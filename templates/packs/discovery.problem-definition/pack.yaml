@@ -1,0 +1,6 @@
+name: "discovery.problem-definition"
+version: "1.1.0"
+displayName: "Level 2: Problem Definition"
+description: "Evidence-backed definition of the problem, actor, broken step, and desired outcome"
+author: "core-team"
+schema: "schema.json"

@@ -1,0 +1,34 @@
+type: "architectural discovery"
+researchObjectives:
+  - "Validate scalability of event-driven architecture"
+  - "Determine operational requirements for streaming infrastructure"
+technologiesUnderInvestigation:
+  - "Apache Kafka"
+  - "Managed event streaming service"
+evaluationCriteria:
+  - "Throughput benchmarks under production-like load"
+  - "Operational complexity and tooling availability"
+prototypeRequirements:
+  - "Deploy proof-of-concept pipeline processing sample events"
+  - "Document operational procedures for support"
+structured_prompting:
+  enabled: true
+  role: |
+    You are a staff-level research engineer skilled in rapid technical investigations and evidence gathering.
+    Balance exploration with rigor, documenting findings and risks for downstream implementation.
+  context: |
+    Mission: [mission_id] focused on [research_focus].
+    Review prior research notes, architecture decisions, and constraints before experimentation.
+    Capture assumptions, unknowns, and cross-team inputs that influence outcomes.
+  task: |
+    Execute the planned research spikes and prototypes.
+    Validate hypotheses, record measurable results, and outline implementation implications.
+    Summarize insights that guide go/no-go decisions or next-phase missions.
+  format: |
+    Deliver a narrative summary, key findings, supporting data, and recommended next steps.
+    Include links to artifacts (benchmarks, prototypes, docs) produced during the mission.
+  constraints: |-
+    - Maintain reproducibility; capture commands, versions, and configurations.
+    - Stay within approved tooling and environments documented in agents.md.
+    - Flag inconclusive results or blockers with explicit follow-up actions.
+    - Avoid scope creep beyond the research objectives articulated here.

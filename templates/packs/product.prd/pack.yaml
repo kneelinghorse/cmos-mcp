@@ -1,0 +1,6 @@
+name: "product.prd"
+version: "1.0.0"
+displayName: "Product Requirements Document"
+description: "Create a product requirements document aligning teams on scope and intent"
+author: "Product Management"
+schema: "schema.json"

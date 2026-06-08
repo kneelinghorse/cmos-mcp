@@ -1,0 +1,166 @@
+{
+  "description": "Production-corpus paraphrase fixtures for s67-m01. Each query shares <2 stemmed content tokens with its source row, simulating the failure mode TraceLab CMOS-CONTEXT-RETRIEVAL-01-02 documented as the 50% production zero-result rate. Source rows pulled directly from cmos/db/cmos.sqlite. Expected IDs are all in active status (decisions, learnings) or live missions table. Hand-authored from real rows — TraceLab mission 2de68a40-cc93-4785-b50f-5318cfbbb4a2 ships a research report, not reusable fixtures.",
+  "version": "1.0",
+  "corpusSnapshot": {
+    "decisionsActive": 43,
+    "learningsActive": 31,
+    "missionsTotal": 259,
+    "sampledOn": "2026-05-26"
+  },
+  "fixtures": [
+    {
+      "query": "where should we put the logic that picks who an outgoing message comes from",
+      "type": "decision",
+      "expected_id": 523,
+      "source_text_snippet": "Centralize outbound-message sender resolution in src/tools/cmos/sender-identity.ts. Every code path that calls DashboardClient.sendMessage MUST use resolveLocalSenderProjectId / getLocalSenderProjectId from this module.",
+      "paraphrase_strategy": "synonyms"
+    },
+    {
+      "query": "do our login tokens automatically time out",
+      "type": "decision",
+      "expected_id": 595,
+      "source_text_snippet": "Auth session lifetime is effectively forever (matches gh). Evidence: UserScopedKeyRecord has issuedAt + lastUsedAt but NO expiresAt field. Design target: login once per machine, lives until explicit rotate or revoke.",
+      "paraphrase_strategy": "reverse-direction"
+    },
+    {
+      "query": "why is the bundled package boilerplate database derived from typescript instead of edited directly",
+      "type": "decision",
+      "expected_id": 619,
+      "source_text_snippet": "cmos-seed/db/schema.sql is now a generated artifact, not hand-written. Single source of truth is the CMOS_SCHEMA constant in src/tools/cmos/schema.ts.",
+      "paraphrase_strategy": "abstract-to-concrete"
+    },
+    {
+      "query": "where do the rule manifests ride along when we publish to the registry",
+      "type": "decision",
+      "expected_id": 659,
+      "source_text_snippet": "Foundational-docs are alive (bundled via cmos-seed/, ship inside the npm tarball). Research papers are point-in-time snapshots (NOT bundled, repo-hygiene only).",
+      "paraphrase_strategy": "synonyms"
+    },
+    {
+      "query": "central strategy doc the team consults at kickoff time",
+      "type": "decision",
+      "expected_id": 690,
+      "source_text_snippet": "cmos/planning/pro-expansion-roadmap.md created as the authoritative reference future planning sessions read at sprint open. At sprint close, update relevant sections to reflect actual scope vs original intent.",
+      "paraphrase_strategy": "abstract-to-concrete"
+    },
+    {
+      "query": "why does my login key sometimes disappear after running scripts",
+      "type": "decision",
+      "expected_id": 700,
+      "source_text_snippet": "BUG (architectural, unfixed): CredentialStore singleton caches credentials.json on first load() and never re-reads from disk. When two processes write to the same file, the second writer's data is lost.",
+      "paraphrase_strategy": "symptom-from-mechanism"
+    },
+    {
+      "query": "switched live search lookups to use the fused ranking backend",
+      "type": "decision",
+      "expected_id": 712,
+      "source_text_snippet": "Sprint-66 m05 hot-path migration. All 5 production retrieval call sites now route through HybridRetriever (BM25 + sqlite-vec via RRF k=60).",
+      "paraphrase_strategy": "synonyms"
+    },
+    {
+      "query": "one toggle that disables multiple unrelated safety checks is a smell",
+      "type": "learning",
+      "expected_id": 122,
+      "source_text_snippet": "When a flag means 'ignore the guard AND ignore the cursor,' those are two independent concerns that should be separate flags. force=true conflated 'bypass large-delta guard' with 'replay from scratch.'",
+      "paraphrase_strategy": "abstract-to-concrete"
+    },
+    {
+      "query": "why we abandoned per-message remote dispatch for the journal upload",
+      "type": "learning",
+      "expected_id": 124,
+      "source_text_snippet": "Event-replay sync (one HTTP POST per event) is not a viable path for large event logs. At real network latency (2-3s/request), 1000 events = 2500s needed vs 120s budget.",
+      "paraphrase_strategy": "synonyms"
+    },
+    {
+      "query": "agents need every input field documented or they have nothing to bind",
+      "type": "learning",
+      "expected_id": 126,
+      "source_text_snippet": "MCP inputSchema must describe its object shape fully, or agents can't tell what keys to send. fieldUpdates was declared as items:{type:'object'} — no property spec; Zod stripped the unknown key.",
+      "paraphrase_strategy": "synonyms"
+    },
+    {
+      "query": "lab fixtures using one project never expose selection-from-list failures",
+      "type": "learning",
+      "expected_id": 138,
+      "source_text_snippet": "Tests that mock a single-project directory and assert 'the returned id matches' cannot catch 'wrong project out of many' bugs. For multi-tenant resolution logic, tests MUST simulate realistic scale.",
+      "paraphrase_strategy": "abstract-to-concrete"
+    },
+    {
+      "query": "the broken self-healing onboarding was actually a logging defect",
+      "type": "learning",
+      "expected_id": 155,
+      "source_text_snippet": "m04 investigation mission paid off: Track E2 first-contact auto-heal gap flagged by Sprint 54 verification turned out to be a reporting bug (boolean field conflated 'heal not needed' with 'heal failed').",
+      "paraphrase_strategy": "abstract-to-concrete"
+    },
+    {
+      "query": "incremental table-evolution approach handles growing column counts",
+      "type": "learning",
+      "expected_id": 189,
+      "source_text_snippet": "Sprint 61 retro — the lazy ensureXxxTable migration pattern proved extensible under real load. m03 added the evergreen column via ensureLearningsTable on both read AND write paths — no new helper.",
+      "paraphrase_strategy": "synonyms"
+    },
+    {
+      "query": "the fused-backend code is its own type because the legacy one is synchronous",
+      "type": "learning",
+      "expected_id": 213,
+      "source_text_snippet": "Splitting HybridRetriever into a separate class (rather than adding async branches inside FTS5Retriever) was the right call. The forcing function was that query embedding via @xenova/transformers is necessarily async.",
+      "paraphrase_strategy": "synonyms"
+    },
+    {
+      "query": "lab measurements over-estimated keyword-search failures vs real world",
+      "type": "learning",
+      "expected_id": 214,
+      "source_text_snippet": "The synthetic paraphrase fixtures (5 queries with deliberately disjoint vocabularies from their source rows) produced a 100% BM25 zero-result rate vs the production 50% baseline documented in TraceLab.",
+      "paraphrase_strategy": "abstract-to-concrete"
+    },
+    {
+      "query": "keep unit suites from corrupting the shared workspace index",
+      "type": "mission",
+      "expected_id": "s56-m01",
+      "source_text_snippet": "Registry isolation: test configDir audit + prune + startup validate. Stop the registry leak at the source and drain the pool. The user registry at ~/.config/cmos-mcp/project-registry.json is at 1935 entries and growing.",
+      "paraphrase_strategy": "synonyms"
+    },
+    {
+      "query": "build the browser-approval authentication handshake",
+      "type": "mission",
+      "expected_id": "s57-m01",
+      "source_text_snippet": "Device code bootstrap + local key store. Implement RFC 8628 device code flow as MCP's bootstrap credential primitive. On first MCP send/init with no local credentials, call POST /api/auth/device/code.",
+      "paraphrase_strategy": "abstract-to-concrete"
+    },
+    {
+      "query": "make the registration handshake invokable from an editor host",
+      "type": "mission",
+      "expected_id": "s58-m01",
+      "source_text_snippet": "cmos_auth(action='login') — MCP-reachable device-code bootstrap. Expose runDeviceCodeFlow as an MCP tool action so agents and IDE hosts can trigger the bootstrap without a terminal.",
+      "paraphrase_strategy": "synonyms"
+    },
+    {
+      "query": "switch the team-directory call from the legacy address to the opt-in one",
+      "type": "mission",
+      "expected_id": "s60-m01",
+      "source_text_snippet": "Migrate listDirectory() to /api/projects/directory/public. Swap dashboard-client.listDirectory() URL from the now-scoped /api/projects/directory to the new opt-in /api/projects/directory/public.",
+      "paraphrase_strategy": "synonyms"
+    },
+    {
+      "query": "set up metadata so we can release under our scoped namespace",
+      "type": "mission",
+      "expected_id": "s62-m02",
+      "source_text_snippet": "npm packaging (@aquex/cmos-mcp). Configure package.json for first npm publish under the @aquex scope. Fields: name=@aquex/cmos-mcp, version=1.0.0, bin entry pointing at the cmos-mcp CLI launcher.",
+      "paraphrase_strategy": "abstract-to-concrete"
+    },
+    {
+      "query": "give the keyword indexes coverage on every persistable type and reserve room for dense lookups",
+      "type": "mission",
+      "expected_id": "s66-m02",
+      "source_text_snippet": "Vector storage + FTS5 parity schema migration. Add an idempotent schema migration that (a) provisions vector storage for strategic_decisions / learnings / missions per the m01 ADR, and (b) brings FTS5 to parity.",
+      "paraphrase_strategy": "abstract-to-concrete"
+    },
+    {
+      "query": "first-time job that fills semantic search storage for our entire existing corpus",
+      "type": "mission",
+      "expected_id": "s66-m03",
+      "source_text_snippet": "Embedding pipeline + one-shot backfill. Implement the embedding pipeline that populates vector storage on every write to decisions/learnings/missions, plus a one-shot backfill script that embeds the 1,152 existing rows.",
+      "paraphrase_strategy": "abstract-to-concrete"
+    }
+  ]
+}

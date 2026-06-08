@@ -1,0 +1,6 @@
+name: "discovery.research-sub-mission"
+version: "1.1.0"
+displayName: "Research Sub-Mission"
+description: "Focused lens mission (e.g., R1–R5). Sourced findings + synthesis + confidence."
+author: "core-team"
+schema: "schema.json"

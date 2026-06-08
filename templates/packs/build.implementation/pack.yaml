@@ -1,0 +1,6 @@
+name: "build.implementation"
+version: "1.0.0"
+displayName: "Build Implementation"
+description: "Technical implementation and development build missions"
+author: "core-team"
+schema: "schema.json"

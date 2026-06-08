@@ -1,0 +1,48 @@
+schemaType: Mission
+schemaVersion: '2.0'
+missionId: 'sample-process-design-review'
+objective: 'Facilitate a structured design review for the workflow intelligence adapter surfaces.'
+context:
+  background: 'Architecture and product stakeholders requested a rapid design checkpoint before implementation begins.'
+  dependencies:
+    - 'sample-engineering-tdd'
+    - 'sample-engineering-adr'
+  constraints:
+    - 'Design feedback must land before code review sign-off.'
+successCriteria:
+  - 'Capture structured feedback across visuals, UX, and content.'
+  - 'Assign actionable follow-ups to the design and engineering owners.'
+  - 'Record approval disposition for the sprint checkpoint.'
+deliverables:
+  - 'Design review notes with action items'
+  - 'Updated mockups reflecting prioritized feedback'
+domain: 'process.design-review'
+domainFields:
+  type: 'process.design-review'
+  projectContext:
+    projectName: 'Workflow Intelligence Adapter'
+    linkToPRD: 'PRD-20251020'
+    reviewGoals:
+      - 'Validate empty and loading states for the author console surface.'
+      - 'Confirm accessibility heuristics meet design system baselines.'
+  designPresentation: 'https://figma.example.com/file/workflow-intelligence-adapter'
+  reviewCriteria:
+    visuals: 'Layout aligns with mission protocol design system spacing and color tokens.'
+    ux: 'Stepper navigation clarifies mission readiness and uses inline help for domain guidance.'
+    content: 'Copy references key telemetry language and avoids internal jargon.'
+  structuredFeedback:
+    whatWorksWell:
+      - 'Timeline visualization cleanly communicates mission readiness signals.'
+      - 'Inline pack guidance cards reduce author lookup time.'
+    areasForImprovement:
+      - 'Contrast ratio on the warning banner fails AA threshold.'
+      - 'Surface needs keyboard shortcuts for switching mission views.'
+    openQuestions:
+      - 'Should the adapter expose export actions from this screen?'
+      - 'Do we need a tutorial overlay for first-time authors?'
+  actionItems:
+    - task: 'Update warning banner colors to meet AA contrast.'
+      owner: 'Design Lead'
+    - task: 'Prototype keyboard navigation flow for mission tab switcher.'
+      owner: 'Front-end Engineer'
+  approvalStatus: 'Approved with Changes'

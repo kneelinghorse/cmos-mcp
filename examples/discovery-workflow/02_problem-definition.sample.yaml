@@ -1,0 +1,67 @@
+schemaType: Mission
+schemaVersion: '2.0'
+missionId: 'sample-discovery-problem-definition'
+objective: 'Express the validated mission author workflow problem with measurable outcomes.'
+context:
+  background: 'Opportunity scan confirmed authors lose context when switching from discovery artifacts to mission templates.'
+  dependencies:
+    - 'sample-discovery-opportunity-scan'
+  constraints:
+    - 'Problem statement must align with Platform Intelligence OKRs.'
+successCriteria:
+  - 'Document a crisp problem statement naming actor, broken step, and desired outcome.'
+  - 'Capture evidence that supports or challenges the problem framing.'
+deliverables:
+  - 'Problem definition brief'
+  - 'Evidence appendix with annotated sources'
+domain: 'discovery.problem-definition'
+domainFields:
+  session:
+    unit: 'AI_session'
+    sessionObjectives:
+      - 'Lock in a machine-readable problem statement for workflow intelligence assistant.'
+    sessionOptimization:
+      guidelines:
+        - 'Use exact role titles from discovery interviews.'
+        - 'Reference specific workflow steps and evidence.'
+  problemStatement: 'Mission authors lack guided translation from discovery packs to execution-ready missions, creating 4h/week of avoidable rework.'
+  actorAndAction:
+    actor: 'Mission Author (Product Discovery Pod)'
+    currentWorkflow:
+      - 'Compile discovery outputs across packs.'
+      - 'Cross-map findings into mission template fields.'
+      - 'Review with engineering lead for feasibility.'
+    brokenStep: 'Cross-mapping findings into mission template fields.'
+    desiredOutcome: 'Automatically suggested mission scaffolds with linked evidence.'
+  evidence:
+    - 'Interview transcript: author struggles aligning discovery outputs to mission template.'
+    - 'Telemetry: 3.8h average per mission to reconcile domain fields.'
+    - 'Sprint retro action: request for guided workflow.'
+  solutionSpace:
+    existingSolutions: 'Manual spreadsheets, shared Notion checklists.'
+    whyTheyFail: 'Go stale quickly and require constant manual updates.'
+    ourAngle: 'Intelligence assistant using domain pack metadata to pre-fill mission scaffolds.'
+  scopeSizing:
+    smallestValuableSolution: 'Guided mission creation wizard seeded by discovery packs.'
+    fullVision: 'Adaptive assistant that monitors discovery progress and updates mission drafts.'
+    firstMilestone: 'Generate draft mission with linked evidence for one discovery pod.'
+  confidenceScores:
+    problemIsReal:
+      score: 5
+      justification: 'Corroborated by 4 independent sources across two sprints.'
+    solutionIsPossible:
+      score: 4
+      justification: 'Requires integrations already targeted in Sprint 4.'
+    weCanBuild:
+      score: 3
+      justification: 'Dependent on telemetry extension work scheduled next sprint.'
+  evidenceChain:
+    sourceRefs:
+      - 'research:author-interviews:2025-10-19'
+      - 'telemetry:mission-authoring-time:Q4'
+    verificationNotes: 'Compared interview notes with telemetry extracts to confirm time cost.'
+  decisionGate:
+    outcome: 'Continue'
+    justification: 'High-confidence problem clarity with achievable scope.'
+    reviewer: 'Discovery Programs Lead'
+    reviewedAt: '2025-10-27T21:10:00Z'

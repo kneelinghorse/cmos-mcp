@@ -1,0 +1,112 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "type": {
+      "type": "string",
+      "description": "Domain type identifier"
+    },
+    "projectContext": {
+      "type": "object",
+      "description": "Context about the project being reviewed",
+      "properties": {
+        "projectName": {
+          "type": "string",
+          "description": "Name of the project or feature"
+        },
+        "linkToPRD": {
+          "type": "string",
+          "description": "Link to the related PRD"
+        },
+        "reviewGoals": {
+          "type": "array",
+          "description": "Goals for this design review",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": ["projectName", "linkToPRD", "reviewGoals"],
+      "additionalProperties": false
+    },
+    "designPresentation": {
+      "type": "string",
+      "description": "Link to design files (Figma, prototype, etc.)"
+    },
+    "reviewCriteria": {
+      "type": "object",
+      "description": "Criteria for evaluating the design",
+      "properties": {
+        "visuals": {
+          "type": "string",
+          "description": "Does the design align with brand guidelines?"
+        },
+        "ux": {
+          "type": "string",
+          "description": "Is the user flow logical and effective?"
+        },
+        "content": {
+          "type": "string",
+          "description": "Is the copy clear and concise?"
+        }
+      },
+      "required": ["visuals", "ux", "content"],
+      "additionalProperties": false
+    },
+    "structuredFeedback": {
+      "type": "object",
+      "description": "Structured feedback from the review",
+      "properties": {
+        "whatWorksWell": {
+          "type": "array",
+          "description": "Positive aspects of the design",
+          "items": {
+            "type": "string"
+          }
+        },
+        "areasForImprovement": {
+          "type": "array",
+          "description": "Areas that need improvement",
+          "items": {
+            "type": "string"
+          }
+        },
+        "openQuestions": {
+          "type": "array",
+          "description": "Open questions requiring clarification",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": ["whatWorksWell", "areasForImprovement", "openQuestions"],
+      "additionalProperties": false
+    },
+    "actionItems": {
+      "type": "array",
+      "description": "Action items resulting from the review",
+      "items": {
+        "type": "object",
+        "properties": {
+          "task": {
+            "type": "string",
+            "description": "Description of the task"
+          },
+          "owner": {
+            "type": "string",
+            "description": "Person responsible for the task"
+          }
+        },
+        "required": ["task", "owner"],
+        "additionalProperties": false
+      }
+    },
+    "approvalStatus": {
+      "type": "string",
+      "enum": ["Approved", "Approved with Changes", "Needs Major Revisions", ""],
+      "description": "Final approval status of the design"
+    }
+  },
+  "required": ["type", "projectContext", "designPresentation", "reviewCriteria", "structuredFeedback", "actionItems", "approvalStatus"],
+  "additionalProperties": false
+}

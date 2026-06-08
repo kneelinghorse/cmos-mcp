@@ -1,0 +1,18 @@
+type: "process.design-review"
+projectContext:
+  projectName: ""
+  linkToPRD: ""
+  reviewGoals: []
+designPresentation: ""
+reviewCriteria:
+  visuals: ""
+  ux: ""
+  content: ""
+structuredFeedback:
+  whatWorksWell: []
+  areasForImprovement: []
+  openQuestions: []
+actionItems:
+  - task: ""
+    owner: ""
+approvalStatus: ""

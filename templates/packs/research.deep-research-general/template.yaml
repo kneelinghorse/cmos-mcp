@@ -1,0 +1,158 @@
+type: "deep-research-general"
+
+# Gemini Deep Research configuration for general (non-technical) investigations
+geminiDeepResearch:
+  tools:
+    googleSearch:
+      enabled: true
+      description: "Use Google Search to gather broad domain context and authoritative sources."
+      notes: "Prefer primary sources, recent publications, and balanced viewpoints."
+    fileSearch:
+      enabled: false
+      storeName: ""
+      description: "Optional managed RAG store for internal docs or prior research."
+      config:
+        displayName: ""
+        customMetadata: []
+        chunkingConfig: null
+      notes: "Enable when internal corpora are available; otherwise leave disabled."
+    urlContext:
+      enabled: false
+      urls: []
+      description: "Deep-read specific URLs (reports, PDFs, longform articles)."
+      notes: "Populate URLs for targeted deep reads; leave empty for discovery-first missions."
+  geminiCli:
+    useCustomCommands: false
+    customCommandPath: ""
+    commandDescription: ""
+    shellContextBlocks:
+      - "!{pwd}"
+    mcpServers: []
+    workflow:
+      depth:
+        level: "standard" # quick | standard | comprehensive | exhaustive
+        maxSearchIterations: 5
+        requireMultipleSources: true
+        crossValidationRequired: true
+      breadth:
+        scope: "focused" # narrow | focused | broad | expansive
+        maxTopicsPerQuery: 3
+        allowTopicExpansion: true
+        relatedTopicsThreshold: 0.6
+      sources:
+        preferredDomains: []
+        excludedDomains: []
+        requireRecentSources: false
+        minSourceCount: 3
+        maxSourceCount: 8
+        sourceTypes:
+          - "academic"
+          - "industry"
+          - "news"
+          - "documentation"
+      citations:
+        requireCitations: true
+        citationFormat: "markdown"
+        includeGroundingMetadata: true
+        trackSearchQueries: true
+
+researchPatterns:
+  primaryPattern: "Opportunity Discovery"
+  supportingPatterns: []
+
+researchStatement:
+  topic: ""
+  scope: ""
+  centralHypothesis: ""
+
+keyQuestions:
+  - ""
+
+geminiResearchPlan:
+  strategy:
+    approach: "exploratory" # exploratory | hypothesis-driven | comparative | synthesis
+    primaryTool: "google_search"
+    toolSequence:
+      - "google_search"
+  queries:
+    initialQueries: []
+    followUpQueries: []
+    refinementStrategy: ""
+  execution:
+    searchQueriesExecuted: []
+    sourcesAnalyzed: []
+    toolsUsed: []
+    iterations: []
+
+synthesis:
+  keyInsights:
+    - ""
+  surprisingFindings: []
+  contradictoryInformation: []
+  groundingMetadata:
+    webSearchQueries: []
+    sourceCitations: []
+    confidenceScores: {}
+
+evidenceCollection: []
+
+prdAlignment:
+  productInitiative: ""
+  keyDecisions:
+    - ""
+  requirementsTraceability:
+    - requirementId: ""
+      insightReference: ""
+      decisionStatus: "Proposed"
+
+srdAlignment:
+  solutionContext: ""
+  affectedSystems: []
+  technicalRisks: []
+  openQuestions: []
+
+conclusion:
+  executiveSummary: ""
+  nextSteps:
+    - ""
+
+handoffContext:
+  dependencies: []
+  blockers: []
+  checklists:
+    - name: "Product Handoff"
+      owner: ""
+      status: "Pending"
+      items:
+        - label: "Review research findings with product lead"
+          owner: ""
+          status: "Pending"
+          notes: ""
+        - label: "Align KPIs and success signals"
+          owner: ""
+          status: "Pending"
+          notes: ""
+    - name: "Cross-Functional Handoff"
+      owner: ""
+      status: "Pending"
+      items:
+        - label: "Share evidence pack with stakeholders"
+          owner: ""
+          status: "Pending"
+          notes: ""
+        - label: "Document risks, assumptions, and open questions"
+          owner: ""
+          status: "Pending"
+          notes: ""
+
+researchGuidance:
+  promptTemplates:
+    initialResearch: "Outline the research goals, audience, and decisions to inform. Gather 3-5 authoritative sources before synthesizing."
+    followUpResearch: "Based on initial findings, deepen exploration on gaps, contradictions, or high-impact opportunities."
+  toolUsageGuidance:
+    googleSearch: "Start broad, prioritize recency and authority; capture executed queries for reproducibility."
+    fileSearch: "Enable when internal research or docs exist; tag results with scope and audience."
+    urlContext: "Use for longform sources that need deep read-through; extract key claims and evidence."
+  workflowOptimization:
+    iterativeRefinement: "Iterate in short loops: search → read → capture → decide next query; log pivots explicitly."
+    qualityAssurance: "Require at least two independent sources per key insight; flag contradictory information and open questions."

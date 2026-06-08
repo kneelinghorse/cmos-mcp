@@ -1,0 +1,180 @@
+/**
+ * cmos_project_list Tool
+ *
+ * MCP tool for listing registered CMOS projects.
+ * Returns project summaries with status indicators.
+ *
+ * @module tools/cmos/cmos-project-list
+ */
+
+import * as fs from 'fs';
+import * as path from 'path';
+import { z } from 'zod';
+import { ProjectRegistry } from '../../intelligence/project-registry';
+import type { RegisteredProject } from '../../intelligence/project-registry';
+import type { CmosToolResult } from './types';
+import { createError, createSuccess } from './errors';
+
+/**
+ * Project summary for list output.
+ */
+export interface ProjectListItem {
+  /** Project path */
+  projectRoot: string;
+
+  /** Display name */
+  name: string;
+
+  /** Whether this is the default project */
+  isDefault: boolean;
+
+  /** Whether the CMOS database exists on disk */
+  dbExists: boolean;
+
+  /** Registration timestamp */
+  registeredAt: string;
+
+  /** Last access timestamp */
+  lastAccessedAt: string;
+}
+
+/**
+ * Summary statistics for projects.
+ */
+export interface ProjectListSummary {
+  /** Total number of projects */
+  total: number;
+}
+
+/**
+ * Result type for cmos_project_list.
+ */
+export interface ProjectListResult {
+  /** List of registered projects */
+  projects: ProjectListItem[];
+
+  /** Number of projects with missing databases */
+  missingCount: number;
+
+  /** Summary statistics */
+  summary: ProjectListSummary;
+
+  /** Path to the registry file */
+  registryPath: string;
+}
+
+/**
+ * Input parameters schema for cmos_project_list tool.
+ */
+export const cmosProjectListSchema = z.object({});
+
+export type CmosProjectListParams = z.infer<typeof cmosProjectListSchema>;
+
+/**
+ * MCP Tool Definition for cmos_project_list.
+ */
+export const cmosProjectListToolDefinition = {
+  name: 'cmos_project_list',
+  description:
+    'List all registered CMOS projects. ' +
+    'Returns project paths, names, and default status. ' +
+    'Use cmos_project_validate to check project health.',
+  inputSchema: {
+    type: 'object',
+    properties: {},
+    additionalProperties: false,
+  },
+} as const;
+
+/**
+ * Execute the cmos_project_list tool.
+ *
+ * @param _params - Tool parameters (unused)
+ * @returns CmosToolResult with project list or error
+ */
+export async function cmosProjectList(
+  _params: CmosProjectListParams
+): Promise<CmosToolResult<ProjectListResult>> {
+  try {
+    const registry = await ProjectRegistry.create();
+    const projects: RegisteredProject[] = await registry.list();
+    const defaultProject = await registry.getDefault();
+
+    const items: ProjectListItem[] = projects.map((project) => ({
+      projectRoot: project.projectRoot,
+      name: project.name ?? project.projectRoot,
+      isDefault: project.projectRoot === defaultProject?.projectRoot,
+      dbExists: fs.existsSync(path.join(project.projectRoot, 'cmos', 'db', 'cmos.sqlite')),
+      registeredAt: project.registeredAt,
+      lastAccessedAt: project.lastAccessedAt,
+    }));
+
+    const missingCount = items.filter((p) => !p.dbExists).length;
+
+    return createSuccess({
+      projects: items,
+      missingCount,
+      summary: {
+        total: items.length,
+      },
+      registryPath: registry.path,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return createError({
+      code: 'DB_CONNECTION_FAILED',
+      message: `Failed to list projects: ${message}`,
+      suggestion: 'Check registry file permissions',
+    });
+  }
+}
+
+/**
+ * Format project list result for LLM readability.
+ *
+ * @param result - Project list result
+ * @returns Human-readable summary
+ */
+export function formatProjectListForLLM(result: CmosToolResult<ProjectListResult>): string {
+  if (!result.success || !result.data) {
+    const error = result.error;
+    const lines = ['❌ Failed to list projects', '', `Error: ${error?.message ?? 'Unknown error'}`];
+
+    if (error?.suggestion) {
+      lines.push('');
+      lines.push(`Suggestion: ${error.suggestion}`);
+    }
+
+    return lines.join('\n');
+  }
+
+  const data = result.data;
+  const lines: string[] = [];
+
+  if (data.projects.length === 0) {
+    lines.push('📋 No projects registered');
+    lines.push('');
+    lines.push('Use cmos_project_register to add a project.');
+  } else {
+    const header =
+      data.missingCount > 0
+        ? `📋 Registered Projects (${data.summary.total}, ${data.missingCount} missing)`
+        : `📋 Registered Projects (${data.summary.total})`;
+    lines.push(header);
+    lines.push('');
+
+    for (const project of data.projects) {
+      const defaultMarker = project.isDefault ? ' (default)' : '';
+      const missingMarker = project.dbExists ? '' : ' [MISSING]';
+      lines.push(`   ${project.name}${defaultMarker}${missingMarker}`);
+      lines.push(`   └─ ${project.projectRoot}`);
+      lines.push('');
+    }
+
+    if (data.missingCount > 0) {
+      lines.push('Tip: Run cmos_project(action="prune") to remove missing entries.');
+    }
+  }
+
+  return lines.join('\n');
+}

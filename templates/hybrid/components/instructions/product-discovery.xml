@@ -1,0 +1,7 @@
+<Instructions>
+  <Title>Product Discovery Hybrid Flow</Title>
+  <Step index="1">Frame the opportunity using latest market intel and mission backlog signals.</Step>
+  <Step index="2">Assemble discovery personas and context fragments relevant to the hypothesis.</Step>
+  <Step index="3">Define validation experiments and expected decision checkpoints.</Step>
+  <Step index="4">Capture output artefacts that satisfy the hybrid JSON schema contract.</Step>
+</Instructions>

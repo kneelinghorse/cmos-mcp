@@ -1,0 +1,267 @@
+// ABOUTME: Embedding pipeline (Sprint 66 m03). Singleton @xenova/transformers feature-extractor for Xenova/all-MiniLM-L6-v2,
+// per-type embedding-input composition, and recordEmbedding() — the write-path hook that hash-compares against
+// last_embedded_hash, embeds on change, and upserts into <type>_vec. Architecture per cmos/planning/adr/s66-vector-retrieval.md.
+
+import * as crypto from 'crypto';
+import type { CmosDatabaseClient } from '../tools/cmos/client';
+
+// ─── Public types ────────────────────────────────────────────────────────────
+
+export type EmbeddingType = 'decision' | 'learning' | 'mission';
+export type Embedder = (text: string) => Promise<Float32Array>;
+
+export interface MissionEmbeddingFields {
+  name: string;
+  objective: string | null;
+  notes: string | null;
+  successCriteria: readonly string[] | null;
+}
+
+export interface RecordEmbeddingTarget {
+  type: EmbeddingType;
+  /** decision/learning use INTEGER ids; mission uses TEXT id (e.g. "s66-m03"). */
+  id: number | string;
+  /** Canonical input text. Use the *EmbeddingInput helpers below to compose. */
+  inputText: string;
+}
+
+export type RecordEmbeddingAction = 'embedded' | 'skipped-no-change' | 'failed';
+
+export interface RecordEmbeddingResult {
+  action: RecordEmbeddingAction;
+  error?: string;
+}
+
+// ─── Constants ───────────────────────────────────────────────────────────────
+
+export const EMBEDDING_MODEL = 'Xenova/all-MiniLM-L6-v2';
+export const EMBEDDING_DIM = 384;
+
+// ─── Embedder singleton (with test-injection hook) ───────────────────────────
+
+let cachedEmbedder: Embedder | null = null;
+let testEmbedder: Embedder | null = null;
+
+/**
+ * Override the embedder used by `recordEmbedding`. Pass null to restore the
+ * default lazy-loaded Xenova pipeline. Tests use this to inject a fake.
+ */
+export function setEmbedderForTesting(embedder: Embedder | null): void {
+  testEmbedder = embedder;
+}
+
+/**
+ * Resolve the active embedder. Priority: test override > cached singleton >
+ * lazy-load Xenova pipeline (model download on first call, then in-memory).
+ */
+export async function getEmbedder(): Promise<Embedder> {
+  if (testEmbedder) return testEmbedder;
+  if (cachedEmbedder) return cachedEmbedder;
+  cachedEmbedder = await loadXenovaEmbedder();
+  return cachedEmbedder;
+}
+
+async function loadXenovaEmbedder(): Promise<Embedder> {
+  // @xenova/transformers is ESM-only — dynamic import works from CJS context.
+  const transformers = (await import('@xenova/transformers')) as unknown as {
+    pipeline: (task: string, model: string) => Promise<XenovaFeatureExtractor>;
+  };
+  const extractor = await transformers.pipeline('feature-extraction', EMBEDDING_MODEL);
+  return async (text: string) => {
+    const result = (await extractor(text, { pooling: 'mean', normalize: true })) as {
+      data: Float32Array;
+    };
+    const data = result.data;
+    if (data.length !== EMBEDDING_DIM) {
+      throw new Error(`Expected ${EMBEDDING_DIM}-dim embedding, got ${data.length} — wrong model?`);
+    }
+    // Defensive copy: the pipeline reuses the underlying buffer across calls
+    // when running in the same process (Xenova's TensorImpl recycles output
+    // tensors), so callers that retain the returned array see surprising
+    // mutations. Slice produces an independent Float32Array.
+    return data.slice();
+  };
+}
+
+interface XenovaFeatureExtractor {
+  (
+    text: string,
+    options: { pooling: 'mean'; normalize: boolean }
+  ): Promise<{
+    data: Float32Array;
+  }>;
+}
+
+// ─── Per-type embedding-input composition ────────────────────────────────────
+
+export function decisionEmbeddingInput(decisionText: string): string {
+  return decisionText.trim();
+}
+
+export function learningEmbeddingInput(content: string): string {
+  return content.trim();
+}
+
+/**
+ * Flatten the four indexable mission fields into one semantic passage that
+ * the embedder sees as a coherent piece of text. The format matches the
+ * canonical layout in cmos/planning/adr/s66-vector-retrieval.md Decision 5.
+ */
+export function missionEmbeddingInput(fields: MissionEmbeddingFields): string {
+  const parts: string[] = [fields.name.trim()];
+  if (fields.objective && fields.objective.trim()) {
+    parts.push(` — ${fields.objective.trim()}`);
+  }
+  if (fields.notes && fields.notes.trim()) {
+    parts.push(` | ${fields.notes.trim()}`);
+  }
+  if (fields.successCriteria && fields.successCriteria.length > 0) {
+    const criteria = fields.successCriteria
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0)
+      .join('; ');
+    if (criteria) parts.push(` | criteria: ${criteria}`);
+  }
+  return parts.join('');
+}
+
+// ─── Vector packing for sqlite-vec ───────────────────────────────────────────
+
+/** Pack a Float32Array into the byte buffer shape sqlite-vec stores. */
+export function packEmbedding(values: Float32Array): Buffer {
+  return Buffer.from(values.buffer, values.byteOffset, values.byteLength);
+}
+
+// ─── recordEmbedding — main write-path hook ──────────────────────────────────
+
+/**
+ * Hash-compare → embed-if-changed → upsert into <type>_vec → record the new
+ * `last_embedded_hash` on the source row.
+ *
+ * NEVER throws. Per the m01 ADR's failure posture (Decision 4), embedding
+ * failures degrade silently — the vector arm of the hybrid retriever tolerates
+ * missing rows. Returns an action enum for telemetry, not for control flow at
+ * the caller.
+ *
+ * The corresponding source-table row MUST already exist (write-path hooks call
+ * after a successful INSERT/UPDATE returns).
+ */
+export async function recordEmbedding(
+  client: CmosDatabaseClient,
+  target: RecordEmbeddingTarget
+): Promise<RecordEmbeddingResult> {
+  try {
+    const hash = crypto.createHash('sha256').update(target.inputText).digest('hex');
+
+    const stored = readLastEmbeddedHash(client, target.type, target.id);
+    if (stored === hash) {
+      return { action: 'skipped-no-change' };
+    }
+
+    const embed = await getEmbedder();
+    const vec = await embed(target.inputText);
+    const blob = packEmbedding(vec);
+
+    upsertVector(client, target.type, target.id, blob);
+    writeLastEmbeddedHash(client, target.type, target.id, hash);
+
+    return { action: 'embedded' };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'unknown error';
+    console.error(`[WARN] embedding-pipeline: ${target.type}#${target.id} failed — ${message}`);
+    return { action: 'failed', error: message };
+  }
+}
+
+// ─── Internal DB plumbing ────────────────────────────────────────────────────
+
+interface TableMeta {
+  vecTable: string;
+  vecColumn: string;
+  sourceTable: string;
+  /** True when the source id is a JS Number that must be wrapped in BigInt
+   *  before binding to a vec0 INTEGER PRIMARY KEY column (see m02 learning). */
+  needsBigInt: boolean;
+}
+
+function tableMeta(type: EmbeddingType): TableMeta {
+  switch (type) {
+    case 'decision':
+      return {
+        vecTable: 'decisions_vec',
+        vecColumn: 'decision_id',
+        sourceTable: 'strategic_decisions',
+        needsBigInt: true,
+      };
+    case 'learning':
+      return {
+        vecTable: 'learnings_vec',
+        vecColumn: 'learning_id',
+        sourceTable: 'learnings',
+        needsBigInt: true,
+      };
+    case 'mission':
+      return {
+        vecTable: 'missions_vec',
+        vecColumn: 'mission_id',
+        sourceTable: 'missions',
+        needsBigInt: false,
+      };
+  }
+}
+
+function coerceVecId(id: number | string, needsBigInt: boolean): unknown {
+  if (typeof id === 'string') return id;
+  return needsBigInt ? BigInt(id) : id;
+}
+
+function readLastEmbeddedHash(
+  client: CmosDatabaseClient,
+  type: EmbeddingType,
+  id: number | string
+): string | null {
+  const meta = tableMeta(type);
+  const row = client.getOne<{ last_embedded_hash: string | null }>(
+    `SELECT last_embedded_hash FROM ${meta.sourceTable} WHERE id = ?`,
+    [id]
+  );
+  if (!row.success || !row.data) return null;
+  return row.data.last_embedded_hash ?? null;
+}
+
+function writeLastEmbeddedHash(
+  client: CmosDatabaseClient,
+  type: EmbeddingType,
+  id: number | string,
+  hash: string
+): void {
+  const meta = tableMeta(type);
+  client.execute(`UPDATE ${meta.sourceTable} SET last_embedded_hash = ? WHERE id = ?`, [hash, id]);
+}
+
+function upsertVector(
+  client: CmosDatabaseClient,
+  type: EmbeddingType,
+  id: number | string,
+  blob: Buffer
+): void {
+  const meta = tableMeta(type);
+  const coercedId = coerceVecId(id, meta.needsBigInt);
+  // vec0 doesn't support ON CONFLICT — delete-then-insert is the canonical
+  // upsert idiom. Safe in a single transaction; the source-table row is the
+  // authoritative reference (the vec0 row is a derived index entry).
+  client.execute(`DELETE FROM ${meta.vecTable} WHERE ${meta.vecColumn} = ?`, [coercedId]);
+  client.execute(`INSERT INTO ${meta.vecTable}(${meta.vecColumn}, embedding) VALUES (?, ?)`, [
+    coercedId,
+    blob,
+  ]);
+}
+
+// ─── Test reset (called between test cases) ──────────────────────────────────
+
+/** Drop the cached real Xenova embedder. Tests call this in afterAll if they
+ *  ever invoked the real pipeline (rare — usually tests inject a mock). */
+export function __resetEmbedderCacheForTesting(): void {
+  cachedEmbedder = null;
+  testEmbedder = null;
+}

@@ -1,0 +1,145 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "type": {
+      "type": "string",
+      "description": "Domain type identifier"
+    },
+    "overview": {
+      "type": "object",
+      "description": "High-level overview of the product requirements",
+      "properties": {
+        "problemStatement": {
+          "type": "string",
+          "description": "Clear statement of the problem being solved"
+        },
+        "targetAudience": {
+          "type": "string",
+          "description": "The primary users or customers for this feature"
+        },
+        "strategicFit": {
+          "type": "string",
+          "description": "How this aligns with broader company or product strategy"
+        }
+      },
+      "required": ["problemStatement", "targetAudience", "strategicFit"],
+      "additionalProperties": false
+    },
+    "goalsAndMetrics": {
+      "type": "object",
+      "description": "Goals and measurable outcomes for the project",
+      "properties": {
+        "businessGoals": {
+          "type": "array",
+          "description": "Business objectives this feature aims to achieve",
+          "items": {
+            "type": "string"
+          }
+        },
+        "userOutcomes": {
+          "type": "array",
+          "description": "Expected outcomes from the user's perspective",
+          "items": {
+            "type": "string"
+          }
+        },
+        "measurableKPIs": {
+          "type": "array",
+          "description": "Key performance indicators to measure success",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": ["businessGoals", "userOutcomes", "measurableKPIs"],
+      "additionalProperties": false
+    },
+    "assumptionsAndDependencies": {
+      "type": "object",
+      "description": "Assumptions made and external dependencies",
+      "properties": {
+        "assumptions": {
+          "type": "array",
+          "description": "Key assumptions underlying the requirements",
+          "items": {
+            "type": "string"
+          }
+        },
+        "dependencies": {
+          "type": "array",
+          "description": "External dependencies or prerequisites",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": ["assumptions", "dependencies"],
+      "additionalProperties": false
+    },
+    "requirements": {
+      "type": "object",
+      "description": "Detailed functional and non-functional requirements",
+      "properties": {
+        "userStories": {
+          "type": "array",
+          "description": "User stories in the format: As a [user type], I want to [action] so that [benefit]",
+          "items": {
+            "type": "string"
+          }
+        },
+        "functional": {
+          "type": "array",
+          "description": "Specific functional requirements",
+          "items": {
+            "type": "string"
+          }
+        },
+        "nonFunctional": {
+          "type": "array",
+          "description": "Non-functional requirements (performance, security, etc.)",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": ["userStories", "functional", "nonFunctional"],
+      "additionalProperties": false
+    },
+    "scope": {
+      "type": "object",
+      "description": "What is and is not included in this project",
+      "properties": {
+        "inScope": {
+          "type": "array",
+          "description": "Features and functionality included in this project",
+          "items": {
+            "type": "string"
+          }
+        },
+        "outOfScope": {
+          "type": "array",
+          "description": "Features and functionality explicitly excluded",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": ["inScope", "outOfScope"],
+      "additionalProperties": false
+    },
+    "designLink": {
+      "type": "string",
+      "description": "Link to design mockups or prototypes"
+    },
+    "openQuestions": {
+      "type": "array",
+      "description": "Unresolved questions that need answers",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": ["type", "overview", "goalsAndMetrics", "assumptionsAndDependencies", "requirements", "scope", "designLink", "openQuestions"],
+  "additionalProperties": false
+}

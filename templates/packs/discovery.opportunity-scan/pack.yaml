@@ -1,0 +1,6 @@
+name: "discovery.opportunity-scan"
+version: "1.1.0"
+displayName: "Level 1: Opportunity Scan"
+description: "Session-scoped scan to determine whether to proceed to problem definition"
+author: "core-team"
+schema: "schema.json"

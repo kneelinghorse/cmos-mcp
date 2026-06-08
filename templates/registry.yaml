@@ -1,0 +1,189 @@
+domains:
+  - name: foundation
+    description: Core infrastructure and governance baseline for organizational missions
+    version: 1.0.0
+    author: core-team
+    path: packs/foundation
+    schema_version: 1.0.0
+
+  - name: build.architecture-mission
+    description: "A 4-6 hour mission to translate validated requirements from the discovery phase into a high-level technical specification, a risk mitigation plan, and initial build missions for CMOS."
+    version: 1.0.0
+    author: CMOS Team
+    path: packs/build.architecture-mission
+    schema_version: 1.0.0
+
+  - name: build.implementation
+    description: Technical implementation and development build missions
+    version: 1.0.0
+    author: core-team
+    path: packs/build.implementation
+    schema_version: 1.0.0
+
+  - name: build.technical-research
+    description: Technical research and architectural investigation missions
+    version: 1.0.0
+    author: core-team
+    path: packs/build.technical-research
+    schema_version: 1.0.0
+
+  - name: business.market-research
+    description: Business analysis and market research missions
+    version: 1.0.0
+    author: core-team
+    path: packs/business.market-research
+    schema_version: 1.0.0
+
+  - name: design.ux-research-summary
+    description: "A mission to synthesize user research findings into actionable insights and recommendations for stakeholders."
+    version: 1.0.0
+    author: Design / UX Research
+    path: packs/design.ux-research-summary
+    schema_version: 1.0.0
+
+  - name: discovery.go-no-go-synthesis
+    description: Aggregate five research lenses into a scored, human-reviewed decision record
+    version: 1.1.0
+    author: core-team
+    path: packs/discovery.go-no-go-synthesis
+    schema_version: 1.1.0
+
+  - name: discovery.opportunity-scan
+    description: Session-scoped scan to determine whether to proceed to problem definition
+    version: 1.1.0
+    author: core-team
+    path: packs/discovery.opportunity-scan
+    schema_version: 1.1.0
+
+  - name: discovery.pivot-analysis
+    description: "Extract a new hypothesis from prior research and decide whether to restart discovery or exit after a Level 4 'Pivot/Refine' decision."
+    version: 1.0.0
+    author: CMOS Team
+    path: packs/discovery.pivot-analysis
+    schema_version: 1.0.0
+
+  - name: discovery.problem-definition
+    description: Evidence-backed definition of the problem, actor, broken step, and desired outcome
+    version: 1.1.0
+    author: core-team
+    path: packs/discovery.problem-definition
+    schema_version: 1.1.0
+
+  - name: discovery.research-orchestrator
+    description: Manage parallel research lenses, cross-validate findings, and synthesize results
+    version: 1.1.0
+    author: core-team
+    path: packs/discovery.research-orchestrator
+    schema_version: 1.1.0
+
+  - name: discovery.research-sub-mission
+    description: "Focused lens mission (e.g., R1–R5). Sourced findings + synthesis + confidence."
+    version: 1.1.0
+    author: core-team
+    path: packs/discovery.research-sub-mission
+    schema_version: 1.1.0
+
+  - name: engineering.adr
+    description: Document critical architecture decisions with context, outcomes, and rationale
+    version: 1.0.0
+    author: Architecture Guild
+    path: packs/engineering.adr
+    schema_version: 1.0.0
+
+  - name: engineering.bug-fix
+    description: Capture the lifecycle of a bug fix including root cause and preventative measures
+    version: 1.0.0
+    author: Engineering
+    path: packs/engineering.bug-fix
+    schema_version: 1.0.0
+
+  - name: engineering.tdd
+    description: Produce a technical design document before implementation begins
+    version: 1.0.0
+    author: Engineering
+    path: packs/engineering.tdd
+    schema_version: 1.0.0
+
+  - name: market.customer-development
+    description: "A mission to validate early adopter hypotheses, refine interview scripts, and align channel strategy with validated pricing insights."
+    version: 1.0.0
+    author: Product Discovery
+    path: packs/market.customer-development
+    schema_version: 1.0.0
+
+  - name: process.code-review
+    description: Run a structured code review ensuring critical quality dimensions are covered
+    version: 1.0.0
+    author: Engineering
+    path: packs/process.code-review
+    schema_version: 1.0.0
+
+  - name: process.design-review
+    description: Facilitate design reviews that gather objective, goal-oriented feedback
+    version: 1.0.0
+    author: Design / Product
+    path: packs/process.design-review
+    schema_version: 1.0.0
+
+  - name: product.competitive-analysis
+    description: Conduct a structured competitive analysis to identify opportunities and advantages
+    version: 1.0.0
+    author: Product Management / Marketing
+    path: packs/product.competitive-analysis
+    schema_version: 1.0.0
+
+  - name: product.dashboard-blueprint
+    description: Design a dashboard that communicates product performance to a specific audience
+    version: 1.0.0
+    author: Product Management / Analytics
+    path: packs/product.dashboard-blueprint
+    schema_version: 1.0.0
+
+  - name: product.prd
+    description: Create a product requirements document aligning teams on scope and intent
+    version: 1.0.0
+    author: Product Management
+    path: packs/product.prd
+    schema_version: 1.0.0
+
+  - name: qa.bug-report
+    description: "A mission to report a software bug with sufficient detail for reproduction and resolution."
+    version: 1.0.0
+    author: QA / Engineering
+    path: packs/qa.bug-report
+    schema_version: 1.0.0
+
+  - name: research.general
+    description: "Pattern-driven research scaffold aligning evidence to PRD/SRD decisions with interactive handoff checklists."
+    version: 1.1.0
+    author: kneelinghorse
+    path: packs/research.general
+    schema_version: 1.1.0
+
+  - name: research.deep-research-general
+    description: "Gemini Deep Research-optimized general research scaffold with controls for depth, breadth, and sources. Uses Google Search, File Search, URL Context, and gemini-cli guidance."
+    version: 1.0.0
+    author: Mission Protocol Team
+    path: packs/research.deep-research-general
+    schema_version: 1.0.0
+
+  - name: research.deep-research-technical
+    description: "Gemini Deep Research-optimized technical research template for architecture, technology evaluation, and implementation research. Uses code analysis, API docs research, and technical deep dives."
+    version: 1.0.0
+    author: Mission Protocol Team
+    path: packs/research.deep-research-technical
+    schema_version: 1.0.0
+
+  - name: research.tracelab-deepsearch
+    description: "Research missions for DeepSearch execution with phased research workflows, constraints, and deliverables."
+    version: 1.0.0
+    author: Mission Protocol Team
+    path: packs/research.tracelab-deepsearch
+    schema_version: 1.0.0
+
+  - name: software.technical-task
+    description: "Missions for designing and implementing software features"
+    version: 1.0.0
+    author: core-team
+    path: packs/software.technical-task
+    schema_version: 1.0.0

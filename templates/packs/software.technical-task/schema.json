@@ -1,0 +1,45 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "userStory": {
+      "type": "string",
+      "description": "User story describing the feature"
+    },
+    "technicalApproach": {
+      "type": "array",
+      "description": "Ordered technical implementation approach",
+      "items": {
+        "type": "string"
+      }
+    },
+    "nonFunctionalRequirements": {
+      "type": "array",
+      "description": "Non-functional quality requirements",
+      "items": {
+        "type": "object",
+        "properties": {
+          "description": {
+            "type": "string",
+            "description": "Description of the quality requirement"
+          },
+          "metric": {
+            "type": "string",
+            "description": "Measurable metric for validation"
+          }
+        },
+        "required": ["description", "metric"],
+        "additionalProperties": false
+      }
+    },
+    "outOfScope": {
+      "type": "array",
+      "description": "Explicit exclusions for this mission",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": ["userStory", "technicalApproach"],
+  "additionalProperties": false
+}

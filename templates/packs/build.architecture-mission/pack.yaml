@@ -1,0 +1,6 @@
+name: "build.architecture-mission"
+version: "1.0.0"
+displayName: "Level 5B: Architecture Mission"
+description: "A 4-6 hour mission to translate validated requirements from the discovery phase into a high-level technical specification, a risk mitigation plan, and initial build missions for CMOS."
+author: "CMOS Team"
+schema: "schema.json"

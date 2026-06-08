@@ -1,0 +1,70 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "earlyAdopterProfile": {
+      "type": "object",
+      "description": "Profile of early adopter customers",
+      "properties": {
+        "companySize": {
+          "type": "string",
+          "description": "Target company size"
+        },
+        "industry": {
+          "type": "string",
+          "description": "Target industry or industries"
+        },
+        "characteristics": {
+          "type": "string",
+          "description": "Key characteristics of early adopters"
+        }
+      },
+      "required": ["companySize", "industry", "characteristics"]
+    },
+    "interviewScriptKeyQuestions": {
+      "type": "array",
+      "description": "Key questions for customer interviews",
+      "items": {
+        "type": "string"
+      }
+    },
+    "channelStrategy": {
+      "type": "object",
+      "description": "Go-to-market channel strategy",
+      "properties": {
+        "primaryChannel": {
+          "type": "string",
+          "description": "Primary channel for reaching customers"
+        },
+        "secondaryChannel": {
+          "type": "string",
+          "description": "Secondary channel for reaching customers"
+        }
+      },
+      "required": ["primaryChannel", "secondaryChannel"]
+    },
+    "pricingValidation": {
+      "type": "object",
+      "description": "Pricing validation results",
+      "properties": {
+        "initialHypothesis": {
+          "type": "string",
+          "description": "Initial pricing hypothesis"
+        },
+        "interviewFeedbackSummary": {
+          "type": "string",
+          "description": "Summary of feedback from interviews"
+        },
+        "finalPricing": {
+          "type": "string",
+          "description": "Final pricing decision"
+        }
+      },
+      "required": ["initialHypothesis", "interviewFeedbackSummary", "finalPricing"]
+    }
+  },
+  "required": ["earlyAdopterProfile", "interviewScriptKeyQuestions", "channelStrategy", "pricingValidation"],
+  "additionalProperties": false
+}
+
+

@@ -1,0 +1,6 @@
+name: "discovery.go-no-go-synthesis"
+version: "1.1.0"
+displayName: "Level 4: Go/No-Go Synthesis"
+description: "Aggregate five research lenses into a scored, human-reviewed decision record"
+author: "core-team"
+schema: "schema.json"

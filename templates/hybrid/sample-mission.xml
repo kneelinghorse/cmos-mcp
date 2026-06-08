@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MissionTemplate apiVersion="mission-template.v2" kind="HybridMissionTemplate">
+  <Metadata>
+    <Name>Structured Mission Template POC</Name>
+    <Version>1.0.0</Version>
+    <Author>Mission Protocol Team</Author>
+    <Signature>
+      <KeyId>sample-dev-key</KeyId>
+      <Algorithm>PGP-SHA256</Algorithm>
+      <Value>BASE64_SIGNATURE_PLACEHOLDER</Value>
+    </Signature>
+    <Tags>
+      <Tag>hybrid</Tag>
+      <Tag>example</Tag>
+    </Tags>
+  </Metadata>
+  <MissionObjective>Demonstrate the XML/JSON hybrid mission template format.</MissionObjective>
+  <AgentPersona src="components/agent-persona/lead-architect.xml" />
+  <Instructions src="components/instructions/structured-delivery.xml" />
+  <ContextData>
+    <Item key="domain">intelligence</Item>
+    <Item key="repository">Mission-Protocol.v2</Item>
+    <Item key="dependencies">templates/generic_mission.yaml</Item>
+  </ContextData>
+  <Examples>
+    <Example name="baseline">
+      <Input><![CDATA[{"prompt":"Summarize mission context","context":["Mission backlog","Active sprint"]}]]></Input>
+      <Output><![CDATA[{"summary":"Structured mission generated","artifacts":[]}]]></Output>
+    </Example>
+  </Examples>
+  <OutputSchema><![CDATA[
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "StructuredMissionResult",
+  "type": "object",
+  "required": ["summary", "artifacts"],
+  "properties": {
+    "summary": { "type": "string", "minLength": 10 },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "description"],
+        "properties": {
+          "path": { "type": "string" },
+          "description": { "type": "string" }
+        }
+      }
+    },
+    "notes": { "type": "string" }
+  }
+}
+  ]]></OutputSchema>
+</MissionTemplate>

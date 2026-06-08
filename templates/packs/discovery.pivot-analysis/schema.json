@@ -1,0 +1,55 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "sourceSynthesisMission": {
+      "type": "string",
+      "description": "Path to the source synthesis mission that triggered this pivot"
+    },
+    "pivotTrigger": {
+      "type": "string",
+      "description": "The key insight that invalidated the original hypothesis or revealed a new opportunity"
+    },
+    "newHypothesis": {
+      "type": "string",
+      "description": "The new hypothesis to test"
+    },
+    "evidenceMapping": {
+      "type": "array",
+      "description": "Mapping of existing research findings to the new hypothesis",
+      "items": {
+        "type": "object",
+        "properties": {
+          "originalFinding": {
+            "type": "string",
+            "description": "Original finding from previous research"
+          },
+          "relevanceToNewHypothesis": {
+            "type": "string",
+            "description": "How this finding supports the new hypothesis"
+          }
+        },
+        "required": ["originalFinding", "relevanceToNewHypothesis"]
+      }
+    },
+    "knowledgeGaps": {
+      "type": "array",
+      "description": "Knowledge gaps that need to be filled for the new hypothesis",
+      "items": {
+        "type": "string"
+      }
+    },
+    "decision": {
+      "type": "string",
+      "enum": ["Restart at Level 2", "Abandon"],
+      "description": "Final decision on whether to restart or abandon"
+    },
+    "justification": {
+      "type": "string",
+      "description": "Justification for the decision"
+    }
+  },
+  "required": ["sourceSynthesisMission", "pivotTrigger", "newHypothesis", "evidenceMapping", "knowledgeGaps", "decision", "justification"],
+  "additionalProperties": false
+}
+

@@ -1,0 +1,263 @@
+// ABOUTME: Implements the cmos_mission_defer action — transitions a mission to Deferred (temporarily parked).
+// ABOUTME: Deferred missions can be re-queued later via cmos_mission_update or cmos_mission_transition requeue.
+
+import { z } from 'zod';
+import { withClientValidated } from './client';
+import type { CmosToolResult, Mission, MissionStatus, SanitizedFieldReport } from './types';
+import {
+  createError,
+  createSuccess,
+  CmosErrors,
+  CMOS_ERROR_CODES,
+  VALID_STATE_TRANSITIONS,
+} from './errors';
+import { ensureMissionTimestamps } from './schema-migrations';
+import { sanitizeContentField } from '../../intelligence/content-sanitizer';
+
+/**
+ * Result of deferring a mission.
+ */
+export interface MissionDeferResult {
+  /** The mission ID that was deferred */
+  missionId: string;
+
+  /** Previous status before transition */
+  previousStatus: MissionStatus;
+
+  /** Current status after transition (always 'Deferred') */
+  currentStatus: MissionStatus;
+
+  /** The reason for deferring */
+  reason: string | null;
+
+  /** Hint about when to re-queue (not enforced, just recorded) */
+  deferUntil: string | null;
+
+  /** Human-readable message */
+  message: string;
+
+  /** Timestamp when mission was deferred */
+  deferredAt: string;
+}
+
+export const cmosMissionDeferSchema = z.object({
+  missionId: z.string().min(1).describe('The mission ID to defer (e.g., "s12-m06")'),
+  reason: z.string().optional().describe('Optional reason why this mission is being deferred'),
+  deferUntil: z
+    .string()
+    .optional()
+    .describe('Optional hint about when to re-queue (e.g., "after sprint 48", "when API ships")'),
+  projectRoot: z
+    .string()
+    .optional()
+    .describe('Project root directory to search for CMOS database (defaults to cwd)'),
+});
+
+export type CmosMissionDeferParams = z.infer<typeof cmosMissionDeferSchema>;
+
+export async function cmosMissionDefer(
+  params: CmosMissionDeferParams
+): Promise<CmosToolResult<MissionDeferResult>> {
+  if (!params.missionId || params.missionId.trim() === '') {
+    return createError(CmosErrors.missingParameter('missionId'));
+  }
+
+  const missionId = params.missionId.trim();
+  const targetStatus: MissionStatus = 'Deferred';
+
+  // Sprint 60 m02: sanitize text inputs (reason + deferUntil) so XML
+  // sibling absorption strips out and surfaces instead of writing verbatim.
+  const inputSanitized: SanitizedFieldReport[] = [];
+  let cleanedReason = params.reason;
+  if (typeof cleanedReason === 'string') {
+    const r = sanitizeContentField(cleanedReason);
+    if (r.wasModified) {
+      cleanedReason = r.cleaned;
+      inputSanitized.push({ field: 'reason', reason: r.reason ?? '' });
+    }
+  }
+  let cleanedDeferUntil = params.deferUntil;
+  if (typeof cleanedDeferUntil === 'string') {
+    const r = sanitizeContentField(cleanedDeferUntil);
+    if (r.wasModified) {
+      cleanedDeferUntil = r.cleaned;
+      inputSanitized.push({ field: 'deferUntil', reason: r.reason ?? '' });
+    }
+  }
+
+  return withClientValidated(
+    (client) => {
+      const missionResult = client.getOne<Mission>(
+        `SELECT id, status, name, domain_fields FROM missions WHERE id = ?`,
+        [missionId]
+      );
+
+      if (!missionResult.success) {
+        return createError<MissionDeferResult>(
+          missionResult.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to query mission' }
+        );
+      }
+
+      if (!missionResult.data) {
+        return createError<MissionDeferResult>(CmosErrors.missionNotFound(missionId));
+      }
+
+      const mission = missionResult.data;
+      const currentStatus = mission.status;
+
+      if (currentStatus === 'Deferred') {
+        return createError<MissionDeferResult>({
+          code: CMOS_ERROR_CODES.MISSION_INVALID_STATE,
+          message: `Mission '${missionId}' is already Deferred`,
+          currentState: currentStatus,
+          suggestion:
+            'Use cmos_mission_transition with action="requeue" or cmos_mission_update to re-queue it',
+        });
+      }
+
+      const validTransitions = VALID_STATE_TRANSITIONS[currentStatus];
+      if (!validTransitions.includes(targetStatus)) {
+        return createError<MissionDeferResult>(
+          CmosErrors.missionInvalidTransition(missionId, currentStatus, targetStatus)
+        );
+      }
+
+      const now = new Date().toISOString();
+
+      let existingDomainFields: Record<string, unknown> = {};
+      if (mission.domain_fields) {
+        try {
+          existingDomainFields = JSON.parse(mission.domain_fields);
+        } catch {
+          existingDomainFields = {};
+        }
+      }
+
+      const updatedDomainFields = {
+        ...existingDomainFields,
+        deferredReason: cleanedReason ?? null,
+        deferredAt: now,
+        deferUntil: cleanedDeferUntil ?? null,
+        deferredFromStatus: currentStatus,
+      };
+
+      const deferNote = cleanedReason
+        ? `[Deferred] ${cleanedReason}${cleanedDeferUntil ? ` (until: ${cleanedDeferUntil})` : ''}`
+        : `[Deferred] Temporarily parked${cleanedDeferUntil ? ` (until: ${cleanedDeferUntil})` : ''}`;
+
+      ensureMissionTimestamps(client);
+
+      const updateResult = client.execute(
+        `UPDATE missions
+         SET status = ?,
+             domain_fields = ?,
+             notes = COALESCE(notes || ' | ', '') || ?,
+             updated_at = ?
+         WHERE id = ?`,
+        [targetStatus, JSON.stringify(updatedDomainFields), deferNote, now, missionId]
+      );
+
+      if (!updateResult.success) {
+        return createError<MissionDeferResult>(
+          updateResult.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to update mission' }
+        );
+      }
+
+      if (updateResult.data?.changes === 0) {
+        return createError<MissionDeferResult>({
+          code: CMOS_ERROR_CODES.DB_QUERY_FAILED,
+          message: `Failed to update mission '${missionId}'`,
+          suggestion: 'The mission may have been modified by another process',
+        });
+      }
+
+      const eventResult = client.execute(
+        `INSERT INTO session_events (ts, agent, mission, action, status, summary, raw_event)
+         VALUES (?, 'mcp-tool', ?, 'defer', ?, ?, ?)`,
+        [
+          now,
+          missionId,
+          targetStatus,
+          cleanedReason ?? `Deferred mission ${missionId}`,
+          JSON.stringify({
+            tool: 'cmos_mission_defer',
+            missionId,
+            previousStatus: currentStatus,
+            newStatus: targetStatus,
+            reason: cleanedReason ?? null,
+            deferUntil: cleanedDeferUntil ?? null,
+          }),
+        ]
+      );
+
+      if (!eventResult.success) {
+        console.warn('Failed to log mission defer event:', eventResult.error);
+      }
+
+      return createSuccess<MissionDeferResult>(
+        {
+          missionId,
+          previousStatus: currentStatus,
+          currentStatus: targetStatus,
+          reason: cleanedReason ?? null,
+          deferUntil: cleanedDeferUntil ?? null,
+          message: `Mission '${missionId}' has been deferred`,
+          deferredAt: now,
+        },
+        undefined,
+        inputSanitized
+      );
+    },
+    { projectRoot: params.projectRoot }
+  );
+}
+
+export function formatMissionDeferForLLM(result: CmosToolResult<MissionDeferResult>): string {
+  if (!result.success || !result.data) {
+    const error = result.error;
+    const lines = ['❌ Failed to defer mission', '', `Error: ${error?.message ?? 'Unknown error'}`];
+
+    if (error?.currentState) {
+      lines.push(`Current status: ${error.currentState}`);
+    }
+
+    if (error?.validTransitions && error.validTransitions.length > 0) {
+      lines.push(`Valid transitions: ${error.validTransitions.join(', ')}`);
+    }
+
+    if (error?.suggestion) {
+      lines.push('');
+      lines.push(`Suggestion: ${error.suggestion}`);
+    }
+
+    return lines.join('\n');
+  }
+
+  const data = result.data;
+  const lines: string[] = [
+    `⏸ Mission '${data.missionId}' deferred`,
+    '',
+    `Status: ${data.previousStatus} → ${data.currentStatus}`,
+    `Deferred at: ${data.deferredAt}`,
+  ];
+
+  if (data.reason) {
+    lines.push(`Reason: ${data.reason}`);
+  }
+
+  if (data.deferUntil) {
+    lines.push(`Re-queue when: ${data.deferUntil}`);
+  }
+
+  // Surface warnings (incl. the m05 collab-sync warnings the transition dispatcher
+  // folds in: lock contention, a superseded conflict, or a non-fatal broker-sync error).
+  if (result.warnings && result.warnings.length > 0) {
+    lines.push('');
+    lines.push('Warnings:');
+    for (const warning of result.warnings) {
+      lines.push(`- ${warning}`);
+    }
+  }
+
+  return lines.join('\n');
+}

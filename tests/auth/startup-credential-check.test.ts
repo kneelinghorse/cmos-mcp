@@ -1,0 +1,64 @@
+// ABOUTME: Sprint 58 m02 — runStartupCredentialCheck emits a [WARN] when the credential store has no user-scoped keys.
+// ABOUTME: Hermetic: tempdir store + captured writer; no MCP server.
+
+import { promises as fs } from 'fs';
+import os from 'os';
+import path from 'path';
+import { describe, expect, it, beforeEach, afterEach } from '@jest/globals';
+import { runStartupCredentialCheck } from '../../src/auth/project-key-capture';
+import { CMOS_CONFIG_DIR_ENV, CredentialStore } from '../../src/intelligence/credential-store';
+
+describe('runStartupCredentialCheck', () => {
+  const originalEnv = { ...process.env };
+  let tempDir: string;
+  let store: CredentialStore;
+  let writes: string[];
+
+  beforeEach(async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'startup-cred-check-'));
+    delete process.env[CMOS_CONFIG_DIR_ENV];
+    CredentialStore.resetInstance();
+    store = await CredentialStore.create({ configDir: tempDir });
+    writes = [];
+  });
+
+  afterEach(async () => {
+    process.env = { ...originalEnv };
+    CredentialStore.resetInstance();
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  it('emits a one-line [WARN] when the store has zero user-scoped keys', async () => {
+    const result = await runStartupCredentialCheck({
+      store,
+      writer: (line) => writes.push(line),
+    });
+
+    expect(result.status).toBe('empty-credential-store');
+    expect(result.warned).toBe(true);
+    expect(result.userScopedKeyCount).toBe(0);
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toMatch(/\[WARN\]/);
+    expect(writes[0]).toMatch(/no user-scoped credentials found/);
+    expect(writes[0]).toMatch(/cmos_auth\(action="login"\)/);
+  });
+
+  it('is silent when at least one user-scoped key is present', async () => {
+    await store.upsertUserScopedKey('user-1', {
+      key: 'cmk_user',
+      label: 'device',
+      issuedAt: new Date().toISOString(),
+      lastUsedAt: new Date().toISOString(),
+    });
+
+    const result = await runStartupCredentialCheck({
+      store,
+      writer: (line) => writes.push(line),
+    });
+
+    expect(result.status).toBe('has-user-scoped-keys');
+    expect(result.warned).toBe(false);
+    expect(result.userScopedKeyCount).toBe(1);
+    expect(writes).toHaveLength(0);
+  });
+});

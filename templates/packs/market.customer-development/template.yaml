@@ -1,0 +1,17 @@
+earlyAdopterProfile:
+  companySize: ""
+  industry: ""
+  characteristics: ""
+
+interviewScriptKeyQuestions: []
+
+channelStrategy:
+  primaryChannel: ""
+  secondaryChannel: ""
+
+pricingValidation:
+  initialHypothesis: ""
+  interviewFeedbackSummary: ""
+  finalPricing: ""
+
+

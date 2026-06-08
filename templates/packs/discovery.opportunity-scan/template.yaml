@@ -1,0 +1,30 @@
+session:
+  unit: "AI_session"
+  sessionObjectives:
+    - "Capture minimal viable evidence to decide"
+  sessionOptimization:
+    guidelines:
+      - "Start with 1–2 best sources; expand only if ambiguous"
+      - "Prefer facts over opinions; link sources"
+      - "Stop early when confident"
+  contextInputs: []
+signal:
+  source: ""
+  observation: ""
+  pattern: ""
+stakes:
+  affectedActors: ""
+  costOfInaction: ""
+  currentAlternatives: ""
+feasibilitySniffTest:
+  technicalBarriers: ""
+  marketReadiness: ""
+  resourceRequirements: ""
+evidenceChain:
+  sourceRefs: []
+  verificationNotes: ""
+decisionGate:
+  outcome: "Stop"
+  justification: ""
+  reviewer: ""
+  reviewedAt: ""

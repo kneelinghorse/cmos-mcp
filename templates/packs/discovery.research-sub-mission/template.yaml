@@ -1,0 +1,13 @@
+session:
+  unit: "AI_session"
+  sessionObjectives:
+    - "Answer defined questions with verifiable evidence"
+keyQuestions:
+  - ""
+findings: []
+synthesis: ""
+summaryConfidenceScore: 0
+risksAndUnknowns: ""
+evidenceChain:
+  sourceRefs: []
+  verificationNotes: ""

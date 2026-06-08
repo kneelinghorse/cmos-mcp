@@ -1,0 +1,15 @@
+# CMOS-local ignores (do not affect host project root)
+# Runtime artifacts inside cmos/
+db/cmos.sqlite
+SESSIONS.jsonl
+dist/
+telemetry/events/*.jsonl
+telemetry/events/*.json
+runtime/boomerang/
+
+# Python caches within cmos
+**/__pycache__/
+**/*.pyc
+
+# OS noise
+.DS_Store

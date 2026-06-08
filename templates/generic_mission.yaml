@@ -1,0 +1,15 @@
+schemaType: Mission
+schemaVersion: "2.0"
+missionId: "mission-template"
+objective: "Define mission objective"
+context:
+  background: "Baseline mission template used for new mission creation"
+  dependencies: []
+  constraints: []
+successCriteria:
+  - "Mission objective captured"
+  - "Initial scope documented"
+deliverables:
+  - "Mission briefing"
+  - "Execution backlog"
+domainFields: {}

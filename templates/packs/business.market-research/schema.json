@@ -1,0 +1,33 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "stakeholders": {
+      "type": "array",
+      "description": "Stakeholders who need to be consulted or informed",
+      "items": {
+        "type": "string"
+      }
+    },
+    "keyMetrics": {
+      "type": "array",
+      "description": "Key metrics and signals monitored in the research",
+      "items": {
+        "type": "string"
+      }
+    },
+    "dataSources": {
+      "type": "array",
+      "description": "Primary data sources that will be analyzed",
+      "items": {
+        "type": "string"
+      }
+    },
+    "researchSummary": {
+      "type": "string",
+      "description": "Narrative summary of findings"
+    }
+  },
+  "required": ["stakeholders", "keyMetrics", "dataSources"],
+  "additionalProperties": false
+}

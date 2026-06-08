@@ -1,0 +1,6 @@
+name: "market.customer-development"
+version: "1.0.0"
+displayName: "Customer Development Mission"
+description: "A mission to validate early adopter hypotheses, refine interview scripts, and align channel strategy with validated pricing insights."
+author: "Product Discovery"
+schema: "schema.json"

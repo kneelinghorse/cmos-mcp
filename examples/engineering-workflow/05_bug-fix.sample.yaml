@@ -1,0 +1,31 @@
+schemaType: Mission
+schemaVersion: '2.0'
+missionId: 'sample-engineering-bug-fix'
+objective: 'Resolve adapter sync crash triggered during mission insight regeneration.'
+context:
+  background: 'During final QA, regenerating insights for large missions triggered null pointer exceptions in the scoring worker.'
+  dependencies:
+    - 'QA Bug Report QA-INT-554'
+    - 'sample-process-code-review'
+  constraints:
+    - 'Fix must be deployed before production rollout of the adapter.'
+successCriteria:
+  - 'Identify and document the root cause with evidence from logs.'
+  - 'Ship corrective and preventive actions with links to verification tests.'
+  - 'Confirm impacted components are updated in the changelog.'
+deliverables:
+  - 'Root cause analysis'
+  - 'Patch PR merged with tests'
+  - 'Preventive actions documented'
+domain: 'engineering.bug-fix'
+domainFields:
+  type: 'engineering.bug-fix'
+  sourceBugReport: 'QA-INT-554'
+  rootCauseAnalysis: 'Worker attempted to dereference missing mission context after domain pack cache eviction; adapter failed to repopulate cache before scoring replay.'
+  correctiveAction: 'Implemented cache warm-up guard that rehydrates mission context before scoring and added null checks around optional pack metadata.'
+  preventiveAction: 'Scheduled nightly cache integrity job and monitoring alerts for adapter cache miss ratios.'
+  affectedComponents:
+    - 'packages/adapter/src/workers/insight-score-worker.ts'
+    - 'packages/adapter/src/cache/domain-pack-cache.ts'
+  pullRequest: 'https://github.com/mission-protocol/mp2/pull/845'
+  verificationTest: 'tests/adapter/insight-cache-regression.test.ts'

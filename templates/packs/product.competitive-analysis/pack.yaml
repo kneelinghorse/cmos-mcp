@@ -1,0 +1,6 @@
+name: "product.competitive-analysis"
+version: "1.0.0"
+displayName: "Competitive Analysis Report"
+description: "Conduct a structured competitive analysis to identify opportunities and advantages"
+author: "Product Management / Marketing"
+schema: "schema.json"

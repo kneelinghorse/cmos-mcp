@@ -1,0 +1,6 @@
+name: "design.ux-research-summary"
+version: "1.0.0"
+displayName: "UX Research Summary Report"
+description: "A mission to synthesize user research findings into actionable insights and recommendations for stakeholders."
+author: "Design / UX Research"
+schema: "schema.json"

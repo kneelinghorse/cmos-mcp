@@ -1,0 +1,48 @@
+# DeepSearch Research Mission Template
+# Follows DeepSearch execution schema for automated research workflows
+
+type: "research.tracelab-deepsearch"
+
+# Required Fields (Must Have)
+mission_id: ""
+title: ""       # 3-255 chars
+objective: ""   # Primary research question
+success_criteria:  # Min 1 required - drives research objectives
+  - ""
+
+# Optional Fields (Enhance Quality)
+context:
+  background: ""      # Domain context, why this matters
+  constraints: []     # Scope boundaries, limitations
+  dependencies: []    # Related missions
+
+research_phases:
+  discovery:
+    title: "Initial Discovery"
+    tasks:
+      - "Identify authoritative sources"
+      - "Map research landscape"
+
+  analysis:
+    title: "Deep Analysis"
+    tasks:
+      - "Analyze primary sources"
+      - "Cross-reference findings"
+      - "Document evidence with citations"
+
+  synthesis:
+    title: "Synthesis"
+    tasks:
+      - "Synthesize findings"
+      - "Identify patterns and themes"
+      - "Formulate recommendations"
+
+deliverables:
+  - "Research summary with key findings"
+  - "Evidence collection with citations"
+  - "Recommendations and next steps"
+
+metadata:
+  tags: []
+  priority: "normal"  # low | normal | high | critical
+  max_loops: 3        # Research iterations (1-10)

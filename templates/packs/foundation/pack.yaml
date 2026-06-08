@@ -1,0 +1,6 @@
+name: "foundation"
+version: "1.0.0"
+displayName: "Foundation"
+description: "Core infrastructure and governance baseline for organizational missions"
+author: "core-team"
+schema: "schema.json"

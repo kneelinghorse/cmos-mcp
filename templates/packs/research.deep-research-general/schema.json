@@ -1,0 +1,487 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "research.deep-research-general Domain Fields",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "type": {
+      "type": "string",
+      "description": "Domain fields type identifier for traceability (e.g., 'research.deep-research-general')."
+    },
+    "geminiDeepResearch": {
+      "type": "object",
+      "description": "Gemini Deep Research configuration and parameter control.",
+      "additionalProperties": false,
+      "properties": {
+        "tools": {
+          "type": "object",
+          "description": "Gemini API tool configuration.",
+          "additionalProperties": false,
+          "properties": {
+            "googleSearch": {
+              "type": "object",
+              "description": "Google Search grounding tool configuration.",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "description": { "type": "string" },
+                "notes": { "type": "string" }
+              },
+              "required": ["enabled"]
+            },
+            "fileSearch": {
+              "type": "object",
+              "description": "File Search (Managed RAG) tool configuration.",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "storeName": { "type": "string" },
+                "description": { "type": "string" },
+                "config": {
+                  "type": "object",
+                  "properties": {
+                    "displayName": { "type": "string" },
+                    "customMetadata": { "type": "array", "items": { "type": "object" } },
+                    "chunkingConfig": { "type": ["object", "null"] }
+                  }
+                },
+                "notes": { "type": "string" }
+              },
+              "required": ["enabled"]
+            },
+            "urlContext": {
+              "type": "object",
+              "description": "URL Context tool configuration for deep URL analysis.",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "urls": { "type": "array", "items": { "type": "string" } },
+                "description": { "type": "string" },
+                "notes": { "type": "string" }
+              },
+              "required": ["enabled"]
+            }
+          }
+        },
+        "geminiCli": {
+          "type": "object",
+          "description": "gemini-cli configuration and custom command strategy.",
+          "additionalProperties": false,
+          "properties": {
+            "useCustomCommands": { "type": "boolean" },
+            "customCommandPath": { "type": "string" },
+            "commandDescription": { "type": "string" },
+            "shellContextBlocks": { "type": "array", "items": { "type": "string" } },
+            "mcpServers": { "type": "array", "items": { "type": "string" } },
+            "workflow": {
+              "type": "object",
+              "properties": {
+                "depth": {
+                  "type": "object",
+                  "properties": {
+                    "level": {
+                      "type": "string",
+                      "enum": ["quick", "standard", "comprehensive", "exhaustive"]
+                    },
+                    "maxSearchIterations": { "type": "integer", "minimum": 1 },
+                    "requireMultipleSources": { "type": "boolean" },
+                    "crossValidationRequired": { "type": "boolean" }
+                  },
+                  "required": ["level"]
+                },
+                "breadth": {
+                  "type": "object",
+                  "properties": {
+                    "scope": {
+                      "type": "string",
+                      "enum": ["narrow", "focused", "broad", "expansive"]
+                    },
+                    "maxTopicsPerQuery": { "type": "integer", "minimum": 1 },
+                    "allowTopicExpansion": { "type": "boolean" },
+                    "relatedTopicsThreshold": { "type": "number", "minimum": 0, "maximum": 1 }
+                  },
+                  "required": ["scope"]
+                },
+                "sources": {
+                  "type": "object",
+                  "properties": {
+                    "preferredDomains": { "type": "array", "items": { "type": "string" } },
+                    "excludedDomains": { "type": "array", "items": { "type": "string" } },
+                    "requireRecentSources": { "type": "boolean" },
+                    "minSourceCount": { "type": "integer", "minimum": 1 },
+                    "maxSourceCount": { "type": "integer", "minimum": 1 },
+                    "sourceTypes": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "enum": ["academic", "industry", "news", "documentation", "all"]
+                      }
+                    }
+                  }
+                },
+                "citations": {
+                  "type": "object",
+                  "properties": {
+                    "requireCitations": { "type": "boolean" },
+                    "citationFormat": {
+                      "type": "string",
+                      "enum": ["markdown", "apa", "mla", "ieee"]
+                    },
+                    "includeGroundingMetadata": { "type": "boolean" },
+                    "trackSearchQueries": { "type": "boolean" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "required": ["tools"]
+    },
+    "researchPatterns": {
+      "type": "object",
+      "description": "Research playbook patterns that guide inquiry and synthesis.",
+      "additionalProperties": false,
+      "properties": {
+        "primaryPattern": {
+          "type": "string",
+          "description": "Primary research pattern (e.g., Opportunity Discovery, Technical Validation)."
+        },
+        "supportingPatterns": {
+          "type": "array",
+          "description": "Supporting or secondary patterns applied during the mission.",
+          "items": { "type": "string" }
+        }
+      },
+      "required": ["primaryPattern"]
+    },
+    "researchStatement": {
+      "type": "object",
+      "description": "Problem framing for the investigation.",
+      "additionalProperties": false,
+      "properties": {
+        "topic": { "type": "string", "description": "What you're researching." },
+        "scope": { "type": "string", "description": "Boundaries: timeframe, subdomains, exclusions." },
+        "centralHypothesis": { "type": "string", "description": "Primary claim to test." }
+      },
+      "required": ["topic", "scope", "centralHypothesis"]
+    },
+    "keyQuestions": {
+      "type": "array",
+      "description": "Driving questions to investigate.",
+      "items": { "type": "string" }
+    },
+    "geminiResearchPlan": {
+      "type": "object",
+      "description": "Gemini-enhanced research execution plan and tracking.",
+      "additionalProperties": false,
+      "properties": {
+        "strategy": {
+          "type": "object",
+          "properties": {
+            "approach": {
+              "type": "string",
+              "enum": ["exploratory", "hypothesis-driven", "comparative", "synthesis"]
+            },
+            "primaryTool": {
+              "type": "string",
+              "enum": ["google_search", "file_search", "url_context", "hybrid"]
+            },
+            "toolSequence": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "queries": {
+          "type": "object",
+          "properties": {
+            "initialQueries": { "type": "array", "items": { "type": "string" } },
+            "followUpQueries": { "type": "array", "items": { "type": "string" } },
+            "refinementStrategy": { "type": "string" }
+          }
+        },
+        "execution": {
+          "type": "object",
+          "properties": {
+            "searchQueriesExecuted": { "type": "array", "items": { "type": "string" } },
+            "sourcesAnalyzed": { "type": "array", "items": { "type": "string" } },
+            "toolsUsed": { "type": "array", "items": { "type": "string" } },
+            "iterations": { "type": "array", "items": { "type": "object" } }
+          }
+        }
+      }
+    },
+    "synthesis": {
+      "type": "object",
+      "description": "Meaning-making across findings.",
+      "additionalProperties": false,
+      "properties": {
+        "keyInsights": {
+          "type": "array",
+          "description": "Most important takeaways.",
+          "items": { "type": "string" }
+        },
+        "surprisingFindings": {
+          "type": "array",
+          "description": "Non-obvious or counterintuitive results.",
+          "items": { "type": "string" }
+        },
+        "contradictoryInformation": {
+          "type": "array",
+          "description": "Conflicts that need reconciliation or follow-up.",
+          "items": { "type": "string" }
+        },
+        "groundingMetadata": {
+          "type": "object",
+          "description": "Gemini API grounding metadata from research execution.",
+          "properties": {
+            "webSearchQueries": { "type": "array", "items": { "type": "string" } },
+            "sourceCitations": { "type": "array", "items": { "type": "object" } },
+            "confidenceScores": { "type": "object" }
+          }
+        }
+      },
+      "required": ["keyInsights"]
+    },
+    "evidenceCollection": {
+      "type": "array",
+      "description": "Evidence chain supporting each key finding, enhanced with Gemini grounding metadata.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "type": "string",
+            "description": "Evidence source type",
+            "enum": [
+              "Academic Paper",
+              "Industry Report",
+              "News Article",
+              "Book",
+              "Dataset",
+              "Interview",
+              "Webpage",
+              "Other"
+            ]
+          },
+          "reference": { "type": "string", "description": "Citation or URL." },
+          "key_insight": { "type": "string", "description": "Why this evidence matters." },
+          "confidence": {
+            "type": "string",
+            "description": "Confidence in the evidence.",
+            "enum": ["High", "Medium", "Low"]
+          },
+          "groundingChunk": { "type": "object", "description": "Gemini API grounding chunk metadata." },
+          "searchQuery": { "type": "string", "description": "Query that discovered this source." }
+        },
+        "required": ["type", "reference", "key_insight", "confidence"]
+      }
+    },
+    "prdAlignment": {
+      "type": "object",
+      "description": "Bridge research findings into product requirement decisions.",
+      "additionalProperties": false,
+      "properties": {
+        "productInitiative": {
+          "type": "string",
+          "description": "Named initiative or PRD the research informs."
+        },
+        "keyDecisions": {
+          "type": "array",
+          "description": "Decisions or trade-offs recommended from the research.",
+          "items": { "type": "string" }
+        },
+        "requirementsTraceability": {
+          "type": "array",
+          "description": "Trace research insights to specific PRD requirements.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "requirementId": {
+                "type": "string",
+                "description": "Identifier of the PRD requirement or epic."
+              },
+              "insightReference": {
+                "type": "string",
+                "description": "Reference to the supporting insight or evidence."
+              },
+              "decisionStatus": {
+                "type": "string",
+                "description": "State of the requirement decision.",
+                "enum": ["Proposed", "Accepted", "Deferred"]
+              }
+            },
+            "required": ["requirementId", "insightReference", "decisionStatus"]
+          }
+        }
+      },
+      "required": ["productInitiative", "requirementsTraceability"]
+    },
+    "srdAlignment": {
+      "type": "object",
+      "description": "Translate product intent into solution requirements.",
+      "additionalProperties": false,
+      "properties": {
+        "solutionContext": {
+          "type": "string",
+          "description": "High-level description of the solution direction or SRD section."
+        },
+        "affectedSystems": {
+          "type": "array",
+          "description": "Systems or components impacted by the proposed solution.",
+          "items": { "type": "string" }
+        },
+        "technicalRisks": {
+          "type": "array",
+          "description": "Risks or unknowns that engineering must mitigate.",
+          "items": { "type": "string" }
+        },
+        "openQuestions": {
+          "type": "array",
+          "description": "Outstanding questions to resolve before implementation.",
+          "items": { "type": "string" }
+        }
+      },
+      "required": ["solutionContext"]
+    },
+    "conclusion": {
+      "type": "object",
+      "description": "So-what and next actions.",
+      "additionalProperties": false,
+      "properties": {
+        "executiveSummary": { "type": "string", "description": "One-paragraph summary." },
+        "nextSteps": {
+          "type": "array",
+          "description": "Actions or decisions derived from the research.",
+          "items": { "type": "string" }
+        }
+      },
+      "required": ["executiveSummary", "nextSteps"]
+    },
+    "handoffContext": {
+      "type": "object",
+      "description": "Interactive checklists and dependency tracking for product and engineering handoff.",
+      "additionalProperties": false,
+      "properties": {
+        "dependencies": {
+          "type": "array",
+          "description": "Mission IDs or artifacts required before handoff completes.",
+          "items": { "type": "string" }
+        },
+        "blockers": {
+          "type": "array",
+          "description": "Blocking issues that must be resolved.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "missionId": {
+                "type": "string",
+                "description": "Mission or artifact identifier that is blocking handoff."
+              },
+              "description": {
+                "type": "string",
+                "description": "Summary of the blocker."
+              },
+              "owner": {
+                "type": "string",
+                "description": "Responsible party for clearing the blocker."
+              }
+            },
+            "required": ["missionId", "description"]
+          }
+        },
+        "checklists": {
+          "type": "array",
+          "description": "Interactive checklist groups for cross-functional handoff.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Checklist grouping name (e.g., Product Handoff)."
+              },
+              "owner": {
+                "type": "string",
+                "description": "Primary owner accountable for the checklist."
+              },
+              "status": {
+                "type": "string",
+                "description": "Overall status of the checklist.",
+                "enum": ["Pending", "In Progress", "Completed"]
+              },
+              "items": {
+                "type": "array",
+                "description": "Individual checklist items to complete.",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "label": { "type": "string", "description": "Checklist item description." },
+                    "owner": {
+                      "type": "string",
+                      "description": "Optional secondary owner or collaborator."
+                    },
+                    "status": {
+                      "type": "string",
+                      "description": "Status of the checklist item.",
+                      "enum": ["Pending", "In Progress", "Completed"]
+                    },
+                    "notes": {
+                      "type": "string",
+                      "description": "Additional context, links, or decisions."
+                    }
+                  },
+                  "required": ["label", "status"]
+                }
+              }
+            },
+            "required": ["name", "status", "items"]
+          }
+        }
+      }
+    },
+    "researchGuidance": {
+      "type": "object",
+      "description": "Gemini Deep Research best practices, prompt templates, and workflow guidance.",
+      "additionalProperties": false,
+      "properties": {
+        "promptTemplates": {
+          "type": "object",
+          "properties": {
+            "initialResearch": { "type": "string" },
+            "followUpResearch": { "type": "string" }
+          }
+        },
+        "toolUsageGuidance": {
+          "type": "object",
+          "properties": {
+            "googleSearch": { "type": "string" },
+            "fileSearch": { "type": "string" },
+            "urlContext": { "type": "string" }
+          }
+        },
+        "workflowOptimization": {
+          "type": "object",
+          "properties": {
+            "iterativeRefinement": { "type": "string" },
+            "qualityAssurance": { "type": "string" }
+          }
+        }
+      }
+    }
+  },
+  "required": [
+    "geminiDeepResearch",
+    "researchPatterns",
+    "researchStatement",
+    "keyQuestions",
+    "synthesis",
+    "evidenceCollection",
+    "prdAlignment",
+    "srdAlignment",
+    "conclusion",
+    "handoffContext"
+  ]
+}
+

@@ -1,0 +1,8 @@
+type: "engineering.adr"
+title: "ADR 001: Use PostgreSQL for primary data store"
+status: "Proposed"
+decision: "We will use PostgreSQL as the primary relational database for all new microservices."
+consequences:
+  - "Positive: Standardizes our data layer, simplifies developer onboarding, and leverages existing team expertise."
+  - "Negative: Less flexible for use cases that might benefit from a NoSQL approach."
+  - "Neutral: Requires a managed database instance in each cloud environment."

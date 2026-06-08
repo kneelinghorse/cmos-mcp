@@ -1,0 +1,88 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "type": {
+      "type": "string",
+      "description": "Domain type identifier"
+    },
+    "executiveSummary": {
+      "type": "string",
+      "description": "High-level summary of the research findings"
+    },
+    "studyOverview": {
+      "type": "object",
+      "description": "Overview of the research study methodology and participants",
+      "properties": {
+        "researchGoals": {
+          "type": "array",
+          "description": "Goals and objectives of the research study",
+          "items": {
+            "type": "string"
+          }
+        },
+        "methodology": {
+          "type": "string",
+          "description": "Research methodology used"
+        },
+        "participantOverview": {
+          "type": "string",
+          "description": "Description of research participants"
+        }
+      },
+      "required": ["researchGoals", "methodology", "participantOverview"],
+      "additionalProperties": false
+    },
+    "keyFindings": {
+      "type": "array",
+      "description": "Key findings from the research",
+      "items": {
+        "type": "object",
+        "properties": {
+          "theme": {
+            "type": "string",
+            "description": "Thematic category for this finding"
+          },
+          "insight": {
+            "type": "string",
+            "description": "The insight or finding"
+          },
+          "supportingEvidence": {
+            "type": "array",
+            "description": "Quotes, data, or other evidence supporting this insight",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": ["theme", "insight", "supportingEvidence"],
+        "additionalProperties": false
+      }
+    },
+    "recommendations": {
+      "type": "array",
+      "description": "Actionable recommendations based on findings",
+      "items": {
+        "type": "object",
+        "properties": {
+          "recommendation": {
+            "type": "string",
+            "description": "The recommendation"
+          },
+          "opportunity": {
+            "type": "string",
+            "description": "How Might We statement framing the opportunity"
+          },
+          "futureResearch": {
+            "type": "string",
+            "description": "Suggestions for future research to validate or expand on this recommendation"
+          }
+        },
+        "required": ["recommendation", "opportunity", "futureResearch"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["type", "executiveSummary", "studyOverview", "keyFindings", "recommendations"],
+  "additionalProperties": false
+}

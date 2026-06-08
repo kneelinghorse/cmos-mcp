@@ -1,0 +1,12 @@
+{
+  "working_memory": {
+    "active_mission": null,
+    "session_count": 0,
+    "last_completed_mission": null,
+    "session_history": []
+  },
+  "context_health": {
+    "last_updated": null,
+    "stale_threshold_hours": 24
+  }
+}

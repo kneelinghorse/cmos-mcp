@@ -1,0 +1,77 @@
+// ABOUTME: Persistence helper for the Sprint 56 m03 agentFeedback standing channel.
+// ABOUTME: Called by cmos_session_complete, cmos_mission_transition, cmos_agent_onboard when the optional field is set.
+
+import type { CmosDatabaseClient } from './client';
+import { ensureAgentFeedbackTable } from './schema-migrations';
+import { sanitizeContentField } from '../../intelligence/content-sanitizer';
+import type { SanitizedFieldReport } from './types';
+
+/** Context that follows the feedback row so triage can scope by sprint/session/mission. */
+export interface AgentFeedbackContext {
+  toolName: string;
+  sessionId?: string | null;
+  sprintId?: string | null;
+  missionId?: string | null;
+  projectId?: string | null;
+}
+
+export interface RecordAgentFeedbackResult {
+  feedbackId: number | null;
+  sanitizedFields: SanitizedFieldReport[];
+}
+
+/**
+ * Persist a single agentFeedback entry, sanitizing the body before write so
+ * corrupted XML markup cannot land in the feedback channel either.
+ *
+ * Returns `{feedbackId: null, sanitizedFields: []}` when the trimmed body is
+ * empty (the caller passed an empty string) — no row is written. All null
+ * context fields are persisted as NULL so the list/triage surface can group
+ * cleanly by tool even when session/sprint/mission context is missing.
+ */
+export function recordAgentFeedback(
+  client: CmosDatabaseClient,
+  body: string,
+  context: AgentFeedbackContext
+): RecordAgentFeedbackResult {
+  const trimmed = body.trim();
+  if (!trimmed) {
+    return { feedbackId: null, sanitizedFields: [] };
+  }
+
+  ensureAgentFeedbackTable(client);
+
+  const sanitizedFields: SanitizedFieldReport[] = [];
+  const sanitation = sanitizeContentField(trimmed);
+  if (sanitation.wasModified) {
+    sanitizedFields.push({
+      field: 'agentFeedback',
+      reason: sanitation.reason ?? 'Stripped XML marshalling artifact.',
+    });
+  }
+
+  const cleaned = sanitation.cleaned;
+  if (!cleaned) {
+    return { feedbackId: null, sanitizedFields };
+  }
+
+  const now = new Date().toISOString();
+  const insertResult = client.execute(
+    `INSERT INTO agent_feedback (
+      tool_name, body, status, session_id, sprint_id, mission_id, project_id, created_at
+    ) VALUES (?, ?, 'open', ?, ?, ?, ?, ?)`,
+    [
+      context.toolName,
+      cleaned,
+      context.sessionId ?? null,
+      context.sprintId ?? null,
+      context.missionId ?? null,
+      context.projectId ?? null,
+      now,
+    ]
+  );
+
+  const feedbackId =
+    insertResult.success && insertResult.data ? Number(insertResult.data.lastInsertRowid) : null;
+  return { feedbackId, sanitizedFields };
+}

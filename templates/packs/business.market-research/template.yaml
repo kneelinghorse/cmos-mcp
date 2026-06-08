@@ -1,0 +1,13 @@
+stakeholders:
+  - "Product Management"
+  - "Executive Sponsor"
+  - "Research Lead"
+keyMetrics:
+  - "Customer acquisition cost"
+  - "Lifetime value"
+  - "Net promoter score"
+dataSources:
+  - "Customer interviews"
+  - "Market intelligence reports"
+  - "Competitive pricing analysis"
+researchSummary: ""

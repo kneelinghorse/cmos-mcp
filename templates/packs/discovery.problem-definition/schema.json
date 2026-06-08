@@ -1,0 +1,125 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "session": {
+      "type": "object",
+      "properties": {
+        "unit": { "type": "string", "const": "AI_session" },
+        "sessionObjectives": { "type": "array", "items": { "type": "string" } },
+        "sessionOptimization": {
+          "type": "object",
+          "properties": {
+            "guidelines": { "type": "array", "items": { "type": "string" } }
+          },
+          "required": ["guidelines"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["unit", "sessionObjectives", "sessionOptimization"],
+      "additionalProperties": false
+    },
+    "problemStatement": { "type": "string" },
+    "actorAndAction": {
+      "type": "object",
+      "properties": {
+        "actor": { "type": "string" },
+        "currentWorkflow": { "type": "array", "items": { "type": "string" } },
+        "brokenStep": { "type": "string" },
+        "desiredOutcome": { "type": "string" }
+      },
+      "required": ["actor", "brokenStep", "desiredOutcome"],
+      "additionalProperties": false
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "claim": { "type": "string" },
+          "source": { "type": "string" },
+          "strength": { "type": "integer", "minimum": 1, "maximum": 5 },
+          "notes": { "type": "string" }
+        },
+        "required": ["claim", "source", "strength"],
+        "additionalProperties": false
+      }
+    },
+    "solutionSpace": {
+      "type": "object",
+      "properties": {
+        "existingSolutions": { "type": "string" },
+        "whyTheyFail": { "type": "string" },
+        "ourAngle": { "type": "string" }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "scopeSizing": {
+      "type": "object",
+      "properties": {
+        "smallestValuableSolution": { "type": "string" },
+        "fullVision": { "type": "string" },
+        "firstMilestone": { "type": "string" }
+      },
+      "required": ["smallestValuableSolution"],
+      "additionalProperties": false
+    },
+    "confidenceScores": {
+      "type": "object",
+      "properties": {
+        "problemIsReal": {
+          "type": "object",
+          "properties": {
+            "score": { "type": "integer", "minimum": 1, "maximum": 5 },
+            "justification": { "type": "string" }
+          },
+          "required": ["score", "justification"],
+          "additionalProperties": false
+        },
+        "solutionIsPossible": {
+          "type": "object",
+          "properties": {
+            "score": { "type": "integer", "minimum": 1, "maximum": 5 },
+            "justification": { "type": "string" }
+          },
+          "required": ["score", "justification"],
+          "additionalProperties": false
+        },
+        "weCanBuild": {
+          "type": "object",
+          "properties": {
+            "score": { "type": "integer", "minimum": 1, "maximum": 5 },
+            "justification": { "type": "string" }
+          },
+          "required": ["score", "justification"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["problemIsReal", "solutionIsPossible", "weCanBuild"],
+      "additionalProperties": false
+    },
+    "evidenceChain": {
+      "type": "object",
+      "properties": {
+        "sourceRefs": { "type": "array", "items": { "type": "string" } },
+        "verificationNotes": { "type": "string" }
+      },
+      "required": ["sourceRefs"],
+      "additionalProperties": false
+    },
+    "decisionGate": {
+      "type": "object",
+      "properties": {
+        "outcome": { "type": "string", "enum": ["Proceed", "Stop", "Refine"] },
+        "justification": { "type": "string" },
+        "reviewer": { "type": "string" },
+        "reviewedAt": { "type": "string" }
+      },
+      "required": ["outcome", "justification"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["session", "problemStatement", "actorAndAction", "evidence", "confidenceScores", "evidenceChain", "decisionGate"],
+  "additionalProperties": false
+}

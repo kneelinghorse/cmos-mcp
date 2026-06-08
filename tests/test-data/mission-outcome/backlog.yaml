@@ -1,0 +1,24 @@
+domainFields:
+  sprints:
+    - sprintId: 'Sprint Test'
+      title: 'Test Sprint'
+      status: 'Current'
+      missions:
+        - id: 'T1'
+          name: 'Outcome instrumentation'
+          status: 'Completed'
+          started_at: '2025-10-01T10:00:00Z'
+          completed_at: '2025-10-01T12:30:00Z'
+          notes: 'Baseline analytics delivered'
+        - id: 'T2'
+          name: 'Outcome dashboards'
+          status: 'In Progress'
+          started_at: '2025-10-02T10:00:00Z'
+        - { id: 'T3', name: 'Outcome pipeline polish', status: 'Current' }
+        - { id: 'T4', name: 'Outcome backlog grooming', status: 'Queued' }
+        - { id: 'T5', name: 'Outcome blockers', status: 'Blocked' }
+    - sprintId: 'Sprint Deferred'
+      title: 'Deferred Work'
+      status: 'Deferred'
+      missions:
+        - { id: 'TD1', name: 'Deferred mission', status: 'Deferred' }

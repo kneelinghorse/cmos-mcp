@@ -1,0 +1,76 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "session": {
+      "type": "object",
+      "properties": {
+        "unit": { "type": "string", "const": "AI_session" },
+        "sessionObjectives": { "type": "array", "items": { "type": "string" } },
+        "sessionOptimization": {
+          "type": "object",
+          "properties": {
+            "guidelines": { "type": "array", "items": { "type": "string" } }
+          },
+          "required": ["guidelines"],
+          "additionalProperties": false
+        },
+        "contextInputs": { "type": "array", "items": { "type": "string" } }
+      },
+      "required": ["unit", "sessionObjectives", "sessionOptimization"],
+      "additionalProperties": false
+    },
+    "signal": {
+      "type": "object",
+      "properties": {
+        "source": { "type": "string" },
+        "observation": { "type": "string" },
+        "pattern": { "type": "string" }
+      },
+      "required": ["source", "observation"],
+      "additionalProperties": false
+    },
+    "stakes": {
+      "type": "object",
+      "properties": {
+        "affectedActors": { "type": "string" },
+        "costOfInaction": { "type": "string" },
+        "currentAlternatives": { "type": "string" }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "feasibilitySniffTest": {
+      "type": "object",
+      "properties": {
+        "technicalBarriers": { "type": "string" },
+        "marketReadiness": { "type": "string" },
+        "resourceRequirements": { "type": "string" }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "evidenceChain": {
+      "type": "object",
+      "properties": {
+        "sourceRefs": { "type": "array", "items": { "type": "string" } },
+        "verificationNotes": { "type": "string" }
+      },
+      "required": ["sourceRefs"],
+      "additionalProperties": false
+    },
+    "decisionGate": {
+      "type": "object",
+      "properties": {
+        "outcome": { "type": "string", "enum": ["Proceed", "Stop", "Refine"] },
+        "justification": { "type": "string" },
+        "reviewer": { "type": "string" },
+        "reviewedAt": { "type": "string" }
+      },
+      "required": ["outcome", "justification"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["session", "signal", "evidenceChain", "decisionGate"],
+  "additionalProperties": false
+}

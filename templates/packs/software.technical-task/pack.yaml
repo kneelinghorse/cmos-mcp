@@ -1,0 +1,6 @@
+name: "software.technical-task"
+version: "1.0.0"
+displayName: "Software Development Task"
+description: "Missions for designing and implementing software features"
+author: "core-team"
+schema: "schema.json"

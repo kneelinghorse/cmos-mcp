@@ -1,0 +1,95 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "sourceGoNoGoMission": {
+      "type": "string",
+      "description": "Path to the source go/no-go mission that triggered this architecture mission"
+    },
+    "validatedRequirements": {
+      "type": "array",
+      "description": "Validated requirements from the discovery phase",
+      "items": {
+        "type": "string"
+      }
+    },
+    "technicalSpecification": {
+      "type": "object",
+      "description": "High-level technical specification",
+      "properties": {
+        "approach": {
+          "type": "string",
+          "description": "Overall technical approach"
+        },
+        "database": {
+          "type": "string",
+          "description": "Database technology choice"
+        },
+        "language": {
+          "type": "string",
+          "description": "Programming language choice"
+        }
+      },
+      "required": ["approach", "database", "language"]
+    },
+    "riskMitigationPlan": {
+      "type": "array",
+      "description": "Risk mitigation strategies",
+      "items": {
+        "type": "object",
+        "properties": {
+          "risk": {
+            "type": "string",
+            "description": "Description of the risk"
+          },
+          "mitigation": {
+            "type": "string",
+            "description": "Mitigation strategy"
+          }
+        },
+        "required": ["risk", "mitigation"]
+      }
+    },
+    "successMetrics": {
+      "type": "array",
+      "description": "Quantitative success metrics",
+      "items": {
+        "type": "object",
+        "properties": {
+          "metric": {
+            "type": "string",
+            "description": "Name of the metric"
+          },
+          "target": {
+            "type": "string",
+            "description": "Target value for the metric"
+          }
+        },
+        "required": ["metric", "target"]
+      }
+    },
+    "cmosMissionGeneration": {
+      "type": "array",
+      "description": "List of initial build missions to be generated",
+      "items": {
+        "type": "string"
+      }
+    },
+    "structured_prompting": {
+      "type": "object",
+      "description": "Structured prompting guidance using R-C-T-F-C blocks",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "role": { "type": "string", "minLength": 1 },
+        "context": { "type": "string", "minLength": 1 },
+        "task": { "type": "string", "minLength": 1 },
+        "format": { "type": "string", "minLength": 1 },
+        "constraints": { "type": "string", "minLength": 1 }
+      },
+      "required": ["enabled", "role", "context", "task", "format", "constraints"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["sourceGoNoGoMission", "validatedRequirements", "technicalSpecification", "riskMitigationPlan", "successMetrics", "cmosMissionGeneration"],
+  "additionalProperties": false
+}

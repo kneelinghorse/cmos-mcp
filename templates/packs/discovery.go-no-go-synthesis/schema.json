@@ -1,0 +1,64 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "timestamp": { "type": "string" },
+        "synthesizer": { "type": "string" }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "linkedResearchMissions": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+    "scoringDimensions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "dimension": { "type": "string" },
+          "keyEvidence": { "type": "string" },
+          "justification": { "type": "string" },
+          "score": { "type": "integer", "minimum": 0, "maximum": 10 }
+        },
+        "required": ["dimension", "score"],
+        "additionalProperties": false
+      },
+      "minItems": 4
+    },
+    "finalScore": { "type": "integer", "minimum": 0, "maximum": 40 },
+    "decisionGate": {
+      "type": "object",
+      "properties": {
+        "outcome": { "type": "string", "enum": ["Stop", "Pivot/Refine", "Conditional Go", "Strong Go"] },
+        "justification": { "type": "string" },
+        "reviewer": { "type": "string" },
+        "reviewedAt": { "type": "string" }
+      },
+      "required": ["outcome", "justification"],
+      "additionalProperties": false
+    },
+    "nextNote": {
+      "type": "object",
+      "properties": {
+        "criticalSuccessFactor": { "type": "string" },
+        "biggestRisk": { "type": "string" },
+        "immediateConsideration": { "type": "string" }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "evidenceChain": {
+      "type": "object",
+      "properties": {
+        "sourceRefs": { "type": "array", "items": { "type": "string" } },
+        "verificationNotes": { "type": "string" }
+      },
+      "required": ["sourceRefs"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["linkedResearchMissions", "scoringDimensions", "finalScore", "decisionGate", "evidenceChain"],
+  "additionalProperties": false
+}

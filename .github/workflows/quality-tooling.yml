@@ -1,0 +1,63 @@
+name: Quality Tooling
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'scripts/**'
+      - '.github/workflows/quality-tooling.yml'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.eslintrc.cjs'
+      - '.prettierrc'
+
+jobs:
+  quality:
+    name: Lint, Format, Tests, Snapshots
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run ESLint
+        run: npm run lint
+
+      - name: Verify formatting
+        run: npm run format:check
+
+      - name: Run unit tests
+        env:
+          CI: 'true'
+        run: npm test -- --runInBand
+
+      - name: Validate tool definition snapshots
+        env:
+          CI: 'true'
+        run: npm run snapshots -- --ci
+
+      - name: Validate mission templates
+        run: npm run validate:packs
+
+      - name: Generate quality metrics
+        run: npm run metrics
+
+      - name: Upload metrics report
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-metrics
+          path: artifacts/quality-metrics/latest.json

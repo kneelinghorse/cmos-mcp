@@ -1,0 +1,105 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "type": {
+      "type": "string",
+      "description": "Domain type identifier"
+    },
+    "competitorProfile": {
+      "type": "object",
+      "description": "Overview of the competitor being analyzed",
+      "properties": {
+        "company": {
+          "type": "string",
+          "description": "Competitor company name"
+        },
+        "marketWeight": {
+          "type": "string",
+          "enum": ["Tier 1", "Tier 2", "Tier 3"],
+          "description": "Market tier classification"
+        },
+        "overview": {
+          "type": "string",
+          "description": "Brief overview of the competitor"
+        }
+      },
+      "required": ["company", "marketWeight", "overview"],
+      "additionalProperties": false
+    },
+    "productComparison": {
+      "type": "object",
+      "description": "Comparison of product features and pricing",
+      "properties": {
+        "featureAnalysis": {
+          "type": "string",
+          "description": "Analysis of competitor's features compared to ours"
+        },
+        "pricingPositioning": {
+          "type": "string",
+          "description": "Competitor's pricing strategy and positioning"
+        }
+      },
+      "required": ["featureAnalysis", "pricingPositioning"],
+      "additionalProperties": false
+    },
+    "marketAnalysis": {
+      "type": "object",
+      "description": "Market positioning and strategy analysis",
+      "properties": {
+        "targetMarket": {
+          "type": "string",
+          "description": "Competitor's target market segments"
+        },
+        "marketingStrategy": {
+          "type": "string",
+          "description": "Competitor's marketing and go-to-market strategy"
+        }
+      },
+      "required": ["targetMarket", "marketingStrategy"],
+      "additionalProperties": false
+    },
+    "swotAnalysis": {
+      "type": "object",
+      "description": "SWOT analysis of the competitor",
+      "properties": {
+        "strengths": {
+          "type": "array",
+          "description": "Competitor's strengths",
+          "items": {
+            "type": "string"
+          }
+        },
+        "weaknesses": {
+          "type": "array",
+          "description": "Competitor's weaknesses",
+          "items": {
+            "type": "string"
+          }
+        },
+        "opportunities": {
+          "type": "array",
+          "description": "Opportunities identified from competitor analysis",
+          "items": {
+            "type": "string"
+          }
+        },
+        "threats": {
+          "type": "array",
+          "description": "Threats posed by the competitor",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": ["strengths", "weaknesses", "opportunities", "threats"],
+      "additionalProperties": false
+    },
+    "competitiveAdvantageSummary": {
+      "type": "string",
+      "description": "Summary of our competitive advantages over this competitor"
+    }
+  },
+  "required": ["type", "competitorProfile", "productComparison", "marketAnalysis", "swotAnalysis", "competitiveAdvantageSummary"],
+  "additionalProperties": false
+}

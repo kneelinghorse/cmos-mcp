@@ -1,0 +1,6 @@
+name: "qa.bug-report"
+version: "1.0.0"
+displayName: "Bug Report"
+description: "A mission to report a software bug with sufficient detail for reproduction and resolution."
+author: "QA / Engineering"
+schema: "schema.json"

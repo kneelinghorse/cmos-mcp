@@ -1,0 +1,6 @@
+name: "research.deep-research-general"
+version: "1.0.0"
+displayName: "Deep Research General (Gemini-Optimized)"
+description: "Gemini Deep Research-optimized general research scaffold with controls for depth, breadth, and sources. Uses Google Search, File Search, URL Context, and gemini-cli guidance."
+author: "Mission Protocol Team"
+schema: "schema.json"

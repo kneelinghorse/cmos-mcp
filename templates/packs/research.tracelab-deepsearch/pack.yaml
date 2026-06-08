@@ -1,0 +1,6 @@
+name: "research.tracelab-deepsearch"
+version: "1.0.0"
+displayName: "DeepSearch Research Mission"
+description: "Research missions for DeepSearch execution with phased research workflows, constraints, and deliverables."
+author: "Mission Protocol Team"
+schema: "schema.json"

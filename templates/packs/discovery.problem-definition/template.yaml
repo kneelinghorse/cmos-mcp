@@ -1,0 +1,35 @@
+session:
+  unit: "AI_session"
+  sessionObjectives:
+    - "Lock in a machine-readable problem statement"
+  sessionOptimization:
+    guidelines:
+      - "Center the workflow; name the broken step"
+      - "Use specific roles/titles, not generic 'user'"
+problemStatement: ""
+actorAndAction:
+  actor: ""
+  currentWorkflow: []
+  brokenStep: ""
+  desiredOutcome: ""
+evidence: []
+solutionSpace:
+  existingSolutions: ""
+  whyTheyFail: ""
+  ourAngle: ""
+scopeSizing:
+  smallestValuableSolution: ""
+  fullVision: ""
+  firstMilestone: ""
+confidenceScores:
+  problemIsReal: { score: 1, justification: "" }
+  solutionIsPossible: { score: 1, justification: "" }
+  weCanBuild: { score: 1, justification: "" }
+evidenceChain:
+  sourceRefs: []
+  verificationNotes: ""
+decisionGate:
+  outcome: "Stop"
+  justification: ""
+  reviewer: ""
+  reviewedAt: ""

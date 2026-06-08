@@ -1,0 +1,65 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "type": {
+      "type": "string",
+      "description": "Domain type identifier"
+    },
+    "title": {
+      "type": "string",
+      "description": "Concise summary of the issue (e.g., '[Component] Description of the issue')"
+    },
+    "environment": {
+      "type": "object",
+      "description": "Environment details where the bug was discovered",
+      "properties": {
+        "os": {
+          "type": "string",
+          "description": "Operating system"
+        },
+        "browser": {
+          "type": "string",
+          "description": "Browser name and version"
+        },
+        "appVersion": {
+          "type": "string",
+          "description": "Application version"
+        }
+      },
+      "required": ["os", "browser", "appVersion"],
+      "additionalProperties": false
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["Critical", "High", "Medium", "Low"],
+      "description": "Severity level of the bug"
+    },
+    "priority": {
+      "type": "string",
+      "enum": ["P0", "P1", "P2", "P3"],
+      "description": "Priority for fixing the bug"
+    },
+    "stepsToReproduce": {
+      "type": "array",
+      "description": "Step-by-step instructions to reproduce the bug",
+      "items": {
+        "type": "string"
+      }
+    },
+    "expectedResult": {
+      "type": "string",
+      "description": "What should happen when following the steps"
+    },
+    "actualResult": {
+      "type": "string",
+      "description": "What actually happens"
+    },
+    "visualProof": {
+      "type": "string",
+      "description": "Link to screenshot or recording demonstrating the issue"
+    }
+  },
+  "required": ["type", "title", "environment", "severity", "priority", "stepsToReproduce", "expectedResult", "actualResult", "visualProof"],
+  "additionalProperties": false
+}

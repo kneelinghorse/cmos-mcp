@@ -1,0 +1,8 @@
+<Instructions>
+  <Title>Hybrid Mission Delivery Flow</Title>
+  <Step index="1">Review the mission objective and confirm required context datasets.</Step>
+  <Step index="2">Load reusable personas and instruction components referenced via src attributes.</Step>
+  <Step index="3">Validate XML structure against mission-template.xsd and embedded JSON schema.</Step>
+  <Step index="4">Generate mission brief and checklist derived from structured fields.</Step>
+  <Step index="5">Emit outputs that satisfy StructuredMissionResult schema.</Step>
+</Instructions>

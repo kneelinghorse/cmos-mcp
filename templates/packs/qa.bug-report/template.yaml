@@ -1,0 +1,13 @@
+type: "qa.bug-report"
+title: ""
+environment:
+  os: ""
+  browser: ""
+  appVersion: ""
+severity: "Medium"
+priority: "P2"
+stepsToReproduce:
+  - ""
+expectedResult: ""
+actualResult: ""
+visualProof: ""

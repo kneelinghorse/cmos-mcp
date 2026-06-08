@@ -1,0 +1,29 @@
+session:
+  unit: "AI_session"
+  sessionObjectives:
+    - "Assign, track, and aggregate five research lenses"
+problemStatement: ""
+subMissions:
+  - { missionType: "R1: Problem Validation", objective: "Quantify pain/frequency", assignee: "", status: "Pending", missionFile: "" }
+  - { missionType: "R2: Solution Landscape", objective: "Map competitors/gaps", assignee: "", status: "Pending", missionFile: "" }
+  - { missionType: "R3: Technical Feasibility", objective: "Feasibility and constraints", assignee: "", status: "Pending", missionFile: "" }
+  - { missionType: "R4: Market Timing", objective: "Timing shifts; competitive moves", assignee: "", status: "Pending", missionFile: "" }
+  - { missionType: "R5: Willingness to Pay", objective: "Budget holder; ROI", assignee: "", status: "Pending", missionFile: "" }
+tracking:
+  completedCount: 0
+  total: 5
+  notes: ""
+crossValidation:
+  contradictions: []
+  resolutions: []
+synthesis:
+  keyFindings: []
+  risksAndUnknowns: []
+  evidenceChain:
+    sourceRefs: []
+    verificationNotes: ""
+decisionGate:
+  outcome: "Stop"
+  justification: ""
+  reviewer: ""
+  reviewedAt: ""

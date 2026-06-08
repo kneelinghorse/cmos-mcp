@@ -1,0 +1,22 @@
+type: "product.prd"
+overview:
+  problemStatement: ""
+  targetAudience: ""
+  strategicFit: ""
+goalsAndMetrics:
+  businessGoals: []
+  userOutcomes: []
+  measurableKPIs: []
+assumptionsAndDependencies:
+  assumptions: []
+  dependencies: []
+requirements:
+  userStories:
+    - ""
+  functional: []
+  nonFunctional: []
+scope:
+  inScope: []
+  outOfScope: []
+designLink: ""
+openQuestions: []

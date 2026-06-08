@@ -1,0 +1,44 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "session": {
+      "type": "object",
+      "properties": {
+        "unit": { "type": "string", "const": "AI_session" },
+        "sessionObjectives": { "type": "array", "items": { "type": "string" } }
+      },
+      "required": ["unit", "sessionObjectives"],
+      "additionalProperties": false
+    },
+    "keyQuestions": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "statement": { "type": "string" },
+          "evidence": { "type": "string" },
+          "confidence": { "type": "integer", "minimum": 1, "maximum": 5 },
+          "notes": { "type": "string" }
+        },
+        "required": ["statement", "evidence", "confidence"],
+        "additionalProperties": false
+      }
+    },
+    "synthesis": { "type": "string" },
+    "summaryConfidenceScore": { "type": "number", "minimum": 0, "maximum": 10 },
+    "risksAndUnknowns": { "type": "string" },
+    "evidenceChain": {
+      "type": "object",
+      "properties": {
+        "sourceRefs": { "type": "array", "items": { "type": "string" } },
+        "verificationNotes": { "type": "string" }
+      },
+      "required": ["sourceRefs"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["session", "keyQuestions", "findings", "synthesis", "summaryConfidenceScore", "evidenceChain"],
+  "additionalProperties": false
+}

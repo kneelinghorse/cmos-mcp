@@ -1,0 +1,71 @@
+type: "research.general"
+
+researchPatterns:
+  primaryPattern: ""
+  supportingPatterns: []
+
+researchStatement:
+  topic: ""
+  scope: ""
+  centralHypothesis: ""
+
+keyQuestions:
+  - ""
+
+synthesis:
+  keyInsights:
+    - ""
+  surprisingFindings: []
+  contradictoryInformation: []
+
+evidenceCollection: []
+
+prdAlignment:
+  productInitiative: ""
+  keyDecisions:
+    - ""
+  requirementsTraceability:
+    - requirementId: ""
+      insightReference: ""
+      decisionStatus: "Proposed"
+
+srdAlignment:
+  solutionContext: ""
+  affectedSystems:
+    - ""
+  technicalRisks: []
+  openQuestions: []
+
+conclusion:
+  executiveSummary: ""
+  nextSteps:
+    - ""
+
+handoffContext:
+  dependencies: []
+  blockers: []
+  checklists:
+    - name: "Product Handoff"
+      owner: ""
+      status: "Pending"
+      items:
+        - label: "Review PRD updates with product lead"
+          owner: ""
+          status: "Pending"
+          notes: ""
+        - label: "Align KPIs with research findings"
+          owner: ""
+          status: "Pending"
+          notes: ""
+    - name: "Engineering Handoff"
+      owner: ""
+      status: "Pending"
+      items:
+        - label: "Translate insights into SRD updates"
+          owner: ""
+          status: "Pending"
+          notes: ""
+        - label: "Schedule implementation feasibility review"
+          owner: ""
+          status: "Pending"
+          notes: ""

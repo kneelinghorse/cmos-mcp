@@ -1,0 +1,6 @@
+<ContextData>
+  <Item key="domain">engineering</Item>
+  <Item key="environment">monorepo</Item>
+  <Item key="qualityGate">all critical tests green</Item>
+  <Item key="escalation">tech-leads@company.test</Item>
+</ContextData>

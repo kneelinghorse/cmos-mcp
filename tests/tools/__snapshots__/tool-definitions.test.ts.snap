@@ -1,0 +1,1386 @@
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+
+exports[`Tool definitions contract registered tool schema stays stable 1`] = `
+[
+  {
+    "description": "Get aggregated onboarding payload for agent cold-start. Returns project identity, active session, pending missions, recent decisions, and suggested actions. Optimized for context windows (<4KB).",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "agentFeedback": {
+          "description": "Optional free-text UX feedback. Use this to report rough edges, improvement ideas, or surprising tool behavior you hit during the prior session. Reviewed periodically via cmos_feedback(action="list").",
+          "maxLength": 2000,
+          "type": "string",
+        },
+        "projectRoot": {
+          "description": "Project root directory to search for CMOS database (defaults to cwd)",
+          "type": "string",
+        },
+      },
+      "type": "object",
+    },
+    "name": "cmos_agent_onboard",
+  },
+  {
+    "description": "Agent-callable credential lifecycle. Actions: login_init (non-blocking — starts RFC 8628 device-code flow, returns userCode + verificationUri immediately; agent renders them for user approval) + login_complete (polls within a bounded window; returns status 'approved'|'pending'|'expired'|'denied'). Prefer login_init + login_complete for agent-driven auth in chat — a single blocking login is invisible in IDE MCP hosts. login (legacy single-call blocking flow; kept for terminal callers where stderr is visible). logout (symmetric to login — revokes the current user-scoped key on the dashboard + clears the local row). rotate (mint new project key with grace window), revoke (hard-revoke a keyId), list (view credential tree, mine-only by default), reissue (recover a lost project key). All writes persist atomically to the local credential store; agents can call these directly without human intervention.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "description": "Credential action: rotate | revoke | list | reissue | login | login_init | login_complete | logout",
+          "enum": [
+            "rotate",
+            "revoke",
+            "list",
+            "reissue",
+            "login",
+            "login_init",
+            "login_complete",
+            "logout",
+          ],
+          "type": "string",
+        },
+        "deviceCode": {
+          "description": "login_complete only: deviceCode from a prior login_init call. Opaque dashboard-side handle.",
+          "type": "string",
+        },
+        "graceSeconds": {
+          "description": "Rotate grace window (default: 300s dashboard-side).",
+          "maximum": 86400,
+          "minimum": 1,
+          "type": "number",
+        },
+        "keyId": {
+          "description": "Specific dashboard keyId to revoke. Omit to revoke the current project key for projectRoot.",
+          "type": "string",
+        },
+        "maxWaitSeconds": {
+          "description": "login_complete only: bound the poll window before returning status=pending (default 30s).",
+          "maximum": 600,
+          "minimum": 1,
+          "type": "number",
+        },
+        "mineOnly": {
+          "description": "list only: default true. When true, filter to keys spawned by a local user-scoped credential.",
+          "type": "boolean",
+        },
+        "pollIntervalSeconds": {
+          "description": "login_complete only: base poll interval (default 2s). Use the interval from login_init for best behavior.",
+          "maximum": 60,
+          "minimum": 1,
+          "type": "number",
+        },
+        "projectRoot": {
+          "description": "Project root for rotate/revoke/reissue. Defaults to caller context.",
+          "type": "string",
+        },
+      },
+      "required": [
+        "action",
+      ],
+      "type": "object",
+    },
+    "name": "cmos_auth",
+  },
+  {
+    "description": "Consolidated context tool with action parameter support. Actions: view, update, condense, snapshot, history, next_steps, search. Use contextType=project_identity to view/update the Layer 0 project description. Use action=search to run FTS5 relevance-scored retrieval over decisions, learnings, and missions.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "description": "Context action: view | update | condense | snapshot | history | next_steps | constraints",
+          "enum": [
+            "view",
+            "update",
+            "condense",
+            "snapshot",
+            "history",
+            "next_steps",
+            "constraints",
+            "search",
+          ],
+          "type": "string",
+        },
+        "arrayUpdates": {
+          "description": "Array fields to append for update action",
+          "type": "object",
+        },
+        "carryToSprint": {
+          "description": "Target sprint ID for carry action",
+          "type": "string",
+        },
+        "compact": {
+          "description": "Return compact view for view action",
+          "type": "boolean",
+        },
+        "constraintAction": {
+          "description": "Sub-action for constraints: list | review | archive",
+          "enum": [
+            "list",
+            "review",
+            "archive",
+          ],
+          "type": "string",
+        },
+        "constraintIds": {
+          "description": "Constraint IDs to archive",
+          "items": {
+            "type": "number",
+          },
+          "type": "array",
+        },
+        "constraintStatus": {
+          "description": "Filter status for constraints list (default: active)",
+          "enum": [
+            "active",
+            "archived",
+            "expired",
+          ],
+          "type": "string",
+        },
+        "contextType": {
+          "description": "Context type (defaults to master_context)",
+          "enum": [
+            "master_context",
+            "project_context",
+            "project_identity",
+          ],
+          "type": "string",
+        },
+        "dryRun": {
+          "description": "Preview condensation for condense action",
+          "type": "boolean",
+        },
+        "fieldUpdates": {
+          "description": "Field-level updates for update action. Each entry must have "path" (dot-notation field name) and "value". Example: [{path: "project_name", value: "My Project"}, {path: "type_fields.stack", value: "Node.js"}]",
+          "items": {
+            "properties": {
+              "path": {
+                "description": "Field path in dot-notation (e.g. "project_name", "type_fields.stack")",
+                "type": "string",
+              },
+              "value": {
+                "description": "New field value",
+              },
+            },
+            "required": [
+              "path",
+              "value",
+            ],
+            "type": "object",
+          },
+          "type": "array",
+        },
+        "mode": {
+          "description": "Update mode for update action",
+          "enum": [
+            "aggregate",
+            "manual",
+          ],
+          "type": "string",
+        },
+        "nextStepAction": {
+          "description": "Sub-action for next_steps: list | complete | carry | drop",
+          "enum": [
+            "list",
+            "complete",
+            "carry",
+            "drop",
+          ],
+          "type": "string",
+        },
+        "nextStepIds": {
+          "description": "Next-step IDs to act on for complete/carry/drop",
+          "items": {
+            "type": "number",
+          },
+          "type": "array",
+        },
+        "nextStepStatus": {
+          "description": "Filter status for next_steps list (default: pending)",
+          "enum": [
+            "pending",
+            "completed",
+            "carried",
+            "dropped",
+          ],
+          "type": "string",
+        },
+        "page": {
+          "description": "Page number for history action",
+          "minimum": 1,
+          "type": "number",
+        },
+        "pageSize": {
+          "description": "Page size for history action",
+          "maximum": 100,
+          "minimum": 1,
+          "type": "number",
+        },
+        "projectRoot": {
+          "description": "Project root directory to search for CMOS database (defaults to cwd)",
+          "type": "string",
+        },
+        "query": {
+          "description": "Search query string for search action",
+          "type": "string",
+        },
+        "recencyWeight": {
+          "description": "Recency boost weight 0–1 for search action (default: 0.5)",
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number",
+        },
+        "searchLimit": {
+          "description": "Max results for search action (default: 5)",
+          "maximum": 50,
+          "minimum": 1,
+          "type": "number",
+        },
+        "searchTypes": {
+          "description": "Content types to search (default: all)",
+          "items": {
+            "enum": [
+              "decision",
+              "learning",
+              "mission",
+              "session",
+            ],
+            "type": "string",
+          },
+          "type": "array",
+        },
+        "sessionId": {
+          "description": "Session ID for snapshot/history actions",
+          "type": "string",
+        },
+        "since": {
+          "description": "ISO date filter for update/history actions",
+          "type": "string",
+        },
+        "sizeOnly": {
+          "description": "Return only size info for view action",
+          "type": "boolean",
+        },
+        "source": {
+          "description": "Snapshot source label for snapshot action",
+          "type": "string",
+        },
+        "stalenessThresholdDays": {
+          "description": "Staleness threshold in days for review (default: 30)",
+          "type": "number",
+        },
+        "strategy": {
+          "description": "Condensation strategy for condense action",
+          "enum": [
+            "conservative",
+            "auto",
+            "aggressive",
+          ],
+          "type": "string",
+        },
+        "targetSizePercent": {
+          "description": "Target size percent for condense action",
+          "maximum": 100,
+          "minimum": 1,
+          "type": "number",
+        },
+        "until": {
+          "description": "ISO date upper bound for history action",
+          "type": "string",
+        },
+      },
+      "required": [
+        "action",
+      ],
+      "type": "object",
+    },
+    "name": "cmos_context",
+  },
+  {
+    "description": "Consolidated database admin tool with action parameter support. Actions: health, snapshot, restore, backfill, reconcile, purge, identify_orphans, pull, clone. Routes to the existing DB handlers without changing DB business logic.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "description": "Database action: health | snapshot | restore | backfill | reconcile | purge | identify_orphans | pull | clone",
+          "enum": [
+            "health",
+            "snapshot",
+            "restore",
+            "backfill",
+            "reconcile",
+            "purge",
+            "identify_orphans",
+            "pull",
+            "clone",
+          ],
+          "type": "string",
+        },
+        "confirm": {
+          "description": "Confirmation flag for restore action",
+          "type": "boolean",
+        },
+        "dryRun": {
+          "description": "Preview backfill without pushing",
+          "type": "boolean",
+        },
+        "expectedSlug": {
+          "description": "Expected project slug for guardrail checks on purge",
+          "type": "string",
+        },
+        "force": {
+          "description": "Force full backfill, ignoring cursor",
+          "type": "boolean",
+        },
+        "limit": {
+          "description": "Per-page event limit for pull action (default 500, broker caps at 1000)",
+          "minimum": 1,
+          "type": "number",
+        },
+        "listOnly": {
+          "description": "List snapshots instead of creating one",
+          "type": "boolean",
+        },
+        "maxPages": {
+          "description": "Safety bound on the pull pagination loop (default 1000)",
+          "minimum": 1,
+          "type": "number",
+        },
+        "maxSnapshots": {
+          "description": "Max snapshots to list",
+          "minimum": 1,
+          "type": "number",
+        },
+        "projectRoot": {
+          "description": "Project root directory to search for CMOS database (defaults to cwd)",
+          "type": "string",
+        },
+        "slug": {
+          "description": "Dashboard slug to pull/clone (for pull and clone actions; defaults to the registered slug)",
+          "type": "string",
+        },
+        "snapshotId": {
+          "description": "Snapshot ID for restore action",
+          "type": "string",
+        },
+      },
+      "required": [
+        "action",
+      ],
+      "type": "object",
+    },
+    "name": "cmos_db",
+  },
+  {
+    "description": "Consolidated decisions tool with action parameter support. Actions: list, search, update, review, batch_update. Use review to triage stale decisions with scores and suggested actions. Use batch_update to archive/supersede multiple decisions at once.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "acrossProjects": {
+          "description": "list action: fan out across all registered projects (cross-store portfolio view)",
+          "type": "boolean",
+        },
+        "action": {
+          "description": "Decisions action: list | search | update",
+          "enum": [
+            "list",
+            "search",
+            "update",
+            "review",
+            "batch_update",
+          ],
+          "type": "string",
+        },
+        "decisionId": {
+          "description": "Decision ID for update action",
+          "minimum": 1,
+          "type": "number",
+        },
+        "decisionIds": {
+          "description": "Array of decision IDs for batch_update action (max 100)",
+          "items": {
+            "minimum": 1,
+            "type": "number",
+          },
+          "type": "array",
+        },
+        "domain": {
+          "description": "Filter by domain",
+          "type": "string",
+        },
+        "includeApproaching": {
+          "description": "Include decisions approaching staleness in review (default true)",
+          "type": "boolean",
+        },
+        "limit": {
+          "description": "Maximum results for search action",
+          "maximum": 100,
+          "minimum": 1,
+          "type": "number",
+        },
+        "page": {
+          "description": "Page number for list action",
+          "minimum": 1,
+          "type": "number",
+        },
+        "pageSize": {
+          "description": "Page size for list action",
+          "maximum": 100,
+          "minimum": 1,
+          "type": "number",
+        },
+        "projectRoot": {
+          "description": "Project root directory to search for CMOS database (defaults to cwd)",
+          "type": "string",
+        },
+        "query": {
+          "description": "Search query for search action",
+          "type": "string",
+        },
+        "since": {
+          "description": "ISO date lower bound for list action",
+          "type": "string",
+        },
+        "sprintId": {
+          "description": "Filter by sprint ID",
+          "type": "string",
+        },
+        "status": {
+          "description": "New status for update/batch_update action",
+          "enum": [
+            "active",
+            "superseded",
+            "archived",
+            "stale",
+          ],
+          "type": "string",
+        },
+        "supersededBy": {
+          "description": "ID of the decision that supersedes this one (for update action)",
+          "minimum": 1,
+          "type": "number",
+        },
+        "until": {
+          "description": "ISO date upper bound for list action",
+          "type": "string",
+        },
+      },
+      "required": [
+        "action",
+      ],
+      "type": "object",
+    },
+    "name": "cmos_decisions",
+  },
+  {
+    "description": "Review and triage the agent_feedback standing channel. Actions: list (filterable by status + tool_name), triage (mark under review), resolve (close with optional note), archive (hide without resolving).",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "description": "Feedback action: list | triage | resolve | archive",
+          "enum": [
+            "list",
+            "triage",
+            "resolve",
+            "archive",
+          ],
+          "type": "string",
+        },
+        "feedbackId": {
+          "description": "Target feedback row ID (required for triage/resolve/archive)",
+          "type": "number",
+        },
+        "limit": {
+          "description": "Max entries to return on list (default 50, max 200)",
+          "maximum": 200,
+          "minimum": 1,
+          "type": "number",
+        },
+        "projectRoot": {
+          "description": "Project root directory to search for CMOS database (defaults to cwd)",
+          "type": "string",
+        },
+        "resolutionNote": {
+          "description": "Optional free-text note for resolve/archive actions",
+          "maxLength": 1000,
+          "type": "string",
+        },
+        "status": {
+          "description": "Filter by status on list (default: "open")",
+          "enum": [
+            "open",
+            "triaged",
+            "resolved",
+            "archived",
+          ],
+          "type": "string",
+        },
+        "toolName": {
+          "description": "Filter by originating tool name on list",
+          "type": "string",
+        },
+      },
+      "required": [
+        "action",
+      ],
+      "type": "object",
+    },
+    "name": "cmos_feedback",
+  },
+  {
+    "description": "Consolidated learnings tool with action parameter support. Actions: list, search, update. Use list to browse learnings with category/sprint/status filters. Use search to find learnings by keyword. Use update to change status (active, archived, superseded). Use reaffirm to mark an evergreen learning as still valid (bumps last_reviewed_at without changing status).",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "description": "Learnings action: list | search | update | reaffirm",
+          "enum": [
+            "list",
+            "search",
+            "update",
+            "reaffirm",
+          ],
+          "type": "string",
+        },
+        "category": {
+          "description": "Filter by category",
+          "enum": [
+            "technical",
+            "process",
+            "agent-behavior",
+            "tooling",
+          ],
+          "type": "string",
+        },
+        "evergreen": {
+          "description": "Toggle institutional-rule flag for the learning. true = exclude from staleness signal; false = clear flag (Sprint 61 m03).",
+          "type": "boolean",
+        },
+        "learningId": {
+          "description": "Learning ID for update action",
+          "minimum": 1,
+          "type": "number",
+        },
+        "limit": {
+          "description": "Maximum results for search action",
+          "maximum": 50,
+          "minimum": 1,
+          "type": "number",
+        },
+        "page": {
+          "description": "Page number for list action",
+          "minimum": 1,
+          "type": "number",
+        },
+        "pageSize": {
+          "description": "Page size for list action",
+          "maximum": 100,
+          "minimum": 1,
+          "type": "number",
+        },
+        "projectRoot": {
+          "description": "Project root directory to search for CMOS database (defaults to cwd)",
+          "type": "string",
+        },
+        "query": {
+          "description": "Search query for search action",
+          "type": "string",
+        },
+        "since": {
+          "description": "ISO date lower bound for list action",
+          "type": "string",
+        },
+        "sprintId": {
+          "description": "Filter by sprint ID",
+          "type": "string",
+        },
+        "status": {
+          "description": "Filter by status (list) or new status (update)",
+          "enum": [
+            "active",
+            "archived",
+            "superseded",
+          ],
+          "type": "string",
+        },
+        "until": {
+          "description": "ISO date upper bound for list action",
+          "type": "string",
+        },
+      },
+      "required": [
+        "action",
+      ],
+      "type": "object",
+    },
+    "name": "cmos_learnings",
+  },
+  {
+    "description": "Agent messaging tool for cross-project communication via cmos-dashboard. Actions: send (send message to another project), list (check inbox/sent), respond (accept/decline/reply to a message), ack (mark a pending message read/acknowledged), directory (discover addressable projects), whoami (diagnose sender attribution). Send auto-detects senderProjectId, normalizes addresses (spaces→hyphens, lowercase), and validates target against the project directory before sending. Requires CMOS_DASHBOARD_URL, CMOS_DASHBOARD_USER, and CMOS_DASHBOARD_PASSWORD environment variables.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "description": "Message action: send | list | respond | ack | directory | whoami",
+          "enum": [
+            "send",
+            "list",
+            "respond",
+            "ack",
+            "directory",
+            "whoami",
+          ],
+          "type": "string",
+        },
+        "body": {
+          "description": "Full message content",
+          "type": "string",
+        },
+        "evidence": {
+          "description": "TraceLab evidence references [{type, id}]",
+          "items": {
+            "properties": {
+              "id": {
+                "description": "Evidence identifier",
+                "type": "string",
+              },
+              "type": {
+                "description": "Evidence type",
+                "type": "string",
+              },
+            },
+            "required": [
+              "type",
+              "id",
+            ],
+            "type": "object",
+          },
+          "type": "array",
+        },
+        "limit": {
+          "description": "Max messages to return (default 20)",
+          "maximum": 100,
+          "minimum": 1,
+          "type": "number",
+        },
+        "messageId": {
+          "description": "UUID of the message to respond to (respond) or acknowledge (ack)",
+          "type": "string",
+        },
+        "notes": {
+          "description": "Response notes",
+          "type": "string",
+        },
+        "projectRoot": {
+          "description": "Project root directory to search for CMOS database (defaults to cwd)",
+          "type": "string",
+        },
+        "respondStatus": {
+          "description": "Response status: accepted | declined | replied",
+          "enum": [
+            "accepted",
+            "declined",
+            "replied",
+          ],
+          "type": "string",
+        },
+        "senderProjectId": {
+          "description": "Sender's project UUID. Resolved from local metadata.dashboard_project_id when omitted; falls back to matching local cmos_address against /api/projects/me. Agents typically do not need to pass this.",
+          "type": "string",
+        },
+        "status": {
+          "description": "Filter by message status for list action",
+          "enum": [
+            "pending",
+            "accepted",
+            "declined",
+            "replied",
+            "acknowledged",
+          ],
+          "type": "string",
+        },
+        "summary": {
+          "description": "Short description displayed in inbox list",
+          "type": "string",
+        },
+        "tab": {
+          "description": "inbox (default) or sent",
+          "enum": [
+            "inbox",
+            "sent",
+          ],
+          "type": "string",
+        },
+        "targetAddress": {
+          "description": "cmos:// address of the recipient. Format: cmos://username/project-name[/mission-id]",
+          "type": "string",
+        },
+        "type": {
+          "description": "Message type: backlog_request | question | status_update | info_push | intel_request | intel_alert",
+          "enum": [
+            "backlog_request",
+            "question",
+            "status_update",
+            "info_push",
+            "intel_request",
+            "intel_alert",
+          ],
+          "type": "string",
+        },
+      },
+      "required": [
+        "action",
+      ],
+      "type": "object",
+    },
+    "name": "cmos_message",
+  },
+  {
+    "description": "Consolidated mission tool with action parameter support. Actions: list, show, status, add, update, depends, undepends. Routes to the existing mission handlers without changing mission business logic.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "description": "Mission action: list | show | status | add | update | depends | undepends",
+          "enum": [
+            "list",
+            "show",
+            "status",
+            "add",
+            "update",
+            "depends",
+            "undepends",
+          ],
+          "type": "string",
+        },
+        "context": {
+          "description": "Mission context for add action (string or object)",
+        },
+        "deliverables": {
+          "description": "Deliverables for add action",
+          "items": {
+            "type": "string",
+          },
+          "type": "array",
+        },
+        "domainFields": {
+          "description": "Domain-specific fields for add action",
+          "type": "object",
+        },
+        "fields": {
+          "additionalProperties": false,
+          "description": "Fields payload for update action",
+          "properties": {
+            "context": {
+              "description": "Background context",
+            },
+            "deliverables": {
+              "description": "Deliverables",
+              "items": {
+                "type": "string",
+              },
+              "type": "array",
+            },
+            "domainFields": {
+              "description": "Domain-specific fields",
+              "type": "object",
+            },
+            "metadata": {
+              "description": "Additional metadata",
+              "type": "object",
+            },
+            "name": {
+              "description": "Mission name/title",
+              "type": "string",
+            },
+            "notes": {
+              "description": "Notes",
+              "type": "string",
+            },
+            "objective": {
+              "description": "Mission objective",
+              "type": "string",
+            },
+            "referenceDocs": {
+              "description": "Reference docs",
+              "items": {
+                "type": "string",
+              },
+              "type": "array",
+            },
+            "status": {
+              "description": "Mission status",
+              "type": "string",
+            },
+            "successCriteria": {
+              "description": "Success criteria",
+              "items": {
+                "type": "string",
+              },
+              "type": "array",
+            },
+          },
+          "type": "object",
+        },
+        "fromId": {
+          "description": "Dependent mission ID for depends action",
+          "type": "string",
+        },
+        "includeBlocked": {
+          "description": "Include blocked missions in status action",
+          "type": "boolean",
+        },
+        "limit": {
+          "description": "Maximum missions to return for list action",
+          "maximum": 100,
+          "minimum": 1,
+          "type": "number",
+        },
+        "missionId": {
+          "description": "Mission ID for show/add/update actions",
+          "type": "string",
+        },
+        "name": {
+          "description": "Mission name for add action",
+          "type": "string",
+        },
+        "notes": {
+          "description": "Notes for add action",
+          "type": "string",
+        },
+        "objective": {
+          "description": "Mission objective for add action",
+          "type": "string",
+        },
+        "projectRoot": {
+          "description": "Project root directory to search for CMOS database (defaults to cwd)",
+          "type": "string",
+        },
+        "queuedLimit": {
+          "description": "Maximum queued missions for status action",
+          "maximum": 50,
+          "minimum": 1,
+          "type": "number",
+        },
+        "referenceDocs": {
+          "description": "Reference docs for add action",
+          "items": {
+            "type": "string",
+          },
+          "type": "array",
+        },
+        "sprintId": {
+          "description": "Sprint ID for list filter or add action",
+          "type": "string",
+        },
+        "status": {
+          "description": "Status filter for list action",
+          "type": "string",
+        },
+        "successCriteria": {
+          "description": "Success criteria for add action",
+          "items": {
+            "type": "string",
+          },
+          "type": "array",
+        },
+        "toId": {
+          "description": "Dependency mission ID for depends action",
+          "type": "string",
+        },
+        "type": {
+          "description": "Dependency type for depends action",
+          "enum": [
+            "Blocks",
+            "Requires",
+            "Enables",
+          ],
+          "type": "string",
+        },
+      },
+      "required": [
+        "action",
+      ],
+      "type": "object",
+    },
+    "name": "cmos_mission",
+  },
+  {
+    "description": "Consolidated mission state-machine tool with action parameter support. Actions: start, complete, block, unblock, drop, defer. Enforces state-machine rules and logs transition events.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "description": "Transition action: start | complete | block | unblock | drop | defer",
+          "enum": [
+            "start",
+            "complete",
+            "block",
+            "unblock",
+            "drop",
+            "defer",
+          ],
+          "type": "string",
+        },
+        "agentFeedback": {
+          "description": "Optional free-text UX feedback (Sprint 56 m03). Use on complete actions to flag rough edges or improvement ideas you hit while working the mission. Reviewed via cmos_feedback(action="list").",
+          "maxLength": 2000,
+          "type": "string",
+        },
+        "blockers": {
+          "description": "List of blockers for block action",
+          "items": {
+            "type": "string",
+          },
+          "type": "array",
+        },
+        "decisions": {
+          "description": "Decisions made during mission for complete action",
+          "items": {
+            "type": "string",
+          },
+          "type": "array",
+        },
+        "deferUntil": {
+          "description": "Hint about when to re-queue for defer action (e.g., "after sprint 48")",
+          "type": "string",
+        },
+        "missionId": {
+          "description": "The mission ID to transition",
+          "type": "string",
+        },
+        "notes": {
+          "description": "Notes for start/complete actions",
+          "type": "string",
+        },
+        "projectRoot": {
+          "description": "Project root directory to search for CMOS database (defaults to cwd)",
+          "type": "string",
+        },
+        "reason": {
+          "description": "Reason for block/drop/defer actions (required for block)",
+          "type": "string",
+        },
+        "resolution": {
+          "description": "Resolution notes for unblock action",
+          "type": "string",
+        },
+        "targetStatus": {
+          "description": "Target status after unblock (default: In Progress)",
+          "enum": [
+            "In Progress",
+            "Current",
+          ],
+          "type": "string",
+        },
+      },
+      "required": [
+        "action",
+        "missionId",
+      ],
+      "type": "object",
+    },
+    "name": "cmos_mission_transition",
+  },
+  {
+    "description": "Consolidated project tool with action parameter support. Actions: init, register, list, unregister, validate, prune, update, sweep. The list action supports an optional validate flag. The prune action removes registry entries where the local CMOS database no longer exists on disk. The update action allows setting project_type (general/managed/build). The sweep action returns all open missions and active sessions across registered instances.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "description": "Project action: init | register | list | unregister | validate | prune | update | sweep",
+          "enum": [
+            "init",
+            "register",
+            "list",
+            "unregister",
+            "validate",
+            "prune",
+            "update",
+            "sweep",
+          ],
+          "type": "string",
+        },
+        "initialMissions": {
+          "description": "Initial missions for init action",
+          "items": {
+            "type": "object",
+          },
+          "type": "array",
+        },
+        "initialSprint": {
+          "description": "Initial sprint config for init action",
+          "type": "object",
+        },
+        "instances": {
+          "description": "Restrict sweep to these registry names only",
+          "items": {
+            "type": "string",
+          },
+          "type": "array",
+        },
+        "itemType": {
+          "description": "Restrict sweep to missions or sessions only",
+          "enum": [
+            "mission",
+            "session",
+          ],
+          "type": "string",
+        },
+        "name": {
+          "description": "Display name for register action",
+          "type": "string",
+        },
+        "projectId": {
+          "description": "Project ID for init action",
+          "type": "string",
+        },
+        "projectName": {
+          "description": "Project name for init action",
+          "type": "string",
+        },
+        "projectRoot": {
+          "description": "Project root directory",
+          "type": "string",
+        },
+        "projectType": {
+          "description": "Project type/tier for update action",
+          "enum": [
+            "general",
+            "managed",
+            "build",
+          ],
+          "type": "string",
+        },
+        "prune": {
+          "description": "Prune invalid entries for validate action",
+          "type": "boolean",
+        },
+        "setAsDefault": {
+          "description": "Set as default project for register action",
+          "type": "boolean",
+        },
+        "statusFilter": {
+          "description": "Restrict sweep to these mission/session statuses",
+          "items": {
+            "type": "string",
+          },
+          "type": "array",
+        },
+        "tracelabProjectId": {
+          "description": "TraceLab project ID for init action",
+          "type": "string",
+        },
+        "validate": {
+          "description": "Run validation on list action (routes to validate handler)",
+          "type": "boolean",
+        },
+      },
+      "required": [
+        "action",
+      ],
+      "type": "object",
+    },
+    "name": "cmos_project",
+  },
+  {
+    "description": "Bundled session-opener digest (≤4KB). Replaces the cmos_agent_onboard + cmos_context_view + cmos_mission_status opener with one project-scoped payload. Top-3 next_actions are promoted to a flat top-level field. Does NOT walk the project registry — use cmos_message for cross-project workflows.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "projectRoot": {
+          "description": "Project root directory to search for CMOS database (defaults to cwd)",
+          "type": "string",
+        },
+      },
+      "type": "object",
+    },
+    "name": "cmos_review",
+  },
+  {
+    "description": "Consolidated session tool with action parameter support. Actions: list, start, capture, complete. Routes to the existing session handlers without changing session business logic.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "description": "Session action: list | start | capture | complete",
+          "enum": [
+            "list",
+            "start",
+            "capture",
+            "complete",
+          ],
+          "type": "string",
+        },
+        "agent": {
+          "description": "Agent identifier for start/capture/complete actions",
+          "type": "string",
+        },
+        "autoRefreshMasterContext": {
+          "description": "Auto-refresh master context on start",
+          "type": "boolean",
+        },
+        "category": {
+          "description": "Capture category for capture action",
+          "enum": [
+            "decision",
+            "learning",
+            "constraint",
+            "context",
+            "next-step",
+          ],
+          "type": "string",
+        },
+        "citesLearningIds": {
+          "description": "Learning IDs this capture/decision cites. Bumps last_reviewed_at on each — applies to capture(category=decision|learning) and complete(decisions[]).",
+          "items": {
+            "minimum": 1,
+            "type": "integer",
+          },
+          "type": "array",
+        },
+        "content": {
+          "description": "Capture content for capture action",
+          "type": "string",
+        },
+        "context": {
+          "description": "Additional context for capture action",
+          "type": "string",
+        },
+        "decisions": {
+          "description": "Decisions captured at session close; each entry is inserted into strategic_decisions",
+          "items": {
+            "type": "string",
+          },
+          "type": "array",
+        },
+        "evidence": {
+          "description": "Array of TraceLab evidence references [{type, id}] for decision captures",
+          "items": {
+            "properties": {
+              "id": {
+                "description": "Evidence identifier",
+                "type": "string",
+              },
+              "type": {
+                "description": "Evidence type",
+                "type": "string",
+              },
+            },
+            "required": [
+              "type",
+              "id",
+            ],
+            "type": "object",
+          },
+          "type": "array",
+        },
+        "missionId": {
+          "description": "Associated mission ID for capture action",
+          "type": "string",
+        },
+        "nextSteps": {
+          "description": "Next steps for complete action",
+          "items": {
+            "type": "string",
+          },
+          "type": "array",
+        },
+        "page": {
+          "description": "Page number for list action",
+          "minimum": 1,
+          "type": "number",
+        },
+        "pageSize": {
+          "description": "Page size for list action",
+          "maximum": 100,
+          "minimum": 1,
+          "type": "number",
+        },
+        "projectRoot": {
+          "description": "Project root directory to search for CMOS database (defaults to cwd)",
+          "type": "string",
+        },
+        "sessionId": {
+          "description": "Session ID for capture/complete actions",
+          "type": "string",
+        },
+        "sprintId": {
+          "description": "Sprint ID filter for list action",
+          "type": "string",
+        },
+        "status": {
+          "description": "Filter by session status for list action",
+          "enum": [
+            "active",
+            "completed",
+            "canceled",
+          ],
+          "type": "string",
+        },
+        "summary": {
+          "description": "Session summary for complete action",
+          "type": "string",
+        },
+        "title": {
+          "description": "Session title for start action",
+          "type": "string",
+        },
+        "type": {
+          "description": "Session type for list/start actions",
+          "enum": [
+            "onboarding",
+            "planning",
+            "review",
+            "research",
+            "check-in",
+            "custom",
+          ],
+          "type": "string",
+        },
+      },
+      "required": [
+        "action",
+      ],
+      "type": "object",
+    },
+    "name": "cmos_session",
+  },
+  {
+    "description": "Consolidated sprint tool with action parameter support. Actions: list, show, add, update, complete, retro, carry_forward, analytics. Use retro to auto-generate a sprint retrospective report with KPIs, decisions, learnings, and git commit summary. Use carry_forward to detect sync gaps and blocked missions and send backlog_request messages to a target project. Use analytics to compute cross-sprint trend KPIs: velocity, completion rate, decision volume, cycle time.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "description": "Sprint action: list | show | add | update | complete",
+          "enum": [
+            "list",
+            "show",
+            "add",
+            "update",
+            "complete",
+            "retro",
+            "carry_forward",
+            "analytics",
+          ],
+          "type": "string",
+        },
+        "condensation": {
+          "description": "Optional condensation strategy for complete action",
+          "enum": [
+            "none",
+            "conservative",
+            "auto",
+            "aggressive",
+          ],
+          "type": "string",
+        },
+        "endDate": {
+          "description": "Sprint end date for add action",
+          "type": "string",
+        },
+        "fields": {
+          "additionalProperties": false,
+          "description": "Fields payload for update action",
+          "properties": {
+            "endDate": {
+              "description": "End date in ISO format (e.g., "2025-01-15")",
+              "type": "string",
+            },
+            "focus": {
+              "description": "Strategic focus or theme of the sprint",
+              "type": "string",
+            },
+            "startDate": {
+              "description": "Start date in ISO format (e.g., "2025-01-01")",
+              "type": "string",
+            },
+            "status": {
+              "description": "Sprint status (e.g., "Active", "Completed")",
+              "type": "string",
+            },
+            "title": {
+              "description": "Sprint title",
+              "type": "string",
+            },
+          },
+          "type": "object",
+        },
+        "focus": {
+          "description": "Strategic focus or theme for add action",
+          "type": "string",
+        },
+        "forceComplete": {
+          "description": "Override the build-freshness gate for complete action. Closeout fails with BUILD_STALE on a stale build/server unless true; the override is recorded as a warning.",
+          "type": "boolean",
+        },
+        "limit": {
+          "description": "Maximum sprints to return for list action",
+          "maximum": 100,
+          "minimum": 1,
+          "type": "number",
+        },
+        "projectRoot": {
+          "description": "Project root directory to search for CMOS database (defaults to cwd)",
+          "type": "string",
+        },
+        "send": {
+          "description": "Whether to actually send messages for carry_forward (default true, false = dry run)",
+          "type": "boolean",
+        },
+        "sprintId": {
+          "description": "Sprint ID for show/add/update/complete actions",
+          "type": "string",
+        },
+        "startDate": {
+          "description": "Sprint start date for add action",
+          "type": "string",
+        },
+        "status": {
+          "description": "Filter or sprint status depending on action",
+          "type": "string",
+        },
+        "summary": {
+          "description": "Closeout summary for complete action",
+          "type": "string",
+        },
+        "targetAddress": {
+          "description": "cmos:// address for carry_forward action (e.g., cmos://derek/cmos-dashboard)",
+          "type": "string",
+        },
+        "targetSizePercent": {
+          "description": "Target size percent for complete action condensation",
+          "maximum": 100,
+          "minimum": 1,
+          "type": "number",
+        },
+        "title": {
+          "description": "Sprint title for add action",
+          "type": "string",
+        },
+      },
+      "required": [
+        "action",
+      ],
+      "type": "object",
+    },
+    "name": "cmos_sprint",
+  },
+  {
+    "description": "Return a structured status payload for the current project: cmos_address, dashboard_url, auth_tier, last_sync_at, last_delivery_observed_at. Mirrors onboard.authState.authTier on the auth_tier field for cross-side parity with the dashboard. Useful for support/ops triage and at-a-glance health.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "projectRoot": {
+          "description": "Project root directory to search for CMOS database (defaults to cwd)",
+          "type": "string",
+        },
+      },
+      "type": "object",
+    },
+    "name": "cmos_status",
+  },
+]
+`;
