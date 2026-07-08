@@ -1,6 +1,7 @@
-// ABOUTME: Sprint 67 m03 — checkBuildFreshness covers the four states sprint close + cmos_review
-// ABOUTME: depend on: fresh, src-newer-than-manifest, src-newer-than-index-mtime, dist-missing,
-// ABOUTME: plus defensive defaults for missing src/ and I/O errors.
+// ABOUTME: Sprint 67 m03 — checkBuildFreshness covers the states sprint close + cmos_review
+// ABOUTME: depend on: fresh, src-newer-than-manifest, src-newer-than-build-dir, dist-missing,
+// ABOUTME: plus defensive defaults for missing src/ and I/O errors. Sprint 74 m01 adds the
+// ABOUTME: generalized candidate-build-dir layouts (aquex.ai / monorepo / Next .next/).
 
 import * as fs from 'fs';
 import * as os from 'os';
@@ -62,6 +63,23 @@ function writeDistIndex(root: string, mtime: Date): void {
   fs.utimesSync(indexPath, mtime, mtime);
 }
 
+/** Write an arbitrary build-output file at an exact mtime (any extension/layout). */
+function writeBuildFile(root: string, relativePath: string, mtime: Date): void {
+  const fullPath = path.join(root, relativePath);
+  fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+  fs.writeFileSync(fullPath, `// built: ${relativePath}\n`);
+  fs.utimesSync(fullPath, mtime, mtime);
+}
+
+/** Write a present-but-unparseable dist/.build-manifest.json at an exact mtime. */
+function writeCorruptDistManifest(root: string, mtime: Date): void {
+  const distDir = path.join(root, 'dist');
+  fs.mkdirSync(distDir, { recursive: true });
+  const manifestPath = path.join(distDir, '.build-manifest.json');
+  fs.writeFileSync(manifestPath, '{ "buildTime": "2026-'); // truncated / invalid JSON
+  fs.utimesSync(manifestPath, mtime, mtime);
+}
+
 describe('checkBuildFreshness', () => {
   let project: TempProject;
 
@@ -104,7 +122,7 @@ describe('checkBuildFreshness', () => {
     expect(result.reason).toBe('src-newer-than-build-manifest');
   });
 
-  it('falls back to dist/index.js mtime when the manifest is absent and detects stale src', async () => {
+  it('falls back to the newest dist/ file mtime when the manifest is absent and detects stale src', async () => {
     const indexMtime = new Date(Date.now() - 60_000);
     const newerSrc = new Date();
     writeSrcFile(project.root, 'src/foo.ts', newerSrc);
@@ -114,10 +132,10 @@ describe('checkBuildFreshness', () => {
 
     expect(result.stale).toBe(true);
     expectIsoCloseTo(result.distBuildTime, indexMtime);
-    expect(result.reason).toBe('src-newer-than-dist-index-mtime');
+    expect(result.reason).toBe('src-newer-than-build-dir');
   });
 
-  it('returns stale=true reason=dist-missing when neither manifest nor dist/index.js exists', async () => {
+  it('returns stale=true reason=dist-missing when no candidate build dir exists', async () => {
     writeSrcFile(project.root, 'src/foo.ts');
 
     const result = await checkBuildFreshness(project.root);
@@ -194,6 +212,210 @@ describe('checkBuildFreshness', () => {
   });
 });
 
+describe('checkBuildFreshness — generalized build-dir layouts (Sprint 74 m01)', () => {
+  // The pre-s74 probe only checked dist/.build-manifest.json then the hardcoded
+  // dist/index.js, so any project whose build output was not exactly <root>/dist/index.js
+  // got a permanent false dist-missing and could never close a sprint without
+  // forceComplete. These cover the three independently-reported layouts plus the
+  // priority/exclusion/empty-dir edges (decision #834).
+  let project: TempProject;
+
+  beforeEach(() => {
+    project = makeTempProject();
+  });
+
+  afterEach(() => {
+    project.cleanup();
+  });
+
+  it('aquex.ai layout: detects stale when src is newer than dist/server/entry.mjs (no dist/index.js, no manifest)', async () => {
+    const buildMtime = new Date(Date.now() - 60_000);
+    const newerSrc = new Date();
+    writeBuildFile(project.root, 'dist/server/entry.mjs', buildMtime);
+    writeSrcFile(project.root, 'src/foo.ts', newerSrc);
+
+    const result = await checkBuildFreshness(project.root);
+
+    expect(result.stale).toBe(true);
+    expect(result.distBuildTime).not.toBeNull();
+    expectIsoCloseTo(result.distBuildTime, buildMtime);
+    expect(result.reason).toBe('src-newer-than-build-dir');
+    expect(result.staleFiles).toEqual([path.join('src', 'foo.ts')]);
+  });
+
+  it('aquex.ai layout: reports fresh when dist/server/entry.mjs is newer than src', async () => {
+    const olderSrc = new Date(Date.now() - 60_000);
+    const buildMtime = new Date();
+    writeSrcFile(project.root, 'src/foo.ts', olderSrc);
+    writeBuildFile(project.root, 'dist/server/entry.mjs', buildMtime);
+
+    const result = await checkBuildFreshness(project.root);
+
+    expect(result.stale).toBe(false);
+    expectIsoCloseTo(result.distBuildTime, buildMtime);
+    expect(result.reason).toBeUndefined();
+  });
+
+  it('monorepo layout: walks dist/src/index.js when there is no dist/index.js', async () => {
+    const buildMtime = new Date(Date.now() - 60_000);
+    const newerSrc = new Date();
+    writeBuildFile(project.root, 'dist/src/index.js', buildMtime);
+    writeBuildFile(project.root, 'dist/src/util.js', new Date(buildMtime.getTime() - 5_000));
+    writeSrcFile(project.root, 'src/index.ts', newerSrc);
+
+    const result = await checkBuildFreshness(project.root);
+
+    expect(result.stale).toBe(true);
+    // Newest file in dist/ (index.js) is the build time, not the older util.js.
+    expectIsoCloseTo(result.distBuildTime, buildMtime);
+    expect(result.reason).toBe('src-newer-than-build-dir');
+  });
+
+  it('Next.js layout: uses .next/ newest mtime when there is no dist/', async () => {
+    const buildMtime = new Date(Date.now() - 60_000);
+    const newerSrc = new Date();
+    writeBuildFile(project.root, '.next/server/app/page.js', buildMtime);
+    writeSrcFile(project.root, 'src/page.tsx', newerSrc);
+
+    const result = await checkBuildFreshness(project.root);
+
+    expect(result.stale).toBe(true);
+    expect(result.distBuildTime).not.toBeNull();
+    expectIsoCloseTo(result.distBuildTime, buildMtime);
+    expect(result.reason).toBe('src-newer-than-build-dir');
+  });
+
+  it('Next.js layout: reports fresh when .next/ build is newer than src', async () => {
+    const olderSrc = new Date(Date.now() - 60_000);
+    const buildMtime = new Date();
+    writeSrcFile(project.root, 'src/page.tsx', olderSrc);
+    writeBuildFile(project.root, '.next/server/app/page.js', buildMtime);
+
+    const result = await checkBuildFreshness(project.root);
+
+    expect(result.stale).toBe(false);
+    expectIsoCloseTo(result.distBuildTime, buildMtime);
+  });
+
+  it('excludes .next/cache from the build-dir walk (dev-server churn is not a build artifact)', async () => {
+    // Real build output is OLDER than src (so the tree is genuinely stale), but a
+    // .next/cache entry is NEWER than everything. If cache were counted the project
+    // would look fresh and the gate would wrongly pass.
+    const realBuild = new Date(Date.now() - 60_000);
+    const srcMtime = new Date(Date.now() - 30_000);
+    const cacheChurn = new Date();
+    writeBuildFile(project.root, '.next/server/app/page.js', realBuild);
+    writeBuildFile(project.root, '.next/cache/webpack/0.pack', cacheChurn);
+    writeSrcFile(project.root, 'src/page.tsx', srcMtime);
+
+    const result = await checkBuildFreshness(project.root);
+
+    expect(result.stale).toBe(true);
+    expectIsoCloseTo(result.distBuildTime, realBuild);
+    expect(result.reason).toBe('src-newer-than-build-dir');
+  });
+
+  it('prefers dist/ over .next/ when both exist (candidate priority order)', async () => {
+    const distMtime = new Date(Date.now() - 90_000);
+    const nextMtime = new Date(Date.now() - 10_000);
+    writeBuildFile(project.root, 'dist/server/entry.mjs', distMtime);
+    writeBuildFile(project.root, '.next/server/app/page.js', nextMtime);
+    writeSrcFile(project.root, 'src/foo.ts', new Date(Date.now() - 120_000));
+
+    const result = await checkBuildFreshness(project.root);
+
+    // Build time comes from dist/ (the higher-priority candidate), not the newer .next/.
+    expectIsoCloseTo(result.distBuildTime, distMtime);
+  });
+
+  it('skips an empty higher-priority candidate and uses the next that holds output', async () => {
+    // A wiped dist/ dir exists but holds no files; the real build is in .next/.
+    // Must NOT false-block as dist-missing.
+    fs.mkdirSync(path.join(project.root, 'dist'), { recursive: true });
+    const buildMtime = new Date(Date.now() - 60_000);
+    writeBuildFile(project.root, '.next/server/app/page.js', buildMtime);
+    writeSrcFile(project.root, 'src/page.tsx', new Date(Date.now() - 120_000));
+
+    const result = await checkBuildFreshness(project.root);
+
+    expect(result.stale).toBe(false);
+    expect(result.reason).toBeUndefined();
+    expectIsoCloseTo(result.distBuildTime, buildMtime);
+  });
+
+  it('recognizes build/ as a candidate build dir', async () => {
+    const buildMtime = new Date(Date.now() - 60_000);
+    writeBuildFile(project.root, 'build/main.js', buildMtime);
+    writeSrcFile(project.root, 'src/foo.ts', new Date());
+
+    const result = await checkBuildFreshness(project.root);
+
+    expect(result.stale).toBe(true);
+    expectIsoCloseTo(result.distBuildTime, buildMtime);
+    expect(result.reason).toBe('src-newer-than-build-dir');
+  });
+
+  it('recognizes out/ as a candidate build dir', async () => {
+    const buildMtime = new Date(Date.now() - 60_000);
+    writeBuildFile(project.root, 'out/bundle.js', buildMtime);
+    writeSrcFile(project.root, 'src/foo.ts', new Date());
+
+    const result = await checkBuildFreshness(project.root);
+
+    expect(result.stale).toBe(true);
+    expectIsoCloseTo(result.distBuildTime, buildMtime);
+    expect(result.reason).toBe('src-newer-than-build-dir');
+  });
+
+  it('does NOT let a corrupt-but-present manifest mtime vouch for an interrupted build', async () => {
+    // A partial/truncated manifest write leaves dist/.build-manifest.json present
+    // (unparseable) with a fresh mtime, but the actual build artifacts are older
+    // than src. The manifest file must be excluded from the walk so its fresh
+    // mtime cannot mask the stale build and wrongly pass the gate.
+    const staleBuild = new Date(Date.now() - 120_000);
+    const srcMtime = new Date(Date.now() - 60_000);
+    const corruptManifestMtime = new Date(); // newest thing on disk
+    writeBuildFile(project.root, 'dist/index.js', staleBuild);
+    writeSrcFile(project.root, 'src/foo.ts', srcMtime);
+    writeCorruptDistManifest(project.root, corruptManifestMtime);
+
+    const result = await checkBuildFreshness(project.root);
+
+    expect(result.stale).toBe(true);
+    // Build time is the real artifact (older), NOT the corrupt manifest (newer).
+    expectIsoCloseTo(result.distBuildTime, staleBuild);
+    expect(result.reason).toBe('src-newer-than-build-dir');
+  });
+
+  it('lets a VALID manifest short-circuit the candidate walk even when a dist file is newer', async () => {
+    // A newer build artifact must not override the deterministic manifest buildTime.
+    const manifestBuildTime = new Date(Date.now() - 60_000);
+    const newerDistFile = new Date();
+    writeDistManifest(project.root, manifestBuildTime);
+    writeBuildFile(project.root, 'dist/index.js', newerDistFile);
+    writeSrcFile(project.root, 'src/foo.ts', new Date(Date.now() - 90_000));
+
+    const result = await checkBuildFreshness(project.root);
+
+    // distBuildTime comes from the manifest, not the newer dist/index.js file.
+    expectIsoCloseTo(result.distBuildTime, manifestBuildTime);
+    expect(result.stale).toBe(false);
+  });
+
+  it('still reports dist-missing when every candidate build dir is empty or absent (gate preserved)', async () => {
+    // .next/ exists but holds ONLY the excluded cache subtree → no usable build
+    // file anywhere → genuinely unbuilt → must still block.
+    writeBuildFile(project.root, '.next/cache/webpack/0.pack', new Date());
+    writeSrcFile(project.root, 'src/foo.ts', new Date());
+
+    const result = await checkBuildFreshness(project.root);
+
+    expect(result.stale).toBe(true);
+    expect(result.reason).toBe('dist-missing');
+    expect(result.distBuildTime).toBeNull();
+  });
+});
+
 describe('isBlockingStaleness (Sprint 70 m02)', () => {
   // The enforced sprint-close gate blocks ONLY on staleness that means the dist/
   // a server would run is genuinely behind src/. The three blocking reasons are
@@ -214,10 +436,10 @@ describe('isBlockingStaleness (Sprint 70 m02)', () => {
     ).toBe(true);
   });
 
-  it('blocks on src-newer-than-dist-index-mtime', () => {
-    expect(
-      isBlockingStaleness(report({ stale: true, reason: 'src-newer-than-dist-index-mtime' }))
-    ).toBe(true);
+  it('blocks on src-newer-than-build-dir', () => {
+    expect(isBlockingStaleness(report({ stale: true, reason: 'src-newer-than-build-dir' }))).toBe(
+      true
+    );
   });
 
   it('blocks on dist-missing', () => {

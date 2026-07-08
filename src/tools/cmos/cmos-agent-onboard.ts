@@ -40,7 +40,11 @@ import {
 } from './context-retention';
 import { detectAndFlagStaleness } from './staleness-detection';
 import { detectOrphans, buildOrphanWarnings, type OrphanDetectionResult } from './orphan-detection';
-import { getServerHealth, type ServerHealthStatus } from '../../server-health';
+import {
+  getServerHealth,
+  getServerProjectRoot,
+  type ServerHealthStatus,
+} from '../../server-health';
 import { computeAuthState, type AuthState } from '../../auth/auth-state';
 import { getStaleConstraintCount as getStaleConstraintCountFromConstraints } from './cmos-constraints';
 import { loadTierConfig, type TierConfig } from './tier-config';
@@ -554,9 +558,23 @@ export async function cmosAgentOnboard(
         hiddenFields.has('syncHealth') ? Promise.resolve(null) : fetchSyncHealth(client, warnings),
       ]);
 
-      // Get server health (build staleness detection)
+      // Server health (build staleness). The server-stale signal tracks THIS
+      // server's OWN build (cmos-mcp-pro), not the onboarding project's — so it is
+      // only actionable for our own project. For a sibling project it is noise it
+      // cannot act on (it can't rebuild/restart our server), and surfacing it made
+      // every sibling digest squawk after any cmos-mcp-pro rebuild. Scope it to the
+      // server's own root, and (parity with the sprint-close advisory) require a
+      // startup manifest — a null startup yields codeIsCurrent=false for an
+      // unrelated reason and must not warn.
       const serverHealth = getServerHealth();
-      if (!serverHealth.codeIsCurrent && serverHealth.stalenessMessage) {
+      const serverRoot = getServerProjectRoot();
+      const onboardRoot = params.projectRoot ?? process.cwd();
+      const serverCodeStaleActionable =
+        serverRoot != null &&
+        path.resolve(serverRoot) === path.resolve(onboardRoot) &&
+        serverHealth.startupBuild != null &&
+        !serverHealth.codeIsCurrent;
+      if (serverCodeStaleActionable && serverHealth.stalenessMessage) {
         warnings.push(serverHealth.stalenessMessage);
       }
 
@@ -604,6 +622,7 @@ export async function cmosAgentOnboard(
         freshProject,
         authState,
         projectRootSupplied: !!params.projectRoot,
+        serverCodeStaleActionable,
       });
 
       const result: CmosAgentOnboardResult = {
@@ -807,6 +826,34 @@ function getLastSession(client: CmosDatabaseClient, tier: string): LastSessionDa
   }
 }
 
+// Sprint 74 m02: a sprint in one of these "dead" statuses must never surface as
+// the current sprint, even when it has the most recent mission/session activity.
+// Extends the s55-m03 Archived-only exclusion (decision #567) to Failed/Dropped —
+// reported by Forge (msg 0b1050b9: a Failed sprint-101 showed as current while
+// 102-111 were Completed). The Step-3 drift query runs before the Completed-aware
+// Step 5, so a Failed/Dropped sprint could only ever be reached there.
+// 'Reverted' added per Forge backlog request (msg 7aac15f6): a reverted sprint is
+// terminal too, but leaked into currentSprint in the review→plan gap, forcing
+// consumers to mint placeholder Active sprints to re-point the opener. Matching is
+// case-insensitive via statusNotIn, so nonstandard casing ('reverted') is covered.
+const DEAD_SPRINT_STATUSES = ['Archived', 'Failed', 'Dropped', 'Reverted'];
+// Steps that hunt for OPEN/in-flight work also treat Completed as terminal (a
+// completed sprint has no open work to resume). The Completed-aware fallback
+// (Step 5 / getMostRecentlyActiveSprintIdIncludingCompleted) re-admits Completed
+// by excluding only DEAD_SPRINT_STATUSES.
+const NO_OPEN_WORK_STATUSES = [...DEAD_SPRINT_STATUSES, 'Completed'];
+
+/**
+ * Build a case-insensitive `UPPER(<expr>) NOT IN (...)` SQL fragment from a
+ * static status list, so a drifted-case status (e.g. lowercase 'failed' or
+ * 'completed') cannot dodge the exclusion. The statuses are compile-time
+ * constants, never user input, so direct interpolation is safe.
+ */
+function statusNotIn(statusExpr: string, statuses: readonly string[]): string {
+  const list = statuses.map((s) => `'${s.toUpperCase()}'`).join(', ');
+  return `UPPER(${statusExpr}) NOT IN (${list})`;
+}
+
 /**
  * Get current sprint context using mission-aware detection.
  *
@@ -830,7 +877,7 @@ function getCurrentSprint(client: CmosDatabaseClient): SprintContext | null {
        JOIN sprints s ON s.id = m.sprint_id
       WHERE m.status IN ('In Progress', 'Current')
         AND m.sprint_id IS NOT NULL
-        AND COALESCE(s.status, 'Planned') != 'Archived'
+        AND ${statusNotIn("COALESCE(s.status, 'Planned')", DEAD_SPRINT_STATUSES)}
       LIMIT 1`,
     []
   );
@@ -857,7 +904,7 @@ function getCurrentSprint(client: CmosDatabaseClient): SprintContext | null {
     `SELECT m.sprint_id FROM missions m
      JOIN sprints s ON m.sprint_id = s.id
      WHERE m.status = 'Queued' AND m.sprint_id IS NOT NULL
-       AND COALESCE(s.status, 'Planned') NOT IN ('Completed', 'Archived')
+       AND ${statusNotIn("COALESCE(s.status, 'Planned')", NO_OPEN_WORK_STATUSES)}
      ORDER BY CASE COALESCE(s.status, 'Planned')
         WHEN 'In Progress' THEN 0
         WHEN 'Current' THEN 1
@@ -897,7 +944,7 @@ function getCurrentSprint(client: CmosDatabaseClient): SprintContext | null {
   }>(
     `SELECT id, title, status, focus
        FROM sprints
-      WHERE COALESCE(status, 'Planned') != 'Archived'
+      WHERE ${statusNotIn("COALESCE(status, 'Planned')", DEAD_SPRINT_STATUSES)}
       ORDER BY CASE status
         WHEN 'In Progress' THEN 0
         WHEN 'Current' THEN 1
@@ -957,8 +1004,11 @@ function getMostRecentlyActiveSprintId(client: CmosDatabaseClient): string | nul
   // Sprint 55 m03: Archived sprints had historically-recent mission/session
   // timestamps on mature projects like OODS-Foundry-MCP (74 sprints, 458
   // missions), so this step was returning the latest Archived sprint instead
-  // of falling through to the Completed sprint in Step 5. Exclude Archived
-  // alongside Completed so only genuinely-active parent sprints bubble up.
+  // of falling through to the Completed sprint in Step 5.
+  // Sprint 74 m02: this drift step runs before the Completed-aware Step 5, so a
+  // Failed/Dropped sprint could only ever be returned here — exclude the full
+  // NO_OPEN_WORK set (Archived/Failed/Dropped/Completed, case-insensitively) so
+  // only genuinely-active parent sprints bubble up (Forge msg 0b1050b9).
   const result = client.getOne<{ sprint_id: string }>(
     `SELECT activity.sprint_id
        FROM (
@@ -967,13 +1017,13 @@ function getMostRecentlyActiveSprintId(client: CmosDatabaseClient): string | nul
            JOIN sprints s ON s.id = m.sprint_id
           WHERE m.sprint_id IS NOT NULL
             AND m.completed_at IS NOT NULL
-            AND COALESCE(s.status, 'Planned') NOT IN ('Completed', 'Archived')
+            AND ${statusNotIn("COALESCE(s.status, 'Planned')", NO_OPEN_WORK_STATUSES)}
          UNION ALL
          SELECT sess.sprint_id, COALESCE(sess.completed_at, sess.started_at) AS activity_at
            FROM sessions sess
            JOIN sprints s ON s.id = sess.sprint_id
           WHERE sess.sprint_id IS NOT NULL
-            AND COALESCE(s.status, 'Planned') NOT IN ('Completed', 'Archived')
+            AND ${statusNotIn("COALESCE(s.status, 'Planned')", NO_OPEN_WORK_STATUSES)}
        ) AS activity
       WHERE activity.activity_at IS NOT NULL
       GROUP BY activity.sprint_id
@@ -991,6 +1041,9 @@ function getMostRecentlyActiveSprintId(client: CmosDatabaseClient): string | nul
 // fork-and-forget projects where every sprint is Completed and the cascade
 // would otherwise drop to sprints.end_date — which is admin-editable and
 // frequently stale.
+// Sprint 74 m02: allows Completed but still excludes the DEAD set
+// (Archived/Failed/Dropped) — a dead sprint must not surface here either, or
+// the Step-3 fix above would just be re-defeated by this fallback.
 function getMostRecentlyActiveSprintIdIncludingCompleted(
   client: CmosDatabaseClient
 ): string | null {
@@ -1002,13 +1055,13 @@ function getMostRecentlyActiveSprintIdIncludingCompleted(
            JOIN sprints s ON s.id = m.sprint_id
           WHERE m.sprint_id IS NOT NULL
             AND m.completed_at IS NOT NULL
-            AND COALESCE(s.status, 'Planned') != 'Archived'
+            AND ${statusNotIn("COALESCE(s.status, 'Planned')", DEAD_SPRINT_STATUSES)}
          UNION ALL
          SELECT sess.sprint_id, COALESCE(sess.completed_at, sess.started_at) AS activity_at
            FROM sessions sess
            JOIN sprints s ON s.id = sess.sprint_id
           WHERE sess.sprint_id IS NOT NULL
-            AND COALESCE(s.status, 'Planned') != 'Archived'
+            AND ${statusNotIn("COALESCE(s.status, 'Planned')", DEAD_SPRINT_STATUSES)}
        ) AS activity
       WHERE activity.activity_at IS NOT NULL
       GROUP BY activity.sprint_id
@@ -1844,6 +1897,10 @@ function generateSuggestedActions(state: {
   freshProject: boolean;
   authState?: AuthState | undefined;
   projectRootSupplied: boolean;
+  /** True only when the running-server-stale signal is the server's OWN build
+   * drift (scoped + startup-manifest-gated). Siblings get false so the digest
+   * does not promote a "restart required" action they cannot act on. */
+  serverCodeStaleActionable: boolean;
 }): SuggestedAction[] {
   const skippedTools = new Set(state.toolsSkip);
   const actions: SuggestedAction[] = [];
@@ -1857,8 +1914,10 @@ function generateSuggestedActions(state: {
     });
   }
 
-  // If server is running stale code, top priority action
-  if (!state.serverHealth.codeIsCurrent) {
+  // If OUR OWN server is running stale code, top priority action. Scoped to the
+  // server's own project (serverCodeStaleActionable) so a sibling project's digest
+  // is never told to "restart" over a cmos-mcp-pro rebuild it cannot act on.
+  if (state.serverCodeStaleActionable) {
     actions.push({
       action: 'MCP server is running stale code — restart required to pick up latest build',
       command: 'Restart MCP server process (e.g., reload Claude Desktop config or restart PM2)',

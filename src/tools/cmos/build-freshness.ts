@@ -26,7 +26,7 @@ export interface BuildFreshnessReport {
 const BLOCKING_STALENESS_REASONS: ReadonlySet<string> = new Set([
   'dist-missing',
   'src-newer-than-build-manifest',
-  'src-newer-than-dist-index-mtime',
+  'src-newer-than-build-dir',
 ]);
 
 /**
@@ -47,7 +47,21 @@ const SKIP_DIRS = new Set(['node_modules', 'dist', '.git', 'coverage', '.next'])
 const STALE_FILES_CAP = 5;
 const SRC_WALK_CAP = 5000;
 const BUILD_MANIFEST_RELATIVE = path.join('dist', '.build-manifest.json');
-const DIST_FALLBACK_FILE = path.join('dist', 'index.js');
+const BUILD_MANIFEST_BASENAME = '.build-manifest.json';
+
+/**
+ * Candidate build-output directories, highest priority first (Sprint 74 m01,
+ * decision #834). When the manifest is absent the build time is the newest file
+ * mtime under the first of these that holds build output — covering layouts the
+ * old hardcoded dist/index.js probe missed: aquex.ai (dist/server/entry.mjs),
+ * Forge monorepo (dist/src/index.js), Synthesis-Workbench (Next .next/).
+ */
+const BUILD_DIR_CANDIDATES = ['dist', '.next', 'build', 'out'] as const;
+/** Reuse the src walk's bound — caps the build-dir walk against pathological trees. */
+const BUILD_WALK_CAP = SRC_WALK_CAP;
+/** .next/cache is dev-server churn, not a build artifact — excluded from the .next walk. */
+const NEXT_BUILD_SKIP_DIRS: ReadonlySet<string> = new Set(['cache']);
+const NO_SKIP_DIRS: ReadonlySet<string> = new Set();
 
 interface SrcFileMtime {
   relativePath: string;
@@ -108,10 +122,64 @@ async function collectSrcMtimes(projectRoot: string): Promise<SrcFileMtime[]> {
 
 interface DistBuildInfo {
   buildTimeMs: number | null;
-  source: 'manifest' | 'index-mtime' | 'missing';
+  source: 'manifest' | 'build-dir-mtime' | 'missing';
+}
+
+/**
+ * Recursively walk a build-output directory and return the NEWEST file mtime.
+ * Unlike collectSrcMtimes this accepts ANY extension — build artifacts are
+ * .js/.mjs/.cjs/.json/.map/.html/etc. Skips subdirectories whose basename is in
+ * skipDirNames (used to drop .next/cache dev-server churn) and the
+ * .build-manifest.json metadata file itself: the walk only runs when the
+ * manifest is absent OR failed to parse, and a corrupt/partial manifest's fresh
+ * mtime must not vouch for an interrupted build (it would mask staleness and
+ * wrongly pass the gate). Capped at BUILD_WALK_CAP entries against pathological
+ * trees. Returns null when the directory holds no build files.
+ */
+async function findNewestBuildMtime(
+  buildDir: string,
+  skipDirNames: ReadonlySet<string>
+): Promise<number | null> {
+  let newest: number | null = null;
+  let visited = 0;
+  const stack: string[] = [buildDir];
+  while (stack.length > 0 && visited < BUILD_WALK_CAP) {
+    const dir = stack.pop()!;
+    let entries: string[];
+    try {
+      entries = await fs.readdir(dir);
+    } catch {
+      continue;
+    }
+    for (const name of entries) {
+      if (visited >= BUILD_WALK_CAP) break;
+      const fullPath = path.join(dir, name);
+      let stat: Awaited<ReturnType<typeof fs.stat>>;
+      try {
+        stat = await fs.stat(fullPath);
+      } catch {
+        // Permission error / symlink to nowhere — skip rather than crash.
+        continue;
+      }
+      visited++;
+      if (stat.isDirectory()) {
+        if (skipDirNames.has(name)) continue;
+        stack.push(fullPath);
+      } else if (
+        stat.isFile() &&
+        name !== BUILD_MANIFEST_BASENAME &&
+        (newest === null || stat.mtimeMs > newest)
+      ) {
+        newest = stat.mtimeMs;
+      }
+    }
+  }
+  return newest;
 }
 
 async function readDistBuildInfo(projectRoot: string): Promise<DistBuildInfo> {
+  // 1. dist/.build-manifest.json — deterministic primary, unchanged in priority
+  //    and parse behavior. A valid manifest short-circuits the candidate walk.
   const manifestPath = path.join(projectRoot, BUILD_MANIFEST_RELATIVE);
   try {
     const raw = await fs.readFile(manifestPath, 'utf-8');
@@ -123,16 +191,29 @@ async function readDistBuildInfo(projectRoot: string): Promise<DistBuildInfo> {
       }
     }
   } catch {
-    // Fall through to index.js mtime.
+    // Fall through to the candidate build-dir walk.
   }
 
-  const indexPath = path.join(projectRoot, DIST_FALLBACK_FILE);
-  try {
-    const stat = await fs.stat(indexPath);
-    return { buildTimeMs: stat.mtimeMs, source: 'index-mtime' };
-  } catch {
-    return { buildTimeMs: null, source: 'missing' };
+  // 2. Newest file mtime under the first candidate build dir that holds output
+  //    (decision #834). An existing-but-empty candidate (e.g. a wiped dist/) is
+  //    skipped rather than false-blocking; only when NONE of the candidates
+  //    yields a build file do we report missing, so a genuinely-unbuilt tree
+  //    still blocks the s70-m02 enforced gate.
+  for (const candidate of BUILD_DIR_CANDIDATES) {
+    const candidateDir = path.join(projectRoot, candidate);
+    try {
+      if (!(await fs.stat(candidateDir)).isDirectory()) continue;
+    } catch {
+      continue;
+    }
+    const skip = candidate === '.next' ? NEXT_BUILD_SKIP_DIRS : NO_SKIP_DIRS;
+    const newest = await findNewestBuildMtime(candidateDir, skip);
+    if (newest != null) {
+      return { buildTimeMs: newest, source: 'build-dir-mtime' };
+    }
   }
+
+  return { buildTimeMs: null, source: 'missing' };
 }
 
 /**
@@ -188,7 +269,7 @@ export async function checkBuildFreshness(projectRoot: string): Promise<BuildFre
       reason:
         distInfo.source === 'manifest'
           ? 'src-newer-than-build-manifest'
-          : 'src-newer-than-dist-index-mtime',
+          : 'src-newer-than-build-dir',
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : 'unknown error';

@@ -801,7 +801,7 @@ describe('cmos_sprint_complete', () => {
     });
   });
 
-  describe('build-freshness ENFORCED gate (Sprint 70 m02)', () => {
+  describe('build-freshness advisory (post-s74; was the Sprint 70 m02 gate)', () => {
     function writeSrcFile(relativePath: string, mtime?: Date): void {
       const fullPath = path.join(tempDir, relativePath);
       fs.mkdirSync(path.dirname(fullPath), { recursive: true });
@@ -819,8 +819,8 @@ describe('cmos_sprint_complete', () => {
     }
 
     function writeDistIndex(mtime: Date): void {
-      // dist/index.js with NO manifest — exercises the manifest-absent / index-mtime
-      // fallback path in checkBuildFreshness (reason 'src-newer-than-dist-index-mtime').
+      // dist/index.js with NO manifest — exercises the manifest-absent build-dir
+      // walk in checkBuildFreshness (reason 'src-newer-than-build-dir', Sprint 74 m01).
       const distDir = path.join(tempDir, 'dist');
       fs.mkdirSync(distDir, { recursive: true });
       const indexPath = path.join(distDir, 'index.js');
@@ -890,9 +890,9 @@ describe('cmos_sprint_complete', () => {
       expect(result.data?.buildFreshness).toBeUndefined();
     });
 
-    // --- Each blocking reason blocks with BUILD_STALE and zero mutation (criteria a, b) ---
+    // --- Staleness is ADVISORY: surfaced as a warning, never blocks (post-s74) ---
 
-    it('BLOCKS with BUILD_STALE when src/ is newer than dist/, with no DB mutation', async () => {
+    it('completes with an advisory warning (does NOT block) when src/ is newer than the build', async () => {
       seedMissions([{ id: 's22-m01', status: 'Completed' }]);
       seedContexts({}, {});
       writeDistManifest(new Date(Date.now() - 60_000));
@@ -900,44 +900,49 @@ describe('cmos_sprint_complete', () => {
 
       const result = await cmosSprintComplete({
         sprintId: 'sprint-22',
-        summary: 'Stale dist must block',
+        summary: 'Stale dist is advisory, not blocking',
         projectRoot: getProjectRoot(),
       });
 
-      expect(result.success).toBe(false);
-      expect(result.error?.code).toBe(CMOS_ERROR_CODES.BUILD_STALE);
-      // Message lists the offending file and the remediation.
-      expect(result.error?.message).toContain(path.join('src', 'foo.ts'));
-      expect(result.error?.suggestion).toMatch(/npm run build/);
-      expect(result.error?.suggestion).toMatch(/forceComplete/);
-
-      // Zero DB mutation: sprint stays Active, no snapshots, no events.
-      expect(readSprintStatus()).toBe('Active');
-      expect(countRows('context_snapshots')).toBe(0);
-      expect(countRows('session_events')).toBe(0);
+      expect(result.success).toBe(true);
+      expect(result.data?.currentStatus).toBe('Completed');
+      // The staleness report is attached and an advisory warning is surfaced...
+      expect(result.data?.buildFreshness?.stale).toBe(true);
+      expect(result.data?.buildFreshness?.staleFiles).toEqual(
+        expect.arrayContaining([path.join('src', 'foo.ts')])
+      );
+      expect(result.warnings).toEqual(
+        expect.arrayContaining([expect.stringMatching(/Advisory.*build looks stale/i)])
+      );
+      // ...but it does NOT block: the sprint actually completed and mutated
+      // (the inverse of the old gate's "zero mutation on block" invariant).
+      expect(readSprintStatus()).toBe('Completed');
+      expect(countRows('context_snapshots')).toBeGreaterThan(0);
     });
 
-    it('BLOCKS with BUILD_STALE and dist-missing reason when dist/ is absent', async () => {
+    it('completes with an advisory warning on dist-missing (does NOT block)', async () => {
       seedMissions([{ id: 's22-m01', status: 'Completed' }]);
       seedContexts({}, {});
       writeSrcFile('src/foo.ts');
 
       const result = await cmosSprintComplete({
         sprintId: 'sprint-22',
-        summary: 'Missing dist must block',
+        summary: 'Missing dist is advisory',
         projectRoot: getProjectRoot(),
       });
 
-      expect(result.success).toBe(false);
-      expect(result.error?.code).toBe(CMOS_ERROR_CODES.BUILD_STALE);
-      expect(result.error?.message).toMatch(/dist-missing/);
-      expect(readSprintStatus()).toBe('Active');
+      expect(result.success).toBe(true);
+      expect(result.data?.buildFreshness?.reason).toBe('dist-missing');
+      expect(result.warnings).toEqual(
+        expect.arrayContaining([expect.stringMatching(/dist-missing/)])
+      );
+      expect(readSprintStatus()).toBe('Completed');
     });
 
-    it('BLOCKS with BUILD_STALE on src-newer-than-dist-index-mtime (manifest absent, index.js older)', async () => {
-      // The third blocking reason: no .build-manifest.json, but dist/index.js exists
-      // with an older mtime than src/. Covered for detection in build-freshness.test.ts;
-      // this asserts the e2e gate actually blocks on it (one test per blocking reason).
+    it('completes with an advisory warning on src-newer-than-build-dir (does NOT block)', async () => {
+      // No .build-manifest.json, but a dist/ build file exists older than src/.
+      // Detection is covered in build-freshness.test.ts; here we assert the e2e
+      // closeout treats it as advisory, not a block.
       seedMissions([{ id: 's22-m01', status: 'Completed' }]);
       seedContexts({}, {});
       writeDistIndex(new Date(Date.now() - 60_000));
@@ -945,18 +950,19 @@ describe('cmos_sprint_complete', () => {
 
       const result = await cmosSprintComplete({
         sprintId: 'sprint-22',
-        summary: 'Stale index.js fallback must block',
+        summary: 'Stale build-dir fallback is advisory',
         projectRoot: getProjectRoot(),
       });
 
-      expect(result.success).toBe(false);
-      expect(result.error?.code).toBe(CMOS_ERROR_CODES.BUILD_STALE);
-      expect(result.error?.message).toMatch(/src-newer-than-dist-index-mtime/);
-      expect(readSprintStatus()).toBe('Active');
-      expect(countRows('context_snapshots')).toBe(0);
+      expect(result.success).toBe(true);
+      expect(result.data?.buildFreshness?.reason).toBe('src-newer-than-build-dir');
+      expect(result.warnings).toEqual(
+        expect.arrayContaining([expect.stringMatching(/src-newer-than-build-dir/)])
+      );
+      expect(readSprintStatus()).toBe('Completed');
     });
 
-    it('never opens a transaction on the blocked path (no BEGIN/COMMIT issued)', async () => {
+    it('still runs the closeout transaction on a stale tree (advisory does not skip work)', async () => {
       seedMissions([{ id: 's22-m01', status: 'Completed' }]);
       seedContexts({}, {});
       writeDistManifest(new Date(Date.now() - 60_000));
@@ -966,19 +972,19 @@ describe('cmos_sprint_complete', () => {
 
       const result = await cmosSprintComplete({
         sprintId: 'sprint-22',
-        summary: 'Blocked path issues no transaction',
+        summary: 'Stale tree still commits the closeout',
         projectRoot: getProjectRoot(),
       });
 
-      expect(result.success).toBe(false);
+      expect(result.success).toBe(true);
       const sqlCalls = executeSpy.mock.calls.map((c) => String(c[0]).toUpperCase());
-      expect(sqlCalls.some((sql) => sql.includes('BEGIN'))).toBe(false);
-      expect(sqlCalls.some((sql) => sql.includes('COMMIT'))).toBe(false);
+      expect(sqlCalls.some((sql) => sql.includes('BEGIN'))).toBe(true);
+      expect(sqlCalls.some((sql) => sql.includes('COMMIT'))).toBe(true);
     });
 
-    // --- forceComplete escape hatch records the override (criterion c) ---
+    // --- forceComplete is now a no-op (kept for backward compatibility) ---
 
-    it('completes with forceComplete:true over a stale tree, retaining the report and warning', async () => {
+    it('accepts forceComplete:true as a no-op — a stale tree completes either way', async () => {
       seedMissions([{ id: 's22-m01', status: 'Completed' }]);
       seedContexts({}, {});
       writeDistManifest(new Date(Date.now() - 60_000));
@@ -986,27 +992,32 @@ describe('cmos_sprint_complete', () => {
 
       const result = await cmosSprintComplete({
         sprintId: 'sprint-22',
-        summary: 'Forced over stale build',
+        summary: 'forceComplete is now a no-op',
         forceComplete: true,
         projectRoot: getProjectRoot(),
       });
 
       expect(result.success).toBe(true);
       expect(result.data?.currentStatus).toBe('Completed');
-      // The override is NOT silent: the freshness report is retained and a warning is pushed.
       expect(result.data?.buildFreshness?.stale).toBe(true);
-      expect(result.warnings).toEqual(
+      // No "forceComplete over a stale build" override warning is produced anymore...
+      expect(result.warnings ?? []).not.toEqual(
         expect.arrayContaining([expect.stringMatching(/forceComplete.*stale build/i)])
       );
-      // And the completion actually happened.
+      // ...just the plain advisory.
+      expect(result.warnings).toEqual(
+        expect.arrayContaining([expect.stringMatching(/Advisory.*build looks stale/i)])
+      );
       expect(readSprintStatus()).toBe('Completed');
     });
 
-    // --- Server-health (codeIsCurrent) signal, gated on startupBuild presence (criterion d) ---
+    // --- Server-health (codeIsCurrent) signal: advisory + SCOPED to the own project ---
 
-    it('BLOCKS when the running server is on stale code (startupBuild present, codeIsCurrent=false)', async () => {
+    it('surfaces server-stale as an advisory (no block) for the server OWN project', async () => {
       seedMissions([{ id: 's22-m01', status: 'Completed' }]);
       seedContexts({}, {});
+      // Scope-in: the closing project IS this server's own project.
+      jest.spyOn(serverHealth, 'getServerProjectRoot').mockReturnValue(getProjectRoot());
       jest.spyOn(serverHealth, 'getServerHealth').mockReturnValue({
         uptimeSeconds: 1,
         startedAt: '2026-05-01T00:00:00Z',
@@ -1022,21 +1033,59 @@ describe('cmos_sprint_complete', () => {
 
       const result = await cmosSprintComplete({
         sprintId: 'sprint-22',
-        summary: 'Server stale must block',
+        summary: 'Own-project server-stale is advisory',
         projectRoot: getProjectRoot(),
       });
 
-      expect(result.success).toBe(false);
-      expect(result.error?.code).toBe(CMOS_ERROR_CODES.BUILD_STALE);
-      expect(result.error?.message).toMatch(/running stale code/i);
-      expect(readSprintStatus()).toBe('Active');
+      expect(result.success).toBe(true);
+      expect(result.data?.currentStatus).toBe('Completed');
+      expect(result.warnings).toEqual(
+        expect.arrayContaining([expect.stringMatching(/running stale code/i)])
+      );
+      expect(readSprintStatus()).toBe('Completed');
     });
 
-    it('does NOT block on a null-startupManifest health result (the Jest-default landmine)', async () => {
+    it('does NOT surface server-stale to a SIBLING project (the Forge cross-project leak)', async () => {
       seedMissions([{ id: 's22-m01', status: 'Completed' }]);
       seedContexts({}, {});
-      // codeIsCurrent=false but startupBuild=null — the normal test/default state
-      // where a manifest exists on disk but the process captured none at startup.
+      // Scope-out: the server's own project is some OTHER directory, not the caller.
+      jest
+        .spyOn(serverHealth, 'getServerProjectRoot')
+        .mockReturnValue(path.join(path.sep, 'some', 'other', 'cmos-mcp-pro'));
+      jest.spyOn(serverHealth, 'getServerHealth').mockReturnValue({
+        uptimeSeconds: 1,
+        startedAt: '2026-05-01T00:00:00Z',
+        memoryUsageMb: 1,
+        startupBuild: fakeManifest('aaaaaaaaaaaa'),
+        currentBuild: fakeManifest('bbbbbbbbbbbb'),
+        codeIsCurrent: false,
+        stalenessMessage:
+          'Server is running stale code. Restart the MCP server to pick up changes.',
+        pid: 1,
+        nodeVersion: 'v20',
+      });
+
+      const result = await cmosSprintComplete({
+        sprintId: 'sprint-22',
+        summary: 'Sibling project must not be blamed for our rebuild',
+        projectRoot: getProjectRoot(),
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.data?.currentStatus).toBe('Completed');
+      // The server-stale message must NOT leak into a sibling's closeout.
+      expect(result.warnings ?? []).not.toEqual(
+        expect.arrayContaining([expect.stringMatching(/running stale code/i)])
+      );
+      expect(readSprintStatus()).toBe('Completed');
+    });
+
+    it('produces no server-stale advisory when startupBuild is null, even for the own project', async () => {
+      seedMissions([{ id: 's22-m01', status: 'Completed' }]);
+      seedContexts({}, {});
+      // Scope-in to the own project, but startupBuild=null (a manifest exists on
+      // disk yet the process captured none at startup) — must NOT surface staleness.
+      jest.spyOn(serverHealth, 'getServerProjectRoot').mockReturnValue(getProjectRoot());
       jest.spyOn(serverHealth, 'getServerHealth').mockReturnValue({
         uptimeSeconds: 1,
         startedAt: '2026-05-01T00:00:00Z',
@@ -1051,12 +1100,17 @@ describe('cmos_sprint_complete', () => {
 
       const result = await cmosSprintComplete({
         sprintId: 'sprint-22',
-        summary: 'Null startup manifest must not block',
+        summary: 'Null startup manifest yields no server-stale advisory',
         projectRoot: getProjectRoot(),
       });
 
       expect(result.success).toBe(true);
       expect(result.data?.currentStatus).toBe('Completed');
+      expect(result.warnings ?? []).not.toEqual(
+        expect.arrayContaining([
+          expect.stringMatching(/running stale|started before build manifest/i),
+        ])
+      );
     });
 
     // --- Degenerate non-blocking cases are preserved (criterion f) ---

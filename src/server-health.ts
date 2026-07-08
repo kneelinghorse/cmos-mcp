@@ -175,6 +175,24 @@ export function isServerStale(): boolean {
 }
 
 /**
+ * The project root whose build this server process tracks — i.e. the directory
+ * containing the dist/.build-manifest.json captured at startup. The running-
+ * server-stale signal compares THIS process's startup hash against THIS code's
+ * manifest on disk; it has nothing to do with whatever project is calling. So
+ * consumers use this to scope that signal to the server's OWN closeout and avoid
+ * blaming a sibling project for a rebuild of the server itself. Returns null
+ * when no manifest was located at startup (staleness detection disabled).
+ */
+export function getServerProjectRoot(): string | null {
+  if (!manifestPath) return null;
+  // manifestPath is <root>/dist/.build-manifest.json (server run from dist/) or,
+  // in tests run from within dist, <dist>/.build-manifest.json. Either way the
+  // project root is the parent of the dist/ directory.
+  const dir = path.dirname(manifestPath);
+  return path.basename(dir) === 'dist' ? path.dirname(dir) : dir;
+}
+
+/**
  * Get the startup manifest (for testing).
  */
 export function getStartupManifest(): BuildManifest | null {

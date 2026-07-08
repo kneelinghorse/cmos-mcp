@@ -31,8 +31,9 @@ import {
   isBlockingStaleness,
   type BuildFreshnessReport,
 } from './build-freshness';
-import { getServerHealth } from '../../server-health';
+import { getServerHealth, getServerProjectRoot } from '../../server-health';
 import { resolveProjectRootEnhanced } from '../../intelligence/project-registry';
+import * as path from 'path';
 
 type CloseoutContextType = 'master_context' | 'project_context';
 type CloseoutCondensationStrategy = 'none' | 'conservative' | 'auto' | 'aggressive';
@@ -161,7 +162,7 @@ export const cmosSprintCompleteSchema = z.object({
     .boolean()
     .optional()
     .describe(
-      'Override the build-freshness gate (Sprint 70 m02). When the dist/ build is stale or the running server is on stale code, closeout fails with BUILD_STALE unless this is true. Use only for intentional dist-only/packaged installs — the override is recorded as a warning.'
+      'No-op, kept for backward compatibility. Build-freshness is advisory as of the s74 review — staleness is surfaced as a warning and never blocks closeout, so no override is needed.'
     ),
   projectRoot: z
     .string()
@@ -208,7 +209,7 @@ export const cmosSprintCompleteToolDefinition = {
       forceComplete: {
         type: 'boolean',
         description:
-          'Override the build-freshness gate. Closeout fails with BUILD_STALE on a stale build/server unless true; the override is recorded as a warning.',
+          'No-op, kept for backward compatibility. Build-freshness is advisory — staleness is surfaced as a warning and never blocks closeout.',
       },
       projectRoot: {
         type: 'string',
@@ -243,21 +244,15 @@ export async function cmosSprintComplete(
     async (client) => {
       const warnings: string[] = [];
 
-      // s70-m02 — ENFORCED build-freshness gate. Runs FIRST: before the
-      // schema-ensure migrations below AND before BEGIN IMMEDIATE, so a blocked
-      // completion mutates nothing (no DDL, no transaction). Two orthogonal
-      // signals block with BUILD_STALE unless forceComplete: (a) source newer
-      // than the built dist/, and (b) the running server itself on stale code.
-      const staleGate = await evaluateBuildStaleGate(params.projectRoot);
-      if (staleGate.blocked && staleGate.error) {
-        if (!params.forceComplete) {
-          return createError<CmosSprintCompleteResult>(staleGate.error);
-        }
-        // forceComplete escape hatch — proceed, but the override is NOT silent.
-        warnings.push(
-          staleGate.overrideWarning ?? 'Sprint closed with forceComplete over a stale build.'
-        );
-      }
+      // Build-freshness is ADVISORY, not blocking (post-s74 review). It used to be
+      // an ENFORCED gate here (s70-m02) that blocked closeout with BUILD_STALE
+      // unless forceComplete. Two problems retired it: (1) the signals (src-mtime
+      // vs build, server-hash drift) are noisy heuristics that over-fire on git
+      // ops and non-runtime edits; (2) the server-stale signal is cross-project
+      // LEAKY — getServerHealth() tracks THIS server's own build (cmos-mcp-pro),
+      // so a rebuild here flipped every sibling project's close to "stale" and
+      // forced forceComplete. Staleness is now surfaced as a warning after the
+      // work completes (see the advisory block near the end), never as a block.
 
       // s69-m03 — sprint closeout wraps its work in a manual BEGIN IMMEDIATE
       // transaction below, and later snapshots genesis rows (genesisColumns). The
@@ -569,18 +564,38 @@ export async function cmosSprintComplete(
           result.contexts.projectContext.afterSize.sizeKb
       );
 
-      // Build-freshness check (Sprint 67 m03). Non-critical: defensive default is fresh.
-      // Attach to the response ONLY when stale=true so the happy-path shape is unchanged.
+      // Build-freshness advisory (Sprint 67 m03; demoted to non-blocking post-s74).
+      // Never blocks — surfaces staleness as a warning + an attached report so the
+      // happy-path shape is unchanged when fresh. Two signals:
+      //   (A) source newer than the MANAGED project's own build — attach the
+      //       report and warn.
+      //   (B) the running server is on stale code — SCOPED to this server's OWN
+      //       project, because getServerHealth() tracks cmos-mcp-pro's build, not
+      //       the caller's; surfacing it to a sibling blames them for our rebuild.
       try {
         const freshnessRoot = await resolveFreshnessProjectRoot(params.projectRoot);
         if (freshnessRoot) {
           const freshness = await checkBuildFreshness(freshnessRoot);
           if (freshness.stale) {
             result.buildFreshness = freshness;
+            if (isBlockingStaleness(freshness)) {
+              warnings.push(buildStaleAdvisory(freshness));
+            }
+          }
+          const serverRoot = getServerProjectRoot();
+          if (serverRoot && path.resolve(serverRoot) === path.resolve(freshnessRoot)) {
+            const health = getServerHealth();
+            if (
+              health.startupBuild != null &&
+              health.codeIsCurrent === false &&
+              health.stalenessMessage
+            ) {
+              warnings.push(health.stalenessMessage);
+            }
           }
         }
       } catch {
-        // Freshness is advisory — never block sprint close on it.
+        // Advisory only — never block sprint close on a probe failure.
       }
 
       return createSuccess(result, warnings);
@@ -607,76 +622,20 @@ async function resolveFreshnessProjectRoot(explicitRoot?: string): Promise<strin
   }
 }
 
-interface BuildStaleGateResult {
-  blocked: boolean;
-  /** The structured BUILD_STALE error to return when blocking (and not forced). */
-  error?: ReturnType<typeof CmosErrors.buildStale>;
-  /** Warning to push when forceComplete bypasses the block — keeps the override audible. */
-  overrideWarning?: string;
-}
-
 /**
- * Sprint 70 m02 — evaluate the two orthogonal staleness signals that block sprint
- * close. Both probes are wrapped so a probe FAILURE is non-blocking (the gate
- * never wedges a sprint on its own error):
- *
- *   (A) source-newer-than-dist — checkBuildFreshness; blocking only when
- *       isBlockingStaleness(report) is true (excludes the freshness-check-failed
- *       I/O path, which returns stale=false).
- *   (B) running-server-stale — getServerHealth().codeIsCurrent===false, but ONLY
- *       when startupBuild != null (genuine startup-vs-disk drift). A null
- *       startupBuild yields codeIsCurrent=false for an unrelated reason (the s69
- *       landmine) and must NOT block.
+ * Build the advisory warning for a stale managed-project build (Signal A). This
+ * NEVER blocks closeout (post-s74); it tells the operator the running code may
+ * not reflect these source changes, with the same remediation the old gate gave.
  */
-async function evaluateBuildStaleGate(explicitRoot?: string): Promise<BuildStaleGateResult> {
-  let freshness: BuildFreshnessReport | undefined;
-  try {
-    const root = await resolveFreshnessProjectRoot(explicitRoot);
-    if (root) {
-      const report = await checkBuildFreshness(root);
-      if (isBlockingStaleness(report)) {
-        freshness = report;
-      }
-    }
-  } catch {
-    // Probe failure (unresolvable root / mocked rejection) is non-blocking.
-  }
-
-  let serverStaleMessage: string | null = null;
-  try {
-    const health = getServerHealth();
-    if (health.startupBuild != null && health.codeIsCurrent === false) {
-      serverStaleMessage = health.stalenessMessage;
-    }
-  } catch {
-    // Health probe failure is non-blocking.
-  }
-
-  if (!freshness && !serverStaleMessage) {
-    return { blocked: false };
-  }
-
-  return {
-    blocked: true,
-    error: CmosErrors.buildStale({
-      reason: freshness?.reason,
-      staleFiles: freshness?.staleFiles,
-      serverStaleMessage,
-    }),
-    overrideWarning: buildStaleOverrideWarning(freshness, serverStaleMessage),
-  };
-}
-
-function buildStaleOverrideWarning(
-  freshness: BuildFreshnessReport | undefined,
-  serverStaleMessage: string | null
-): string {
-  const causes: string[] = [];
-  if (freshness?.reason) causes.push(freshness.reason);
-  if (serverStaleMessage) causes.push('server-running-stale-code');
-  return `Sprint closed with forceComplete over a stale build (${
-    causes.join(', ') || 'stale'
-  }). Rebuild (npm run build) and restart the MCP server to clear the staleness.`;
+function buildStaleAdvisory(report: BuildFreshnessReport): string {
+  const examples = report.staleFiles?.length
+    ? ` (e.g. ${report.staleFiles.slice(0, 3).join(', ')})`
+    : '';
+  return (
+    `Advisory: this project's build looks stale — ${report.reason ?? 'src newer than build'}` +
+    `${examples}. Rebuild (npm run build) and restart the MCP server if the running ` +
+    `code should reflect these changes. This does not block sprint close.`
+  );
 }
 
 function summarizeSprintReadiness(missions: SprintMissionRow[]): SprintCloseoutReadiness {

@@ -2,6 +2,21 @@
 
 All notable changes to cmos-mcp are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.1.1 — 2026-07-07
+
+Patch release. Four fixes — three triaged from sibling-project bug reports (aquex.ai, Synthesis-Workbench, Forge) against 1.1.0, plus an auth-resolution fix — and one build-freshness **policy change**. **Additive and non-breaking** over 1.1.0: no tools added or removed, no parameter, type, or required-field changes. The only schema-visible edit is the description of the existing `cmos_sprint` `forceComplete` parameter, now documented as a no-op (see Changed). Drop-in upgrade — no consumer action required.
+
+### Fixed
+
+- **Build-freshness now detects real build layouts instead of only `dist/index.js`.** `readDistBuildInfo` keeps `dist/.build-manifest.json` as the deterministic primary, then falls back to the newest-mtime file from a capped walk of the first candidate build dir that has output — `dist/` → `.next/` (excluding `.next/cache`) → `build/` → `out/`. `dist-missing` now fires only when none of those has output. This clears the permanent false `BUILD_STALE` that hit Next.js projects building to `.next/` (Synthesis-Workbench), monorepo `dist/src/` and `dist/server/entry.mjs` layouts (aquex.ai), and non-`dist` roots (Forge). A concurrent adversarial review also closed a corrupt-manifest false-pass (the manifest file is now excluded from the walk) and corrected a misleading `dist/`-only message in `cmos_review`.
+- **`getCurrentSprint()` no longer surfaces a terminal sprint as "current".** The picker previously excluded only `Archived`, so `Failed`, `Dropped`, and `Reverted` sprints leaked into `currentSprint` during the review→plan gap, and a lowercase `completed` dodged the case-sensitive comparison. The terminal set is now `{Archived, Failed, Dropped, Reverted}`, case-folded, applied across every step of the selection cascade — including the Completed-aware fallbacks — so it cannot be re-defeated. Consumers no longer need to mint placeholder Active sprints to re-point the opener.
+- **Write-path handler exceptions return a structured error instead of a bare `-32603`.** A tool handler that throws a non-protocol exception (e.g. a store-specific write crash on `cmos_sprint(action="complete")` or `cmos_session(action="capture")`) now returns a `CmosToolResult` error — `TOOL_EXECUTION_ERROR` with the real message, a suggestion, and a `correlationId` — as an `isError` result, instead of the generic JSON-RPC `-32603` that swallowed the cause. Genuine protocol errors (`McpError`) keep their JSON-RPC shape.
+- **`cmos_db` sync ops resolve the dashboard client via the credential store, not env-only auth.** `backfill` / `reconcile` / `identify_orphans` / `purge` were the last sync surface still on `DashboardClient.fromEnv()` (env `CMOS_DASHBOARD_API_KEY` or user+password → `/api/auth/login`), so they returned `401` after a dashboard password rotation and `.env` scrub while every credential-store path kept working. They now route through `fromEnvForProject()` — credential-store key first, legacy env preserved as a script/CI fallback — so the MCP-tool path needs zero `.env` secrets. Behavior-preserving for standalone callers.
+
+### Changed
+
+- **Build-freshness is now advisory, never blocking (policy change).** `cmos_sprint(action="complete")` no longer blocks closeout on `BUILD_STALE`; staleness is surfaced as a warning and the sprint closes normally. `forceComplete` is retained for backward compatibility but is now a **no-op** (its parameter description says so). The running-server-stale signal on `cmos_agent_onboard` / `cmos_review` is scoped to this project and startup-manifest-gated, so it no longer reports "server is running stale code / restart required" over unrelated projects' rebuilds. This reverses the previously-blocking gate, which over-fired on foreign build layouts; the generalized probe plus advisory warnings preserve the signal without the false-positive tax.
+
 ## 1.1.0 — 2026-06-08
 
 First public release cut from the pro tree (sprints 64–72). A drop-in minor upgrade over 1.0.1 — additive only, no breaking changes. Adds five tool/action surfaces, refreshes the bundled seed schema's cross-store indexes, and relicenses to Apache-2.0.

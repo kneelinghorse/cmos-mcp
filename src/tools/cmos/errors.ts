@@ -71,6 +71,11 @@ export const CMOS_ERROR_CODES = {
   // Device code flow errors (Sprint 58 m01)
   DEVICE_CODE_EXPIRED: 'DEVICE_CODE_EXPIRED',
   DEVICE_CODE_ACCESS_DENIED: 'DEVICE_CODE_ACCESS_DENIED',
+
+  // Unhandled tool-execution exception surfaced at the MCP dispatch boundary (Sprint 74 m03).
+  // A handler threw instead of returning a {success:false} envelope; the boundary wraps it
+  // as a structured error rather than leaking a bare JSON-RPC -32603 to the caller.
+  TOOL_EXECUTION_ERROR: 'TOOL_EXECUTION_ERROR',
 } as const;
 
 export type CmosErrorCode = (typeof CMOS_ERROR_CODES)[keyof typeof CMOS_ERROR_CODES];

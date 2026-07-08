@@ -286,8 +286,8 @@ function buildDigest(
         {
           action:
             buildFreshness.reason === 'dist-missing'
-              ? 'dist/ missing — run npm run build before starting work (sprint close now blocks on this)'
-              : 'dist/ is behind src/ — rebuild before starting fresh sessions (sprint close now blocks on this)',
+              ? 'build output missing — run npm run build before starting work (sprint close now blocks on this)'
+              : 'build output is behind src/ — rebuild before starting fresh sessions (sprint close now blocks on this)',
           command: 'npm run build',
           priority: 1,
         },

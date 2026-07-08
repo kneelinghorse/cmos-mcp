@@ -28,6 +28,7 @@ jest.mock('../../../src/server-health', () => ({
     pid: 12345,
     nodeVersion: 'v24.6.0',
   }),
+  getServerProjectRoot: () => null,
   initServerHealth: jest.fn(),
 }));
 

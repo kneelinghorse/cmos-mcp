@@ -24,6 +24,7 @@ import {
   type PurgeResult,
 } from '../../../src/tools/cmos/cmos-db-backfill';
 import { CmosDetector } from '../../../src/intelligence/cmos-detector';
+import { CredentialStore } from '../../../src/intelligence/credential-store';
 import type { CmosToolResult } from '../../../src/tools/cmos/types';
 
 // ─── Fetch Mock ───────────────────────────────────────────────────────────────
@@ -1814,6 +1815,64 @@ describe('cmosDbReconcile', () => {
     expect(tableNames).toContain('strategic_decisions');
     expect(tableNames).toContain('learnings');
     expect(tableNames).toContain('mission_dependencies');
+  });
+
+  it('reconciles via the credential-store key with NO env creds (s73 fix: fromEnvForProject, not fromEnv)', async () => {
+    // s73 review: cmos_db was the last sync surface still on env-only auth. Under
+    // the old DashboardClient.fromEnv() path, scrubbing the env (no API key, no
+    // USER+PASSWORD) returned dashboardNotConfigured even when a device-code key
+    // existed in the credential store. fromEnvForProject resolves that store key
+    // (used directly as a Bearer — no /api/auth/login), so reconcile succeeds.
+    const prevConfigDir = process.env.CMOS_CONFIG_DIR;
+    const prevApiKey = process.env.CMOS_DASHBOARD_API_KEY;
+    const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-credstore-'));
+    try {
+      // The credential-store key is the ONLY credential available.
+      delete process.env.CMOS_DASHBOARD_USER;
+      delete process.env.CMOS_DASHBOARD_PASSWORD;
+      delete process.env.CMOS_DASHBOARD_API_KEY;
+      process.env.CMOS_CONFIG_DIR = storeDir;
+      CredentialStore.resetInstance();
+      const store = await CredentialStore.create({ configDir: storeDir });
+      await store.upsertUserScopedKey('store-key-id', {
+        key: 'cmk_storekey',
+        label: 'device-code test',
+        issuedAt: new Date().toISOString(),
+        lastUsedAt: '',
+      });
+
+      createDb();
+      setupFetchForProjectScopedReconcile({
+        sprints: 0,
+        missions: 0,
+        sessions: 0,
+        decisions: 0,
+        learnings: 0,
+        dependencies: 0,
+      });
+
+      const result = await cmosDbReconcile({ projectRoot: tempDir });
+
+      // Would be dashboardNotConfigured under the old fromEnv() path.
+      expect(result.success).toBe(true);
+
+      const urls = fetchMock.mock.calls.map((c) => String(c[0]));
+      // API-key auth uses the key directly as a Bearer — it never logs in.
+      expect(urls.some((u) => u.includes('/api/auth/login'))).toBe(false);
+      // A sync request carried the store key as its Bearer token.
+      const sawStoreKeyBearer = fetchMock.mock.calls.some((c) => {
+        const init = c[1] as { headers?: Record<string, string> } | undefined;
+        return (init?.headers ?? {}).Authorization === 'Bearer cmk_storekey';
+      });
+      expect(sawStoreKeyBearer).toBe(true);
+    } finally {
+      CredentialStore.resetInstance();
+      if (prevConfigDir === undefined) delete process.env.CMOS_CONFIG_DIR;
+      else process.env.CMOS_CONFIG_DIR = prevConfigDir;
+      if (prevApiKey === undefined) delete process.env.CMOS_DASHBOARD_API_KEY;
+      else process.env.CMOS_DASHBOARD_API_KEY = prevApiKey;
+      fs.rmSync(storeDir, { recursive: true, force: true });
+    }
   });
 
   // ─── Formatter ───────────────────────────────────────────────────────────

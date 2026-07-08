@@ -134,7 +134,7 @@ export const cmosSprintSchema = z
       .boolean()
       .optional()
       .describe(
-        'Override the build-freshness gate for complete action (Sprint 70 m02). Closeout fails with BUILD_STALE on a stale build/server unless true; the override is recorded as a warning.'
+        'No-op for complete action, kept for backward compatibility. Build-freshness is advisory as of the s74 review — staleness is surfaced as a warning and never blocks closeout, so no override is needed.'
       ),
     targetAddress: z
       .string()
@@ -240,7 +240,7 @@ export const cmosSprintToolDefinition = {
       forceComplete: {
         type: 'boolean',
         description:
-          'Override the build-freshness gate for complete action. Closeout fails with BUILD_STALE on a stale build/server unless true; the override is recorded as a warning.',
+          'No-op for complete action, kept for backward compatibility. Build-freshness is advisory — staleness is surfaced as a warning and never blocks closeout.',
       },
       targetAddress: {
         type: 'string',

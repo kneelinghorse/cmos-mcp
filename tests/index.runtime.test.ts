@@ -498,6 +498,110 @@ describe('Mission Protocol entry lifecycle', () => {
     }
   });
 
+  // Sprint 74 m03: a write-path handler that throws an unhandled (non-McpError)
+  // exception must surface a structured CmosToolResult error (code+message+
+  // suggestion) as an isError result — never a bare JSON-RPC -32603 that swallows
+  // the real cause. Reported by aquex.ai (msg aa124685): forceComplete + capture
+  // crashed with a bare -32603 'Tool execution failed' and no actionable detail.
+  test('buildToolExecutionErrorResult wraps an unhandled exception as a structured isError result (not a throw)', async () => {
+    const moduleData = await loadIndexModule();
+    const { indexModule } = moduleData;
+    const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      const result = indexModule.buildToolExecutionErrorResult(
+        'cmos_sprint',
+        { action: 'complete', forceComplete: true },
+        new Error('SQLITE_CONSTRAINT: stable_event_id is not unique')
+      );
+
+      // Returned, not thrown; flagged as an error result.
+      expect(result.isError).toBe(true);
+      const text = (result.content[0] as { text: string }).text;
+      // Carries the machine code, the REAL underlying message, and a suggestion —
+      // not the generic 'Tool execution failed' that toPublicError would substitute.
+      expect(text).toContain('TOOL_EXECUTION_ERROR');
+      expect(text).toContain('SQLITE_CONSTRAINT: stable_event_id is not unique');
+      expect(text).toMatch(/Suggestion:/);
+
+      const structured = result.structuredContent as {
+        success: boolean;
+        error: { code: string; message: string; suggestion: string };
+      };
+      expect(structured.success).toBe(false);
+      expect(structured.error.code).toBe('TOOL_EXECUTION_ERROR');
+      expect(structured.error.message).toContain('cmos_sprint');
+      expect(structured.error.message).toContain('SQLITE_CONSTRAINT');
+      expect(structured.error.suggestion.length).toBeGreaterThan(0);
+    } finally {
+      moduleData.cleanup();
+      consoleSpy.mockRestore();
+    }
+  });
+
+  test.each(['cmos_sprint', 'cmos_session'])(
+    'CallTool handler returns a structured isError result (no bare -32603) when the %s write handler throws',
+    async (toolName) => {
+      const moduleData = await loadIndexModule();
+      const { indexModule, mockServer } = moduleData;
+      const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+      // Force the cross-module handler to throw a plain (non-McpError) exception,
+      // simulating the aquex.ai store-specific write crash.
+      const cmosBarrel = await import('../src/tools/cmos');
+      const handlerName = toolName === 'cmos_sprint' ? 'cmosSprint' : 'cmosSession';
+      const handlerSpy = jest
+        .spyOn(cmosBarrel, handlerName as 'cmosSprint' | 'cmosSession')
+        .mockRejectedValue(new Error('simulated store-specific write crash') as never);
+
+      const context = createMockContext();
+      try {
+        indexModule.__test__.registerToolHandlers(context);
+        const callHandler = mockServer.setRequestHandler.mock.calls[1][1] as (
+          request: any
+        ) => Promise<any>;
+
+        const request =
+          toolName === 'cmos_sprint'
+            ? {
+                params: {
+                  name: 'cmos_sprint',
+                  arguments: {
+                    action: 'complete',
+                    sprintId: 'sprint-1',
+                    forceComplete: true,
+                    projectRoot: '/tmp/cmos-m03-wiring-test',
+                  },
+                },
+              }
+            : {
+                params: {
+                  name: 'cmos_session',
+                  arguments: {
+                    action: 'capture',
+                    category: 'decision',
+                    content: 'x',
+                    projectRoot: '/tmp/cmos-m03-wiring-test',
+                  },
+                },
+              };
+
+        // Must RESOLVE to a structured error result, NOT reject with an McpError.
+        const result = await callHandler(request);
+
+        expect(result.isError).toBe(true);
+        const text = (result.content[0] as { text: string }).text;
+        expect(text).toContain('TOOL_EXECUTION_ERROR');
+        expect(text).toContain('simulated store-specific write crash');
+        expect(text).toMatch(/Suggestion:/);
+      } finally {
+        moduleData.cleanup();
+        handlerSpy.mockRestore();
+        consoleSpy.mockRestore();
+      }
+    }
+  );
+
   test('registerToolHandlers reports when server context is missing', async () => {
     const moduleData = await loadIndexModule();
     const { indexModule, mockServer, ErrorHandler } = moduleData;

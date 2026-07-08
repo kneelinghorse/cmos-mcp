@@ -441,6 +441,152 @@ describe('cmos_agent_onboard', () => {
     });
   });
 
+  // Sprint 74 m02: currentSprint treats Failed/Dropped as terminal + case-folds
+  // ---------------------------------------------------------------------------
+  // Bug context: Forge reproduction (msg 0b1050b9). Their dead sprint-101 (Failed)
+  // surfaced as currentSprint while sprints 102-111 were Completed. Root cause:
+  // every step excluded only 'Archived' (and Completed in the open-work steps),
+  // so Step 3 (getMostRecentlyActiveSprintId) — which runs before the Completed-
+  // aware Step 5 — was the only step a Failed sprint could reach, and it returned
+  // the dead sprint. The '= Completed' compares were also case-sensitive, so a
+  // lowercase 'completed' dodged the exclusion. Extends the s55-m03 Archived
+  // pattern (decision #567) to {Archived, Failed, Dropped}, compared UPPER().
+  // ---------------------------------------------------------------------------
+  describe('Sprint 74 m02: Failed/Dropped terminal exclusion + case-fold', () => {
+    it('does not surface a Failed sprint even when it has the most recent mission activity', async () => {
+      const db = new Database(dbPath);
+      db.exec(`
+        DELETE FROM missions;
+        DELETE FROM sprints;
+        INSERT INTO sprints (id, title, status, focus, start_date, end_date) VALUES
+          ('sprint-completed', 'Completed Sprint', 'Completed', 'Shipped', '2024-01-01', '2024-01-15'),
+          ('sprint-failed-recent', 'Failed Sprint', 'Failed', 'Abandoned', '2024-06-01', '2024-06-15');
+        INSERT INTO missions (id, sprint_id, name, status, objective, completed_at) VALUES
+          ('m-completed', 'sprint-completed', 'Done work', 'Completed', 'Done', '2024-01-14T10:00:00Z'),
+          ('m-failed', 'sprint-failed-recent', 'Newer but failed', 'Completed', 'Failed', '2024-06-14T10:00:00Z');
+      `);
+      db.close();
+
+      const result = await cmosAgentOnboardWithDb(dbPath);
+      expect(result.success).toBe(true);
+      expect(result.data?.currentSprint?.status).not.toBe('Failed');
+      expect(result.data?.currentSprint?.id).toBe('sprint-completed');
+    });
+
+    it('does not surface a Dropped sprint even when it has the most recent mission activity', async () => {
+      const db = new Database(dbPath);
+      db.exec(`
+        DELETE FROM missions;
+        DELETE FROM sprints;
+        INSERT INTO sprints (id, title, status, focus, start_date, end_date) VALUES
+          ('sprint-completed', 'Completed Sprint', 'Completed', 'Shipped', '2024-01-01', '2024-01-15'),
+          ('sprint-dropped-recent', 'Dropped Sprint', 'Dropped', 'Cut', '2024-06-01', '2024-06-15');
+        INSERT INTO missions (id, sprint_id, name, status, objective, completed_at) VALUES
+          ('m-completed', 'sprint-completed', 'Done work', 'Completed', 'Done', '2024-01-14T10:00:00Z'),
+          ('m-dropped', 'sprint-dropped-recent', 'Newer but dropped', 'Completed', 'Dropped', '2024-06-14T10:00:00Z');
+      `);
+      db.close();
+
+      const result = await cmosAgentOnboardWithDb(dbPath);
+      expect(result.success).toBe(true);
+      expect(result.data?.currentSprint?.status).not.toBe('Dropped');
+      expect(result.data?.currentSprint?.id).toBe('sprint-completed');
+    });
+
+    it('does not surface a Reverted sprint even when it has the most recent activity (Forge backlog msg 7aac15f6)', async () => {
+      // Forge repro: sprint-133 'Reverted' leaked into currentSprint in the
+      // review→plan gap while 134–148 were Completed, because 'Reverted' was not in
+      // DEAD_SPRINT_STATUSES. Even with the newest mission activity, a reverted
+      // sprint must be excluded and the latest Completed must win.
+      const db = new Database(dbPath);
+      db.exec(`
+        DELETE FROM missions;
+        DELETE FROM sprints;
+        INSERT INTO sprints (id, title, status, focus, start_date, end_date) VALUES
+          ('sprint-147', 'Done 147', 'Completed', 'Shipped', '2024-10-01', '2024-10-15'),
+          ('sprint-148', 'Done 148', 'Completed', 'Shipped', '2024-11-01', '2024-11-15'),
+          ('sprint-133', 'Reverted Sprint', 'Reverted', 'Rolled back', '2024-03-01', '2024-03-15');
+        INSERT INTO missions (id, sprint_id, name, status, objective, completed_at) VALUES
+          ('m-147', 'sprint-147', 'Done 147', 'Completed', 'Done', '2024-10-14T10:00:00Z'),
+          ('m-148', 'sprint-148', 'Done 148', 'Completed', 'Done', '2024-11-14T10:00:00Z'),
+          ('m-133', 'sprint-133', 'Reverted work', 'Completed', 'Reverted', '2024-12-14T10:00:00Z');
+      `);
+      db.close();
+
+      const result = await cmosAgentOnboardWithDb(dbPath);
+      expect(result.success).toBe(true);
+      expect(result.data?.currentSprint?.status).not.toBe('Reverted');
+      expect(result.data?.currentSprint?.id).toBe('sprint-148');
+    });
+
+    it('Forge repro: a Failed sprint with no later siblings still yields the latest Completed, not the Failed one', async () => {
+      // sprint-101 Failed is the ONLY non-Completed sprint, so the old Step 3
+      // (excludes Completed+Archived but not Failed) returned it regardless of
+      // 102-111's later activity. New code excludes Failed → falls through to the
+      // Completed-aware Step 5, which returns the most-recently-active Completed.
+      const db = new Database(dbPath);
+      db.exec(`
+        DELETE FROM missions;
+        DELETE FROM sprints;
+        INSERT INTO sprints (id, title, status, focus, start_date, end_date) VALUES
+          ('sprint-101', 'Failed', 'Failed', 'Abandoned', '2024-01-01', '2024-01-15'),
+          ('sprint-110', 'Done 110', 'Completed', 'Shipped', '2024-10-01', '2024-10-15'),
+          ('sprint-111', 'Done 111', 'Completed', 'Shipped', '2024-11-01', '2024-11-15');
+        INSERT INTO missions (id, sprint_id, name, status, objective, completed_at) VALUES
+          ('m-101', 'sprint-101', 'Failed work', 'Completed', 'Failed', '2024-01-14T10:00:00Z'),
+          ('m-110', 'sprint-110', 'Done 110', 'Completed', 'Done', '2024-10-14T10:00:00Z'),
+          ('m-111', 'sprint-111', 'Done 111', 'Completed', 'Done', '2024-11-14T10:00:00Z');
+      `);
+      db.close();
+
+      const result = await cmosAgentOnboardWithDb(dbPath);
+      expect(result.success).toBe(true);
+      expect(result.data?.currentSprint?.status).not.toBe('Failed');
+      expect(result.data?.currentSprint?.id).toBe('sprint-111');
+    });
+
+    it('treats a lowercase "failed" status as terminal (case-fold)', async () => {
+      const db = new Database(dbPath);
+      db.exec(`
+        DELETE FROM missions;
+        DELETE FROM sprints;
+        INSERT INTO sprints (id, title, status, focus, start_date, end_date) VALUES
+          ('sprint-completed', 'Completed Sprint', 'Completed', 'Shipped', '2024-01-01', '2024-01-15'),
+          ('sprint-fail-lower', 'lowercase failed', 'failed', 'Abandoned', '2024-06-01', '2024-06-15');
+        INSERT INTO missions (id, sprint_id, name, status, objective, completed_at) VALUES
+          ('m-completed', 'sprint-completed', 'Done work', 'Completed', 'Done', '2024-01-14T10:00:00Z'),
+          ('m-fail-lower', 'sprint-fail-lower', 'Newer but failed', 'Completed', 'failed', '2024-06-14T10:00:00Z');
+      `);
+      db.close();
+
+      const result = await cmosAgentOnboardWithDb(dbPath);
+      expect(result.success).toBe(true);
+      expect(result.data?.currentSprint?.id).toBe('sprint-completed');
+    });
+
+    it('case-folds Completed: a lowercase "completed" sprint is excluded from the drift step in favor of a genuinely-active one', async () => {
+      // Step 3 ("most recently active NON-completed sprint when status drifts")
+      // must skip a lowercase 'completed' sprint. Old case-sensitive code let it
+      // through and returned it over the genuinely-not-completed Planned sprint.
+      const db = new Database(dbPath);
+      db.exec(`
+        DELETE FROM missions;
+        DELETE FROM sprints;
+        INSERT INTO sprints (id, title, status, focus, start_date) VALUES
+          ('sprint-planned', 'Drifted Planned', 'Planned', 'Real in-flight work', '2024-02-01'),
+          ('sprint-comp-lower', 'lowercase completed', 'completed', 'Shipped', '2024-03-01');
+        INSERT INTO missions (id, sprint_id, name, status, objective, completed_at) VALUES
+          ('m-planned', 'sprint-planned', 'In-flight', 'Completed', 'Work', '2024-02-14T10:00:00Z'),
+          ('m-comp-lower', 'sprint-comp-lower', 'Most recent activity', 'Completed', 'Shipped', '2024-03-14T10:00:00Z');
+      `);
+      db.close();
+
+      const result = await cmosAgentOnboardWithDb(dbPath);
+      expect(result.success).toBe(true);
+      expect(result.data?.currentSprint?.id).toBe('sprint-planned');
+    });
+  });
+
   // Sprint 63 m01: cascade must trust real mission/session activity over the
   // admin-editable end_date column.
   //

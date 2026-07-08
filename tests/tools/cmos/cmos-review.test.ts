@@ -417,7 +417,7 @@ describe('cmos_review', () => {
 
       expect(digest.buildFreshness?.stale).toBe(true);
       expect(digest.buildFreshness?.reason).toBe('dist-missing');
-      expect(digest.next_actions[0].action).toContain('dist/ missing');
+      expect(digest.next_actions[0].action).toContain('build output missing');
     });
   });
 

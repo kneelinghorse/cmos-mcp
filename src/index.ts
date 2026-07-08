@@ -113,6 +113,7 @@ import {
   // Utility
   resolveProjectRoot,
   CMOS_PROJECT_ROOT_ENV,
+  CMOS_ERROR_CODES,
 } from './tools/cmos';
 import type {
   CmosMissionParams,
@@ -433,6 +434,18 @@ export function registerToolHandlers(
 
       return await executeMissionProtocolTool(name, args, context);
     } catch (error) {
+      // Sprint 74 m03: a tool HANDLER that throws an unhandled exception (a
+      // write-path crash — e.g. cmos_sprint(complete)/cmos_session(capture)
+      // hitting a store-specific failure) is a tool-EXECUTION failure, not a
+      // protocol error. Surface it as a structured CmosToolResult error
+      // (code + real message + suggestion) returned as an isError result —
+      // never a bare JSON-RPC -32603 that swallows the cause (aquex.ai aa124685).
+      // Genuine protocol errors (McpError: unknown tool, uninitialized context)
+      // keep their JSON-RPC error shape — they already carry a clear message.
+      if (!(error instanceof McpError)) {
+        return buildToolExecutionErrorResult(name, args, error);
+      }
+
       const sanitizedArgs = sanitizeArgs(args);
       const data: Record<string, JsonValue> = {
         tool: name,
@@ -465,6 +478,63 @@ export function registerToolHandlers(
       );
     }
   });
+}
+
+/**
+ * Sprint 74 m03 — convert an unhandled tool-handler exception into a structured
+ * CmosToolResult error returned as an `isError` tool result, so the caller sees a
+ * real `{code, message, suggestion}` instead of a bare JSON-RPC -32603 that hides
+ * the cause. Logs the underlying error (via ErrorHandler.handle, never re-throws)
+ * to keep the correlationId trail, then surfaces the REAL exception message —
+ * NOT the generic userMessage that toPublicError would substitute.
+ */
+export function buildToolExecutionErrorResult(
+  toolName: string,
+  args: unknown,
+  error: unknown
+): CallToolResult {
+  const sanitizedArgs = sanitizeArgs(args);
+  const data: Record<string, JsonValue> = { tool: toolName };
+  if (sanitizedArgs) {
+    data.args = sanitizedArgs;
+  }
+
+  const missionError = ErrorHandler.handle(
+    error,
+    'server.execute_tool',
+    { module: 'server', data },
+    { rethrow: false, userMessage: 'Tool execution failed. Please check inputs and try again.' }
+  );
+
+  const correlationId = missionError.context?.correlationId;
+  const correlationSuffix =
+    typeof correlationId === 'string' && correlationId.length > 0
+      ? ` (correlationId=${correlationId})`
+      : '';
+  const detail =
+    typeof missionError.message === 'string' && missionError.message.trim().length > 0
+      ? missionError.message.trim()
+      : 'unexpected internal error';
+
+  const structured = {
+    success: false as const,
+    error: {
+      code: CMOS_ERROR_CODES.TOOL_EXECUTION_ERROR,
+      message: `The '${toolName}' tool failed with an unhandled internal error: ${detail}`,
+      suggestion: `This is an internal error, not an input-validation problem — retry the call; if it persists, capture the tool inputs and report this${correlationSuffix}.`,
+    },
+  };
+
+  const text =
+    `Tool execution error [${structured.error.code}]: ${structured.error.message}\n` +
+    `Suggestion: ${structured.error.suggestion}\n\n` +
+    JSON.stringify(structured, null, 2);
+
+  return {
+    content: [{ type: 'text', text }],
+    structuredContent: structured,
+    isError: true,
+  };
 }
 
 export async function executeMissionProtocolTool(

@@ -1313,7 +1313,7 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "type": "string",
         },
         "forceComplete": {
-          "description": "Override the build-freshness gate for complete action. Closeout fails with BUILD_STALE on a stale build/server unless true; the override is recorded as a warning.",
+          "description": "No-op for complete action, kept for backward compatibility. Build-freshness is advisory — staleness is surfaced as a warning and never blocks closeout.",
           "type": "boolean",
         },
         "limit": {

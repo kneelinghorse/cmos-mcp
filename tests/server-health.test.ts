@@ -15,6 +15,7 @@ import {
   getServerHealth,
   isServerStale,
   getStartupManifest,
+  getServerProjectRoot,
   resetServerHealth,
   type BuildManifest,
 } from '../src/server-health';
@@ -79,6 +80,39 @@ describe('server-health', () => {
 
       const result = readBuildManifest(tempDir);
       expect(result).toBeNull();
+    });
+  });
+
+  describe('getServerProjectRoot', () => {
+    it('returns null when no manifest was located at startup', () => {
+      initServerHealth(tempDir);
+      expect(getServerProjectRoot()).toBeNull();
+    });
+
+    it('returns the project root (parent of dist/) for a manifest under dist/', () => {
+      // Production layout: <root>/dist/.build-manifest.json — the scope check must
+      // resolve to <root> so a sibling caller at a DIFFERENT root is scoped out.
+      const distDir = path.join(tempDir, 'dist');
+      fs.mkdirSync(distDir);
+      fs.writeFileSync(
+        path.join(distDir, '.build-manifest.json'),
+        JSON.stringify({ buildHash: 'h', buildTime: '2026-03-11T10:00:00.000Z', fileCount: 1 })
+      );
+
+      initServerHealth(tempDir);
+
+      expect(getServerProjectRoot()).toBe(tempDir);
+    });
+
+    it('returns the manifest directory when the manifest is at the root (no dist/)', () => {
+      fs.writeFileSync(
+        path.join(tempDir, '.build-manifest.json'),
+        JSON.stringify({ buildHash: 'h', buildTime: '2026-03-11T10:00:00.000Z', fileCount: 1 })
+      );
+
+      initServerHealth(tempDir);
+
+      expect(getServerProjectRoot()).toBe(tempDir);
     });
   });
 

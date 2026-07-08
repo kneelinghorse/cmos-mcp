@@ -261,11 +261,39 @@ function provenanceData(row: GenesisProvenanceRow): {
 
 // ─── Implementation ──────────────────────────────────────────────────────────
 
+/**
+ * Resolve a DashboardClient for cmos_db sync operations.
+ *
+ * Routes through fromEnvForProject so the MCP-tool path authenticates with the
+ * Sprint 57 credential-store key (the device-code / project-scoped cmk_ token,
+ * used as a permanent Bearer) — no CMOS_DASHBOARD_* env vars required.
+ * fromEnvForProject is a strict superset of fromEnv: it still falls back to the
+ * legacy CMOS_DASHBOARD_API_KEY and USER+PASSWORD env vars (steps 4-5) for
+ * standalone script/CI callers that run without a local credential store.
+ *
+ * s73 review finding: cmos_db backfill/reconcile/identify_orphans/purge were the
+ * last sync surface still on env-only auth via fromEnv; every other sync path
+ * (cmos_status, sync-pull, sync-mutable-push, sync-locks, checkpoint-backfill,
+ * cmos_message) already resolves through the credential store. This closes that
+ * gap, so a scrubbed .env (key-only auth) no longer breaks cmos_db.
+ */
+async function resolveSyncClient(
+  projectRoot: string | undefined,
+  overrides?: { timeoutMs?: number }
+): Promise<CmosToolResult<DashboardClient>> {
+  const result = await DashboardClient.fromEnvForProject(projectRoot, overrides);
+  if (!result.success || !result.data) {
+    return createError(result.error ?? CmosErrors.dashboardNotConfigured());
+  }
+  return createSuccess(result.data.client);
+}
+
 export async function cmosDbBackfill(
   params: CmosDbBackfillParams
 ): Promise<CmosToolResult<CmosDbBackfillResult>> {
-  // Validate dashboard is configured; honour per-request timeout override
-  const clientResult = DashboardClient.fromEnv({
+  // Resolve the dashboard client (credential store first, env fallback);
+  // honour per-request timeout override
+  const clientResult = await resolveSyncClient(params.projectRoot, {
     timeoutMs: params.perRequestTimeoutMs ?? PER_REQUEST_TIMEOUT_MS,
   });
   if (!clientResult.success || !clientResult.data) {
@@ -1011,7 +1039,7 @@ interface CountRow {
 export async function cmosDbReconcile(params: {
   projectRoot?: string;
 }): Promise<CmosToolResult<ReconciliationResult>> {
-  const clientResult = DashboardClient.fromEnv();
+  const clientResult = await resolveSyncClient(params.projectRoot);
   if (!clientResult.success || !clientResult.data) {
     return createError(CmosErrors.dashboardNotConfigured());
   }
@@ -1176,7 +1204,7 @@ export interface PgOrphanReport {
 export async function identifyPgOrphans(params: {
   projectRoot?: string;
 }): Promise<CmosToolResult<PgOrphanReport>> {
-  const clientResult = DashboardClient.fromEnv();
+  const clientResult = await resolveSyncClient(params.projectRoot);
   if (!clientResult.success || !clientResult.data) {
     return createError(CmosErrors.dashboardNotConfigured());
   }
@@ -1327,7 +1355,7 @@ export async function cmosDbPurge(params: {
     });
   }
 
-  const clientResult = DashboardClient.fromEnv();
+  const clientResult = await resolveSyncClient(params.projectRoot);
   if (!clientResult.success || !clientResult.data) {
     return createError(CmosErrors.dashboardNotConfigured());
   }
