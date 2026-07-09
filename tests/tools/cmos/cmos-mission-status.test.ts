@@ -453,7 +453,7 @@ describe('cmos_mission_status', () => {
       expect(result.data?.queued[0].id).toBe('s13-m01');
     });
 
-    it('should return null activeSprint when no sprints have missions', async () => {
+    it('surfaces the explicitly-open sprint when no sprints have missions (s77-m02 convergence)', async () => {
       const db = new Database(dbPath);
       db.exec('DELETE FROM missions');
       db.close();
@@ -461,7 +461,14 @@ describe('cmos_mission_status', () => {
       const result = await cmosMissionStatusWithDb(dbPath, {});
 
       expect(result.success).toBe(true);
-      expect(result.data?.activeSprint).toBeNull();
+      // Pre-s77-m02 this returned null — mission-status' picker required a sprint
+      // WITH missions, while onboard's getCurrentSprint already surfaced an
+      // explicitly-open (In Progress) sprint with no missions yet. m02 collapses
+      // both onto resolveCurrentSprintId, so mission-status now agrees: the open
+      // sprint IS the current sprint even before its missions are added.
+      expect(result.data?.activeSprint?.id).toBe('sprint-12');
+      // No open missions → nothing queued to scope in.
+      expect(result.data?.queued).toHaveLength(0);
     });
 
     it('should show all queued as fallback when no active sprint found', async () => {

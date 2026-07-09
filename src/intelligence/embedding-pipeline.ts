@@ -4,6 +4,7 @@
 
 import * as crypto from 'crypto';
 import type { CmosDatabaseClient } from '../tools/cmos/client';
+import { applyOfflineTransformersEnv, type TransformersEnv } from './transformers-offline-env';
 
 // ─── Public types ────────────────────────────────────────────────────────────
 
@@ -41,6 +42,8 @@ export const EMBEDDING_DIM = 384;
 
 let cachedEmbedder: Embedder | null = null;
 let testEmbedder: Embedder | null = null;
+let embedderLoadPromise: Promise<Embedder> | null = null;
+let embedderLoadAttempts = 0;
 
 /**
  * Override the embedder used by `recordEmbedding`. Pass null to restore the
@@ -51,21 +54,61 @@ export function setEmbedderForTesting(embedder: Embedder | null): void {
 }
 
 /**
- * Resolve the active embedder. Priority: test override > cached singleton >
- * lazy-load Xenova pipeline (model download on first call, then in-memory).
+ * Resolve the active embedder. Priority: test override > cached singleton (a real
+ * embedder OR the negative-cache no-op) > a single lazy-load attempt.
+ *
+ * NEGATIVE CACHE (Sprint 78 m03): `loadXenovaEmbedder` is attempted AT MOST ONCE
+ * per process. On failure — e.g. offline (`CMOS_OFFLINE_EMBEDDINGS=1`) with the
+ * model not in the local cache — we cache a no-op embedder that throws on use, so
+ * `recordEmbedding` and `HybridRetriever.embedQuery` fall into their catch/degrade
+ * paths instantly instead of re-hitting HuggingFace (a per-call network timeout).
+ * A concurrent burst shares the one in-flight load via `embedderLoadPromise`.
  */
 export async function getEmbedder(): Promise<Embedder> {
   if (testEmbedder) return testEmbedder;
   if (cachedEmbedder) return cachedEmbedder;
-  cachedEmbedder = await loadXenovaEmbedder();
-  return cachedEmbedder;
+  if (!embedderLoadPromise) {
+    embedderLoadPromise = (async () => {
+      embedderLoadAttempts += 1;
+      try {
+        cachedEmbedder = await loadXenovaEmbedder();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'unknown error';
+        console.error(
+          `[WARN] embedding-pipeline: embedder load failed — vector arm disabled (BM25-only), ` +
+            `not retrying this process — ${message}`
+        );
+        cachedEmbedder = makeUnavailableEmbedder(message);
+      } finally {
+        embedderLoadPromise = null;
+      }
+      return cachedEmbedder as Embedder;
+    })();
+  }
+  return embedderLoadPromise;
+}
+
+/**
+ * The no-op embedder cached after a failed load (negative cache). Throws on use;
+ * callers (recordEmbedding, HybridRetriever.embedQuery) catch it and degrade to
+ * BM25-only / action:'failed' rather than re-attempting the network fetch.
+ */
+function makeUnavailableEmbedder(reason: string): Embedder {
+  return async () => {
+    throw new Error(`embedder unavailable — vector arm disabled (${reason})`);
+  };
 }
 
 async function loadXenovaEmbedder(): Promise<Embedder> {
   // @xenova/transformers is ESM-only — dynamic import works from CJS context.
   const transformers = (await import('@xenova/transformers')) as unknown as {
     pipeline: (task: string, model: string) => Promise<XenovaFeatureExtractor>;
+    env: TransformersEnv;
   };
+  // Local-forever hook (s78-m03): honor CMOS_OFFLINE_EMBEDDINGS / CMOS_MODEL_CACHE_DIR
+  // BEFORE pipeline() so an offline install fails fast into the negative cache instead
+  // of blocking on a HuggingFace fetch.
+  applyOfflineTransformersEnv(transformers.env);
   const extractor = await transformers.pipeline('feature-extraction', EMBEDDING_MODEL);
   return async (text: string) => {
     const result = (await extractor(text, { pooling: 'mean', normalize: true })) as {
@@ -259,9 +302,18 @@ function upsertVector(
 
 // ─── Test reset (called between test cases) ──────────────────────────────────
 
-/** Drop the cached real Xenova embedder. Tests call this in afterAll if they
- *  ever invoked the real pipeline (rare — usually tests inject a mock). */
+/** Drop the cached real Xenova embedder (incl. the negative-cache no-op) and the
+ *  load-attempt counter. Tests call this in afterAll if they ever invoked the real
+ *  pipeline (rare — usually tests inject a mock). */
 export function __resetEmbedderCacheForTesting(): void {
   cachedEmbedder = null;
   testEmbedder = null;
+  embedderLoadPromise = null;
+  embedderLoadAttempts = 0;
+}
+
+/** Test-observable count of real embedder load attempts — the negative-cache proof
+ *  (repeated getEmbedder() calls after a failure must NOT re-attempt the load). */
+export function __getEmbedderLoadAttemptsForTesting(): number {
+  return embedderLoadAttempts;
 }

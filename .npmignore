@@ -15,5 +15,3 @@ logs/
 scripts/
 templates/
 SESSIONS.jsonl
-HTTP_TRANSPORT.md
-README_HTTP.md

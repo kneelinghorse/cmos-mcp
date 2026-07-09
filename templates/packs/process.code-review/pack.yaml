@@ -1,6 +1,0 @@
-name: "process.code-review"
-version: "1.0.0"
-displayName: "Code Review Checklist"
-description: "Run a structured code review ensuring critical quality dimensions are covered"
-author: "Engineering"
-schema: "schema.json"

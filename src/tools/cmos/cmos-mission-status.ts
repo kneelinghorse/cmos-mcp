@@ -19,6 +19,7 @@ import { z } from 'zod';
 import { withClient, type CmosDatabaseClient } from './client';
 import type { CmosToolResult, Mission, MissionStatus, Sprint } from './types';
 import { createError, createSuccess } from './errors';
+import { resolveCurrentSprintId } from './current-sprint';
 
 /**
  * Mission item with sprint context for the status view.
@@ -397,71 +398,48 @@ interface ActiveSprintInfo {
 /**
  * Find the active sprint by examining mission states.
  *
- * Strategy:
- * 1. Sprint with In Progress or Current missions (active work)
- * 2. Earliest Active sprint with Queued missions (next work)
- * 3. Most recent Active sprint with all work done (sprint complete)
+ * s77-m02: identity is delegated to the canonical resolveCurrentSprintId so this
+ * surface names the SAME current sprint as onboard / review / session-start (was
+ * a divergent 3-step picker whose `start_date ASC` Step 2 disagreed with onboard's
+ * `DESC` — the #853 split). `isComplete` stays a LOCAL computation: the resolved
+ * sprint has missions and none of them are still open.
  */
 function findActiveSprint(
   client: CmosDatabaseClient,
   sprintsMap: Map<string, Sprint>
 ): ActiveSprintInfo | null {
-  // Step 1: Find sprint with active work (In Progress or Current missions)
-  const activeWorkResult = client.getOne<{ sprint_id: string }>(
-    `SELECT sprint_id FROM missions
-     WHERE status IN ('In Progress', 'Current') AND sprint_id IS NOT NULL
-     LIMIT 1`,
-    []
-  );
-
-  if (activeWorkResult.success && activeWorkResult.data?.sprint_id) {
-    const sprint = sprintsMap.get(activeWorkResult.data.sprint_id);
-    if (sprint) {
-      return { sprint, isComplete: false };
-    }
+  const sprintId = resolveCurrentSprintId(client);
+  if (!sprintId) {
+    return null;
   }
-
-  // Step 2: Earliest Active sprint with Queued missions
-  const queuedWorkResult = client.getOne<{ sprint_id: string }>(
-    `SELECT m.sprint_id FROM missions m
-     JOIN sprints s ON m.sprint_id = s.id
-     WHERE m.status = 'Queued' AND m.sprint_id IS NOT NULL
-       AND s.status IN ('Active', 'In Progress')
-     ORDER BY s.start_date ASC, s.rowid ASC
-     LIMIT 1`,
-    []
-  );
-
-  if (queuedWorkResult.success && queuedWorkResult.data?.sprint_id) {
-    const sprint = sprintsMap.get(queuedWorkResult.data.sprint_id);
-    if (sprint) {
-      return { sprint, isComplete: false };
-    }
+  const sprint = sprintsMap.get(sprintId);
+  if (!sprint) {
+    return null;
   }
+  return { sprint, isComplete: isSprintComplete(client, sprintId) };
+}
 
-  // Step 3: Check for completed Active sprint (has missions, none remaining including blocked)
-  const completedSprintResult = client.getOne<{ id: string }>(
-    `SELECT s.id FROM sprints s
-     WHERE s.status IN ('Active', 'In Progress')
-       AND EXISTS (SELECT 1 FROM missions m WHERE m.sprint_id = s.id)
-       AND NOT EXISTS (
-         SELECT 1 FROM missions m
-         WHERE m.sprint_id = s.id
-           AND m.status IN ('In Progress', 'Current', 'Queued', 'Blocked')
-       )
-     ORDER BY s.start_date DESC, s.rowid DESC
-     LIMIT 1`,
-    []
+/**
+ * A sprint is "complete" for queue-scoping when it has at least one mission and
+ * none are still open (In Progress / Current / Queued / Blocked). A sprint with no
+ * missions yet is not complete (there is nothing done).
+ */
+function isSprintComplete(client: CmosDatabaseClient, sprintId: string): boolean {
+  const hasMissions = client.getOne<{ one: number }>(
+    `SELECT 1 AS one FROM missions WHERE sprint_id = ? LIMIT 1`,
+    [sprintId]
   );
-
-  if (completedSprintResult.success && completedSprintResult.data?.id) {
-    const sprint = sprintsMap.get(completedSprintResult.data.id);
-    if (sprint) {
-      return { sprint, isComplete: true };
-    }
+  if (!hasMissions.success || !hasMissions.data) {
+    return false;
   }
-
-  return null;
+  const openMission = client.getOne<{ one: number }>(
+    `SELECT 1 AS one FROM missions
+      WHERE sprint_id = ?
+        AND status IN ('In Progress', 'Current', 'Queued', 'Blocked')
+      LIMIT 1`,
+    [sprintId]
+  );
+  return !(openMission.success && openMission.data);
 }
 
 /**

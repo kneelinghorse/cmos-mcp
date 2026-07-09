@@ -18,6 +18,10 @@ jest.mock('../../../src/tools/cmos/cmos-session-complete', () => ({
   cmosSessionComplete: jest.fn(),
   formatSessionCompleteForLLM: jest.fn(),
 }));
+jest.mock('../../../src/tools/cmos/cmos-session-search', () => ({
+  cmosSessionSearch: jest.fn(),
+  formatSessionSearchForLLM: jest.fn(),
+}));
 
 import {
   CMOS_SESSION_ACTIONS,
@@ -29,6 +33,7 @@ import { cmosSessionList } from '../../../src/tools/cmos/cmos-session-list';
 import { cmosSessionStart } from '../../../src/tools/cmos/cmos-session-start';
 import { cmosSessionCapture } from '../../../src/tools/cmos/cmos-session-capture';
 import { cmosSessionComplete } from '../../../src/tools/cmos/cmos-session-complete';
+import { cmosSessionSearch } from '../../../src/tools/cmos/cmos-session-search';
 
 describe('cmos_session', () => {
   beforeEach(() => {
@@ -101,6 +106,36 @@ describe('cmos_session', () => {
     expect(result).toBe(expected);
   });
 
+  it('routes search action', async () => {
+    const expected = { success: true, data: { query: 'sqlite', results: [] } } as any;
+    (cmosSessionSearch as jest.MockedFunction<typeof cmosSessionSearch>).mockResolvedValueOnce(
+      expected
+    );
+
+    const result = await cmosSession({
+      action: 'search',
+      query: 'sqlite',
+      type: 'planning',
+      limit: 5,
+      projectRoot: '/tmp',
+    });
+    expect(cmosSessionSearch).toHaveBeenCalledWith(
+      expect.objectContaining({ query: 'sqlite', type: 'planning', limit: 5 })
+    );
+    expect(result).toBe(expected);
+  });
+
+  it('routes search action with a missing query as empty string (handler emits MISSING_PARAMETER)', async () => {
+    const expected = { success: false, error: { code: 'MISSING_PARAMETER' } } as any;
+    (cmosSessionSearch as jest.MockedFunction<typeof cmosSessionSearch>).mockResolvedValueOnce(
+      expected
+    );
+
+    await cmosSession({ action: 'search', projectRoot: '/tmp' });
+    // `?? ''` mirrors start/capture: the router forwards '' so the handler owns the error.
+    expect(cmosSessionSearch).toHaveBeenCalledWith(expect.objectContaining({ query: '' }));
+  });
+
   it('returns INVALID_ACTION for unknown action', async () => {
     const result = await cmosSession({ action: 'archive' as any });
     expect(result.success).toBe(false);
@@ -117,8 +152,9 @@ describe('cmos_session', () => {
   });
 
   describe('CMOS_SESSION_ACTIONS', () => {
-    it('contains 4 actions', () => {
-      expect(CMOS_SESSION_ACTIONS).toHaveLength(4);
+    it('contains 5 actions (incl. search)', () => {
+      expect(CMOS_SESSION_ACTIONS).toHaveLength(5);
+      expect(CMOS_SESSION_ACTIONS).toContain('search');
     });
   });
 

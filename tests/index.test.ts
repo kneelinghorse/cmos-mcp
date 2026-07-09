@@ -6,7 +6,9 @@ import {
   executeMissionProtocolTool,
   summarizeValue,
   sanitizeArgs,
+  getServerVersion,
 } from '../src/index';
+import * as fs from 'fs';
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 
 const DEPRECATED_TOOL_NAMES = [
@@ -73,20 +75,25 @@ describe('Mission Protocol entry point', () => {
   test('buildMissionProtocolContext creates default components', async () => {
     const context = await buildMissionProtocolContext();
 
+    // s77-m04: the vestigial `baseDir` (templates) was removed from the context.
     expect(context.defaultModel).toBe('claude');
-    expect(context.baseDir.endsWith(`${path.sep}templates`)).toBe(true);
     expect(typeof context.tokenCounter.count).toBe('function');
   });
 
-  test('buildMissionProtocolContext respects overrides', async () => {
-    const templatesDir = path.resolve(__dirname, '../templates');
-    const context = await buildMissionProtocolContext({
-      baseDir: templatesDir,
-      defaultModel: 'gpt',
-    });
+  test('buildMissionProtocolContext respects the defaultModel override', async () => {
+    const context = await buildMissionProtocolContext({ defaultModel: 'gemini' });
 
-    expect(context.baseDir).toBe(templatesDir);
-    expect(context.defaultModel).toBe('gpt');
+    expect(context.defaultModel).toBe('gemini');
+  });
+
+  test('getServerVersion returns the package.json version (s77-m04)', () => {
+    const pkg = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../package.json'), 'utf8')) as {
+      version: string;
+    };
+
+    const version = getServerVersion();
+    expect(version).toBe(pkg.version);
+    expect(version).toMatch(/^\d+\.\d+\.\d+/);
   });
 
   describe('executeMissionProtocolTool', () => {

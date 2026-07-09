@@ -31,12 +31,9 @@ export const CMOS_DASHBOARD_API_KEY_ENV = 'CMOS_DASHBOARD_API_KEY';
  * package so fresh installs reach the right host without env config. The 402
  * graceful-degradation path (m05) is the actual fresh-user UX when the user
  * has no account yet — they hit the default URL, dashboard returns 402, and
- * cmos_message etc surface https://cmos.aquex.ai for sign-up.
+ * cmos_message etc surface https://cmos.aquex.ai/register for sign-up.
  */
 export const DEFAULT_DASHBOARD_URL = 'https://cmos.aquex.ai';
-
-/** @deprecated Use CMOS_DASHBOARD_USER_ENV + CMOS_DASHBOARD_PASSWORD_ENV instead */
-export const CMOS_DASHBOARD_SECRET_ENV = 'CMOS_DASHBOARD_SECRET';
 
 /**
  * Resolve the dashboard base URL from explicit override → env var → baked default.

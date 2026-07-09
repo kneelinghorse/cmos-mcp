@@ -645,7 +645,6 @@ export {
   CMOS_DASHBOARD_URL_ENV,
   CMOS_DASHBOARD_USER_ENV,
   CMOS_DASHBOARD_PASSWORD_ENV,
-  CMOS_DASHBOARD_SECRET_ENV,
 } from './dashboard-client';
 
 export type {

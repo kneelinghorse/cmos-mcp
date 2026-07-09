@@ -11,6 +11,8 @@ import { withClient } from './client';
 import type { CmosToolResult } from './types';
 import { createSuccess } from './errors';
 import { loadUnifiedDecisionRecords, type DecisionSource } from './decision-memory';
+import { getProjectId } from './genesis-columns';
+import { frameForeignText } from '../../intelligence/provenance-frame';
 import {
   queryAcrossStores,
   type CrossStoreError,
@@ -89,6 +91,10 @@ export interface CmosDecisionsListResult {
 
   /** s69-m06: fan-out instrumentation — present only on the cross-store path. */
   crossStoreMetadata?: CrossStoreQueryResult['metadata'];
+
+  /** s78-m05: the querying store's own project_id. Rows whose projectId differs are
+   *  foreign (pull-merged or cross-store) and are framed as untrusted in the render. */
+  localProjectId?: string | null;
 }
 
 /**
@@ -235,6 +241,7 @@ export async function cmosDecisionsList(
           status: row.status,
           supersededBy: row.supersededBy,
           evidence: row.evidence,
+          projectId: row.projectId,
         }));
 
       return createSuccess<CmosDecisionsListResult>({
@@ -243,6 +250,7 @@ export async function cmosDecisionsList(
         page,
         pageSize,
         hasMore: offset + decisions.length < totalCount,
+        localProjectId: getProjectId(client),
       });
     },
     { projectRoot: params.projectRoot }
@@ -385,9 +393,18 @@ export function formatDecisionsListForLLM(result: CmosToolResult<CmosDecisionsLi
     const source = d.source === 'session_capture' ? ' [session capture]' : '';
     const category = d.category ? ` <${d.category}>` : '';
     const status = d.status && d.status !== 'active' ? ` [${d.status}]` : '';
-    lines.push(
-      `• ${d.decision}${project}${domain}${sprint}${mission}${category}${status}${source}`
-    );
+    const meta = `${project}${domain}${sprint}${mission}${category}${status}${source}`;
+    // s78-m05: a decision from another project (pull-merged or cross-store) is foreign,
+    // non-locally-authored content — frame its text as untrusted DATA rather than emitting it
+    // as a bare bullet. localProjectId absent (portfolio view) → treat every tagged row as foreign.
+    const isForeign =
+      d.projectId != null && (data.localProjectId == null || d.projectId !== data.localProjectId);
+    if (isForeign) {
+      lines.push(`•${meta}`);
+      lines.push(frameForeignText(d.decision, `proj:${d.projectId}`));
+    } else {
+      lines.push(`• ${d.decision}${meta}`);
+    }
     lines.push(`  Created: ${d.createdAt}`);
     lines.push('');
   }

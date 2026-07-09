@@ -30,6 +30,7 @@ import { cmosMissionStatus, type StatusMissionItem } from './cmos-mission-status
 import { checkBuildFreshness, type BuildFreshnessReport } from './build-freshness';
 import { resolveProjectRootEnhanced } from '../../intelligence/project-registry';
 import { ProjectGraphRegistry } from '../../intelligence/project-graph-registry';
+import { isReadOnlyAgentSession } from './read-only-agent-guard';
 
 /**
  * Compact action descriptor for the flat top-level next_actions array.
@@ -365,6 +366,9 @@ async function resolveReviewFreshness(
  * Swallows every error: registry bookkeeping must never break the session opener.
  */
 async function touchProjectGraphRegistry(explicitRoot: string | undefined): Promise<void> {
+  // s78-m04: the read-only review role must not mutate ANY store — skip the per-user
+  // project-graph last_seen_at write so review mode is side-effect-free everywhere.
+  if (isReadOnlyAgentSession()) return;
   try {
     let root = explicitRoot;
     if (!root) {

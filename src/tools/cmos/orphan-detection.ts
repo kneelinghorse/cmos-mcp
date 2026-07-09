@@ -11,6 +11,11 @@
  */
 
 import type { CmosDatabaseClient } from './client';
+import {
+  SPRINT_NO_OPEN_WORK_STATUSES,
+  MISSION_TERMINAL_STATUSES,
+  statusNotInSql,
+} from './terminal-status';
 
 /** Default threshold: sessions active for >24 hours are stale */
 const STALE_SESSION_HOURS = 24;
@@ -148,7 +153,7 @@ function findOrphanedSprints(client: CmosDatabaseClient): OrphanedSprint[] {
     `SELECT s.id, s.title, s.status
      FROM sprints s
      LEFT JOIN missions m ON m.sprint_id = s.id
-     WHERE s.status NOT IN ('Completed', 'Archived')
+     WHERE ${statusNotInSql('s.status', SPRINT_NO_OPEN_WORK_STATUSES)}
      GROUP BY s.id
      HAVING COUNT(m.id) = 0
      ORDER BY s.id`
@@ -171,7 +176,7 @@ function findOrphanedMissions(client: CmosDatabaseClient, staleDays: number): Or
     `SELECT id, name, status, started_at
      FROM missions
      WHERE (sprint_id IS NULL OR sprint_id = '')
-       AND status NOT IN ('Completed', 'Archived')
+       AND ${statusNotInSql('status', MISSION_TERMINAL_STATUSES)}
      ORDER BY id`
   );
   if (noSprintResult.success && noSprintResult.data) {

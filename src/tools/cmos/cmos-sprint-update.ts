@@ -11,6 +11,8 @@ import { z } from 'zod';
 import { withClientValidated } from './client';
 import type { CmosToolResult, Sprint } from './types';
 import { createError, createSuccess, CmosErrors, CMOS_ERROR_CODES } from './errors';
+import { isOpenStatus } from './terminal-status';
+import { buildDemotionWarning, writeSingleCurrentSprint } from './sprint-current-invariant';
 
 /**
  * Fields that can be updated on a sprint.
@@ -172,10 +174,6 @@ export async function cmosSprintUpdate(
         return createError<SprintUpdateResult>(CmosErrors.sprintNotFound(sprintId));
       }
 
-      // Build dynamic UPDATE query
-      const setClauses: string[] = [];
-      const queryParams: (string | null)[] = [];
-
       // Map of TypeScript field names to database column names
       const fieldMapping: Record<string, string> = {
         title: 'title',
@@ -185,47 +183,76 @@ export async function cmosSprintUpdate(
         endDate: 'end_date',
       };
 
-      for (const key of fieldKeys) {
-        const dbColumn = fieldMapping[key];
-        if (!dbColumn) continue;
+      // The primary write: build + run the dynamic UPDATE from the provided fields.
+      const applyUpdate = (): CmosToolResult<void> => {
+        const setClauses: string[] = [];
+        const queryParams: (string | null)[] = [];
 
-        const value = fields[key as keyof SprintUpdateFields];
-        if (value === undefined) continue;
+        for (const key of fieldKeys) {
+          const dbColumn = fieldMapping[key];
+          if (!dbColumn) continue;
 
-        setClauses.push(`${dbColumn} = ?`);
-        queryParams.push(value.trim() || null);
-      }
+          const value = fields[key as keyof SprintUpdateFields];
+          if (value === undefined) continue;
 
-      // Add sprintId as the last parameter for WHERE clause
-      queryParams.push(sprintId);
+          setClauses.push(`${dbColumn} = ?`);
+          queryParams.push(value.trim() || null);
+        }
 
-      const updateQuery = `
+        // Add sprintId as the last parameter for WHERE clause
+        queryParams.push(sprintId);
+
+        const updateQuery = `
         UPDATE sprints
         SET ${setClauses.join(', ')}
         WHERE id = ?
       `;
 
-      const updateResult = client.execute(updateQuery, queryParams);
+        const updateResult = client.execute(updateQuery, queryParams);
 
-      if (!updateResult.success) {
-        return createError<SprintUpdateResult>(
-          updateResult.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to update sprint' }
-        );
+        if (!updateResult.success) {
+          return createError<void>(
+            updateResult.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to update sprint' }
+          );
+        }
+
+        if (updateResult.data?.changes === 0) {
+          return createError<void>({
+            code: CMOS_ERROR_CODES.DB_QUERY_FAILED,
+            message: `Failed to update sprint '${sprintId}'`,
+            suggestion: 'The sprint may have been modified by another process',
+          });
+        }
+
+        return createSuccess<void>(undefined);
+      };
+
+      const message = `Sprint '${sprintId}' updated successfully (${fieldKeys.length} field${fieldKeys.length === 1 ? '' : 's'})`;
+      const success = (warnings?: string[]): CmosToolResult<SprintUpdateResult> =>
+        createSuccess({ sprintId, updatedFields: fieldKeys, message }, warnings);
+
+      // Single-current-sprint invariant (s77-m01): only when this update puts the
+      // sprint INTO the OPEN set do we demote the other open sprints (atomically).
+      // A field-only edit or a move to a non-open status opens no new work, so it
+      // takes the plain UPDATE path and demotes nothing.
+      const nextStatus = fields.status?.trim();
+      const willBecomeOpen =
+        nextStatus !== undefined && nextStatus !== '' && isOpenStatus(nextStatus);
+
+      if (!willBecomeOpen) {
+        const updated = applyUpdate();
+        if (!updated.success) {
+          return createError<SprintUpdateResult>(updated.error!);
+        }
+        return success();
       }
 
-      if (updateResult.data?.changes === 0) {
-        return createError<SprintUpdateResult>({
-          code: CMOS_ERROR_CODES.DB_QUERY_FAILED,
-          message: `Failed to update sprint '${sprintId}'`,
-          suggestion: 'The sprint may have been modified by another process',
-        });
+      const invariant = writeSingleCurrentSprint(client, sprintId, applyUpdate);
+      if (!invariant.success) {
+        return createError<SprintUpdateResult>(invariant.error!);
       }
-
-      return createSuccess({
-        sprintId,
-        updatedFields: fieldKeys,
-        message: `Sprint '${sprintId}' updated successfully (${fieldKeys.length} field${fieldKeys.length === 1 ? '' : 's'})`,
-      });
+      const warning = buildDemotionWarning(invariant.data!.demoted);
+      return success(warning ? [warning] : undefined);
     },
     { projectRoot: params.projectRoot }
   );

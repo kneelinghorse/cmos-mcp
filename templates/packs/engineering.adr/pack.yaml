@@ -1,6 +1,0 @@
-name: "engineering.adr"
-version: "1.0.0"
-displayName: "Architecture Decision Record"
-description: "Document critical architecture decisions with context, outcomes, and rationale"
-author: "Architecture Guild"
-schema: "schema.json"

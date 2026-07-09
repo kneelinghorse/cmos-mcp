@@ -1,6 +1,8 @@
 /**
  * TokenCounter offline implementation tests
- * Tests the hybrid offline tokenizer strategy (R2.1)
+ * Tests the hybrid offline tokenizer strategy (R2.1).
+ * s77-m03: the GPT path was excised — an honest Claude (@xenova) + Gemini counter
+ * remains, and an unsupported model (incl. the retired 'gpt') throws.
  */
 
 import { describe, test, expect, beforeEach, jest } from '@jest/globals';
@@ -16,15 +18,6 @@ jest.mock('../../src/intelligence/telemetry', () => {
     emitTelemetryError: jest.fn(),
   };
 });
-
-// Mock gpt-tokenizer
-jest.mock(
-  'gpt-tokenizer',
-  () => ({
-    encode: jest.fn((text: string) => Array(Math.max(1, Math.ceil(text.length / 4))).fill(0)),
-  }),
-  { virtual: true }
-);
 
 // Mock @xenova/transformers for Claude
 jest.mock(
@@ -44,10 +37,6 @@ jest.mock(
   { virtual: true }
 );
 
-let telemetryWarningMock: jest.MockedFunction<
-  typeof import('../../src/intelligence/telemetry').emitTelemetryWarning
->;
-
 type TokenCounterClass = typeof import('../../src/intelligence/token-counters').TokenCounter;
 
 let TokenCounter: TokenCounterClass;
@@ -57,28 +46,15 @@ let transformersMock: {
     from_pretrained: jest.Mock;
   };
 };
-let gptTokenizerMock: {
-  encode: jest.Mock;
-};
 let bootstrapTestUtils: { reset: () => void } | undefined;
-let getTokenizerHealth:
-  | typeof import('../../src/intelligence/tokenizer-bootstrap').getTokenizerHealth
-  | undefined;
-let ensureTokenizersReady:
-  | typeof import('../../src/intelligence/tokenizer-bootstrap').ensureTokenizersReady
-  | undefined;
 
 describe('TokenCounter offline implementation', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    getTokenizerHealth = undefined;
-    ensureTokenizersReady = undefined;
     jest.isolateModules(() => {
       ({ TokenCounter } = require('../../src/intelligence/token-counters'));
       const bootstrapModule = require('../../src/intelligence/tokenizer-bootstrap');
       bootstrapTestUtils = bootstrapModule.__test__;
-      getTokenizerHealth = bootstrapModule.getTokenizerHealth;
-      ensureTokenizersReady = bootstrapModule.ensureTokenizersReady;
     });
     bootstrapTestUtils?.reset();
     tokenCounter = new TokenCounter();
@@ -87,16 +63,6 @@ describe('TokenCounter offline implementation', () => {
         from_pretrained: jest.Mock;
       };
     };
-    gptTokenizerMock = jest.requireMock('gpt-tokenizer') as {
-      encode: jest.Mock;
-    };
-    telemetryWarningMock = require('../../src/intelligence/telemetry')
-      .emitTelemetryWarning as jest.MockedFunction<
-      typeof import('../../src/intelligence/telemetry').emitTelemetryWarning
-    >;
-    gptTokenizerMock.encode.mockImplementation((text: unknown) =>
-      Array(Math.max(1, Math.ceil(String(text ?? '').length / 4))).fill(0)
-    );
     transformersMock.AutoTokenizer.from_pretrained.mockImplementation(async () => {
       return async (text: string) => ({
         input_ids: {
@@ -104,13 +70,6 @@ describe('TokenCounter offline implementation', () => {
         },
       });
     });
-  });
-
-  test('GPT uses gpt-tokenizer (offline)', async () => {
-    const result = await tokenCounter.count('hello world', 'gpt');
-    expect(result.model).toBe('gpt');
-    expect(result.count).toBeGreaterThan(0);
-    expect(result.estimatedCost).toBeGreaterThan(0);
   });
 
   test('Claude uses Transformers.js (offline)', async () => {
@@ -129,25 +88,21 @@ describe('TokenCounter offline implementation', () => {
     expect(result.estimatedCost).toBeGreaterThan(0);
   });
 
-  test('GPT falls back to heuristic on library failure', async () => {
-    gptTokenizerMock.encode.mockImplementationOnce(() => {
-      throw new Error('Library not available');
-    });
-
-    const result = await tokenCounter.count('test text', 'gpt');
-    expect(result.model).toBe('gpt');
-    expect(result.count).toBeGreaterThan(0);
-  });
-
   test('Unsupported model throws error', async () => {
     await expect(tokenCounter.count('test', 'unknown' as any)).rejects.toThrow('Unsupported model');
   });
 
-  test('Cost estimation is proportional to token count', async () => {
-    const result1 = await tokenCounter.count('short', 'gpt');
+  test('the retired gpt model throws Unsupported model: gpt (keep-branch guard)', async () => {
+    await expect(tokenCounter.count('test', 'gpt' as any)).rejects.toThrow(
+      'Unsupported model: gpt'
+    );
+  });
+
+  test('Cost estimation is proportional to token count (Claude)', async () => {
+    const result1 = await tokenCounter.count('short', 'claude');
     const result2 = await tokenCounter.count(
       'This is a much longer text that should result in more tokens and higher cost',
-      'gpt'
+      'claude'
     );
 
     expect(result2.count).toBeGreaterThan(result1.count);
@@ -155,9 +110,8 @@ describe('TokenCounter offline implementation', () => {
   });
 
   test('Claude tokenizer is cached between invocations', async () => {
-    expect(ensureTokenizersReady).toBeDefined();
-    await ensureTokenizersReady?.();
-    expect(transformersMock.AutoTokenizer.from_pretrained).toBeDefined();
+    // Warm the cache with one real count, then confirm subsequent counts reuse it.
+    await tokenCounter.count('warm up', 'claude');
     transformersMock.AutoTokenizer.from_pretrained.mockClear();
 
     await tokenCounter.count('first run', 'claude');

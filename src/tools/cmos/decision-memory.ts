@@ -32,6 +32,9 @@ export interface DecisionRecord {
   status: string | null;
   supersededBy: number | null;
   evidence: string | null;
+  /** s78-m05: the row's genesis project_id (null pre-migration / for local session captures).
+   *  Compared against the local store id to frame pull-merged foreign rows as untrusted. */
+  projectId: string | null;
 }
 
 export interface SprintDecisionCounts {
@@ -53,6 +56,7 @@ interface StrategicDecisionRow {
   status: string | null;
   superseded_by: number | null;
   evidence: string | null;
+  project_id: string | null;
 }
 
 interface SessionDecisionRow {
@@ -127,6 +131,7 @@ function loadStrategicDecisionRecords(
   const statusExpr = decisionColumns.has('status') ? 'sd.status' : "'active'";
   const supersededByExpr = decisionColumns.has('superseded_by') ? 'sd.superseded_by' : 'NULL';
   const evidenceExpr = decisionColumns.has('evidence') ? 'sd.evidence' : 'NULL';
+  const projectExpr = decisionColumns.has('project_id') ? 'sd.project_id' : 'NULL';
   const sprintExprBase = decisionColumns.has('sprint_id') ? 'sd.sprint_id' : 'NULL';
 
   const missionJoin =
@@ -182,7 +187,8 @@ function loadStrategicDecisionRecords(
         ${categoryExpr} AS category,
         ${statusExpr} AS status,
         ${supersededByExpr} AS superseded_by,
-        ${evidenceExpr} AS evidence
+        ${evidenceExpr} AS evidence,
+        ${projectExpr} AS project_id
        FROM strategic_decisions sd
        ${missionJoin}
        ${sessionJoin}
@@ -208,6 +214,7 @@ function loadStrategicDecisionRecords(
     status: row.status,
     supersededBy: row.superseded_by,
     evidence: row.evidence,
+    projectId: row.project_id,
   }));
 }
 
@@ -284,6 +291,7 @@ function loadSessionFallbackDecisionRecords(
         status: 'active',
         supersededBy: null,
         evidence: null,
+        projectId: null, // local session capture — never foreign
       });
     }
   }

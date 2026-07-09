@@ -20,6 +20,12 @@ import { createSuccess } from './errors';
 import { recordAgentFeedback } from './agent-feedback';
 import { DashboardClient, type DashboardMessage } from './dashboard-client';
 import {
+  foreignDescriptor,
+  frameForeignInline,
+  UNTRUSTED_CONTENT_CONTRACT,
+  type ProvenanceDescriptor,
+} from '../../intelligence/provenance-frame';
+import {
   calculateContextFreshness,
   buildContextStalenessWarning,
   type ContextFreshness,
@@ -40,6 +46,7 @@ import {
 } from './context-retention';
 import { detectAndFlagStaleness } from './staleness-detection';
 import { detectOrphans, buildOrphanWarnings, type OrphanDetectionResult } from './orphan-detection';
+import { resolveCurrentSprintId } from './current-sprint';
 import {
   getServerHealth,
   getServerProjectRoot,
@@ -380,6 +387,9 @@ export interface RecentMessageSummary {
 
   /** When the message was sent */
   createdAt: string;
+
+  /** s78-m05: additive provenance descriptor — inbound messages are untrusted foreign content. */
+  provenance?: ProvenanceDescriptor;
 }
 
 /**
@@ -415,7 +425,8 @@ interface InternalCmosAgentOnboardParams extends CmosAgentOnboardParams {
 export const cmosAgentOnboardToolDefinition = {
   name: 'cmos_agent_onboard',
   description:
-    'Get aggregated onboarding payload for agent cold-start. Returns project identity, active session, pending missions, recent decisions, and suggested actions. Optimized for context windows (<4KB).',
+    'Get aggregated onboarding payload for agent cold-start. Returns project identity, active session, pending missions, recent decisions, and suggested actions. Optimized for context windows (<4KB). ' +
+    UNTRUSTED_CONTENT_CONTRACT,
   inputSchema: {
     type: 'object',
     properties: {
@@ -826,251 +837,21 @@ function getLastSession(client: CmosDatabaseClient, tier: string): LastSessionDa
   }
 }
 
-// Sprint 74 m02: a sprint in one of these "dead" statuses must never surface as
-// the current sprint, even when it has the most recent mission/session activity.
-// Extends the s55-m03 Archived-only exclusion (decision #567) to Failed/Dropped —
-// reported by Forge (msg 0b1050b9: a Failed sprint-101 showed as current while
-// 102-111 were Completed). The Step-3 drift query runs before the Completed-aware
-// Step 5, so a Failed/Dropped sprint could only ever be reached there.
-// 'Reverted' added per Forge backlog request (msg 7aac15f6): a reverted sprint is
-// terminal too, but leaked into currentSprint in the review→plan gap, forcing
-// consumers to mint placeholder Active sprints to re-point the opener. Matching is
-// case-insensitive via statusNotIn, so nonstandard casing ('reverted') is covered.
-const DEAD_SPRINT_STATUSES = ['Archived', 'Failed', 'Dropped', 'Reverted'];
-// Steps that hunt for OPEN/in-flight work also treat Completed as terminal (a
-// completed sprint has no open work to resume). The Completed-aware fallback
-// (Step 5 / getMostRecentlyActiveSprintIdIncludingCompleted) re-admits Completed
-// by excluding only DEAD_SPRINT_STATUSES.
-const NO_OPEN_WORK_STATUSES = [...DEAD_SPRINT_STATUSES, 'Completed'];
+// s77-m02: the six-step current-sprint cascade + its helpers were lifted into
+// src/tools/cmos/current-sprint.ts so onboard, mission-status, session-start and
+// capture all name the SAME current sprint. getCurrentSprint now = resolve the id
+// (canonical resolver) + build the SprintContext locally.
 
 /**
- * Build a case-insensitive `UPPER(<expr>) NOT IN (...)` SQL fragment from a
- * static status list, so a drifted-case status (e.g. lowercase 'failed' or
- * 'completed') cannot dodge the exclusion. The statuses are compile-time
- * constants, never user input, so direct interpolation is safe.
- */
-function statusNotIn(statusExpr: string, statuses: readonly string[]): string {
-  const list = statuses.map((s) => `'${s.toUpperCase()}'`).join(', ');
-  return `UPPER(${statusExpr}) NOT IN (${list})`;
-}
-
-/**
- * Get current sprint context using mission-aware detection.
- *
- * Strategy:
- * 1. Sprint with In Progress or Current missions (active work)
- * 2. Explicit In Progress/Current/Active sprint that still has open work or no missions yet
- * 3. Most recently active non-Completed sprint when status fields drift behind reality
- * 4. Earliest non-completed sprint with Queued missions (next work)
- * 5. Most recently active sprint by real activity (any non-Archived, includes Completed)
- * 6. Fall back to status-based ordering
+ * Get current sprint context: the canonical resolveCurrentSprintId cascade plus
+ * this module's SprintContext shape (title/status/focus).
  */
 function getCurrentSprint(client: CmosDatabaseClient): SprintContext | null {
-  // Sprint 55 m03: Archived sprints must never surface as currentSprint, even
-  // if an Archived sprint has recent mission/session activity. Each step below
-  // filters Archived explicitly (Step 2 is already scoped to open statuses).
-
-  // Step 1: Find sprint with active work (In Progress or Current missions) on
-  // a non-Archived sprint.
-  const activeWorkResult = client.getOne<{ sprint_id: string }>(
-    `SELECT m.sprint_id FROM missions m
-       JOIN sprints s ON s.id = m.sprint_id
-      WHERE m.status IN ('In Progress', 'Current')
-        AND m.sprint_id IS NOT NULL
-        AND ${statusNotIn("COALESCE(s.status, 'Planned')", DEAD_SPRINT_STATUSES)}
-      LIMIT 1`,
-    []
-  );
-
-  if (activeWorkResult.success && activeWorkResult.data?.sprint_id) {
-    return getSprintContextById(client, activeWorkResult.data.sprint_id);
-  }
-
-  // Step 2: Prefer an explicitly active sprint unless it already looks fully completed.
-  const explicitOpenSprintId = getExplicitOpenSprintId(client);
-  if (explicitOpenSprintId) {
-    return getSprintContextById(client, explicitOpenSprintId);
-  }
-
-  // Step 3: Most recently active sprint with mission/session activity, even if the
-  // sprint status was never advanced beyond Planned.
-  const recentActivitySprintId = getMostRecentlyActiveSprintId(client);
-  if (recentActivitySprintId) {
-    return getSprintContextById(client, recentActivitySprintId);
-  }
-
-  // Step 4: Earliest non-completed, non-archived sprint with Queued missions
-  const queuedWorkResult = client.getOne<{ sprint_id: string }>(
-    `SELECT m.sprint_id FROM missions m
-     JOIN sprints s ON m.sprint_id = s.id
-     WHERE m.status = 'Queued' AND m.sprint_id IS NOT NULL
-       AND ${statusNotIn("COALESCE(s.status, 'Planned')", NO_OPEN_WORK_STATUSES)}
-     ORDER BY CASE COALESCE(s.status, 'Planned')
-        WHEN 'In Progress' THEN 0
-        WHEN 'Current' THEN 1
-        WHEN 'Active' THEN 2
-        WHEN 'Planned' THEN 3
-        ELSE 4
-      END, COALESCE(s.start_date, '9999-12-31') ASC, s.rowid ASC
-     LIMIT 1`,
-    []
-  );
-
-  if (queuedWorkResult.success && queuedWorkResult.data?.sprint_id) {
-    return getSprintContextById(client, queuedWorkResult.data.sprint_id);
-  }
-
-  // Step 5: Most recently active non-Archived sprint by real mission/session
-  // activity, allowing Completed status. The Step 6 status-and-end_date
-  // fallback below trusts sprints.end_date, but that column is admin-editable
-  // (set by sprint(complete), backfilled by closeout scripts) and frequently
-  // drifts later than the sprint's actual activity — see Sprint 63 m01.
-  // Querying mission/session timestamps yields the genuinely most-recent
-  // shipped sprint, which is what an agent cold-starting on a fork-and-forget
-  // project expects to see.
-  const recentlyActiveSprintId = getMostRecentlyActiveSprintIdIncludingCompleted(client);
-  if (recentlyActiveSprintId) {
-    return getSprintContextById(client, recentlyActiveSprintId);
-  }
-
-  // Step 6: Fall back to status-based ordering, with Archived sprints excluded
-  // entirely. When no Active/In Progress/Planned sprint exists, prefer the
-  // latest Completed sprint over silently returning an Archived record.
-  const result = client.getOne<{
-    id: string;
-    title: string;
-    status: string | null;
-    focus: string | null;
-  }>(
-    `SELECT id, title, status, focus
-       FROM sprints
-      WHERE ${statusNotIn("COALESCE(status, 'Planned')", DEAD_SPRINT_STATUSES)}
-      ORDER BY CASE status
-        WHEN 'In Progress' THEN 0
-        WHEN 'Current' THEN 1
-        WHEN 'Active' THEN 2
-        WHEN 'Planned' THEN 3
-        WHEN 'Completed' THEN 4
-        ELSE 5
-      END, COALESCE(end_date, start_date, '') DESC, rowid DESC
-      LIMIT 1`,
-    []
-  );
-
-  if (!result.success || !result.data) {
+  const sprintId = resolveCurrentSprintId(client);
+  if (!sprintId) {
     return null;
   }
-
-  return {
-    id: result.data.id,
-    title: result.data.title,
-    status: result.data.status,
-    focus: result.data.focus,
-  };
-}
-
-function getExplicitOpenSprintId(client: CmosDatabaseClient): string | null {
-  const result = client.getOne<{ id: string }>(
-    `SELECT s.id
-       FROM sprints s
-      WHERE COALESCE(s.status, 'Planned') IN ('In Progress', 'Current', 'Active')
-        AND (
-          NOT EXISTS (
-            SELECT 1
-              FROM missions m
-             WHERE m.sprint_id = s.id
-          )
-          OR EXISTS (
-            SELECT 1
-              FROM missions m
-             WHERE m.sprint_id = s.id
-               AND COALESCE(m.status, '') != 'Completed'
-          )
-        )
-      ORDER BY CASE COALESCE(s.status, 'Planned')
-        WHEN 'In Progress' THEN 0
-        WHEN 'Current' THEN 1
-        WHEN 'Active' THEN 2
-        ELSE 3
-      END, COALESCE(s.start_date, '') DESC, s.rowid DESC
-      LIMIT 1`,
-    []
-  );
-
-  return result.success ? (result.data?.id ?? null) : null;
-}
-
-function getMostRecentlyActiveSprintId(client: CmosDatabaseClient): string | null {
-  // Sprint 55 m03: Archived sprints had historically-recent mission/session
-  // timestamps on mature projects like OODS-Foundry-MCP (74 sprints, 458
-  // missions), so this step was returning the latest Archived sprint instead
-  // of falling through to the Completed sprint in Step 5.
-  // Sprint 74 m02: this drift step runs before the Completed-aware Step 5, so a
-  // Failed/Dropped sprint could only ever be returned here — exclude the full
-  // NO_OPEN_WORK set (Archived/Failed/Dropped/Completed, case-insensitively) so
-  // only genuinely-active parent sprints bubble up (Forge msg 0b1050b9).
-  const result = client.getOne<{ sprint_id: string }>(
-    `SELECT activity.sprint_id
-       FROM (
-         SELECT m.sprint_id, m.completed_at AS activity_at
-           FROM missions m
-           JOIN sprints s ON s.id = m.sprint_id
-          WHERE m.sprint_id IS NOT NULL
-            AND m.completed_at IS NOT NULL
-            AND ${statusNotIn("COALESCE(s.status, 'Planned')", NO_OPEN_WORK_STATUSES)}
-         UNION ALL
-         SELECT sess.sprint_id, COALESCE(sess.completed_at, sess.started_at) AS activity_at
-           FROM sessions sess
-           JOIN sprints s ON s.id = sess.sprint_id
-          WHERE sess.sprint_id IS NOT NULL
-            AND ${statusNotIn("COALESCE(s.status, 'Planned')", NO_OPEN_WORK_STATUSES)}
-       ) AS activity
-      WHERE activity.activity_at IS NOT NULL
-      GROUP BY activity.sprint_id
-      ORDER BY MAX(activity.activity_at) DESC, activity.sprint_id DESC
-      LIMIT 1`,
-    []
-  );
-
-  return result.success ? (result.data?.sprint_id ?? null) : null;
-}
-
-// Sprint 63 m01: variant of getMostRecentlyActiveSprintId that allows
-// Completed sprints. The original only surfaces non-Completed sprints (to
-// catch drifted status fields); this one is the steady-state fallback for
-// fork-and-forget projects where every sprint is Completed and the cascade
-// would otherwise drop to sprints.end_date — which is admin-editable and
-// frequently stale.
-// Sprint 74 m02: allows Completed but still excludes the DEAD set
-// (Archived/Failed/Dropped) — a dead sprint must not surface here either, or
-// the Step-3 fix above would just be re-defeated by this fallback.
-function getMostRecentlyActiveSprintIdIncludingCompleted(
-  client: CmosDatabaseClient
-): string | null {
-  const result = client.getOne<{ sprint_id: string }>(
-    `SELECT activity.sprint_id
-       FROM (
-         SELECT m.sprint_id, m.completed_at AS activity_at
-           FROM missions m
-           JOIN sprints s ON s.id = m.sprint_id
-          WHERE m.sprint_id IS NOT NULL
-            AND m.completed_at IS NOT NULL
-            AND ${statusNotIn("COALESCE(s.status, 'Planned')", DEAD_SPRINT_STATUSES)}
-         UNION ALL
-         SELECT sess.sprint_id, COALESCE(sess.completed_at, sess.started_at) AS activity_at
-           FROM sessions sess
-           JOIN sprints s ON s.id = sess.sprint_id
-          WHERE sess.sprint_id IS NOT NULL
-            AND ${statusNotIn("COALESCE(s.status, 'Planned')", DEAD_SPRINT_STATUSES)}
-       ) AS activity
-      WHERE activity.activity_at IS NOT NULL
-      GROUP BY activity.sprint_id
-      ORDER BY MAX(activity.activity_at) DESC, activity.sprint_id DESC
-      LIMIT 1`,
-    []
-  );
-
-  return result.success ? (result.data?.sprint_id ?? null) : null;
+  return getSprintContextById(client, sprintId);
 }
 
 /**
@@ -1545,6 +1326,7 @@ async function fetchMessagingContext(warnings: string[]): Promise<MessagingSumma
         from: msg.from ?? null,
         status: msg.status,
         createdAt: msg.createdAt,
+        provenance: foreignDescriptor(msg.from ?? msg.senderAddress ?? msg.from_project_id),
       })),
     };
   } catch {
@@ -2292,8 +2074,9 @@ export function formatAgentOnboardForLLM(result: CmosToolResult<CmosAgentOnboard
     lines.push(`**Messaging**: ${data.messaging.unreadCount} unread`);
     if (data.messaging.recentMessages.length > 0) {
       for (const msg of data.messaging.recentMessages) {
-        const from = msg.from ? ` from ${msg.from}` : '';
-        lines.push(`  • [${msg.type}] ${msg.summary}${from}`);
+        // s78-m05: inbound message summaries are untrusted foreign content — frame them.
+        const src = msg.from ?? 'unknown sender';
+        lines.push(`  • [${msg.type}] ${frameForeignInline(msg.summary, src)}`);
       }
     }
   }

@@ -308,6 +308,9 @@ export interface StartupCredentialCheckResult {
   warned: boolean;
   /** Count of user-scoped keys observed in the local store (0 when empty). */
   userScopedKeyCount: number;
+  /** s78-m06: whether a dashboard was explicitly configured (CMOS_DASHBOARD_URL set).
+   *  The empty-store WARN is gated on this so a local-forever install boots silent. */
+  dashboardConfigured: boolean;
 }
 
 /**
@@ -318,22 +321,53 @@ export interface StartupCredentialCheckResult {
  * `cmos_auth(action="login")` before attempting a send.
  *
  * Non-fatal: never throws. Startup continues regardless.
+ *
+ * s78-m06: the empty-store WARN is gated on dashboard INTENT. A local-forever install
+ * with no CMOS_DASHBOARD_URL needs no credentials, so the WARN was pure noise on the
+ * quietest, most common path — it is suppressed there. When the operator explicitly
+ * configured a dashboard (CMOS_DASHBOARD_URL set), an empty store IS actionable, so the
+ * WARN stands.
  */
 export async function runStartupCredentialCheck(
-  options: { store?: CredentialStore; writer?: (line: string) => void } = {}
+  options: {
+    store?: CredentialStore;
+    writer?: (line: string) => void;
+    dashboardUrl?: string;
+  } = {}
 ): Promise<StartupCredentialCheckResult> {
   const store = options.store ?? (await CredentialStore.create());
   const writer = options.writer ?? ((line: string) => process.stderr.write(line));
+  const dashboardConfigured =
+    (options.dashboardUrl ?? process.env.CMOS_DASHBOARD_URL ?? '').trim().length > 0;
 
   const userKeys = await store.listUserScopedKeys();
   const count = Object.keys(userKeys).length;
 
   if (count === 0) {
-    writer(
-      '[WARN] cmos-mcp: no user-scoped credentials found; run cmos_auth(action="login") to bootstrap\n'
-    );
-    return { status: 'empty-credential-store', warned: true, userScopedKeyCount: 0 };
+    if (dashboardConfigured) {
+      writer(
+        '[WARN] cmos-mcp: no user-scoped credentials found; run cmos_auth(action="login") to bootstrap\n'
+      );
+      return {
+        status: 'empty-credential-store',
+        warned: true,
+        userScopedKeyCount: 0,
+        dashboardConfigured,
+      };
+    }
+    // Local-forever: no dashboard intent → no credentials needed → boot silently.
+    return {
+      status: 'empty-credential-store',
+      warned: false,
+      userScopedKeyCount: 0,
+      dashboardConfigured,
+    };
   }
 
-  return { status: 'has-user-scoped-keys', warned: false, userScopedKeyCount: count };
+  return {
+    status: 'has-user-scoped-keys',
+    warned: false,
+    userScopedKeyCount: count,
+    dashboardConfigured,
+  };
 }

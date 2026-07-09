@@ -27,6 +27,13 @@ import {
 import { findRelevantDecisions } from '../../../src/tools/cmos/relevance-surfacing';
 import { ensureDecisionsFts5 } from '../../../src/tools/cmos/schema-migrations';
 
+// Wall-clock latency asserts (`elapsed < 200ms`) flake under full-suite parallel
+// CPU contention (220+ suites), so they run only in the opt-in performance lane
+// (`npm run test:performance`, which sets RUN_PERF_ASSERTS=1). The functional
+// assertions in these tests — operations succeed and return correct results at
+// scale — always run. See s75-m03.
+const PERF_ASSERTS = process.env.RUN_PERF_ASSERTS === '1';
+
 interface TestDb {
   tempDir: string;
   projectRoot: string;
@@ -554,7 +561,7 @@ describe('Performance benchmarks', () => {
       .all();
     const listElapsed = Date.now() - listStart;
     expect(missions).toHaveLength(50);
-    expect(listElapsed).toBeLessThan(200);
+    if (PERF_ASSERTS) expect(listElapsed).toBeLessThan(200);
 
     // Benchmark: Status query (grouped counts)
     const statusStart = Date.now();
@@ -565,13 +572,13 @@ describe('Performance benchmarks', () => {
       .all();
     const statusElapsed = Date.now() - statusStart;
     expect(statusCounts.length).toBeGreaterThan(0);
-    expect(statusElapsed).toBeLessThan(200);
+    if (PERF_ASSERTS) expect(statusElapsed).toBeLessThan(200);
 
     // Benchmark: Mission update
     const updateStart = Date.now();
     db.prepare(`UPDATE missions SET notes = 'Updated' WHERE id = 'perf-m001'`).run();
     const updateElapsed = Date.now() - updateStart;
-    expect(updateElapsed).toBeLessThan(200);
+    if (PERF_ASSERTS) expect(updateElapsed).toBeLessThan(200);
   });
 
   it('FTS5 search performs well with 500+ decisions', async () => {
@@ -623,7 +630,7 @@ describe('Performance benchmarks', () => {
 
     expect(results.length).toBeGreaterThan(0);
     expect(results.length).toBeLessThanOrEqual(5);
-    expect(searchElapsed).toBeLessThan(200);
+    if (PERF_ASSERTS) expect(searchElapsed).toBeLessThan(200);
   });
 
   it('agent onboard completes quickly with large dataset', async () => {
@@ -678,7 +685,7 @@ describe('Performance benchmarks', () => {
     expect(result.success).toBe(true);
     expect(result.data?.project).toBeDefined();
     expect(result.data?.pendingMissions).toBeDefined();
-    expect(elapsed).toBeLessThan(200);
+    if (PERF_ASSERTS) expect(elapsed).toBeLessThan(200);
   });
 
   it('context size stays stable with snapshot overhead', () => {

@@ -24,7 +24,7 @@ npx -y @aquex/cmos-mcp
 Verify it starts:
 
 ```bash
-@aquex/cmos-mcp --version  # if global
+cmos-mcp --version  # if globally installed (the bin is `cmos-mcp`)
 # or
 npx -y @aquex/cmos-mcp --version
 ```
@@ -141,9 +141,9 @@ Claude Code, Cursor, Zed, VS Code, and Windsurf auto-discover from the working d
 cmos_agent_onboard()
 ```
 
-You'll get a single payload (<4KB) with project identity, the active sprint (if any), pending missions, recent decisions, context freshness, and suggested actions. This is the one tool to call at the top of every session.
+You'll get a single payload (<4KB) with project identity, the active sprint (if any), pending missions, recent decisions, context freshness, and suggested actions. `cmos_agent_onboard` is the **cold-start / fresh-project** entry point — if this is a fresh project the payload includes a `freshProject: true` flag and the suggested action will be to start a planning session.
 
-If this is a fresh project the payload includes a `freshProject: true` flag and the suggested action will be to start a planning session.
+For an **ongoing** session (a project that already has state), open with `cmos_review` instead — it returns the same essentials as a tighter ≤4 KB digest with the top next actions promoted to a flat field.
 
 ## 5. Plan your first sprint
 
@@ -196,10 +196,10 @@ cmos_session(action="complete", summary="Sprint 01 first mission shipped")
 ## 8. Check the state
 
 ```
-cmos_agent_onboard()
+cmos_review()
 ```
 
-You'll see the completed mission, the captured decisions, and the updated context. The next mission in the queue (if any) becomes the natural pull.
+You'll see the completed mission, the captured decisions, and the updated context in the session digest. The next mission in the queue (if any) becomes the natural pull. `cmos_review` is the opener to reach for at the top of every ongoing session.
 
 ```
 cmos_status()
@@ -275,7 +275,7 @@ This revokes the user-scoped key on the dashboard and clears the local row. Proj
 
 ## Where to next
 
-- [agents.md](../agents.md) — full tool reference, action-by-action, with the behavioral notes the agent picks up at cold-start.
+- [Tool reference](../TOOL_REFERENCE.md) — every tool, action, and parameter (generated from the tool definitions).
 - [Changelog](../CHANGELOG.md) — release notes and tool-surface changes.
 - [GitHub issues](https://github.com/kneelinghorse/cmos-mcp/issues) — bug reports and feature requests.
 

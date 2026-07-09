@@ -20,6 +20,7 @@ import {
 } from './context-retention';
 import { detectAndFlagStaleness } from './staleness-detection';
 import { applyPendingBlobMigrations } from './blob-migrations';
+import { isReadOnlyAgentSession } from './read-only-agent-guard';
 
 /**
  * Parsed context content with type-safe structure.
@@ -255,8 +256,13 @@ export async function cmosContextView(
         totalSizeBytes,
       };
 
-      // Detect and flag stale decisions/learnings
-      const stalenessResult = detectAndFlagStaleness(client);
+      // Detect and flag stale decisions/learnings. Skipped under the read-only review
+      // role (s78-m04): detectAndFlagStaleness UPDATEs decision/learning status — a store
+      // write a read-only session must not perform. The view still renders; it simply does
+      // not re-run staleness maintenance (that lands on the next non-review session).
+      const stalenessResult = isReadOnlyAgentSession()
+        ? { totalStaleDecisions: 0, totalStaleLearnings: 0, threshold: 0 }
+        : detectAndFlagStaleness(client);
       const staleness = {
         staleDecisions: stalenessResult.totalStaleDecisions,
         staleLearnings: stalenessResult.totalStaleLearnings,
@@ -388,8 +394,13 @@ function getContextById(client: CmosDatabaseClient, contextId: string): ParsedCo
   }
 
   // Apply any pending blob migrations (lazy, idempotent, snapshot-protected).
-  // No-op if blob_schema_version in metadata is already current.
-  const migrationResult = applyPendingBlobMigrations(client, contextId, ctx.content, parsedContent);
+  // No-op if blob_schema_version in metadata is already current. Skipped under the
+  // read-only review role (s78-m04): the migration INSERTs a snapshot + UPDATEs
+  // contexts/metadata (store writes). The view reads the pre-migration blob as-is;
+  // the migration lands on the next non-review session.
+  const migrationResult = isReadOnlyAgentSession()
+    ? { blob: parsedContent, migrated: false }
+    : applyPendingBlobMigrations(client, contextId, ctx.content, parsedContent);
   parsedContent = migrationResult.blob;
 
   // Use post-migration content for size calculation when blob was pruned

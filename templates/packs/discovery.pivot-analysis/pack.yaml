@@ -1,6 +1,0 @@
-name: "discovery.pivot-analysis"
-version: "1.0.0"
-displayName: "Level 5A: Pivot Analysis"
-description: "Extract a new hypothesis from prior research and decide whether to restart discovery or exit after a Level 4 'Pivot/Refine' decision."
-author: "CMOS Team"
-schema: "schema.json"

@@ -1,6 +1,0 @@
-name: "process.design-review"
-version: "1.0.0"
-displayName: "Design Review"
-description: "Facilitate design reviews that gather objective, goal-oriented feedback"
-author: "Design / Product"
-schema: "schema.json"

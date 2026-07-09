@@ -2,25 +2,20 @@
  * Token Counters - Hybrid Offline Strategy
  *
  * Model-specific token counting implementations using offline libraries.
- * Follows R2.1 findings:
- * - GPT: gpt-tokenizer (100% accurate, pure JS)
+ * s77-m03 excised the GPT path (gpt-tokenizer removed); the honest surface is:
  * - Claude: Transformers.js with Xenova/claude-tokenizer (known drift, monitored)
  * - Gemini: Enhanced heuristic (temporary, pending official library)
+ * An unsupported model (e.g. the retired 'gpt') throws `Unsupported model: …`.
  */
 
 import { AbortableOptions, ITokenCounter, TokenCount, SupportedModel } from './types';
 import { emitTelemetryWarning } from './telemetry';
-import {
-  getClaudeTokenizerInstance,
-  getGPTEncoder,
-  recordTokenizerFallback,
-} from './tokenizer-bootstrap';
+import { getClaudeTokenizerInstance } from './tokenizer-bootstrap';
 import { throwIfAborted, withAbort } from '../utils/abort';
 
 /**
  * Type definitions for external libraries
  */
-type GPTTokens = number[];
 type ClaudeTokenizer = (text: string) => Promise<{
   input_ids: { data: { length: number } };
 }>;
@@ -44,44 +39,12 @@ export class TokenCounter implements ITokenCounter {
     throwIfAborted(signal, 'Token counting aborted');
 
     switch (model) {
-      case 'gpt':
-        return this.countGPT(text, options);
       case 'claude':
         return this.countClaude(text, options);
       case 'gemini':
         return this.countGemini(text, options);
       default:
         throw new Error(`Unsupported model: ${model}`);
-    }
-  }
-
-  /**
-   * Count tokens for GPT using gpt-tokenizer library
-   * Uses pure JavaScript implementation with 1:1 accuracy to tiktoken
-   * Supports cl100k_base (GPT-4) and o200k_base (GPT-4o) encodings
-   */
-  private async countGPT(text: string, options: AbortableOptions): Promise<TokenCount> {
-    const { signal } = options;
-
-    try {
-      const encode = await withAbort(getGPTEncoder(), signal, 'Loading GPT tokenizer aborted');
-      if (!encode) {
-        return this.fallbackCount(text, 'gpt', signal);
-      }
-
-      throwIfAborted(signal, 'Token counting aborted');
-
-      const tokens: GPTTokens = encode(text);
-      const count = tokens.length;
-
-      return {
-        model: 'gpt',
-        count,
-        estimatedCost: this.estimateGPTCost(count),
-      };
-    } catch (_error) {
-      // Fallback to heuristic if library fails
-      return this.fallbackCount(text, 'gpt', signal);
     }
   }
 
@@ -183,7 +146,6 @@ export class TokenCounter implements ITokenCounter {
     throwIfAborted(signal, 'Token counting aborted');
 
     const count = Math.ceil(text.length / 4);
-    recordTokenizerFallback(model);
 
     emitTelemetryWarning('token-counter', `Fallback heuristic used for ${model} tokenizer`, {
       model,
@@ -195,9 +157,6 @@ export class TokenCounter implements ITokenCounter {
 
     let estimatedCost: number | undefined;
     switch (model) {
-      case 'gpt':
-        estimatedCost = this.estimateGPTCost(count);
-        break;
       case 'claude':
         TokenCounter.claudeTokenizerCache = null;
         estimatedCost = this.estimateClaudeCost(count);
@@ -212,14 +171,6 @@ export class TokenCounter implements ITokenCounter {
       count,
       estimatedCost,
     };
-  }
-
-  /**
-   * Estimate cost for GPT tokens (input pricing)
-   * GPT-4o: ~$2.50 per 1M input tokens
-   */
-  private estimateGPTCost(tokens: number): number {
-    return (tokens / 1_000_000) * 2.5;
   }
 
   /**

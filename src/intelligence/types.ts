@@ -5,9 +5,12 @@
  */
 
 /**
- * Supported AI models for optimization
+ * Supported AI models for optimization.
+ *
+ * s77-m03 excised 'gpt': the gpt-tokenizer dependency + its counting apparatus
+ * were removed, leaving an honest Claude (@xenova) + Gemini (heuristic) counter.
  */
-export type SupportedModel = 'claude' | 'gpt' | 'gemini';
+export type SupportedModel = 'claude' | 'gemini';
 
 /**
  * Compression level configuration

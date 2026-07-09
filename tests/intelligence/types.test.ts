@@ -21,7 +21,7 @@ const ensureOptimizerConfig = (config: TokenOptimizerConfig): TokenOptimizerConf
 
 describe('intelligence/types', () => {
   test('supported model unions list known engines', () => {
-    const models = useModels(['claude', 'gpt', 'gemini']);
+    const models = useModels(['claude', 'gemini']);
     expect(models).toContain('claude');
     expect(models).toContain('gemini');
   });
@@ -68,7 +68,7 @@ describe('intelligence/types', () => {
 
   test('model config surface preferred delimiters', () => {
     const config = ensureModelConfig({
-      model: 'gpt',
+      model: 'claude',
       templateFormat: 'markdown',
       preferredDelimiters: ['```'],
       supportsXmlTags: false,

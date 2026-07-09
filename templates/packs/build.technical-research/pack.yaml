@@ -1,6 +1,0 @@
-name: "build.technical-research"
-version: "1.0.0"
-displayName: "Build Technical Research"
-description: "Technical research and architectural investigation missions"
-author: "core-team"
-schema: "schema.json"

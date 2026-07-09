@@ -26,7 +26,10 @@ PRIVATE_PATHS=( cmos analysis artifacts tmp SESSIONS.jsonl agents.md CLAUDE.md e
 
 # Internal planning-adjacent docs nested under the otherwise-public docs/ tree (s73-m05 review):
 # sprint planning, an internal strategy survey, and the private dashboard's PG-mirror schema (moat).
-# The discovery/ docs and docs/specs/project-registry-system.md are genuine public reference and stay.
+# s77-m09 purged the stale pre-Great-Deletion docs (mission-protocol/domain-pack/quality/versioning/
+# extension/intelligence guides, the discovery/ snapshots, and the whitepaper); the only genuine
+# public reference left under docs/ is getting-started.md + docs/specs/project-registry-system.md
+# (the authoritative per-action tool reference is now the generated top-level TOOL_REFERENCE.md).
 DOCS_EXCLUDES=(
   docs/specs/sprint-15-revised-missions.md
   docs/specs/phase2-pg-mirror-schema.md

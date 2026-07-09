@@ -3,7 +3,8 @@
 // s68 ADR App-View migration triggers: current store count N, mutable-write
 // share vs the 25% CRDT threshold, and fan-in p95 latency for the four named
 // CMOS queries via application-level fan-out. Re-runnable; emits a stable JSON
-// report + a markdown summary appended to pro-expansion-roadmap.md.
+// report + a markdown summary upserted into cmos/planning/phase-2-master-plan.md
+// (s77-m09 Fork D repointed the writeback from the superseded pro-expansion-roadmap.md).
 //
 // Usage: npm run baseline:cross-store [-- --archive] [-- --config <path>]
 //
@@ -41,7 +42,9 @@ const FANIN_TRIGGER_MS = 200; // p95 > 200ms → App-View Trigger A
 const FANIN_APPROACHING_MS = 100;
 const RUNS_PER_QUERY = 10;
 const REPORT_PATH = path.resolve(__dirname, '..', 'cmos/research/s69-baseline-measurement.json');
-const ROADMAP_PATH = path.resolve(__dirname, '..', 'cmos/planning/pro-expansion-roadmap.md');
+// s77-m09 Fork D: the writeback target is the authoritative phase-2-master-plan.md;
+// the superseded pro-expansion-roadmap.md no longer carries the regenerating block.
+const ROADMAP_PATH = path.resolve(__dirname, '..', 'cmos/planning/phase-2-master-plan.md');
 const MARK_START = '<!-- BASELINE-MEASUREMENT-S69M01 -->';
 const MARK_END = '<!-- /BASELINE-MEASUREMENT-S69M01 -->';
 

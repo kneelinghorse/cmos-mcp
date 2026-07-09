@@ -394,7 +394,7 @@ export const CmosErrors = {
     return {
       code: CMOS_ERROR_CODES.DASHBOARD_NOT_CONFIGURED,
       message:
-        'This feature requires a dashboard account. Sign up at https://cmos.aquex.ai to enable sync, messaging, and cross-project features.',
+        'This feature requires a dashboard account. Sign up at https://cmos.aquex.ai/register to enable sync, messaging, and cross-project features.',
       suggestion:
         'Set CMOS_DASHBOARD_URL=https://cmos.aquex.ai (or your dashboard host) and run cmos_auth(action="login") to bootstrap credentials. Local-only CMOS works without this.',
     };
@@ -404,9 +404,9 @@ export const CmosErrors = {
     const detailSuffix = detail ? `: ${detail}` : '';
     return {
       code: CMOS_ERROR_CODES.DASHBOARD_UPGRADE_REQUIRED,
-      message: `This feature requires a paid dashboard tier${detailSuffix}. Upgrade at https://cmos.aquex.ai to access it.`,
+      message: `This feature requires a paid dashboard tier${detailSuffix}. Upgrade at https://cmos.aquex.ai/register to access it.`,
       suggestion:
-        'Visit https://cmos.aquex.ai to view tier options and upgrade. Local-only CMOS features remain unaffected.',
+        'Visit https://cmos.aquex.ai/register to view tier options and upgrade. Local-only CMOS features remain unaffected.',
     };
   },
 };

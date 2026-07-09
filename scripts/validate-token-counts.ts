@@ -190,8 +190,7 @@ async function main() {
   const hasGoogleKey = !!process.env.GOOGLE_GEMINI_API_KEY;
 
   if (!hasAnthropicKey && !hasGoogleKey) {
-    console.error('❌ No API keys found. Set ANTHROPIC_API_KEY and/or GOOGLE_GEMINI_API_KEY');
-    console.error('   See docs/Token_Validation_Setup.md for setup instructions.\n');
+    console.error('❌ No API keys found. Set ANTHROPIC_API_KEY and/or GOOGLE_GEMINI_API_KEY.\n');
     process.exit(2);
   }
 

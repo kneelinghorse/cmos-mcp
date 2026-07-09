@@ -1,9 +1,0 @@
-type: "product.dashboard-blueprint"
-dashboardTitle: ""
-audience: ""
-primaryGoal: ""
-keyMetrics:
-  - metric: ""
-    visualization: ""
-    context: ""
-filters: []

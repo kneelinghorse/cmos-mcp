@@ -18,17 +18,15 @@ const SRC_ROOT = path.resolve(__dirname, '../../../src');
 
 /**
  * Files intentionally exempt from the genesis-stamp requirement, with rationale:
- *  - sqlite-client.ts: legacy SQLiteClient with ZERO production importers (only
- *    tests use it); operates on its own test schema, never a migrated store.
  *  - cmos-project-init.ts: initializes a fresh store via raw better-sqlite3 (not
  *    CmosDatabaseClient) where the genesis columns are still NULLABLE; its initial
  *    sprint/mission rows are backfilled by the lazy firehose migration on the
  *    first genesis write.
+ *
+ * (Sprint 76 Great Deletion removed the former sqlite-client.ts exemption — the
+ * dead legacy SQLiteClient was deleted in G2, so it no longer needs allowlisting.)
  */
-const ALLOWLIST = new Set([
-  path.join('intelligence', 'sqlite-client.ts'),
-  path.join('tools', 'cmos', 'cmos-project-init.ts'),
-]);
+const ALLOWLIST = new Set([path.join('tools', 'cmos', 'cmos-project-init.ts')]);
 
 const FIREHOSE_RE = FIREHOSE_TABLES.join('|');
 // An INSERT into a firehose table, capturing the column-list region up to VALUES/SELECT.
@@ -102,10 +100,7 @@ describe('event_type coverage (Sprint 69 m03)', () => {
 
   it('keeps the allowlist tightly scoped (no silent additions)', () => {
     expect([...ALLOWLIST].sort()).toEqual(
-      [
-        path.join('intelligence', 'sqlite-client.ts'),
-        path.join('tools', 'cmos', 'cmos-project-init.ts'),
-      ].sort()
+      [path.join('tools', 'cmos', 'cmos-project-init.ts')].sort()
     );
   });
 });

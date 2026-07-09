@@ -9,6 +9,7 @@
 
 import { z } from 'zod';
 import { withClientValidated } from './client';
+import { resolveCurrentSprintId } from './current-sprint';
 import { genesisColumns, getProjectId } from './genesis-columns';
 import type { CmosToolResult, Session } from './types';
 import {
@@ -288,16 +289,17 @@ export async function cmosSessionStart(
         warnings.push(`${staleWarning} ${suffix}`);
       }
 
-      // Auto-detect active sprint if sprintId not explicitly provided
+      // Auto-detect the current sprint if sprintId not explicitly provided.
+      // s77-m02: delegate to the canonical resolveCurrentSprintId instead of an
+      // inline `status='Active' ORDER BY start_date DESC` SELECT (the surface that
+      // mis-tagged PS-2026-07-08-002) so a new session tags to the SAME sprint
+      // onboard/review name.
       let sprintId = params.sprintId ?? null;
       let sprintAutoTagged = false;
       if (!sprintId) {
-        const activeSprintResult = client.getOne<{ id: string }>(
-          "SELECT id FROM sprints WHERE status = 'Active' ORDER BY COALESCE(start_date, '') DESC, rowid DESC LIMIT 1",
-          []
-        );
-        if (activeSprintResult.success && activeSprintResult.data) {
-          sprintId = activeSprintResult.data.id;
+        const resolvedSprintId = resolveCurrentSprintId(client);
+        if (resolvedSprintId) {
+          sprintId = resolvedSprintId;
           sprintAutoTagged = true;
         }
       }

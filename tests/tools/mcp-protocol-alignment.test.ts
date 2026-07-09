@@ -5,7 +5,6 @@ import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 
 function createMockContext(): any {
   return {
-    baseDir: '/tmp',
     defaultModel: 'claude',
     loader: {} as any,
     registryParser: {

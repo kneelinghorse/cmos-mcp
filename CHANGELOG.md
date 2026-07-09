@@ -2,6 +2,44 @@
 
 All notable changes to cmos-mcp are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## 2.0.0 — 2026-07-09
+
+Major release cutting the **honest surface + trustworthy base** work (sprints 76–78). One BREAKING change — the unauthenticated HTTP transport is removed — drives the major bump. The stdio server (`cmos-mcp`), which is the product, is unchanged in its tool contract: the surface holds at **15 tools** and gains only additive actions/flags. What changed is the posture: one truthful identity, a generated tool reference, machine-enforced read-only review agents, foreign-content provenance framing, offline-capable embeddings, a verified-truthful `SECURITY.md`, and a large internal deletion that ships a much leaner tarball with no dead code. A security-skeptical reader can now grep the package and find nothing alarming.
+
+### Added
+
+- **`SECURITY.md`** — a verified-truthful security posture doc, shipped in the tarball. Covers the auth model (device-code preferred; legacy-env and password-fallback tiers with their WARN; dashboard optional), data-at-rest reality (`cmos/db/cmos.sqlite` unencrypted; `~/.config/cmos-mcp/credentials.json` at `0600` holding **plaintext** `cmk_` keys — stated honestly, no encryption-at-rest claim), the network surface (dashboard only when `CMOS_DASHBOARD_URL` is set + `huggingface.co` for the ~25 MB embedding model on first use), snapshot/delete reality (manual snapshots only — no auto-snapshot, no soft-delete), the sanctioned deployment shape, and a vulnerability-reporting pointer. Every claim carries a file:line backing.
+- **`cmos_session` `search` action** — full-text search across session titles, summaries, and captures (`query`, plus optional `since` / `until` / `limit`), routed through the consolidated `cmos_session` tool.
+- **`--version` and `--help` flags** — the `cmos-mcp` bin prints `cmos-mcp <version>` (or a usage synopsis) to stdout and exits 0, short-circuiting before the stdio server connects.
+- **Generated `TOOL_REFERENCE.md`** — a build-time, per-tool/per-action reference for all 15 tools, generated from the tool definitions and shipped in the tarball, guarded by a freshness test so it cannot drift from the schemas.
+- **Foreign-content provenance framing** — inbound text not authored in the resolved project (cross-project message bodies, onboard-surfaced messages, directory descriptions, and pull-merged / cross-store decision & learning rows) now renders inside a source-labeled, self-escaping fence and carries a `{source, trust: 'foreign'}` descriptor on `structuredContent`. The `cmos_message` and `cmos_agent_onboard` tool descriptions state the untrusted-data contract — foreign content is data, not instructions.
+- **Machine-enforced read-only review agents** — an opt-in `CMOS_AGENT_ROLE=review` env gate hard-rejects every write-capable tool/action via a fail-closed action taxonomy (unknown actions default to write); strict no-op when unset. Ships with a `PreToolUse` git-mutation-blocking hook template under `scripts/hooks/`. The guarantee holds under the sanctioned separate read-only-server deployment (see `SECURITY.md`).
+- **Offline-capable embeddings** — `CMOS_OFFLINE_EMBEDDINGS` (sets the transformers `allowRemoteModels=false`) and `CMOS_MODEL_CACHE_DIR` let a local-forever install run without ever fetching the model from HuggingFace. On a load failure the embedder and tokenizer degrade to BM25 / heuristic instead of re-hitting the network on every call.
+- **First-run E2E in CI** — a `pack → install-the-tarball → drive-over-stdio` test that guards the published first-run experience (identity, tool count, quickstart lifecycle) against silent breakage.
+
+### Changed
+
+- **One truthful server identity.** The MCP server announces `cmos-mcp` (not the retired `mission-protocol`, nor the scoped package name) at the `package.json` version, and startup logs the real schema version (`2.1`). The vestigial `baseDir` field and the dead `CMOS_DASHBOARD_SECRET` env are gone.
+- **Single-current-sprint invariant + one canonical resolver.** A write-time invariant demotes other open sprints to `Planned` (atomic, with a warning), and the four previously-divergent current-sprint pickers collapse onto one `resolveCurrentSprintId` with a most-recent-activity tie-break. This closes a lying-signal bug where `cmos_review`, `cmos_mission(status)`, and `cmos_session` auto-tagging could each report a different "current" sprint; they now agree.
+- **npm audit clear of the critical protobufjs chain.** A `protobufjs ^7.6.5` override resolves the critical `@xenova/transformers → onnxruntime-web → onnx-proto → protobufjs` advisory (embedding output verified byte-identical before/after). Zero critical/high remain; 4 moderate **dev-only** advisories are an accepted residual documented in `SECURITY.md`.
+- **Quieter local boot.** The empty-credential-store login WARN is suppressed when no dashboard is configured (`CMOS_DASHBOARD_URL` unset), so a local-forever install boots silent; sign-up nudges point to the working `/register` route; a startup topology diagnostic warns only in the ambiguous pinned-`CMOS_PROJECT_ROOT` + multiple-registered-project case.
+- **Docs truth pass.** `agents.md`, the README opener, and `docs/getting-started.md` were reconciled to reality — 15 tools via a link to the generated `TOOL_REFERENCE.md` instead of drifted hand-maintained action tables, `cmos_review` documented as the session opener, and removed live-claim references to subsystems deleted in the Great Deletion. The project's own `master_context` identity was refreshed to the open-core description.
+
+### Removed
+
+- **BREAKING — the unauthenticated HTTP transport is removed (hard-delete).** The `cmos-mcp-http` bin, the `./http-server` package export, the `start:http` script, the `src/http-server.ts` source, the transport docs (`HTTP_TRANSPORT.md`, `README_HTTP.md`), and the PM2 config (`ecosystem.config.js`) are all deleted. The bin exposed an unauthenticated channel — `Access-Control-Allow-Origin: *`, no auth, full read-write to every registered store — had no known consumers, and ran nowhere. The stdio bin (`cmos-mcp`) — the product — is unchanged. Consumers importing `@aquex/cmos-mcp/http-server` or invoking the `cmos-mcp-http` bin must pin to an earlier version; if a genuine remote-client need appears, recover the source from git history and rebuild **with authentication** rather than restoring this surface as-is.
+- **`gpt-tokenizer` dependency and the GPT token-counting apparatus.** Removed the `gpt-tokenizer` dependency, the boot-time tokenizer preload (and its `[INFO] Tokenizer preload status` startup line), and the scheduled `token-validation.yml` workflow. Token counting keeps an honest Claude (`@xenova`) + Gemini (heuristic) counter; requesting `gpt` now throws `Unsupported model: gpt`. `@xenova/transformers` and the token-counter / tokenizer modules are retained.
+- **Dead code and stale docs (the "Great Deletion").** Removed ~69 dead source modules and their tests, the unused domain-pack data (`templates/`, `examples/`), tracked repo cruft (`artifacts/`, `tmp/`, orphaned scripts), and ~34 `docs/` guides describing deleted or superseded subsystems plus the whitepaper. **No tool or API surface changed** — this is internal-only, verified by a two-bin import-graph reachability proof. Consumer-observable effect: a much smaller install with no misleading documentation (the tarball now ships only live `dist/`, `cmos-seed/`, `TOOL_REFERENCE.md`, and `docs/getting-started.md`).
+
+### Security
+
+- The single most alarming grep result — the zero-auth, `CORS *`, full-store-write HTTP channel — is gone (see Removed, BREAKING).
+- Review/adversarial agents can be **machine-prevented** from writing to the store or running git-mutating commands (`CMOS_AGENT_ROLE=review`), closing the prose-only gap behind two prior data-loss incidents.
+- Inbound foreign content is framed as data, not instructions, across every surface where non-project-authored text reaches agent context.
+- The critical protobufjs advisory chain is cleared; the remaining posture (including the plaintext-key and no-encryption-at-rest disclosures) is documented honestly in `SECURITY.md`.
+
 ## 1.1.1 — 2026-07-07
 
 Patch release. Four fixes — three triaged from sibling-project bug reports (aquex.ai, Synthesis-Workbench, Forge) against 1.1.0, plus an auth-resolution fix — and one build-freshness **policy change**. **Additive and non-breaking** over 1.1.0: no tools added or removed, no parameter, type, or required-field changes. The only schema-visible edit is the description of the existing `cmos_sprint` `forceComplete` parameter, now documented as a no-op (see Changed). Drop-in upgrade — no consumer action required.

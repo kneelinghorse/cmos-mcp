@@ -8,10 +8,12 @@
  */
 
 import { z } from 'zod';
-import { withClientValidated } from './client';
+import { withClientValidated, type CmosDatabaseClient } from './client';
 import { genesisColumns, getProjectId } from './genesis-columns';
 import type { CmosToolResult } from './types';
 import { createError, createSuccess, CmosErrors } from './errors';
+import { isOpenStatus } from './terminal-status';
+import { buildDemotionWarning, writeSingleCurrentSprint } from './sprint-current-invariant';
 
 /**
  * Result type for cmos_sprint_add.
@@ -144,44 +146,106 @@ export async function cmosSprintAdd(
         return createError<SprintAddResult>(CmosErrors.sprintIdExists(sprintId));
       }
 
-      // Insert new sprint
-      const g = genesisColumns(client, 'sprints', getProjectId(client));
-      const insertResult = client.execute(
-        `INSERT INTO sprints (id, title, focus, status, start_date, end_date, ${g.columns.join(', ')})
-        VALUES (?, ?, ?, ?, ?, ?, ${g.placeholders})`,
-        [
-          sprintId,
-          title.trim(),
-          focus?.trim() || null,
-          status?.trim() || 'Active',
-          startDate?.trim() || null,
-          endDate?.trim() || null,
-          ...g.values,
-        ]
-      );
-
-      if (!insertResult.success) {
-        return createError<SprintAddResult>(
-          insertResult.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to create sprint' }
+      const effectiveStatus = status?.trim() || 'Active';
+      const projectId = getProjectId(client);
+      const insert = (): CmosToolResult<void> =>
+        insertSprintRow(
+          client,
+          {
+            sprintId,
+            title: title.trim(),
+            focus: focus?.trim() || null,
+            status: effectiveStatus,
+            startDate: startDate?.trim() || null,
+            endDate: endDate?.trim() || null,
+          },
+          projectId
         );
+
+      const success = (warnings?: string[]): CmosToolResult<SprintAddResult> =>
+        createSuccess(
+          {
+            id: sprintId,
+            title: title.trim(),
+            message: `Sprint '${sprintId}' created successfully`,
+          },
+          warnings
+        );
+
+      // Single-current-sprint invariant (s77-m01): adding an OPEN sprint demotes
+      // every other open sprint to 'Planned' atomically. A non-open add (Planned,
+      // Completed, …) takes the plain insert path — it opens no work, so demotes
+      // nothing.
+      if (!isOpenStatus(effectiveStatus)) {
+        const inserted = insert();
+        if (!inserted.success) {
+          return createError<SprintAddResult>(inserted.error!);
+        }
+        return success();
       }
 
-      if (insertResult.data?.changes === 0) {
-        return createError<SprintAddResult>({
-          code: 'DB_QUERY_FAILED',
-          message: 'Sprint was not created (no rows affected)',
-          suggestion: 'Check database permissions and try again',
-        });
+      const invariant = writeSingleCurrentSprint(client, sprintId, insert);
+      if (!invariant.success) {
+        return createError<SprintAddResult>(invariant.error!);
       }
-
-      return createSuccess({
-        id: sprintId,
-        title: title.trim(),
-        message: `Sprint '${sprintId}' created successfully`,
-      });
+      const warning = buildDemotionWarning(invariant.data!.demoted);
+      return success(warning ? [warning] : undefined);
     },
     { projectRoot: params.projectRoot }
   );
+}
+
+/**
+ * Fields the sprint-add INSERT stamps (pre-trimmed / defaulted by the caller).
+ */
+interface SprintInsertFields {
+  sprintId: string;
+  title: string;
+  focus: string | null;
+  status: string;
+  startDate: string | null;
+  endDate: string | null;
+}
+
+/**
+ * Stamp the genesis columns and INSERT one sprint row. Shared by the plain-add
+ * and the single-current-sprint transactional paths so both stamp identically.
+ */
+function insertSprintRow(
+  client: CmosDatabaseClient,
+  fields: SprintInsertFields,
+  projectId: string
+): CmosToolResult<void> {
+  const g = genesisColumns(client, 'sprints', projectId);
+  const insertResult = client.execute(
+    `INSERT INTO sprints (id, title, focus, status, start_date, end_date, ${g.columns.join(', ')})
+        VALUES (?, ?, ?, ?, ?, ?, ${g.placeholders})`,
+    [
+      fields.sprintId,
+      fields.title,
+      fields.focus,
+      fields.status,
+      fields.startDate,
+      fields.endDate,
+      ...g.values,
+    ]
+  );
+
+  if (!insertResult.success) {
+    return createError<void>(
+      insertResult.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to create sprint' }
+    );
+  }
+
+  if (insertResult.data?.changes === 0) {
+    return createError<void>({
+      code: 'DB_QUERY_FAILED',
+      message: 'Sprint was not created (no rows affected)',
+      suggestion: 'Check database permissions and try again',
+    });
+  }
+
+  return createSuccess<void>(undefined);
 }
 
 /**
@@ -210,6 +274,18 @@ export function formatSprintAddForLLM(result: CmosToolResult<SprintAddResult>): 
     `   ID: ${data.id}`,
     `   Title: ${data.title}`,
   ];
+
+  // s77-m01: surface the single-current-sprint demotion warning so the running
+  // server TELLS the operator which sprints were auto-demoted (mirrors
+  // formatSprintUpdateForLLM). index.ts renders only this text — warnings not
+  // folded in here would be invisible to the operator.
+  if (result.warnings && result.warnings.length > 0) {
+    lines.push('');
+    lines.push('Warnings:');
+    for (const warning of result.warnings) {
+      lines.push(`- ${warning}`);
+    }
+  }
 
   return lines.join('\n');
 }

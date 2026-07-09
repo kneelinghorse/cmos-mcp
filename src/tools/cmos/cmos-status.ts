@@ -162,7 +162,7 @@ export function formatStatusForLLM(result: CmosToolResult<CmosStatusResult>): st
     `last_sync_at:              ${s.last_sync_at ?? 'never'}`,
     `last_delivery_observed_at: ${s.last_delivery_observed_at ?? 'never'}`,
     s.auth_tier === 'none'
-      ? '\nNo dashboard credentials configured. Run cmos_auth(action="login") to bootstrap, or sign up at https://cmos.aquex.ai.'
+      ? '\nNo dashboard credentials configured. Run cmos_auth(action="login") to bootstrap, or sign up at https://cmos.aquex.ai/register.'
       : '',
   ]
     .filter(Boolean)

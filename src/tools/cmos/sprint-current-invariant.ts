@@ -1,0 +1,160 @@
+// SPDX-License-Identifier: Apache-2.0
+// ABOUTME: s77-m01 write-time single-current-sprint invariant — demote every OTHER
+// open sprint to 'Planned' + the caller's primary write, in ONE atomic transaction.
+
+/**
+ * Write-time single-current-sprint invariant (s77-m01).
+ *
+ * Two Active sprints re-arm the "current sprint" resolver divergence (#853): the
+ * naive picker orders `start_date ASC` and the canonical one `DESC`, so they name
+ * different sprints the instant a second open sprint exists. The durable fix is
+ * two layers — this write-side invariant (keep the store single-open) plus the
+ * read-side resolver (heal foreign/legacy stores we don't control, s77-m02).
+ *
+ * This module is the write half: when a sprint is put into the OPEN set
+ * ({@link SPRINT_OPEN_STATUSES}) via cmos_sprint(add|update), every OTHER open
+ * sprint is demoted to 'Planned' — resumable, never 'Completed' (Fork 1a) — in
+ * the SAME transaction as the primary write, so a forced failure leaves NEITHER
+ * applied.
+ *
+ * @module tools/cmos/sprint-current-invariant
+ */
+
+import type { CmosDatabaseClient } from './client';
+import { createError, createSuccess, CMOS_ERROR_CODES } from './errors';
+import type { CmosToolResult } from './types';
+import { ensureAuthorNamespaceColumns, ensureFirehoseEventColumns } from './schema-migrations';
+import { SPRINT_OPEN_STATUSES, statusInSql } from './terminal-status';
+
+/** A sprint that was auto-demoted to 'Planned' to preserve the single-open invariant. */
+export interface DemotedSprint {
+  id: string;
+  title: string | null;
+}
+
+/** Result payload of {@link writeSingleCurrentSprint}: the primary write's data + who was demoted. */
+export interface SingleCurrentSprintResult<T> {
+  data: T;
+  demoted: DemotedSprint[];
+}
+
+const openStatusSql = statusInSql('status', SPRINT_OPEN_STATUSES);
+
+/**
+ * Run `primaryWrite` (the add INSERT or the status→open UPDATE) together with the
+ * demotion of every OTHER open sprint to 'Planned', atomically.
+ *
+ * Migration ordering (load-bearing): the genesis firehose migration performs a
+ * SQLite 12-step rebuild that toggles `foreign_keys`, which is a no-op inside a
+ * transaction. `primaryWrite` stamps genesis columns (add) and would otherwise
+ * trigger that rebuild lazily mid-transaction, silently corrupting an un-migrated
+ * store. So both `ensure…` migrations run BEFORE `BEGIN IMMEDIATE` here — mirror
+ * of cmos-sprint-complete.ts. Once ensured, the lazy ensures inside `primaryWrite`
+ * are marker-gated no-ops.
+ *
+ * @param client   open DB client
+ * @param keepSprintId  the sprint being made current — excluded from demotion
+ * @param primaryWrite  the caller's write; its success/failure drives commit/rollback
+ */
+export function writeSingleCurrentSprint<T>(
+  client: CmosDatabaseClient,
+  keepSprintId: string,
+  primaryWrite: () => CmosToolResult<T>
+): CmosToolResult<SingleCurrentSprintResult<T>> {
+  // Pre-BEGIN migrations (see doc comment): the firehose rebuild cannot run inside
+  // a transaction, and the author-namespace ALTERs are kept out of it for symmetry.
+  ensureFirehoseEventColumns(client);
+  ensureAuthorNamespaceColumns(client);
+
+  const begin = client.execute('BEGIN IMMEDIATE', []);
+  if (!begin.success) {
+    return createError(
+      begin.error ?? {
+        code: CMOS_ERROR_CODES.DB_QUERY_FAILED,
+        message: 'Failed to begin single-current-sprint transaction',
+        suggestion: 'Retry once the database becomes available.',
+      }
+    );
+  }
+
+  let transactionOpen = true;
+  const rollback = (): void => {
+    if (!transactionOpen) return;
+    client.execute('ROLLBACK', []);
+    transactionOpen = false;
+  };
+  const fail = (
+    error: Parameters<typeof createError<SingleCurrentSprintResult<T>>>[0]
+  ): CmosToolResult<SingleCurrentSprintResult<T>> => {
+    rollback();
+    return createError<SingleCurrentSprintResult<T>>(error);
+  };
+
+  // Name the sprints we are about to demote (for the warning). BEGIN IMMEDIATE
+  // holds the write lock, so no other writer can change the set between this
+  // SELECT and the UPDATE below — the two predicates match identically.
+  const othersResult = client.getMany<DemotedSprint>(
+    `SELECT id, title FROM sprints WHERE ${openStatusSql} AND id != ?`,
+    [keepSprintId]
+  );
+  if (!othersResult.success) {
+    return fail(
+      othersResult.error ?? {
+        code: CMOS_ERROR_CODES.DB_QUERY_FAILED,
+        message: 'Failed to query other open sprints',
+      }
+    );
+  }
+  const demoted = othersResult.data ?? [];
+
+  if (demoted.length > 0) {
+    const demoteResult = client.execute(
+      `UPDATE sprints SET status = 'Planned' WHERE ${openStatusSql} AND id != ?`,
+      [keepSprintId]
+    );
+    if (!demoteResult.success) {
+      return fail(
+        demoteResult.error ?? {
+          code: CMOS_ERROR_CODES.DB_QUERY_FAILED,
+          message: 'Failed to demote other open sprints',
+        }
+      );
+    }
+  }
+
+  const writeResult = primaryWrite();
+  if (!writeResult.success) {
+    return fail(
+      writeResult.error ?? {
+        code: CMOS_ERROR_CODES.DB_QUERY_FAILED,
+        message: 'Primary sprint write failed',
+      }
+    );
+  }
+
+  const commit = client.execute('COMMIT', []);
+  if (!commit.success) {
+    return fail(
+      commit.error ?? {
+        code: CMOS_ERROR_CODES.DB_QUERY_FAILED,
+        message: 'Failed to commit single-current-sprint transaction',
+      }
+    );
+  }
+  transactionOpen = false;
+
+  return createSuccess({ data: writeResult.data as T, demoted });
+}
+
+/**
+ * Build the operator-facing warning naming the demoted sprints, or null when none
+ * were demoted (so a single-current add/update stays warning-free).
+ */
+export function buildDemotionWarning(demoted: DemotedSprint[]): string | null {
+  if (demoted.length === 0) return null;
+  const names = demoted.map((s) => (s.title ? `${s.id} ("${s.title}")` : s.id)).join(', ');
+  return (
+    `Demoted ${demoted.length} other open sprint${demoted.length === 1 ? '' : 's'} to ` +
+    `'Planned' to preserve a single current sprint: ${names}.`
+  );
+}

@@ -12,32 +12,11 @@ describe('TokenCounter', () => {
     tokenCounter = new TokenCounter();
   });
 
-  describe('GPT token counting', () => {
-    test('should count tokens for simple text', async () => {
-      const text = 'Hello, world!';
-      const result = await tokenCounter.count(text, 'gpt');
-
-      expect(result.model).toBe('gpt');
-      expect(result.count).toBeGreaterThan(0);
-      expect(result.count).toBeLessThan(10);
-    });
-
-    test('should count more tokens for longer text', async () => {
-      const shortText = 'Hello';
-      const longText = 'Hello, this is a much longer sentence with many more words to count.';
-
-      const shortResult = await tokenCounter.count(shortText, 'gpt');
-      const longResult = await tokenCounter.count(longText, 'gpt');
-
-      expect(longResult.count).toBeGreaterThan(shortResult.count);
-    });
-
-    test('should include cost estimate', async () => {
-      const text = 'Sample text for cost estimation';
-      const result = await tokenCounter.count(text, 'gpt');
-
-      expect(result.estimatedCost).toBeDefined();
-      expect(result.estimatedCost).toBeGreaterThan(0);
+  describe('Retired GPT model (s77-m03)', () => {
+    test('count("…", "gpt") throws Unsupported model: gpt (keep-branch guard)', async () => {
+      await expect(tokenCounter.count('Hello, world!', 'gpt' as any)).rejects.toThrow(
+        'Unsupported model: gpt'
+      );
     });
   });
 
@@ -81,7 +60,7 @@ describe('TokenCounter', () => {
 
     test('should handle special characters', async () => {
       const text = '!@#$%^&*()_+-={}[]|\\:";\'<>?,./';
-      const result = await tokenCounter.count(text, 'gpt');
+      const result = await tokenCounter.count(text, 'claude');
 
       expect(result.count).toBeGreaterThan(0);
     });
@@ -95,9 +74,9 @@ describe('TokenCounter', () => {
   });
 
   describe('Cost estimation', () => {
-    test('should estimate GPT costs correctly', async () => {
+    test('should estimate Claude costs correctly', async () => {
       const text = 'a'.repeat(4000); // ~1000 tokens
-      const result = await tokenCounter.count(text, 'gpt');
+      const result = await tokenCounter.count(text, 'claude');
 
       expect(result.estimatedCost).toBeDefined();
       expect(result.estimatedCost).toBeGreaterThan(0);
@@ -115,7 +94,7 @@ describe('TokenCounter', () => {
     });
 
     test('should handle null or undefined text gracefully', async () => {
-      const result = await tokenCounter.count('', 'gpt');
+      const result = await tokenCounter.count('', 'claude');
       expect(result.count).toBe(0);
     });
   });
@@ -124,12 +103,10 @@ describe('TokenCounter', () => {
     test('different models may produce different token counts', async () => {
       const text = 'This is a test of model-specific tokenization differences.';
 
-      const gptResult = await tokenCounter.count(text, 'gpt');
       const claudeResult = await tokenCounter.count(text, 'claude');
       const geminiResult = await tokenCounter.count(text, 'gemini');
 
       // All should be positive
-      expect(gptResult.count).toBeGreaterThan(0);
       expect(claudeResult.count).toBeGreaterThan(0);
       expect(geminiResult.count).toBeGreaterThan(0);
 
@@ -146,7 +123,7 @@ describe('TokenCounter internals', () => {
       counter as unknown as {
         fallbackCount: (
           text: string,
-          model: 'gpt' | 'claude' | 'gemini'
+          model: 'claude' | 'gemini'
         ) => {
           count: number;
           estimatedCost?: number;
@@ -155,11 +132,9 @@ describe('TokenCounter internals', () => {
     ).fallbackCount.bind(counter);
 
     const sampleText = 'Mission execution summary with ample characters for estimation.';
-    const gpt = fallback(sampleText, 'gpt');
     const claude = fallback(sampleText, 'claude');
     const gemini = fallback(sampleText, 'gemini');
 
-    expect(gpt.estimatedCost).toBeCloseTo((gpt.count / 1_000_000) * 2.5);
     expect(claude.estimatedCost).toBeCloseTo((claude.count / 1_000_000) * 3.0);
     expect(gemini.estimatedCost).toBeCloseTo((gemini.count / 1_000_000) * 1.25);
   });

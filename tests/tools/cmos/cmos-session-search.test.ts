@@ -1,7 +1,9 @@
 /**
  * cmos_session_search Tool Tests
  *
- * Tests for session search functionality.
+ * s77-m05: these drive the REAL cmosSessionSearch handler (via projectRoot) against
+ * a seeded temp store — the previous ~220-line reimplementation (a drift hazard whose
+ * highlight logic had already diverged from the real createHighlight) was removed.
  *
  * @module tests/tools/cmos/cmos-session-search
  */
@@ -12,11 +14,14 @@ import * as os from 'os';
 import * as path from 'path';
 import {
   cmosSessionSearch,
-  cmosSessionSearchToolDefinition,
   formatSessionSearchForLLM,
   VALID_SESSION_TYPES,
+  type CmosSessionSearchParams,
   type CmosSessionSearchResult,
 } from '../../../src/tools/cmos/cmos-session-search';
+import type { CmosToolResult } from '../../../src/tools/cmos/types';
+import { cmosSession } from '../../../src/tools/cmos/cmos-session';
+import type { CmosSessionSearchResult as SessionSearchResultType } from '../../../src/tools/cmos/cmos-session-search';
 import { CmosDetector } from '../../../src/intelligence/cmos-detector';
 
 describe('cmos_session_search', () => {
@@ -25,7 +30,9 @@ describe('cmos_session_search', () => {
 
   beforeEach(() => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-session-search-test-'));
-    dbPath = path.join(tempDir, 'cmos.sqlite');
+    const dbDir = path.join(tempDir, 'cmos', 'db');
+    fs.mkdirSync(dbDir, { recursive: true });
+    dbPath = path.join(dbDir, 'cmos.sqlite');
 
     const db = new Database(dbPath);
     db.exec(`
@@ -58,6 +65,9 @@ describe('cmos_session_search', () => {
         updated_at TEXT
       );
 
+      CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      INSERT INTO metadata (key, value) VALUES ('project_name', 'Search Test'), ('project_id', 'search-test');
+
       -- Insert test data
       INSERT INTO sprints (id, title, status)
       VALUES ('sprint-14', 'Sprint 14', 'Current');
@@ -80,9 +90,17 @@ describe('cmos_session_search', () => {
     }
   });
 
+  /** Drive the REAL cmosSessionSearch handler against the seeded temp store. */
+  function search(
+    params: Omit<CmosSessionSearchParams, 'projectRoot'>
+  ): Promise<CmosToolResult<CmosSessionSearchResult>> {
+    CmosDetector.resetInstance();
+    return cmosSessionSearch({ ...params, projectRoot: tempDir });
+  }
+
   describe('basic search functionality', () => {
     it('should search across session titles', async () => {
-      const result = await cmosSessionSearchWithDb(dbPath, { query: 'Planning' });
+      const result = await search({ query: 'Planning' });
 
       expect(result.success).toBe(true);
       expect(result.data?.results.length).toBeGreaterThan(0);
@@ -90,7 +108,7 @@ describe('cmos_session_search', () => {
     });
 
     it('should search across session summaries', async () => {
-      const result = await cmosSessionSearchWithDb(dbPath, { query: 'TypeScript' });
+      const result = await search({ query: 'TypeScript' });
 
       expect(result.success).toBe(true);
       expect(result.data?.results.length).toBeGreaterThan(0);
@@ -98,26 +116,29 @@ describe('cmos_session_search', () => {
     });
 
     it('should search across captures', async () => {
-      const result = await cmosSessionSearchWithDb(dbPath, { query: 'SQLite' });
+      const result = await search({ query: 'SQLite' });
 
       expect(result.success).toBe(true);
       expect(result.data?.results.length).toBe(2); // PS-001 and PS-003
       expect(result.data?.results[0].matchedIn).toContain('captures');
     });
 
-    it('should return matched captures with highlights', async () => {
-      const result = await cmosSessionSearchWithDb(dbPath, { query: 'TypeScript' });
+    it('should return matched captures with highlights (real createHighlight)', async () => {
+      const result = await search({ query: 'TypeScript' });
 
       expect(result.success).toBe(true);
       expect(result.data?.results[0].matchedCaptures.length).toBeGreaterThan(0);
-      expect(result.data?.results[0].matchedCaptures[0].highlight).toBeDefined();
+      const hl = result.data?.results[0].matchedCaptures[0].highlight;
+      expect(hl).toBeDefined();
+      // createHighlight extracts a window around the first keyword — the matched
+      // snippet must actually contain the query.
+      expect(hl?.toLowerCase()).toContain('typescript');
     });
 
     it('should rank results by relevance', async () => {
-      const result = await cmosSessionSearchWithDb(dbPath, { query: 'SQLite' });
+      const result = await search({ query: 'SQLite' });
 
       expect(result.success).toBe(true);
-      // Results should be ordered by relevance (descending)
       const relevances = result.data?.results.map((r) => r.relevance) ?? [];
       for (let i = 1; i < relevances.length; i++) {
         expect(relevances[i]).toBeLessThanOrEqual(relevances[i - 1]);
@@ -127,13 +148,9 @@ describe('cmos_session_search', () => {
 
   describe('filtering', () => {
     it('should filter by capture category', async () => {
-      const result = await cmosSessionSearchWithDb(dbPath, {
-        query: 'SQLite',
-        category: 'learning',
-      });
+      const result = await search({ query: 'SQLite', category: 'learning' });
 
       expect(result.success).toBe(true);
-      // Only captures with category 'learning' should be in matchedCaptures
       for (const session of result.data?.results ?? []) {
         for (const capture of session.matchedCaptures) {
           expect(capture.category).toBe('learning');
@@ -142,10 +159,7 @@ describe('cmos_session_search', () => {
     });
 
     it('should filter by session type', async () => {
-      const result = await cmosSessionSearchWithDb(dbPath, {
-        query: 'session',
-        type: 'planning',
-      });
+      const result = await search({ query: 'session', type: 'planning' });
 
       expect(result.success).toBe(true);
       for (const session of result.data?.results ?? []) {
@@ -154,10 +168,7 @@ describe('cmos_session_search', () => {
     });
 
     it('should filter by date range (since)', async () => {
-      const result = await cmosSessionSearchWithDb(dbPath, {
-        query: 'session',
-        since: '2024-01-17',
-      });
+      const result = await search({ query: 'session', since: '2024-01-17' });
 
       expect(result.success).toBe(true);
       for (const session of result.data?.results ?? []) {
@@ -166,10 +177,7 @@ describe('cmos_session_search', () => {
     });
 
     it('should filter by date range (until)', async () => {
-      const result = await cmosSessionSearchWithDb(dbPath, {
-        query: 'session',
-        until: '2024-01-16T12:00:00Z',
-      });
+      const result = await search({ query: 'session', until: '2024-01-16T12:00:00Z' });
 
       expect(result.success).toBe(true);
       for (const session of result.data?.results ?? []) {
@@ -178,11 +186,7 @@ describe('cmos_session_search', () => {
     });
 
     it('should apply multiple filters', async () => {
-      const result = await cmosSessionSearchWithDb(dbPath, {
-        query: 'Planning',
-        type: 'planning',
-        since: '2024-01-15',
-      });
+      const result = await search({ query: 'Planning', type: 'planning', since: '2024-01-15' });
 
       expect(result.success).toBe(true);
       for (const session of result.data?.results ?? []) {
@@ -194,20 +198,14 @@ describe('cmos_session_search', () => {
 
   describe('pagination', () => {
     it('should respect limit parameter', async () => {
-      const result = await cmosSessionSearchWithDb(dbPath, {
-        query: 'session',
-        limit: 2,
-      });
+      const result = await search({ query: 'session', limit: 2 });
 
       expect(result.success).toBe(true);
       expect(result.data?.results.length).toBeLessThanOrEqual(2);
     });
 
     it('should indicate when results are limited', async () => {
-      const result = await cmosSessionSearchWithDb(dbPath, {
-        query: 'session',
-        limit: 1,
-      });
+      const result = await search({ query: 'session', limit: 1 });
 
       expect(result.success).toBe(true);
       if (result.data?.totalMatches && result.data.totalMatches > 1) {
@@ -216,7 +214,7 @@ describe('cmos_session_search', () => {
     });
 
     it('should default limit to 20', async () => {
-      const result = await cmosSessionSearchWithDb(dbPath, { query: 'session' });
+      const result = await search({ query: 'session' });
 
       expect(result.success).toBe(true);
       expect(result.data?.results.length).toBeLessThanOrEqual(20);
@@ -225,13 +223,13 @@ describe('cmos_session_search', () => {
 
   describe('error handling', () => {
     it('should return error for empty query', async () => {
-      const result = await cmosSessionSearchWithDb(dbPath, { query: '' });
+      const result = await search({ query: '' });
 
       expect(result.success).toBe(false);
     });
 
     it('should return empty results for non-matching query', async () => {
-      const result = await cmosSessionSearchWithDb(dbPath, { query: 'xyznonexistent' });
+      const result = await search({ query: 'xyznonexistent' });
 
       expect(result.success).toBe(true);
       expect(result.data?.results.length).toBe(0);
@@ -239,30 +237,42 @@ describe('cmos_session_search', () => {
     });
   });
 
-  describe('tool definition', () => {
-    it('should have correct tool name', () => {
-      expect(cmosSessionSearchToolDefinition.name).toBe('cmos_session_search');
-    });
-
-    it('should have description', () => {
-      expect(cmosSessionSearchToolDefinition.description).toBeTruthy();
-      expect(cmosSessionSearchToolDefinition.description.toLowerCase()).toContain('search');
-    });
-
-    it('should require query parameter', () => {
-      expect(cmosSessionSearchToolDefinition.inputSchema.required).toContain('query');
-    });
-
-    it('should have valid session types', () => {
+  describe('exports', () => {
+    it('exposes the valid session types', () => {
       expect(VALID_SESSION_TYPES).toContain('planning');
       expect(VALID_SESSION_TYPES).toContain('review');
       expect(VALID_SESSION_TYPES).toContain('research');
     });
   });
 
+  describe('via cmos_session(action="search") — end-to-end through the router', () => {
+    it('drives the real handler and returns matchedCaptures with a highlight', async () => {
+      CmosDetector.resetInstance();
+      const result = (await cmosSession({
+        action: 'search',
+        query: 'SQLite',
+        projectRoot: tempDir,
+      })) as CmosToolResult<SessionSearchResultType>;
+
+      expect(result.success).toBe(true);
+      expect(result.data?.results.length).toBe(2); // PS-001 + PS-003
+      const withCaptures = result.data?.results.find((r) => r.matchedCaptures.length > 0);
+      expect(withCaptures).toBeDefined();
+      expect(withCaptures?.matchedCaptures[0].highlight.toLowerCase()).toContain('sqlite');
+    });
+
+    it('surfaces MISSING_PARAMETER when query is omitted (?? "" reaches the handler)', async () => {
+      CmosDetector.resetInstance();
+      const result = await cmosSession({ action: 'search', projectRoot: tempDir });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('MISSING_PARAMETER');
+    });
+  });
+
   describe('formatSessionSearchForLLM', () => {
     it('should format search results', async () => {
-      const result = await cmosSessionSearchWithDb(dbPath, { query: 'Planning' });
+      const result = await search({ query: 'Planning' });
       const formatted = formatSessionSearchForLLM(result);
 
       expect(formatted).toContain('Search Results');
@@ -270,247 +280,17 @@ describe('cmos_session_search', () => {
     });
 
     it('should show filter information', async () => {
-      const result = await cmosSessionSearchWithDb(dbPath, {
-        query: 'test',
-        type: 'planning',
-      });
+      const result = await search({ query: 'test', type: 'planning' });
       const formatted = formatSessionSearchForLLM(result);
 
       expect(formatted).toContain('type: planning');
     });
 
     it('should show matched captures', async () => {
-      const result = await cmosSessionSearchWithDb(dbPath, { query: 'TypeScript' });
+      const result = await search({ query: 'TypeScript' });
       const formatted = formatSessionSearchForLLM(result);
 
       expect(formatted).toContain('decision');
     });
   });
 });
-
-/**
- * Helper to run cmosSessionSearch with explicit database path.
- */
-async function cmosSessionSearchWithDb(
-  dbPath: string,
-  params: {
-    query: string;
-    category?: 'decision' | 'learning' | 'constraint' | 'context' | 'next-step';
-    type?: 'planning' | 'review' | 'research' | 'onboarding' | 'check-in' | 'custom';
-    since?: string;
-    until?: string;
-    limit?: number;
-  }
-): Promise<{
-  success: boolean;
-  data?: CmosSessionSearchResult;
-  error?: { code: string; message: string };
-}> {
-  const { withClient } = await import('../../../src/tools/cmos/client');
-  const { createSuccess, createError, CmosErrors } = await import('../../../src/tools/cmos/errors');
-
-  if (!params.query || params.query.trim().length === 0) {
-    return createError(CmosErrors.missingParameter('query'));
-  }
-
-  const limit = params.limit ?? 20;
-  const query = params.query.trim().toLowerCase();
-  const keywords = query.split(/\s+/).filter((k) => k.length >= 2);
-
-  if (keywords.length === 0) {
-    return createError(
-      CmosErrors.invalidParameter('query', query, ['At least one keyword with 2+ characters'])
-    );
-  }
-
-  return withClient(
-    (client) => {
-      // Build WHERE clauses
-      const clauses: string[] = [];
-      const queryParams: (string | number)[] = [];
-
-      if (params.type) {
-        clauses.push('type = ?');
-        queryParams.push(params.type);
-      }
-
-      if (params.since) {
-        clauses.push('started_at >= ?');
-        queryParams.push(params.since);
-      }
-
-      if (params.until) {
-        clauses.push('started_at <= ?');
-        queryParams.push(params.until);
-      }
-
-      // Build search condition
-      const searchConditions: string[] = [];
-      for (const keyword of keywords) {
-        searchConditions.push(
-          `(LOWER(title) LIKE ? OR LOWER(COALESCE(summary, '')) LIKE ? OR LOWER(COALESCE(captures, '')) LIKE ?)`
-        );
-        queryParams.push(`%${keyword}%`, `%${keyword}%`, `%${keyword}%`);
-      }
-
-      if (searchConditions.length > 0) {
-        clauses.push(`(${searchConditions.join(' AND ')})`);
-      }
-
-      const whereClause = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
-
-      // Get sessions
-      interface SessionRow {
-        id: string;
-        type: string;
-        title: string;
-        status: string;
-        sprint_id: string | null;
-        started_at: string;
-        completed_at: string | null;
-        summary: string | null;
-        captures: string | null;
-      }
-
-      const result = client.getMany<SessionRow>(
-        `SELECT id, type, title, status, sprint_id, started_at, completed_at, summary, captures
-         FROM sessions ${whereClause} ORDER BY started_at DESC LIMIT ?`,
-        [...queryParams, limit + 10]
-      );
-
-      if (!result.success || !result.data) {
-        return createSuccess<CmosSessionSearchResult>({
-          query: params.query,
-          results: [],
-          totalMatches: 0,
-          limited: false,
-          filters: {
-            category: params.category,
-            type: params.type,
-            since: params.since,
-            until: params.until,
-          },
-        });
-      }
-
-      // Process results
-      interface ParsedCapture {
-        category: string;
-        content: string;
-        timestamp: string;
-      }
-
-      interface ProcessedResult {
-        id: string;
-        type: string;
-        title: string;
-        status: string;
-        sprintId: string | null;
-        startedAt: string;
-        completedAt: string | null;
-        summary: string | null;
-        captureCount: number;
-        matchedCaptures: Array<{
-          category: 'decision' | 'learning' | 'constraint' | 'context' | 'next-step';
-          content: string;
-          timestamp: string;
-          highlight: string;
-        }>;
-        matchedIn: ('title' | 'summary' | 'captures')[];
-        relevance: number;
-      }
-
-      const processedResults: ProcessedResult[] = [];
-
-      for (const row of result.data) {
-        let captures: ParsedCapture[] = [];
-        try {
-          captures = JSON.parse(row.captures || '[]');
-        } catch {
-          captures = [];
-        }
-
-        if (params.category) {
-          captures = captures.filter((c) => c.category === params.category);
-        }
-
-        const matchedIn: ('title' | 'summary' | 'captures')[] = [];
-        let relevance = 0;
-
-        const titleLower = row.title.toLowerCase();
-        for (const keyword of keywords) {
-          if (titleLower.includes(keyword)) {
-            if (!matchedIn.includes('title')) matchedIn.push('title');
-            relevance += 3;
-          }
-        }
-
-        const summaryLower = (row.summary || '').toLowerCase();
-        for (const keyword of keywords) {
-          if (summaryLower.includes(keyword)) {
-            if (!matchedIn.includes('summary')) matchedIn.push('summary');
-            relevance += 2;
-          }
-        }
-
-        const matchedCaptures: ProcessedResult['matchedCaptures'] = [];
-        for (const capture of captures) {
-          const contentLower = capture.content.toLowerCase();
-          let captureMatches = false;
-
-          for (const keyword of keywords) {
-            if (contentLower.includes(keyword)) {
-              captureMatches = true;
-              relevance += 1;
-            }
-          }
-
-          if (captureMatches) {
-            if (!matchedIn.includes('captures')) matchedIn.push('captures');
-            matchedCaptures.push({
-              category: capture.category as ProcessedResult['matchedCaptures'][0]['category'],
-              content: capture.content,
-              timestamp: capture.timestamp,
-              highlight:
-                capture.content.slice(0, 100) + (capture.content.length > 100 ? '...' : ''),
-            });
-          }
-        }
-
-        if (matchedIn.length === 0) continue;
-
-        processedResults.push({
-          id: row.id,
-          type: row.type,
-          title: row.title,
-          status: row.status,
-          sprintId: row.sprint_id,
-          startedAt: row.started_at,
-          completedAt: row.completed_at,
-          summary: row.summary,
-          captureCount: captures.length,
-          matchedCaptures,
-          matchedIn,
-          relevance,
-        });
-      }
-
-      processedResults.sort((a, b) => b.relevance - a.relevance);
-      const limitedResults = processedResults.slice(0, limit);
-
-      return createSuccess<CmosSessionSearchResult>({
-        query: params.query,
-        results: limitedResults,
-        totalMatches: processedResults.length,
-        limited: processedResults.length > limit,
-        filters: {
-          category: params.category,
-          type: params.type,
-          since: params.since,
-          until: params.until,
-        },
-      });
-    },
-    { dbPath }
-  );
-}

@@ -151,6 +151,43 @@ describe('orphan-detection', () => {
       expect(result.orphanedSprints).toHaveLength(0);
     });
 
+    it('should not flag Failed/Dropped/Reverted sprints with no missions (terminal-status regression)', async () => {
+      const db = new Database(dbPath);
+      db.exec(`
+        INSERT INTO sprints (id, title, status) VALUES ('sprint-failed', 'Failed Sprint', 'Failed');
+        INSERT INTO sprints (id, title, status) VALUES ('sprint-dropped', 'Dropped Sprint', 'Dropped');
+        INSERT INTO sprints (id, title, status) VALUES ('sprint-reverted', 'Reverted Sprint', 'Reverted');
+      `);
+      db.close();
+
+      const result = await runWithClient((client) => detectOrphans(client));
+      expect(result.orphanedSprints).toHaveLength(0);
+    });
+
+    it('should not flag terminal sprints with drifted-case status (lowercase "failed"/"completed")', async () => {
+      const db = new Database(dbPath);
+      db.exec(`
+        INSERT INTO sprints (id, title, status) VALUES ('sprint-lc1', 'lowercase failed', 'failed');
+        INSERT INTO sprints (id, title, status) VALUES ('sprint-lc2', 'lowercase completed', 'completed');
+      `);
+      db.close();
+
+      const result = await runWithClient((client) => detectOrphans(client));
+      expect(result.orphanedSprints).toHaveLength(0);
+    });
+
+    it('should still flag a genuinely live (Planned) sprint with no missions', async () => {
+      const db = new Database(dbPath);
+      db.exec(`
+        INSERT INTO sprints (id, title, status) VALUES ('sprint-live', 'Live Sprint', 'Planned');
+      `);
+      db.close();
+
+      const result = await runWithClient((client) => detectOrphans(client));
+      expect(result.orphanedSprints).toHaveLength(1);
+      expect(result.orphanedSprints[0].id).toBe('sprint-live');
+    });
+
     it('should return empty when no sprints exist', async () => {
       const result = await runWithClient((client) => detectOrphans(client));
       expect(result.orphanedSprints).toHaveLength(0);
@@ -198,16 +235,47 @@ describe('orphan-detection', () => {
       expect(noSprint).toHaveLength(0);
     });
 
-    it('should not flag Archived missions without sprint', async () => {
+    it('should not flag Dropped/Deferred/Failed missions without sprint (terminal-status regression)', async () => {
+      // Dropped/Deferred are the bug: the old NOT IN ('Completed','Archived') list
+      // omitted them, so a dropped/deferred mission with no sprint was wrongly
+      // reported as a live orphan. ('Archived' is not a valid mission status — the
+      // mission-terminal set is {Completed, Failed, Dropped, Deferred}.)
       const db = new Database(dbPath);
       db.exec(`
-        INSERT INTO missions (id, sprint_id, name, status) VALUES ('m01', NULL, 'Archived Mission', 'Archived');
+        INSERT INTO missions (id, sprint_id, name, status) VALUES ('m-drop', NULL, 'Dropped Mission', 'Dropped');
+        INSERT INTO missions (id, sprint_id, name, status) VALUES ('m-defer', NULL, 'Deferred Mission', 'Deferred');
+        INSERT INTO missions (id, sprint_id, name, status) VALUES ('m-fail', NULL, 'Failed Mission', 'Failed');
       `);
       db.close();
 
       const result = await runWithClient((client) => detectOrphans(client));
       const noSprint = result.orphanedMissions.filter((m) => m.reason === 'no_sprint');
       expect(noSprint).toHaveLength(0);
+    });
+
+    it('should not flag terminal missions with drifted-case status (lowercase "dropped")', async () => {
+      const db = new Database(dbPath);
+      db.exec(`
+        INSERT INTO missions (id, sprint_id, name, status) VALUES ('m-lc', NULL, 'lowercase dropped', 'dropped');
+      `);
+      db.close();
+
+      const result = await runWithClient((client) => detectOrphans(client));
+      const noSprint = result.orphanedMissions.filter((m) => m.reason === 'no_sprint');
+      expect(noSprint).toHaveLength(0);
+    });
+
+    it('should still flag a genuinely live (Blocked) mission without sprint', async () => {
+      const db = new Database(dbPath);
+      db.exec(`
+        INSERT INTO missions (id, sprint_id, name, status) VALUES ('m-live', NULL, 'Blocked Mission', 'Blocked');
+      `);
+      db.close();
+
+      const result = await runWithClient((client) => detectOrphans(client));
+      const noSprint = result.orphanedMissions.filter((m) => m.reason === 'no_sprint');
+      expect(noSprint).toHaveLength(1);
+      expect(noSprint[0].id).toBe('m-live');
     });
   });
 

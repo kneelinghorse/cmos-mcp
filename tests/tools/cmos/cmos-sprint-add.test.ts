@@ -241,6 +241,26 @@ describe('cmos_sprint_add', () => {
       expect(formatted).toContain('Failed');
       expect(formatted).toContain('Suggestion');
     });
+
+    it('renders the single-current-sprint demotion warning (s77-m01)', () => {
+      // index.ts surfaces only the formatted text, so a demotion warning must be
+      // rendered here to reach the operator on the running server.
+      const formatted = formatSprintAddForLLM({
+        success: true,
+        data: {
+          id: 'sprint-b',
+          title: 'Sprint B',
+          message: "Sprint 'sprint-b' created successfully",
+        },
+        warnings: [
+          "Demoted 1 other open sprint to 'Planned' to preserve a single current sprint: sprint-a.",
+        ],
+      });
+
+      expect(formatted).toContain('Warnings:');
+      expect(formatted).toContain('Demoted 1 other open sprint');
+      expect(formatted).toContain('sprint-a');
+    });
   });
 });
 

@@ -1,6 +1,6 @@
 {
   "name": "@aquex/cmos-mcp",
-  "version": "1.1.1",
+  "version": "2.0.0",
   "description": "MCP server for CMOS — typed, safe, SQLite-backed project management for AI agents",
   "repository": {
     "type": "git",
@@ -21,16 +21,10 @@
       "require": "./dist/index.js",
       "default": "./dist/index.js"
     },
-    "./http-server": {
-      "types": "./dist/http-server.d.ts",
-      "require": "./dist/http-server.js",
-      "default": "./dist/http-server.js"
-    },
     "./package.json": "./package.json"
   },
   "bin": {
-    "cmos-mcp": "./dist/index.js",
-    "cmos-mcp-http": "./dist/http-server.js"
+    "cmos-mcp": "./dist/index.js"
   },
   "files": [
     "dist",
@@ -38,7 +32,10 @@
     "LICENSE",
     "NOTICE",
     "README.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "SECURITY.md",
+    "TOOL_REFERENCE.md",
+    "docs/getting-started.md"
   ],
   "engines": {
     "node": ">=18"
@@ -53,9 +50,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "metrics": "node scripts/collect-quality-metrics.js",
-    "outcomes": "npx ts-node scripts/collect-mission-outcomes.ts",
     "snapshots": "jest --runTestsByPath tests/tools/tool-definitions.test.ts --coverage=false",
-    "validate:packs": "npx ts-node scripts/validate-packs.ts",
     "prune:registry": "npx ts-node scripts/prune-project-registry.ts",
     "detect:corrupted": "npx ts-node scripts/detect-corrupted-decisions.ts",
     "backfill:embeddings": "npx ts-node scripts/backfill-embeddings.ts",
@@ -66,11 +61,11 @@
     "test": "jest",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
-    "test:performance": "jest --coverage=false tests/import-export/performance.test.ts",
-    "build": "tsc && node scripts/generate-build-manifest.js",
+    "test:performance": "RUN_PERF_ASSERTS=1 jest --coverage=false tests/tools/cmos/e2e-lifecycle.test.ts",
+    "test:e2e-firstrun": "jest --config jest.e2e.config.js --runInBand",
+    "build": "tsc && node scripts/generate-build-manifest.js && node scripts/generate-tool-reference.js",
     "clean": "rm -rf dist coverage",
     "start": "node dist/index.js",
-    "start:http": "node dist/http-server.js",
     "prepare": "husky"
   },
   "keywords": [
@@ -108,11 +103,13 @@
     "@xenova/transformers": "^2.17.2",
     "better-sqlite3": "^12.6.0",
     "fast-xml-parser": "^5.3.0",
-    "gpt-tokenizer": "^3.2.0",
     "sqlite-vec": "^0.1.9",
     "ulid": "^3.0.2",
     "yaml": "^2.8.1",
     "zod": "^3.25.76"
+  },
+  "overrides": {
+    "protobufjs": "^7.6.5"
   },
   "lint-staged": {
     "!(*.config).{js,ts}": [

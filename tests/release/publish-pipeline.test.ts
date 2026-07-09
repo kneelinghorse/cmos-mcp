@@ -18,6 +18,7 @@ type PackageJson = {
   exports?: PackageJsonExports;
   files?: string[];
   bin?: Record<string, string>;
+  scripts?: Record<string, string>;
 };
 
 const projectRoot = path.resolve(__dirname, '..', '..');
@@ -35,7 +36,6 @@ describe('npm publish pipeline configuration', () => {
     expect(packageJson.files).toContain('dist');
     expect(packageJson.bin).toMatchObject({
       'cmos-mcp': './dist/index.js',
-      'cmos-mcp-http': './dist/http-server.js',
     });
 
     expect(packageJson.exports).toMatchObject({
@@ -44,13 +44,46 @@ describe('npm publish pipeline configuration', () => {
         require: './dist/index.js',
         default: './dist/index.js',
       },
-      './http-server': {
-        types: './dist/http-server.d.ts',
-        require: './dist/http-server.js',
-        default: './dist/http-server.js',
-      },
       './package.json': './package.json',
     });
+  });
+
+  // Arc C / s78-m01 (FORK-1 = A, hard-delete): the unauthenticated HTTP transport
+  // (`cmos-mcp-http` bin, `./http-server` export, `start:http` script, `src/http-server.ts`)
+  // was removed — it was a CORS-`*`, zero-auth, full-store-write channel with no consumers.
+  // This guard is INVERTED from the old "must expose the http bin" assertion: it now fences
+  // AGAINST a well-meaning re-add. If a real remote client ever needs it, recover the source
+  // from git history and rebuild WITH authentication (do not just un-delete this surface).
+  test('package.json does NOT expose the unauthenticated HTTP transport', () => {
+    const packageJson = JSON.parse(readTextFile('package.json')) as PackageJson;
+
+    expect(packageJson.bin).not.toHaveProperty('cmos-mcp-http');
+    expect(packageJson.scripts ?? {}).not.toHaveProperty('start:http');
+    expect(packageJson.exports ?? {}).not.toHaveProperty('./http-server');
+
+    // No bin/export/script value may point at the deleted http-server artifact.
+    const referencesHttpServer = [
+      ...Object.values(packageJson.bin ?? {}),
+      ...Object.values(packageJson.scripts ?? {}),
+      ...Object.values(packageJson.exports ?? {}).flatMap((entry) =>
+        typeof entry === 'string' ? [entry] : Object.values(entry)
+      ),
+    ].some((value) => typeof value === 'string' && value.includes('http-server'));
+    expect(referencesHttpServer).toBe(false);
+
+    // The stdio bin — the product — is untouched.
+    expect(packageJson.bin).toMatchObject({ 'cmos-mcp': './dist/index.js' });
+  });
+
+  test('the http-server source and transport docs are deleted from the repo', () => {
+    for (const relativePath of [
+      'src/http-server.ts',
+      'HTTP_TRANSPORT.md',
+      'README_HTTP.md',
+      'ecosystem.config.js',
+    ]) {
+      expect(fs.existsSync(path.join(projectRoot, relativePath))).toBe(false);
+    }
   });
 
   test('.npmignore excludes local workspace and development artifacts', () => {

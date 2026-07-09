@@ -264,13 +264,16 @@ describe('Session Auto-Sprint Detection', () => {
     expect(result.data?.sprintAutoTagged).toBe(false);
   });
 
-  it('should set sprintAutoTagged=false and sprintId=null when no active sprint exists', async () => {
-    // Mark all sprints as completed
-    testDb.db.exec(`UPDATE sprints SET status = 'Completed'`);
+  it('does not auto-tag when the store has no current sprint at all (s77-m02)', async () => {
+    // s77-m02: session-start now delegates to resolveCurrentSprintId, which returns
+    // a sprint whenever ANY live-or-recent one exists (matching onboard — e.g. on a
+    // fork-and-forget project the most-recent Completed sprint is still "current").
+    // So the only genuine no-tag case is a store with nothing to resolve.
+    testDb.db.exec(`DELETE FROM missions; DELETE FROM sprints;`);
 
     const result = await cmosSessionStart({
       type: 'research',
-      title: 'No active sprint session',
+      title: 'No sprint session',
       projectRoot: testDb.tempDir,
     });
 
@@ -290,7 +293,7 @@ describe('Session Auto-Sprint Detection', () => {
     expect(result.data?.message).toContain('auto-tagged to sprint-11');
   });
 
-  it('should pick the latest active sprint when multiple exist', async () => {
+  it('auto-tags to the sprint with active work, not merely the newest Active sprint (s77-m02)', async () => {
     testDb.db.exec(`
       INSERT INTO sprints (id, title, focus, status)
       VALUES ('sprint-12', 'Sprint 12', 'Newer active', 'Active');
@@ -303,32 +306,43 @@ describe('Session Auto-Sprint Detection', () => {
     });
 
     expect(result.success).toBe(true);
-    // Should pick sprint-12 (most recently inserted, same date)
-    expect(result.data?.sprintId).toBe('sprint-12');
+    // sprint-11 holds the In Progress mission s11-m01, so the resolver's Step-1
+    // (active-work) picks it over the empty, newer sprint-12 — converged with
+    // onboard's getCurrentSprint (which always ran active-work first).
+    expect(result.data?.sprintId).toBe('sprint-11');
     expect(result.data?.sprintAutoTagged).toBe(true);
   });
 
-  it('should pick the most recently started sprint, not the lexicographically greatest ID', async () => {
-    // Regression: sprint IDs are strings — lexicographic ORDER BY id DESC is unreliable.
-    // 'sprint-9' > 'sprint-43' lexicographically (because '9' > '4'),
-    // but sprint-43 started later so it should be preferred.
+  it('breaks a multi-Active tie by real activity, not start_date or lexicographic ID (s77-m02 Fork 1b)', async () => {
+    // Remove the active-work confound (Step 1) so the explicit-open tie-break
+    // decides, then give two Active sprints distinct real activity. Fork 1b:
+    // most-recent activity wins — NOT start_date (the retired naive Resolver B) and
+    // NOT lexicographic ID ('sprint-9' > 'sprint-43' lexically, but loses on date).
     testDb.db.exec(`
+      UPDATE missions SET status = 'Completed', completed_at = '2024-01-05T10:00:00Z' WHERE id = 's11-m01';
       UPDATE sprints SET status = 'Completed';
       INSERT INTO sprints (id, title, focus, status, start_date)
       VALUES
-        ('sprint-43', 'Sprint 43', 'Older by ID sort', 'Active', '2024-02-01'),
-        ('sprint-9',  'Sprint 9',  'Newer by ID sort', 'Active', '2024-01-01');
+        ('sprint-43', 'Sprint 43', 'earlier activity', 'Active', '2024-02-01'),
+        ('sprint-9',  'Sprint 9',  'later activity',   'Active', '2024-01-01');
+      INSERT INTO missions (id, sprint_id, name, status, completed_at, objective)
+      VALUES
+        ('s43-done', 'sprint-43', 'S43 done',  'Completed', '2024-03-01T00:00:00Z', 'o'),
+        ('s43-q',    'sprint-43', 'S43 queued','Queued',    NULL,                   'o'),
+        ('s9-done',  'sprint-9',  'S9 done',   'Completed', '2024-04-01T00:00:00Z', 'o'),
+        ('s9-q',     'sprint-9',  'S9 queued', 'Queued',    NULL,                   'o');
     `);
 
     const result = await cmosSessionStart({
       type: 'planning',
-      title: 'Date-based sprint selection',
+      title: 'Activity tie-break',
       projectRoot: testDb.tempDir,
     });
 
     expect(result.success).toBe(true);
-    // sprint-43 started 2024-02-01, which is more recent than sprint-9's 2024-01-01
-    expect(result.data?.sprintId).toBe('sprint-43');
+    // sprint-9's mission completed 2024-04 (later than sprint-43's 2024-03), so
+    // sprint-9 wins on activity despite its earlier start_date and lower-sorting ID.
+    expect(result.data?.sprintId).toBe('sprint-9');
     expect(result.data?.sprintAutoTagged).toBe(true);
   });
 

@@ -2,9 +2,10 @@ name: Quality Tooling
 
 on:
   push:
+    # All branches — commits pushed between PRs (e.g. long-lived working branches
+    # like pro-expansion-phase-1) must still get CI, not just main/develop.
     branches:
-      - main
-      - develop
+      - '**'
   pull_request:
     paths:
       - 'src/**'
@@ -50,9 +51,6 @@ jobs:
           CI: 'true'
         run: npm run snapshots -- --ci
 
-      - name: Validate mission templates
-        run: npm run validate:packs
-
       - name: Generate quality metrics
         run: npm run metrics
 
@@ -61,3 +59,31 @@ jobs:
         with:
           name: quality-metrics
           path: artifacts/quality-metrics/latest.json
+
+  first-run-e2e:
+    name: First-run E2E (pack -> install -> drive stdio)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      # Packs the tarball, installs it into a temp dir, and drives the documented
+      # getting-started quickstart over real MCP stdio against the INSTALLED server
+      # (s77-m10). Guards the published first-run experience against silent breakage.
+      - name: Run first-run E2E
+        env:
+          CI: 'true'
+        run: npm run test:e2e-firstrun

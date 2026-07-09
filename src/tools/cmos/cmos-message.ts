@@ -15,6 +15,12 @@ import { z } from 'zod';
 import path from 'path';
 import { createError, createSuccess, CmosErrors } from './errors';
 import type { CmosToolResult } from './types';
+import {
+  foreignDescriptor,
+  frameForeignInline,
+  UNTRUSTED_CONTENT_CONTRACT,
+  type ProvenanceDescriptor,
+} from '../../intelligence/provenance-frame';
 import { computeAuthState, type AuthState } from '../../auth/auth-state';
 import { DashboardClient, type DashboardMessage, type DirectoryProject } from './dashboard-client';
 import { CMOS_PROJECT_ROOT_ENV } from './client';
@@ -104,8 +110,13 @@ export interface MessageSendResult {
   deliveryStatus?: string;
 }
 
+/** s78-m05: a DashboardMessage plus an additive {source, trust:'foreign'} descriptor.
+ *  All original fields (incl. `body`) are preserved for wire-contract compatibility;
+ *  the descriptor signals to consumers that summary/body are untrusted foreign content. */
+export type FramedMessage = DashboardMessage & { provenance?: ProvenanceDescriptor };
+
 export interface MessageListResult {
-  messages: DashboardMessage[];
+  messages: FramedMessage[];
   unreadCount: number;
   totalCount: number;
   tab: string;
@@ -127,8 +138,12 @@ export interface MessageAckResult {
   ackedAt: string;
 }
 
+/** s78-m05: a DirectoryProject plus an additive provenance descriptor. Descriptions
+ *  come from other users' project registrations and are untrusted foreign content. */
+export type FramedDirectoryProject = DirectoryProject & { provenance?: ProvenanceDescriptor };
+
 export interface MessageDirectoryResult {
-  projects: DirectoryProject[];
+  projects: FramedDirectoryProject[];
   totalCount: number;
 }
 
@@ -246,7 +261,8 @@ export const cmosMessageToolDefinition = {
     'directory (discover addressable projects), whoami (diagnose sender attribution). ' +
     'Send auto-detects senderProjectId, normalizes addresses (spaces→hyphens, lowercase), ' +
     'and validates target against the project directory before sending. ' +
-    'Requires CMOS_DASHBOARD_URL, CMOS_DASHBOARD_USER, and CMOS_DASHBOARD_PASSWORD environment variables.',
+    'Requires CMOS_DASHBOARD_URL, CMOS_DASHBOARD_USER, and CMOS_DASHBOARD_PASSWORD environment variables. ' +
+    UNTRUSTED_CONTENT_CONTRACT,
   inputSchema: {
     type: 'object',
     properties: {
@@ -729,8 +745,16 @@ async function handleList(
     return createError<MessageListResult>(result.error!);
   }
 
+  // s78-m05: tag each message with an additive foreign-provenance descriptor. Body/summary
+  // are inbound, non-locally-authored content — untrusted DATA, not instructions. Original
+  // fields (incl. `body`) are preserved for the wire contract.
+  const framed: FramedMessage[] = result.data!.messages.map((msg) => ({
+    ...msg,
+    provenance: foreignDescriptor(msg.from ?? msg.senderAddress ?? msg.from_project_id),
+  }));
+
   return createSuccess<MessageListResult>({
-    messages: result.data!.messages,
+    messages: framed,
     unreadCount: result.data!.unreadCount,
     totalCount: result.data!.totalCount,
     tab,
@@ -818,8 +842,17 @@ async function handleDirectory(
     return createError<MessageDirectoryResult>(result.error!);
   }
 
+  // s78-m05: directory descriptions are authored by other users — tag each with a
+  // foreign-provenance descriptor (own-project entries stay 'local').
+  const framedProjects: FramedDirectoryProject[] = result.data!.projects.map((p) => ({
+    ...p,
+    provenance: p.isOwner
+      ? { source: p.address, trust: 'local' as const }
+      : foreignDescriptor(p.address),
+  }));
+
   return createSuccess<MessageDirectoryResult>({
-    projects: result.data!.projects,
+    projects: framedProjects,
     totalCount: result.data!.totalCount,
   });
 }
@@ -912,8 +945,10 @@ function formatListForLLM(result: CmosToolResult<MessageListResult>): string {
     lines.push('  No messages');
   } else {
     for (const msg of d.messages) {
-      const from = msg.from ? ` from ${msg.from}` : '';
-      lines.push(`  [${msg.status}] ${msg.summary}${from} (${msg.id})`);
+      // s78-m05: the summary is inbound foreign content — render it inside an untrusted
+      // fence labeled with the sender, never as a bare instruction-looking line.
+      const src = msg.from ?? msg.senderAddress ?? 'unknown sender';
+      lines.push(`  [${msg.status}] (${msg.id}) ${frameForeignInline(msg.summary, src)}`);
     }
   }
 
@@ -960,7 +995,12 @@ function formatDirectoryForLLM(result: CmosToolResult<MessageDirectoryResult>): 
     lines.push('  No projects found');
   } else {
     for (const p of d.projects) {
-      const desc = p.description ? ` — ${p.description}` : '';
+      // s78-m05: descriptions are foreign-authored — frame non-owner descriptions untrusted.
+      const desc = p.description
+        ? p.provenance?.trust === 'foreign'
+          ? ` — ${frameForeignInline(p.description, p.address)}`
+          : ` — ${p.description}`
+        : '';
       lines.push(`  ${p.address} (${p.id})${desc}`);
     }
   }

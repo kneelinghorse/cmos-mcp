@@ -1,6 +1,0 @@
-name: "business.market-research"
-version: "1.0.0"
-displayName: "Market Research Mission"
-description: "Business analysis and market research missions"
-author: "core-team"
-schema: "schema.json"

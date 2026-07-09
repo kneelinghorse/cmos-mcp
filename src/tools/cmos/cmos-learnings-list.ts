@@ -11,6 +11,8 @@ import { withClient } from './client';
 import type { CmosToolResult } from './types';
 import { createSuccess } from './errors';
 import { ensureLearningsTable } from './schema-migrations';
+import { getProjectId } from './genesis-columns';
+import { frameForeignText } from '../../intelligence/provenance-frame';
 
 /**
  * Learning record surfaced to clients.
@@ -40,6 +42,10 @@ export interface Learning {
   /** When the learning was recorded */
   createdAt: string;
 
+  /** s78-m05: the row's genesis project_id (null pre-migration). Compared against the
+   *  local store id to frame pull-merged foreign learnings as untrusted. */
+  projectId: string | null;
+
   /**
    * Sprint 61 m03 — institutional-rule flag. When 1, the learning is excluded
    * from staleness flagging and from the staleness count surfaced on agent
@@ -66,6 +72,10 @@ export interface CmosLearningsListResult {
 
   /** Whether there are more results */
   hasMore: boolean;
+
+  /** s78-m05: the querying store's own project_id; rows with a different projectId are
+   *  foreign (pull-merged) and framed as untrusted in the render. */
+  localProjectId?: string | null;
 }
 
 /**
@@ -159,6 +169,12 @@ export async function cmosLearningsList(
         learningCols.success && learningCols.data?.some((c) => c.name === 'author_session_id')
           ? 'author_session_id'
           : 'session_id';
+      // s78-m05: surface the genesis project_id when present so pull-merged foreign
+      // learnings can be framed as untrusted. NULL on pre-migration stores.
+      const projectExpr =
+        learningCols.success && learningCols.data?.some((c) => c.name === 'project_id')
+          ? 'project_id'
+          : 'NULL';
 
       // Get paginated results
       const listResult = client.getMany<{
@@ -171,8 +187,9 @@ export async function cmosLearningsList(
         mission_id: string | null;
         created_at: string;
         evergreen: number | null;
+        project_id: string | null;
       }>(
-        `SELECT id, content, category, status, sprint_id, ${sessCol} AS session_id, mission_id, created_at, evergreen
+        `SELECT id, content, category, status, sprint_id, ${sessCol} AS session_id, mission_id, created_at, evergreen, ${projectExpr} AS project_id
          FROM learnings ${whereClause}
          ORDER BY created_at DESC, id DESC
          LIMIT ? OFFSET ?`,
@@ -191,6 +208,7 @@ export async function cmosLearningsList(
               missionId: row.mission_id,
               createdAt: row.created_at,
               evergreen: row.evergreen === 1,
+              projectId: row.project_id,
             }))
           : [];
 
@@ -200,6 +218,7 @@ export async function cmosLearningsList(
         page,
         pageSize,
         hasMore: offset + learnings.length < totalCount,
+        localProjectId: getProjectId(client),
       });
     },
     { projectRoot: params.projectRoot }
@@ -243,7 +262,17 @@ export function formatLearningsListForLLM(result: CmosToolResult<CmosLearningsLi
     const mission = l.missionId ? ` {${l.missionId}}` : '';
     const status = l.status !== 'active' ? ` [${l.status}]` : '';
     const evergreen = l.evergreen ? ' [evergreen]' : '';
-    lines.push(`• #${l.id} ${l.content}${category}${sprint}${mission}${status}${evergreen}`);
+    const meta = `${category}${sprint}${mission}${status}${evergreen}`;
+    // s78-m05: a learning from another project (pull-merged) is foreign, untrusted content —
+    // frame its text rather than emitting it as a bare bullet.
+    const isForeign =
+      l.projectId != null && (data.localProjectId == null || l.projectId !== data.localProjectId);
+    if (isForeign) {
+      lines.push(`• #${l.id} [proj:${l.projectId}]${meta}`);
+      lines.push(frameForeignText(l.content, `proj:${l.projectId}`));
+    } else {
+      lines.push(`• #${l.id} ${l.content}${meta}`);
+    }
     lines.push(`  Created: ${l.createdAt}`);
     lines.push('');
   }

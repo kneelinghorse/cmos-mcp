@@ -68,16 +68,6 @@ describe('Token Validation', () => {
       });
     });
 
-    it('should NOT emit telemetry for GPT counts (100% accurate)', async () => {
-      await counter.count('hello world', 'gpt');
-
-      const gptEvents = telemetryEvents.filter(
-        (e) => e.source === 'token-counter' && e.message.includes('GPT')
-      );
-
-      expect(gptEvents).toHaveLength(0);
-    });
-
     it('should capture text length and token count in telemetry context', async () => {
       const text = 'This is a test message for telemetry validation.';
       await counter.count(text, 'gemini');
@@ -90,14 +80,6 @@ describe('Token Validation', () => {
   });
 
   describe('Offline Token Counting', () => {
-    it('should count GPT tokens without emitting warnings', async () => {
-      const result = await counter.count('hello world', 'gpt');
-
-      expect(result.model).toBe('gpt');
-      expect(result.count).toBeGreaterThan(0);
-      expect(result.estimatedCost).toBeDefined();
-    });
-
     it('should count Claude tokens with drift warning', async () => {
       const result = await counter.count('hello world', 'claude');
 

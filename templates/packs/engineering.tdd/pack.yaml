@@ -1,6 +1,0 @@
-name: "engineering.tdd"
-version: "1.0.0"
-displayName: "Technical Design Document"
-description: "Produce a technical design document before implementation begins"
-author: "Engineering"
-schema: "schema.json"

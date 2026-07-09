@@ -50,26 +50,11 @@ async function loadIndexModule() {
     McpError,
   }));
 
-  // Sprint 70 m01: stub the tokenizer bootstrap. Each loadIndexModule() does a
-  // jest.resetModules() and re-imports src/index, which wipes the module-level
-  // tokenizer cache — so initializeServer()'s `await ensureTokenizersReady()`
-  // cold-loads the GPT + Claude encoders EVERY time. Under parallel load that
-  // real I/O blew the 5000ms test timeout and its late-resolving promises bled
-  // console output into sibling tests ("console.error spy interleaving"), the
-  // #714/#721 flaky. Mocking it makes startup deterministic and instant with no
-  // lingering async; these tests assert on logging/wiring, not tokenizer health.
-  jest.doMock('../src/intelligence/tokenizer-bootstrap', () => ({
-    ensureTokenizersReady: jest.fn(async () => {}),
-    getTokenizerHealth: jest.fn(() => ({
-      updatedAt: '1970-01-01T00:00:00.000Z',
-      models: {
-        gpt: { ready: true, attempts: 0 },
-        claude: { ready: true, attempts: 0 },
-      },
-      fallbacks: { gpt: 0, claude: 0, gemini: 0 },
-    })),
-  }));
-
+  // s77-m03: the boot-time tokenizer preload was removed from initializeServer(),
+  // so the #714/#721 cold-load flake (Sprint 70 m01 mocked it away) no longer
+  // exists — startup never touches the tokenizer. The Claude tokenizer now loads
+  // lazily on first count(), which these logging/wiring tests never trigger, so no
+  // stub is needed.
   const indexModule = await import('../src/index');
   const { ErrorHandler } = await import('../src/errors/handler');
   const { MissionProtocolError } = await import('../src/errors/mission-error');
@@ -97,6 +82,7 @@ async function loadIndexModule() {
     status: 'has-user-scoped-keys',
     warned: false,
     userScopedKeyCount: 0,
+    dashboardConfigured: false,
   }));
   indexModule.__test__.setStartupBundledEnvCheckRunner(() => ({
     installedFromNpm: false,
@@ -144,7 +130,6 @@ afterEach(() => {
 
 const createMockContext = () =>
   ({
-    baseDir: '/tmp/templates',
     defaultModel: 'claude',
     loader: {},
     registryParser: {} as any,
@@ -177,9 +162,7 @@ describe('Mission Protocol entry lifecycle', () => {
 
       expect(result).toBe(context);
       expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Initializing MCP server'));
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Template base directory: /tmp/templates')
-      );
+      expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('CMOS schema version: 2.1'));
       expect(consoleSpy).toHaveBeenCalledWith(
         expect.stringContaining('Roots support: probed on first call')
       );
@@ -648,7 +631,7 @@ describe('Mission Protocol entry lifecycle', () => {
       expect(mockServer.connect).toHaveBeenCalled();
       expect(transportCtor).toHaveBeenCalled();
       expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Mission Protocol MCP server running on stdio')
+        expect.stringContaining('cmos-mcp MCP server running on stdio')
       );
     } finally {
       moduleData.cleanup();

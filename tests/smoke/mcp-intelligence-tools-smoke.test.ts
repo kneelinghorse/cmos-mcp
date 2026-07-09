@@ -30,7 +30,7 @@ describe('Legacy tool deprecation smoke coverage', () => {
   let context: MissionProtocolContext;
 
   beforeAll(async () => {
-    context = await buildMissionProtocolContext({ defaultModel: 'gpt' });
+    context = await buildMissionProtocolContext({ defaultModel: 'claude' });
   });
 
   it('list_tools omits deprecated Mission Protocol tools', () => {

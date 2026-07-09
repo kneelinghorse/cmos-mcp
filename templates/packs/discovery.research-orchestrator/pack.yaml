@@ -1,6 +1,0 @@
-name: "discovery.research-orchestrator"
-version: "1.1.0"
-displayName: "Level 3: Research Orchestrator"
-description: "Manage parallel research lenses, cross-validate findings, and synthesize results"
-author: "core-team"
-schema: "schema.json"

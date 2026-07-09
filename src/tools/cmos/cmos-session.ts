@@ -37,9 +37,14 @@ import {
   type CmosSessionCompleteParams,
   type CmosSessionCompleteResult,
 } from './cmos-session-complete';
+import {
+  cmosSessionSearch,
+  formatSessionSearchForLLM,
+  type CmosSessionSearchResult,
+} from './cmos-session-search';
 import { triggerCheckpointBackfill } from './checkpoint-backfill';
 
-export const CMOS_SESSION_ACTIONS = ['list', 'start', 'capture', 'complete'] as const;
+export const CMOS_SESSION_ACTIONS = ['list', 'start', 'capture', 'complete', 'search'] as const;
 
 export type CmosSessionAction = (typeof CMOS_SESSION_ACTIONS)[number];
 
@@ -47,13 +52,28 @@ export type CmosSessionResult =
   | CmosSessionListResult
   | CmosSessionStartResult
   | CmosSessionCaptureResult
-  | CmosSessionCompleteResult;
+  | CmosSessionCompleteResult
+  | CmosSessionSearchResult;
 
 export const cmosSessionSchema = z
   .object({
     action: z
       .enum(CMOS_SESSION_ACTIONS)
-      .describe('Session action: list | start | capture | complete'),
+      .describe('Session action: list | start | capture | complete | search'),
+    // search params (s77-m05) — query/since/until/limit; type/category reused below
+    query: z
+      .string()
+      .optional()
+      .describe('Search query for search action (keywords across titles, summaries, captures)'),
+    since: z.string().optional().describe('Filter sessions started after this ISO date (search)'),
+    until: z.string().optional().describe('Filter sessions started before this ISO date (search)'),
+    limit: z
+      .number()
+      .int()
+      .positive()
+      .max(100)
+      .optional()
+      .describe('Maximum sessions to return for search action (1-100, default: 20)'),
     // list params
     status: z
       .enum(VALID_SESSION_STATUSES)
@@ -123,7 +143,7 @@ export const cmosSessionToolDefinition = {
   name: 'cmos_session',
   description:
     'Consolidated session tool with action parameter support. ' +
-    'Actions: list, start, capture, complete. ' +
+    'Actions: list, start, capture, complete, search. ' +
     'Routes to the existing session handlers without changing session business logic.',
   inputSchema: {
     type: 'object',
@@ -131,7 +151,25 @@ export const cmosSessionToolDefinition = {
       action: {
         type: 'string',
         enum: [...CMOS_SESSION_ACTIONS],
-        description: 'Session action: list | start | capture | complete',
+        description: 'Session action: list | start | capture | complete | search',
+      },
+      query: {
+        type: 'string',
+        description: 'Search query for search action (keywords across titles, summaries, captures)',
+      },
+      since: {
+        type: 'string',
+        description: 'Filter sessions started after this ISO date (search action)',
+      },
+      until: {
+        type: 'string',
+        description: 'Filter sessions started before this ISO date (search action)',
+      },
+      limit: {
+        type: 'number',
+        minimum: 1,
+        maximum: 100,
+        description: 'Maximum sessions to return for search action (1-100, default: 20)',
       },
       status: {
         type: 'string',
@@ -268,6 +306,18 @@ export async function cmosSession(
       }
       return result;
     }
+    case 'search':
+      // `?? ''` mirrors start/capture: a missing query reaches the handler as ''
+      // and surfaces its own MISSING_PARAMETER('query').
+      return cmosSessionSearch({
+        query: params.query ?? '',
+        category: params.category,
+        type: params.type,
+        since: params.since,
+        until: params.until,
+        limit: params.limit,
+        projectRoot: params.projectRoot,
+      });
   }
 }
 
@@ -306,6 +356,8 @@ export function formatSessionForLLM(
       return formatSessionCaptureForLLM(result as CmosToolResult<CmosSessionCaptureResult>);
     case 'complete':
       return formatSessionCompleteForLLM(result as CmosToolResult<CmosSessionCompleteResult>);
+    case 'search':
+      return formatSessionSearchForLLM(result as CmosToolResult<CmosSessionSearchResult>);
     default:
       return result.success ? '✓ Session action completed' : '❌ Failed to execute cmos_session';
   }

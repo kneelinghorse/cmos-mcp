@@ -155,56 +155,10 @@ export const cmosSessionSearchSchema = z.object({
 
 export type CmosSessionSearchParams = z.infer<typeof cmosSessionSearchSchema>;
 
-/**
- * MCP Tool Definition for cmos_session_search.
- */
-export const cmosSessionSearchToolDefinition = {
-  name: 'cmos_session_search',
-  description:
-    'Search session history by keyword. Searches across titles, summaries, and captures. Supports filtering by capture category, session type, and date range.',
-  inputSchema: {
-    type: 'object',
-    properties: {
-      query: {
-        type: 'string',
-        minLength: 1,
-        description: 'Search query - keywords to find in session titles, summaries, and captures',
-      },
-      category: {
-        type: 'string',
-        enum: VALID_CAPTURE_CATEGORIES,
-        description:
-          'Filter by capture category: decision, learning, constraint, context, next-step',
-      },
-      type: {
-        type: 'string',
-        enum: VALID_SESSION_TYPES,
-        description:
-          'Filter by session type: planning, review, research, onboarding, check-in, custom',
-      },
-      since: {
-        type: 'string',
-        description: 'Filter sessions started after this ISO date (e.g., "2024-01-01")',
-      },
-      until: {
-        type: 'string',
-        description: 'Filter sessions started before this ISO date',
-      },
-      limit: {
-        type: 'number',
-        minimum: 1,
-        maximum: 100,
-        description: 'Maximum sessions to return (1-100, default: 20)',
-      },
-      projectRoot: {
-        type: 'string',
-        description: 'Project root directory to search for CMOS database (defaults to cwd)',
-      },
-    },
-    required: ['query'],
-    additionalProperties: false,
-  },
-} as const;
+// s77-m05: the standalone `cmosSessionSearchToolDefinition` was deleted — session
+// search is now reachable as cmos_session(action="search"), and the tool surface is
+// generated from CMOS_TOOL_DEFINITIONS (m06). `cmosSessionSearchSchema` above is
+// retained purely as the `z.infer` source for CmosSessionSearchParams.
 
 /**
  * Session row from database.

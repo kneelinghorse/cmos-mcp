@@ -1,6 +1,0 @@
-name: "engineering.bug-fix"
-version: "1.0.0"
-displayName: "Bug Fix Documentation"
-description: "Capture the lifecycle of a bug fix including root cause and preventative measures"
-author: "Engineering"
-schema: "schema.json"

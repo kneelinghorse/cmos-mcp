@@ -74,6 +74,10 @@ import {
 } from './intelligence/sender-context';
 import { isReadAction, type MultiClientEntry } from './tools/cmos/client';
 import {
+  assertReadOnlyAgentAllowed,
+  ReadOnlyAgentGuardError,
+} from './tools/cmos/read-only-agent-guard';
+import {
   CMOS_TOOL_DEFINITIONS,
   // Consolidated entity tools (Sprint 24)
   cmosMission,
@@ -133,8 +137,8 @@ import type {
   CmosReviewParams,
 } from './tools/cmos';
 import { TokenCounter } from './intelligence/token-counters';
-import { ensureTokenizersReady, getTokenizerHealth } from './intelligence/tokenizer-bootstrap';
 import { SupportedModel } from './intelligence/types';
+import { CMOS_SCHEMA_VERSION } from './tools/cmos/schema';
 import { ErrorHandler } from './errors/handler';
 import { ErrorLogger } from './errors/logger';
 import type { JsonValue } from './errors/types';
@@ -145,11 +149,35 @@ import {
 } from './auth/project-key-capture';
 
 /**
- * MCP Server Configuration
+ * Resolve the server version from package.json at runtime — shared by both bins.
+ *
+ * s77-m04: a sync fs read of the sibling package.json (dist/ sits one level below
+ * package.json in both the repo and the installed tarball) with a hardcoded
+ * fallback, so bumping package.json changes the announced version with NO code
+ * edit (chosen over a JSON import or the build-manifest to keep the announce
+ * decoupled from the build step).
+ */
+export function getServerVersion(): string {
+  try {
+    const pkgPath = path.resolve(__dirname, '../package.json');
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8')) as { version?: string };
+    if (typeof pkg.version === 'string' && pkg.version.length > 0) {
+      return pkg.version;
+    }
+  } catch {
+    // fall through to the hardcoded fallback below
+  }
+  return '2.0.0';
+}
+
+/**
+ * MCP Server Configuration — one truthful identity (s77-m04). The server NAME is
+ * the literal 'cmos-mcp' (not the retired 'mission-protocol', nor the scoped
+ * '@aquex/cmos-mcp'); the version is sourced from package.json.
  */
 const SERVER_CONFIG = {
-  name: 'mission-protocol',
-  version: '2.0.0',
+  name: 'cmos-mcp',
+  version: getServerVersion(),
 } as const;
 
 /**
@@ -174,7 +202,6 @@ ErrorHandler.useLogger(errorLogger);
  * Mission Protocol server context shared across handlers
  */
 export interface MissionProtocolContext {
-  baseDir: string;
   defaultModel: SupportedModel;
   tokenCounter: TokenCounter;
   /** Whether CMOS is detected in the project */
@@ -229,10 +256,8 @@ export function sanitizeArgs(args: unknown): Record<string, JsonValue> | undefin
 }
 
 export async function buildMissionProtocolContext(options?: {
-  baseDir?: string;
   defaultModel?: SupportedModel;
 }): Promise<MissionProtocolContext> {
-  const baseDir = options?.baseDir ?? path.resolve(__dirname, '../templates');
   const defaultModel = options?.defaultModel ?? 'claude';
 
   // Initialize token counter for intelligence tools
@@ -245,7 +270,6 @@ export async function buildMissionProtocolContext(options?: {
   const cmosDetected = cmosResult.hasCmosDirectory && cmosResult.hasDatabase;
 
   return {
-    baseDir,
     defaultModel,
     tokenCounter,
     cmosDetected,
@@ -537,11 +561,34 @@ export function buildToolExecutionErrorResult(
   };
 }
 
+/** Best-effort read of the `action` discriminator from a tool's args, for the
+ *  read-only-agent guard. Returns undefined for action-less tools or malformed args. */
+function extractActionArg(args: unknown): string | undefined {
+  if (args && typeof args === 'object' && 'action' in args) {
+    const value = (args as { action?: unknown }).action;
+    return typeof value === 'string' ? value : undefined;
+  }
+  return undefined;
+}
+
 export async function executeMissionProtocolTool(
   name: string,
   args: unknown,
   _context: MissionProtocolContext
 ): Promise<CallToolResult> {
+  // Sprint 78 m04 (FORK-5): read-only review-agent guard. Runs BEFORE the switch —
+  // and therefore before any resolveToolSenderContext / DB open — so a blocked write
+  // opens no DB and mutates no row. Strict no-op unless CMOS_AGENT_ROLE=review; then
+  // any write-classified action is hard-rejected as a structured isError result.
+  try {
+    assertReadOnlyAgentAllowed(name, extractActionArg(args));
+  } catch (error) {
+    if (error instanceof ReadOnlyAgentGuardError) {
+      return buildToolExecutionErrorResult(name, args, error);
+    }
+    throw error;
+  }
+
   switch (name) {
     // ========================================
     // CMOS Tools (always available, return graceful error if not detected)
@@ -942,6 +989,36 @@ async function runStartupRegistryPrune(): Promise<StartupRegistryPruneResult> {
 let startupRegistryPruneRunner: typeof runStartupRegistryPrune = runStartupRegistryPrune;
 
 // Sprint 57 m02: startup recovery for partial-failure auto-issue. Non-fatal.
+/** Result of the s78-m06 startup topology diagnostic. */
+export interface StartupTopologyResult {
+  /** True when the ambiguous-attribution topology was detected and warned. */
+  warned: boolean;
+  /** Whether CMOS_PROJECT_ROOT is pinned (non-empty). */
+  projectRootPinned: boolean;
+  /** Registered project count consulted for the ambiguity check. */
+  registryProjectCount: number;
+}
+
+/**
+ * s78-m06 topology diagnostic. WARNs ONLY in the single ambiguous-attribution
+ * topology: a global MCP entry with CMOS_PROJECT_ROOT pinned to one repo WHILE more
+ * than one project is registered — the config where one env pins .env bootstrap +
+ * fallback attribution to a single repo that every sibling session shares. Silent for
+ * the safe cases (local per-project server, or a single registered project). Pure so
+ * it is unit-testable without booting.
+ */
+export function evaluateStartupTopology(
+  projectRootEnv: string | undefined,
+  registryProjectCount: number
+): StartupTopologyResult {
+  const projectRootPinned = (projectRootEnv ?? '').trim().length > 0;
+  return {
+    warned: projectRootPinned && registryProjectCount > 1,
+    projectRootPinned,
+    registryProjectCount,
+  };
+}
+
 let startupProjectKeyRecoveryRunner: typeof runStartupProjectKeyRecovery =
   runStartupProjectKeyRecovery;
 
@@ -1029,7 +1106,7 @@ async function initializeServer(): Promise<MissionProtocolContext> {
   try {
     console.error(`[INFO] Initializing MCP server...`);
     const context = await contextBuilder();
-    console.error(`[INFO] Template base directory: ${context.baseDir}`);
+    console.error(`[INFO] CMOS schema version: ${CMOS_SCHEMA_VERSION}`);
     console.error(`[INFO] Default intelligence model: ${context.defaultModel}`);
 
     // Sprint 53 m02 / m04: startup diagnostic for attribution. `SERVER_INSTALL_ROOT`
@@ -1115,6 +1192,29 @@ async function initializeServer(): Promise<MissionProtocolContext> {
       );
     }
 
+    // Sprint 78 m06: topology diagnostic. WARN only in the ambiguous-attribution
+    // config — CMOS_PROJECT_ROOT pinned while >1 project is registered. Non-fatal.
+    try {
+      const topology = evaluateStartupTopology(
+        process.env[CMOS_PROJECT_ROOT_ENV],
+        registryPrune.remaining ?? 0
+      );
+      if (topology.warned) {
+        console.error(
+          `[WARN] cmos-mcp: ${CMOS_PROJECT_ROOT_ENV}=${process.env[CMOS_PROJECT_ROOT_ENV]} is pinned ` +
+            `while ${topology.registryProjectCount} projects are registered. A single global MCP entry ` +
+            `with this env pins .env bootstrap + fallback attribution to one repo that every sibling ` +
+            `session shares. Prefer a project-local server, or pass projectRoot explicitly per call. ` +
+            `See SECURITY.md "Sanctioned deployment shape".`
+        );
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'unknown error';
+      console.error(
+        `[WARN] Startup topology diagnostic threw (non-fatal): ${message}. Continuing startup.`
+      );
+    }
+
     // Sprint 62 m02: detect a .env file accidentally bundled inside the npm
     // package — protects against accidental credential leaks to the registry.
     // Non-fatal; only fires when running from a node_modules install.
@@ -1135,13 +1235,9 @@ async function initializeServer(): Promise<MissionProtocolContext> {
       );
     }
 
-    await ensureTokenizersReady();
-    const tokenizerHealth = getTokenizerHealth();
-    console.error(
-      `[INFO] Tokenizer preload status: GPT ready=${tokenizerHealth.models.gpt.ready} (attempts=${tokenizerHealth.models.gpt.attempts}), ` +
-        `Claude ready=${tokenizerHealth.models.claude.ready} (attempts=${tokenizerHealth.models.claude.attempts}), ` +
-        `fallbacks=${JSON.stringify(tokenizerHealth.fallbacks)}`
-    );
+    // s77-m03: the boot-time tokenizer preload + health log was removed. The
+    // Claude (@xenova) tokenizer now loads lazily on first count(); Gemini is a
+    // heuristic. No startup preload, no '[INFO] Tokenizer preload status' line.
     // Initialize server health tracking (build staleness detection)
     initServerHealth();
     const serverHealth = getServerHealth();
@@ -1173,6 +1269,27 @@ async function initializeServer(): Promise<MissionProtocolContext> {
  */
 async function main(): Promise<void> {
   try {
+    // s77-m04: --version / --help short-circuit in main() BEFORE initializeServer()
+    // and server.connect() (mirror the --whoami branch) — else they would hang the
+    // stdio server for every MCP host. Both print to stdout and exit 0.
+    if (process.argv.includes('--version')) {
+      process.stdout.write(`cmos-mcp ${getServerVersion()}\n`);
+      process.exit(0);
+    }
+    if (process.argv.includes('--help')) {
+      process.stdout.write(
+        `cmos-mcp ${getServerVersion()} — MCP server for CMOS project management over SQLite.\n\n` +
+          `Usage:\n` +
+          `  cmos-mcp              Run the MCP server over stdio (default).\n` +
+          `  cmos-mcp --version    Print the version and exit.\n` +
+          `  cmos-mcp --help       Print this help and exit.\n` +
+          `  cmos-mcp --whoami     Print sender-attribution diagnostics and exit.\n\n` +
+          `The server speaks the Model Context Protocol on stdio; launch it from an MCP\n` +
+          `host (Claude Code, Claude Desktop, Cursor, VS Code), not directly.\n`
+      );
+      process.exit(0);
+    }
+
     if (process.argv.includes('--whoami')) {
       const exitCode = await whoamiCliRunner();
       if (exitCode !== 0) {
@@ -1193,7 +1310,7 @@ async function main(): Promise<void> {
     // Connect server to transport
     await server.connect(transport);
 
-    console.error(`[INFO] Mission Protocol MCP server running on stdio`);
+    console.error(`[INFO] ${SERVER_CONFIG.name} MCP server running on stdio`);
     console.error(`[INFO] Server: ${SERVER_CONFIG.name} v${SERVER_CONFIG.version}`);
     const totalTools = getToolDefinitions().length;
     console.error(`[INFO] ${totalTools} tools registered`);

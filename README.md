@@ -113,13 +113,13 @@ Add to `~/.cursor/mcp.json`:
 
 ## First call
 
-In your MCP client, ask the agent to onboard:
+In your MCP client, open the project with the session digest:
 
 ```
-Run cmos_agent_onboard to see the project state.
+Run cmos_review to see the project state.
 ```
 
-If you're in a directory with no CMOS database yet, the agent will surface a fresh-project pathway. Otherwise it returns the active sprint, pending missions, recent decisions, context freshness, and suggested actions in a single payload optimized for cold-start (<4KB).
+`cmos_review` returns a ≤4 KB digest — project identity, current sprint, work queue, recent decisions, freshness, and the top next actions — in one call. (For a brand-new project's cold start, or to carry the operational tier, use `cmos_agent_onboard`; it surfaces the fresh-project pathway when there's no database yet.)
 
 The full walkthrough — install → config → init → first sprint/mission/session loop — lives in [docs/getting-started.md](docs/getting-started.md).
 
@@ -127,25 +127,25 @@ The full walkthrough — install → config → init → first sprint/mission/se
 
 cmos-mcp exposes 15 consolidated tools. Most use an `action` parameter to select the operation; `cmos_agent_onboard`, `cmos_status`, and `cmos_review` take only `projectRoot`.
 
-| Tool                      | Purpose                                                                                                |
-| ------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `cmos_review`             | ≤4 KB session-opener digest: identity, current sprint, work queue, decisions, freshness, next actions  |
-| `cmos_agent_onboard`      | Cold-start payload: identity, active sprint, missions, decisions, suggestions                          |
-| `cmos_status`             | Diagnostic snapshot: cmos_address, dashboard_url, auth_tier, sync timestamps                           |
-| `cmos_mission`            | `list \| show \| status \| add \| update \| depends`                                                   |
-| `cmos_mission_transition` | `start \| complete \| block \| unblock \| drop \| defer`                                               |
-| `cmos_sprint`             | `list \| show \| add \| update \| complete \| retro \| analytics`                                      |
-| `cmos_session`            | `list \| start \| capture \| complete`                                                                 |
-| `cmos_context`            | `view \| update \| condense \| snapshot \| history \| next_steps \| search`                            |
-| `cmos_decisions`          | `list \| search \| update \| review \| batch_update`                                                   |
-| `cmos_learnings`          | `list \| search \| update \| reaffirm`                                                                 |
-| `cmos_db`                 | `health \| snapshot \| restore \| backfill \| reconcile \| purge \| identify_orphans \| pull \| clone` |
-| `cmos_project`            | `init \| register \| list \| unregister \| validate \| prune \| update`                                |
-| `cmos_auth`               | `login_init \| login_complete \| logout \| rotate \| revoke \| list \| reissue`                        |
-| `cmos_message`            | `send \| list \| respond \| ack \| directory \| whoami` (requires dashboard)                           |
-| `cmos_feedback`           | `list \| triage \| resolve \| archive`                                                                 |
+| Tool                      | Purpose                                                                       |
+| ------------------------- | ----------------------------------------------------------------------------- |
+| `cmos_review`             | ≤4 KB session-opener digest: identity, current sprint, work queue, decisions  |
+| `cmos_agent_onboard`      | Cold-start payload: identity, active sprint, missions, decisions, suggestions |
+| `cmos_status`             | Diagnostic snapshot: cmos_address, dashboard_url, auth_tier, sync timestamps  |
+| `cmos_mission`            | Missions — create, update, query, and link dependencies                       |
+| `cmos_mission_transition` | Mission state machine — start, complete, block, unblock, drop, defer          |
+| `cmos_sprint`             | Sprints — CRUD, closeout, retro, and cross-sprint analytics                   |
+| `cmos_session`            | Work sessions — start, capture insights, complete, list, and search           |
+| `cmos_context`            | Master/project context — view, update, condense, snapshot, and search         |
+| `cmos_decisions`          | Strategic decisions — list, full-text search, update, and staleness review    |
+| `cmos_learnings`          | Cross-cutting learnings — list, search, update, and reaffirm                  |
+| `cmos_db`                 | Database ops — health, snapshot/restore, and sync (backfill, reconcile, pull) |
+| `cmos_project`            | Project registry — init, register, list, validate                             |
+| `cmos_auth`               | Dashboard credential lifecycle — device-code login, rotate, revoke            |
+| `cmos_message`            | Cross-project messaging (requires the hosted dashboard)                       |
+| `cmos_feedback`           | Agent-feedback channel — list, triage, resolve, archive                       |
 
-See [agents.md](agents.md) for the full per-action reference and behavioral notes.
+See **[TOOL_REFERENCE.md](TOOL_REFERENCE.md)** for the exact per-action parameter reference — it is generated from the tool definitions on every build, so it never drifts from the shipped surface.
 
 ## Optional: hosted dashboard
 
@@ -231,7 +231,7 @@ Every tool returns a uniform envelope:
 ## Documentation
 
 - [Getting started](docs/getting-started.md) — install through first onboard, no dashboard required.
-- [Agent playbook (agents.md)](agents.md) — full tool reference, conventions, architecture deep-dive.
+- [Tool reference](TOOL_REFERENCE.md) — every tool, action, and parameter (generated from the tool definitions).
 - [Changelog](CHANGELOG.md) — release notes and tool-surface changes.
 
 ## Development

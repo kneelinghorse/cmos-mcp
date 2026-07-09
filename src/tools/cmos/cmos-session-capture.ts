@@ -14,6 +14,7 @@ import { createError, createSuccess, CmosErrors, CMOS_ERROR_CODES } from './erro
 import { sanitizeContentField, type SanitizedField } from '../../intelligence/content-sanitizer';
 import { ensureMissionIdColumn } from './cmos-mission-complete';
 import { genesisColumns, getProjectId } from './genesis-columns';
+import { resolveCurrentSprintId } from './current-sprint';
 import {
   ensureLearningsTable,
   ensureSessionMissionsTable,
@@ -717,26 +718,12 @@ function inferSprintIdForDecisionCapture(
     return activeMission.data.sprint_id;
   }
 
-  const recentSprint = client.getOne<{ sprint_id: string }>(
-    `SELECT activity.sprint_id
-       FROM (
-         SELECT m.sprint_id, m.completed_at AS activity_at
-           FROM missions m
-          WHERE m.sprint_id IS NOT NULL
-            AND m.completed_at IS NOT NULL
-         UNION ALL
-         SELECT sess.sprint_id, COALESCE(sess.completed_at, sess.started_at) AS activity_at
-           FROM sessions sess
-          WHERE sess.sprint_id IS NOT NULL
-       ) AS activity
-      WHERE activity.activity_at IS NOT NULL
-      GROUP BY activity.sprint_id
-      ORDER BY MAX(activity.activity_at) DESC, activity.sprint_id DESC
-      LIMIT 1`,
-    []
-  );
-
-  return recentSprint.success ? (recentSprint.data?.sprint_id ?? null) : null;
+  // s77-m02 Fork 2a: keep the mission-first leg above (a decision captured mid-work
+  // belongs to the active mission's sprint), but route the no-active-mission
+  // FALLBACK through the canonical resolver so a captured decision lands on the
+  // SAME current sprint the other surfaces name (and inherits the dead-status
+  // exclusions the old bare recent-activity query lacked).
+  return resolveCurrentSprintId(client);
 }
 
 /**
