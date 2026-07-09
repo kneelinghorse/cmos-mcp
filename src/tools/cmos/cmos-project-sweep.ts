@@ -5,7 +5,7 @@ import Database from 'better-sqlite3';
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { ProjectRegistry } from '../../intelligence/project-registry';
+import { ProjectGraphRegistry } from '../../intelligence/project-graph-registry';
 import type { CmosToolResult } from './types';
 
 // ---------------------------------------------------------------------------
@@ -115,10 +115,13 @@ function queryActiveSessions(dbPath: string): SessionRow[] {
 
 export async function cmosProjectSweep(
   params: SweepParams,
-  registryOverride?: ProjectRegistry
+  registryOverride?: ProjectGraphRegistry
 ): Promise<CmosToolResult<SweepResult>> {
-  const registry = registryOverride ?? (await ProjectRegistry.getInstance());
-  const allProjects = await registry.list();
+  // s79-m02 — enumerate discoverable stores from the write-authoritative
+  // project-graph registry (map store_path → projectRoot) rather than the derived
+  // JSON, so "across my projects" has one discovery source.
+  const registry = registryOverride ?? (await ProjectGraphRegistry.create());
+  const allProjects = registry.list().map((r) => ({ projectRoot: r.store_path, name: r.name }));
 
   const targetProjects = params.instances
     ? allProjects.filter((p) => {

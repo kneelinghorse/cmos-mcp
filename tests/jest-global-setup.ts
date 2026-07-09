@@ -1,4 +1,4 @@
-// ABOUTME: Jest globalSetup — isolates every test-worker's ProjectRegistry
+// ABOUTME: Jest globalSetup — isolates every test-worker's project-graph registry
 // ABOUTME: under a per-run tmpdir via CMOS_CONFIG_DIR so tests never write to ~/.config/cmos-mcp.
 
 import { promises as fs } from 'fs';

@@ -32,7 +32,7 @@ import {
   type BuildFreshnessReport,
 } from './build-freshness';
 import { getServerHealth, getServerProjectRoot } from '../../server-health';
-import { resolveProjectRootEnhanced } from '../../intelligence/project-registry';
+import { resolveProjectRootEnhanced } from '../../intelligence/project-resolution';
 import * as path from 'path';
 
 type CloseoutContextType = 'master_context' | 'project_context';

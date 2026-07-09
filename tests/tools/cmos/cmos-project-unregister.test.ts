@@ -10,7 +10,8 @@ import { promises as fs } from 'fs';
 import os from 'os';
 import path from 'path';
 import { CmosDetector } from '../../../src/intelligence/cmos-detector';
-import { ProjectRegistry } from '../../../src/intelligence/project-registry';
+import { ProjectGraphRegistry } from '../../../src/intelligence/project-graph-registry';
+import { cmosProjectRegister } from '../../../src/tools/cmos/cmos-project-register';
 import {
   cmosProjectUnregister,
   cmosProjectUnregisterToolDefinition,
@@ -34,17 +35,29 @@ async function ensureCmosDatabase(workspace: string): Promise<string> {
 describe('cmos_project_unregister', () => {
   let workspace: string;
   let configDir: string;
-  let registry: ProjectRegistry;
+  let graph: ProjectGraphRegistry;
+  let prevConfigEnv: string | undefined;
+
+  // Register through the graph-authoritative tool path (s79-m02). s80-m02: the
+  // graph is the single discovery source (no derived JSON mirror).
+  const register = (opts: { name?: string; setAsDefault?: boolean } = {}) =>
+    cmosProjectRegister({ projectRoot: workspace, ...opts });
 
   beforeEach(async () => {
     workspace = await createTempWorkspace('cmos-project-unregister-');
     configDir = await createTempWorkspace('config-');
+    // Point the graph registry at configDir.
+    prevConfigEnv = process.env.CMOS_CONFIG_DIR;
+    process.env.CMOS_CONFIG_DIR = configDir;
     CmosDetector.resetInstance();
-    ProjectRegistry.resetInstance();
-    registry = await ProjectRegistry.create({ configDir });
+    ProjectGraphRegistry.resetInstance();
+    graph = await ProjectGraphRegistry.create({ configDir });
   });
 
   afterEach(async () => {
+    ProjectGraphRegistry.resetInstance();
+    if (prevConfigEnv === undefined) delete process.env.CMOS_CONFIG_DIR;
+    else process.env.CMOS_CONFIG_DIR = prevConfigEnv;
     await fs.rm(workspace, { recursive: true, force: true });
     await fs.rm(configDir, { recursive: true, force: true });
   });
@@ -52,7 +65,7 @@ describe('cmos_project_unregister', () => {
   describe('basic functionality', () => {
     it('should unregister a registered project', async () => {
       await ensureCmosDatabase(workspace);
-      await registry.register(workspace, { name: 'My Project' });
+      await register({ name: 'My Project' });
 
       const result = await cmosProjectUnregister({ projectRoot: workspace });
 
@@ -60,14 +73,14 @@ describe('cmos_project_unregister', () => {
       expect(result.data?.projectRoot).toBe(workspace);
       expect(result.data?.message).toContain('Unregistered');
 
-      // Verify removed
-      const projects = await registry.list();
+      // Verify removed from the graph registry
+      const projects = graph.list();
       expect(projects).toHaveLength(0);
     });
 
     it('should indicate if project was default', async () => {
       await ensureCmosDatabase(workspace);
-      await registry.register(workspace, { setAsDefault: true });
+      await register({ setAsDefault: true });
 
       const result = await cmosProjectUnregister({ projectRoot: workspace });
 
@@ -77,12 +90,12 @@ describe('cmos_project_unregister', () => {
 
     it('should clear default when unregistering default project', async () => {
       await ensureCmosDatabase(workspace);
-      await registry.register(workspace, { setAsDefault: true });
+      await register({ setAsDefault: true });
 
       await cmosProjectUnregister({ projectRoot: workspace });
 
-      const defaultProject = await registry.getDefault();
-      expect(defaultProject).toBeUndefined();
+      const defaultProject = graph.getDefault();
+      expect(defaultProject).toBeNull();
     });
   });
 
@@ -131,7 +144,7 @@ describe('cmos_project_unregister', () => {
   describe('formatProjectUnregisterForLLM', () => {
     it('should format success result', async () => {
       await ensureCmosDatabase(workspace);
-      await registry.register(workspace);
+      await register();
 
       const result = await cmosProjectUnregister({ projectRoot: workspace });
       const formatted = formatProjectUnregisterForLLM(result);
@@ -143,7 +156,7 @@ describe('cmos_project_unregister', () => {
 
     it('should note when default was cleared', async () => {
       await ensureCmosDatabase(workspace);
-      await registry.register(workspace, { setAsDefault: true });
+      await register({ setAsDefault: true });
 
       const result = await cmosProjectUnregister({ projectRoot: workspace });
       const formatted = formatProjectUnregisterForLLM(result);

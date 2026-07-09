@@ -6,7 +6,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { CredentialStore } from '../../src/intelligence/credential-store';
-import { ProjectRegistry } from '../../src/intelligence/project-registry';
+import { ProjectGraphRegistry } from '../../src/intelligence/project-graph-registry';
 import { runCleanup } from '../../scripts/cleanup-stale-credkeys';
 
 describe('cleanup-stale-credkeys', () => {
@@ -17,12 +17,12 @@ describe('cleanup-stale-credkeys', () => {
     configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cred-cleanup-cfg-'));
     scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'cred-cleanup-scratch-'));
     CredentialStore.resetInstance();
-    ProjectRegistry.resetInstance();
+    ProjectGraphRegistry.resetInstance();
   });
 
   afterEach(() => {
     CredentialStore.resetInstance();
-    ProjectRegistry.resetInstance();
+    ProjectGraphRegistry.resetInstance();
     fs.rmSync(configDir, { recursive: true, force: true });
     fs.rmSync(scratch, { recursive: true, force: true });
   });
@@ -47,35 +47,22 @@ describe('cleanup-stale-credkeys', () => {
   }
 
   /**
-   * Write the registry file directly so we can register a projectRoot
-   * regardless of whether it has CMOS — ProjectRegistry.register() requires
-   * cmos/db/cmos.sqlite to exist, which is more setup than these tests need
-   * (we're exercising the cleanup logic, not the detector).
+   * Register a projectRoot directly into the project-graph registry so we can seed a
+   * "registered" project regardless of whether it has CMOS — the low-level register()
+   * takes an explicit project_id and never opens a store DB, which is exactly what
+   * these tests need (we're exercising the cleanup logic, not the detector). s80-m02:
+   * runCleanup now reads the graph registry (the JSON ProjectRegistry was deleted).
    */
-  function seedRegistryEntry(projectRoot: string, name: string): void {
-    const registryPath = path.join(configDir, 'project-registry.json');
-    const now = new Date().toISOString();
-    const resolvedRoot = path.resolve(projectRoot);
-    let registryFile: { version: number; projects: Record<string, unknown>; updatedAt: string };
-    if (fs.existsSync(registryPath)) {
-      registryFile = JSON.parse(fs.readFileSync(registryPath, 'utf-8'));
-    } else {
-      registryFile = { version: 1, projects: {}, updatedAt: now };
-    }
-    registryFile.projects[resolvedRoot] = {
-      projectRoot: resolvedRoot,
-      name,
-      registeredAt: now,
-      lastAccessedAt: now,
-    };
-    registryFile.updatedAt = now;
-    fs.writeFileSync(registryPath, JSON.stringify(registryFile, null, 2));
+  async function seedRegistryEntry(projectRoot: string, name: string): Promise<void> {
+    const graph = await ProjectGraphRegistry.create({ configDir });
+    graph.register({ project_id: name, store_path: path.resolve(projectRoot), name });
+    ProjectGraphRegistry.resetInstance();
   }
 
   it('returns an empty stale list when every key points at a registered + on-disk project', async () => {
     const root = makeProjectRoot('valid-1');
     await seedProjectKey(root, 'keyA');
-    seedRegistryEntry(root, 'valid-1');
+    await seedRegistryEntry(root, 'valid-1');
 
     const summary = await runCleanup({ configDir });
 
@@ -103,7 +90,7 @@ describe('cleanup-stale-credkeys', () => {
   it('flags a key that is in the registry but not on disk (either-signal-missing is stale)', async () => {
     const root = makeProjectRoot('registered-then-deleted');
     await seedProjectKey(root, 'keyB');
-    seedRegistryEntry(root, 'registered-then-deleted');
+    await seedRegistryEntry(root, 'registered-then-deleted');
     fs.rmSync(root, { recursive: true, force: true });
 
     const summary = await runCleanup({ configDir });
@@ -130,7 +117,7 @@ describe('cleanup-stale-credkeys', () => {
   it('--prune removes stale keys, leaves valid keys untouched', async () => {
     const validRoot = makeProjectRoot('still-valid');
     await seedProjectKey(validRoot, 'valid-key');
-    seedRegistryEntry(validRoot, 'still-valid');
+    await seedRegistryEntry(validRoot, 'still-valid');
 
     const ghostRoot = path.join(scratch, 'phantom');
     await seedProjectKey(ghostRoot, 'phantom-key');

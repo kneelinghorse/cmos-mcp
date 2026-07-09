@@ -19,7 +19,7 @@ import {
   CMOS_ERROR_CODES,
 } from '../../../src/tools/cmos';
 import { CmosDetector } from '../../../src/intelligence/cmos-detector';
-import { ProjectRegistry } from '../../../src/intelligence/project-registry';
+import { ProjectGraphRegistry } from '../../../src/intelligence/project-graph-registry';
 
 describe('Project ID Validation', () => {
   let tempDir: string;
@@ -72,7 +72,7 @@ describe('Project ID Validation', () => {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
 
-    ProjectRegistry.resetInstance();
+    ProjectGraphRegistry.resetInstance();
   });
 
   describe('CmosDatabaseClient.validateProjectId', () => {
@@ -334,8 +334,8 @@ describe('Project ID Validation', () => {
         process.cwd = () => emptyWorkspace;
         delete process.env[CMOS_PROJECT_ROOT_ENV];
         CmosDetector.resetInstance();
-        ProjectRegistry.resetInstance();
-        await ProjectRegistry.create({ configDir: registryConfigDir });
+        ProjectGraphRegistry.resetInstance();
+        await ProjectGraphRegistry.create({ configDir: registryConfigDir });
 
         // Call without projectRoot - should fail with clear resolution guidance.
         const result = await cmosMissionStart({ missionId: 'm1' });
@@ -345,7 +345,7 @@ describe('Project ID Validation', () => {
         expect(result.error?.message).toContain('No CMOS project found');
       } finally {
         process.cwd = originalCwd;
-        ProjectRegistry.resetInstance();
+        ProjectGraphRegistry.resetInstance();
         fs.rmSync(emptyWorkspace, { recursive: true, force: true });
         fs.rmSync(registryConfigDir, { recursive: true, force: true });
       }

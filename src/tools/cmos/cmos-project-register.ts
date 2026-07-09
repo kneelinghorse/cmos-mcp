@@ -9,9 +9,8 @@
 
 import * as path from 'path';
 import { z } from 'zod';
-import { ProjectRegistry } from '../../intelligence/project-registry';
-import { ProjectGraphRegistry } from '../../intelligence/project-graph-registry';
-import { withClientAsync } from './client';
+import { ProjectGraphRegistry, readStoreIdentity } from '../../intelligence/project-graph-registry';
+import { CmosDetector } from '../../intelligence/cmos-detector';
 import type { CmosToolResult } from './types';
 import { createError, createSuccess, CmosErrors } from './errors';
 
@@ -107,86 +106,42 @@ export async function cmosProjectRegister(
   }
 
   try {
-    const registry = await ProjectRegistry.create();
-    const result = await registry.register(projectRoot, {
-      name,
-      setAsDefault,
-    });
+    const resolvedPath = path.resolve(projectRoot);
 
-    if (!result.success) {
+    // Verify the project has a CMOS database before registering (the file must
+    // exist; validity is not required — a store may carry an unreadable/legacy DB).
+    const detector = CmosDetector.getInstance();
+    const detection = await detector.detect(resolvedPath, { forceRefresh: true });
+    if (!detection.hasCmosDirectory || !detection.hasDatabase) {
       return createError({
         code: 'CMOS_NOT_DETECTED',
-        message: result.message,
+        message: `No CMOS database found at ${resolvedPath}. Ensure cmos/db/cmos.sqlite exists.`,
         suggestion: 'Ensure the project has a cmos/db/cmos.sqlite file',
       });
     }
 
-    // Check if this is the default
-    const defaultProject = await registry.getDefault();
-    const isDefault = defaultProject?.projectRoot === result.project?.projectRoot;
+    // s79-m02 — the project-graph registry is the sole discovery store. Give the
+    // store a stable project_id (mint a UUID where absent) and upsert into the
+    // graph. (s80-m02: the graph is the single source — no JSON mirror to derive.)
+    const graph = await ProjectGraphRegistry.create();
+    const wasAlreadyRegistered = graph.getByStorePath(resolvedPath) !== null;
+    const hadId = readStoreIdentity(resolvedPath) !== null;
+    const entry = graph.registerStore(resolvedPath, { name, setAsDefault });
 
-    // Auto-populate empty metadata in the SQLite DB
-    const projectName = result.project!.name ?? path.basename(result.project!.projectRoot);
-    let metadataRepaired = false;
-    try {
-      const repairResult = await withClientAsync(
-        async (db) => {
-          interface MetadataRow {
-            value: string;
-          }
-          const pidResult = db.getOne<MetadataRow>(
-            `SELECT value FROM metadata WHERE key = 'project_id'`
-          );
-          const pnameResult = db.getOne<MetadataRow>(
-            `SELECT value FROM metadata WHERE key = 'project_name'`
-          );
-          const hasId = pidResult.success && pidResult.data?.value;
-          const hasName = pnameResult.success && pnameResult.data?.value;
-
-          if (!hasId || !hasName) {
-            const derivedId = projectName.toLowerCase().replace(/\s+/g, '-');
-            if (!hasId) {
-              db.execute(`INSERT OR REPLACE INTO metadata (key, value) VALUES ('project_id', ?)`, [
-                derivedId,
-              ]);
-            }
-            if (!hasName) {
-              db.execute(
-                `INSERT OR REPLACE INTO metadata (key, value) VALUES ('project_name', ?)`,
-                [projectName]
-              );
-            }
-            return createSuccess({ repaired: true });
-          }
-          return createSuccess({ repaired: false });
-        },
-        { projectRoot: result.project!.projectRoot }
-      );
-      metadataRepaired = repairResult.success && repairResult.data?.repaired === true;
-    } catch {
-      // Non-critical — metadata repair is best-effort
-    }
-
-    // s69-m05 — mirror the registration into the per-user project-graph registry
-    // (project_id → store metadata) so the cross-store fan-out path + future
-    // App-View Relay can discover this store without a filesystem scan. Runs after
-    // metadata repair so project_id is populated. Best-effort: an optimization
-    // layer, never fails the registration.
-    try {
-      const graph = await ProjectGraphRegistry.create();
-      graph.touchOrRegisterFromStore(result.project!.projectRoot);
-    } catch {
-      // Non-critical — the project-graph registry is an additive discovery index.
-    }
+    const metadataRepaired = !hadId && readStoreIdentity(resolvedPath) !== null;
+    const isDefault = graph.getDefault()?.project_id === entry.project_id;
+    const baseMessage = wasAlreadyRegistered
+      ? `Updated project registration: ${entry.name}`
+      : `Registered project: ${entry.name}`;
 
     return createSuccess({
-      projectRoot: result.project!.projectRoot,
-      name: result.project!.name ?? result.project!.projectRoot,
+      projectRoot: resolvedPath,
+      name: entry.name,
       isDefault,
-      wasAlreadyRegistered: result.wasAlreadyRegistered ?? false,
-      registeredAt: result.project!.registeredAt,
+      wasAlreadyRegistered,
+      registeredAt: new Date(entry.registered_at).toISOString(),
       metadataRepaired,
-      message: result.message + (metadataRepaired ? ' (project metadata auto-populated)' : ''),
+      message: baseMessage + (metadataRepaired ? ' (project metadata auto-populated)' : ''),
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

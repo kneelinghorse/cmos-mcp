@@ -33,7 +33,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { performance } from 'perf_hooks';
 import { CmosDatabaseClient } from '../src/tools/cmos/client';
-import { ProjectRegistry } from '../src/intelligence/project-registry';
+import { ProjectGraphRegistry } from '../src/intelligence/project-graph-registry';
 
 // ─── Thresholds (from s68 ADR Section 5.1 + CMOS-MULTIUSER-COLLAB-01-01) ──────
 const CRDT_THRESHOLD_PCT = 25; // 25% mutable-write share → revisit CRDT layering
@@ -634,16 +634,17 @@ async function enumerateStores(): Promise<{
   unreachable: { projectRoot: string; reason: string }[];
   registered: number;
 }> {
-  const registry = await ProjectRegistry.create();
-  const projects = await registry.list();
+  // s80-m02: enumerate stores from the project-graph registry (single source).
+  const graph = await ProjectGraphRegistry.create();
+  const projects = graph.list();
   const reachable: { projectRoot: string; dbPath: string }[] = [];
   const unreachable: { projectRoot: string; reason: string }[] = [];
   for (const p of projects) {
-    const dbPath = path.join(p.projectRoot, 'cmos', 'db', 'cmos.sqlite');
+    const dbPath = path.join(p.store_path, 'cmos', 'db', 'cmos.sqlite');
     if (fs.existsSync(dbPath)) {
-      reachable.push({ projectRoot: p.projectRoot, dbPath });
+      reachable.push({ projectRoot: p.store_path, dbPath });
     } else {
-      unreachable.push({ projectRoot: p.projectRoot, reason: 'cmos/db/cmos.sqlite not found' });
+      unreachable.push({ projectRoot: p.store_path, reason: 'cmos/db/cmos.sqlite not found' });
     }
   }
   return { reachable, unreachable, registered: projects.length };

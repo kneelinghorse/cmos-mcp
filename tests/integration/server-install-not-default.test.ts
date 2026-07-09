@@ -7,7 +7,7 @@ import os from 'os';
 import path from 'path';
 
 import { CmosDetector } from '../../src/intelligence/cmos-detector';
-import { ProjectRegistry } from '../../src/intelligence/project-registry';
+import { ProjectGraphRegistry } from '../../src/intelligence/project-graph-registry';
 import { resolveSenderContext } from '../../src/intelligence/sender-context';
 
 async function makeTempDir(prefix: string): Promise<string> {
@@ -19,14 +19,14 @@ describe('server install root guard', () => {
 
   beforeEach(async () => {
     CmosDetector.resetInstance();
-    ProjectRegistry.resetInstance();
+    ProjectGraphRegistry.resetInstance();
     configDir = await makeTempDir('server-install-cfg-');
-    await ProjectRegistry.create({ configDir });
+    await ProjectGraphRegistry.create({ configDir });
   });
 
   afterEach(async () => {
     CmosDetector.resetInstance();
-    ProjectRegistry.resetInstance();
+    ProjectGraphRegistry.resetInstance();
     await fs.rm(configDir, { recursive: true, force: true });
   });
 

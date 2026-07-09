@@ -65,14 +65,13 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 
 import { CmosDetector } from './intelligence/cmos-detector';
-import { ProjectRegistry } from './intelligence/project-registry';
+import { ProjectGraphRegistry } from './intelligence/project-graph-registry';
 import {
   resolveSenderContext,
   SenderResolutionError,
   SERVER_INSTALL_ROOT,
   type SenderContext,
 } from './intelligence/sender-context';
-import { isReadAction, type MultiClientEntry } from './tools/cmos/client';
 import {
   assertReadOnlyAgentAllowed,
   ReadOnlyAgentGuardError,
@@ -339,65 +338,6 @@ async function getClientProjectRoots(): Promise<string[]> {
 }
 
 /**
- * Fan out a read-only operation across all registered CMOS instances.
- *
- * Returns an entry per registered project. Partial failures are included
- * (not thrown) so callers can surface provenance alongside any errors.
- *
- * @param fn - Async service call to run for each projectRoot
- * @returns Success with per-instance entries, or error if no projects registered
- */
-async function fanOutRead<T>(
-  fn: (projectRoot: string) => Promise<{ success: boolean; data?: T; error?: unknown }>
-): Promise<{ success: boolean; data?: Array<MultiClientEntry<T>>; error?: unknown }> {
-  const registry = ProjectRegistry.getInstance();
-  const projects = await registry.list();
-
-  if (projects.length === 0) {
-    return {
-      success: false,
-      error: {
-        code: 'CMOS_NOT_DETECTED',
-        message: 'No CMOS projects registered. Cannot fan out without an explicit projectRoot.',
-        suggestion:
-          'Provide an explicit projectRoot, set CMOS_PROJECT_ROOT, or register a project with cmos_project(action="register").',
-      },
-    };
-  }
-
-  const entries: Array<MultiClientEntry<T>> = await Promise.all(
-    projects.map(async (project): Promise<MultiClientEntry<T>> => {
-      const result = await fn(project.projectRoot);
-      return {
-        resolvedFrom: project.projectRoot,
-        success: result.success,
-        data: result.data,
-        error: result.error as import('./tools/cmos/types').CmosToolError | undefined,
-      };
-    })
-  );
-
-  return { success: true, data: entries };
-}
-
-/**
- * Format fan-out results for LLM consumption.
- *
- * Each entry is labelled with its source project and separated by a divider.
- */
-function formatFanOut<T>(
-  entries: Array<MultiClientEntry<T>>,
-  formatEntry: (result: { success: boolean; data?: T; error?: unknown }) => string
-): string {
-  if (entries.length === 0) {
-    return 'No registered CMOS instances found.';
-  }
-  return entries
-    .map((e) => `[${path.basename(e.resolvedFrom)}] ${e.resolvedFrom}\n${formatEntry(e)}`)
-    .join('\n\n---\n\n');
-}
-
-/**
  * Resolve the sender context for a dispatched tool call.
  *
  * Sprint 53 m02: replaces the old `resolveCmosProjectRoot` (which silently fell
@@ -612,25 +552,13 @@ export async function executeMissionProtocolTool(
     case 'cmos_mission': {
       const params = args as CmosMissionParams;
 
-      if (!params.projectRoot && isReadAction('cmos_mission', params.action)) {
-        const fanResult = await fanOutRead((root) => cmosMission({ ...params, projectRoot: root }));
-        const formatted = fanResult.success
-          ? formatFanOut(fanResult.data!, (e) =>
-              formatMissionForLLM(params.action, {
-                success: e.success,
-                data: e.data,
-                error: e.error as import('./tools/cmos/types').CmosToolError | undefined,
-              })
-            )
-          : String((fanResult.error as { message?: string })?.message ?? 'Fan-out failed');
-        return {
-          content: [{ type: 'text', text: formatted }],
-          structuredContent: fanResult,
-          isError: !fanResult.success,
-        };
-      }
-
-      const projectRoot = (await resolveToolSenderContext(params.projectRoot)).projectRoot;
+      // s79-m04/m05 — no per-handler fan-out. cmos_mission(status) with no
+      // projectRoot resolves to the sender; "active missions across the portfolio"
+      // is served by acrossProjects=true (the graph-backed queryAcrossStores),
+      // which must NOT require a resolvable LOCAL store — skip resolution for it.
+      const projectRoot = params.acrossProjects
+        ? undefined
+        : (await resolveToolSenderContext(params.projectRoot)).projectRoot;
       const result = await cmosMission({ ...params, projectRoot });
       const formatted = formatMissionForLLM(params.action, result);
 
@@ -659,28 +587,6 @@ export async function executeMissionProtocolTool(
     case 'cmos_context': {
       const params = args as CmosContextParams;
 
-      if (!params.projectRoot && isReadAction('cmos_context', params.action)) {
-        const fanResult = await fanOutRead((root) => cmosContext({ ...params, projectRoot: root }));
-        const formatted = fanResult.success
-          ? formatFanOut(fanResult.data!, (e) =>
-              formatContextForLLM(
-                params.action,
-                {
-                  success: e.success,
-                  data: e.data,
-                  error: e.error as import('./tools/cmos/types').CmosToolError | undefined,
-                },
-                params.contextType
-              )
-            )
-          : String((fanResult.error as { message?: string })?.message ?? 'Fan-out failed');
-        return {
-          content: [{ type: 'text', text: formatted }],
-          structuredContent: fanResult,
-          isError: !fanResult.success,
-        };
-      }
-
       const projectRoot = (await resolveToolSenderContext(params.projectRoot)).projectRoot;
       const result = await cmosContext({ ...params, projectRoot });
       const formatted = formatContextForLLM(params.action, result, params.contextType);
@@ -696,24 +602,8 @@ export async function executeMissionProtocolTool(
     case 'cmos_session': {
       const params = args as CmosSessionParams;
 
-      if (!params.projectRoot && isReadAction('cmos_session', params.action)) {
-        const fanResult = await fanOutRead((root) => cmosSession({ ...params, projectRoot: root }));
-        const formatted = fanResult.success
-          ? formatFanOut(fanResult.data!, (e) =>
-              formatSessionForLLM(params.action, {
-                success: e.success,
-                data: e.data,
-                error: e.error as import('./tools/cmos/types').CmosToolError | undefined,
-              })
-            )
-          : String((fanResult.error as { message?: string })?.message ?? 'Fan-out failed');
-        return {
-          content: [{ type: 'text', text: formatted }],
-          structuredContent: fanResult,
-          isError: !fanResult.success,
-        };
-      }
-
+      // s79-m04 — cmos_session(list) with no projectRoot pins to the sender (no
+      // §5.4 named portfolio query; documented deviation from the master-plan wording).
       const projectRoot = (await resolveToolSenderContext(params.projectRoot)).projectRoot;
       const result = await cmosSession({ ...params, projectRoot });
       const formatted = formatSessionForLLM(params.action, result);
@@ -751,7 +641,11 @@ export async function executeMissionProtocolTool(
     // Consolidated learnings tool (Sprint 38)
     case 'cmos_learnings': {
       const params = args as CmosLearningsParams;
-      const projectRoot = (await resolveToolSenderContext(params.projectRoot)).projectRoot;
+      // s79-m05: acrossProjects (list) is a graph-backed portfolio query — skip
+      // local-root resolution (mirrors cmos_decisions / cmos_mission).
+      const projectRoot = params.acrossProjects
+        ? undefined
+        : (await resolveToolSenderContext(params.projectRoot)).projectRoot;
       const result = await cmosLearnings({ ...params, projectRoot });
       const formatted = formatLearningsForLLM(params.action, result);
 
@@ -807,24 +701,6 @@ export async function executeMissionProtocolTool(
     // Sprint tools
     case 'cmos_sprint': {
       const params = args as CmosSprintParams;
-
-      if (!params.projectRoot && isReadAction('cmos_sprint', params.action)) {
-        const fanResult = await fanOutRead((root) => cmosSprint({ ...params, projectRoot: root }));
-        const formatted = fanResult.success
-          ? formatFanOut(fanResult.data!, (e) =>
-              formatSprintForLLM(params.action, {
-                success: e.success,
-                data: e.data,
-                error: e.error as import('./tools/cmos/types').CmosToolError | undefined,
-              })
-            )
-          : String((fanResult.error as { message?: string })?.message ?? 'Fan-out failed');
-        return {
-          content: [{ type: 'text', text: formatted }],
-          structuredContent: fanResult,
-          isError: !fanResult.success,
-        };
-      }
 
       const projectRoot = (await resolveToolSenderContext(params.projectRoot)).projectRoot;
       const result = await cmosSprint({ ...params, projectRoot });
@@ -905,6 +781,24 @@ export async function executeMissionProtocolTool(
           requireSenderIdentity: true,
         });
         projectRoot = ctx.projectRoot;
+      } else if (params.action === 'list' && !projectRoot) {
+        // s80-m05: best-effort project-pin for LIST only — resolve the sender RELAXED so
+        // a project-scoped credential (when one exists) scopes the dashboard query and
+        // trims the payload. A read must NEVER fail closed, so an unresolvable sender
+        // fails OPEN: leave projectRoot undefined and fall through to user-scoped auth.
+        // NB: `get` is deliberately NOT pinned — pinning would narrow its client-side
+        // paging to one project, hiding a valid messageId from another of the operator's
+        // projects (s80-m05 review). get uses user-scoped (widest) visibility.
+        try {
+          const ctx = await resolveSenderContext({
+            explicitProjectRoot: params.projectRoot,
+            mcpRoots: advertisedRoots,
+            requireSenderIdentity: false,
+          });
+          projectRoot = ctx.projectRoot;
+        } catch {
+          // fail-open — user-scoped auth returns the operator's full inbox
+        }
       }
       const result = await cmosMessage({ ...params, projectRoot, advertisedRoots });
       const formatted = formatMessageForLLM(params.action, result);
@@ -975,10 +869,13 @@ interface StartupRegistryPruneResult {
  */
 async function runStartupRegistryPrune(): Promise<StartupRegistryPruneResult> {
   try {
-    const registry = await ProjectRegistry.create();
-    const before = (await registry.list()).length;
-    const pruned = await registry.prune();
-    const remaining = (await registry.list()).length;
+    // s79-m03 — prune/archive against the project-graph registry (rows whose
+    // store's cmos/db/cmos.sqlite vanished). s80-m02: the graph is the single
+    // discovery source — no JSON mirror to re-derive.
+    const graph = await ProjectGraphRegistry.create();
+    const before = graph.list().length;
+    const pruned = graph.pruneMissingStores();
+    const remaining = graph.list().length;
     return { totalBefore: before, pruned, remaining, error: null };
   } catch (error) {
     const message = error instanceof Error ? error.message : 'unknown error';

@@ -1110,6 +1110,13 @@ describe('cmos_agent_onboard', () => {
             isStale: false,
             staleThresholdDays: 7,
           },
+          selfCapture: {
+            gapDays: 0,
+            thresholdDays: 7,
+            lastCaptureAt: null,
+            devActivityAt: null,
+            fires: false,
+          },
           staleness: {
             staleDecisions: 0,
             staleLearnings: 0,

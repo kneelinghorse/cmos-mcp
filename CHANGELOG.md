@@ -4,6 +4,28 @@ All notable changes to cmos-mcp are documented here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## 2.1.0 — 2026-07-09
+
+Arc D "One Portfolio Brain" — Sprints 1 **and** 2. "What's happening across my projects" collapses to **one** answer path, the two registry split-brains collapse to one genuine source, and the session-opener payloads become honest and cheap. The sqlite `ProjectGraphRegistry` (keyed by `project_id`) is now the **sole** discovery store — the JSON `ProjectRegistry` and its `project-registry.json` derivation layer are **deleted** (not merely derived). Every local read pins to its sender; portfolio-wide reads are the explicit `acrossProjects=true` opt-in on the graph-backed `queryAcrossStores`.
+
+> **Answer shapes changed (response payloads, not the input contract).** Every read now pins to the resolved project by default — no more silent cross-project fan-out. `cmos_message(list)` returns a byte-capped **summary**; the full body comes from `cmos_message(get, messageId=…)`. `cmos_review`'s portfolio reports a strict `reachable | silent | unmigrated | unreadable` partition plus a per-project drift list. The **15-tool contract holds** — new capability rides as params (`acrossProjects`) and actions (`cmos_message get`), never new tools.
+
+### Added
+
+- **`acrossProjects=true` on `cmos_mission` and `cmos_learnings`** (additive, matching `cmos_decisions`). `cmos_mission(status, acrossProjects=true)` returns active missions (In Progress/Current) across your registered projects; `cmos_learnings(list, acrossProjects=true, category=X)` returns learnings tagged X across projects. Both merge through the graph-backed `queryAcrossStores`, carry per-row `projectId`, surface per-store failures on `errors[]`, and emit the same metadata envelope as `cmos_decisions(acrossProjects)`.
+- **`cmos_message(get, messageId=…)`** — a new **action** (not a tool) returning one message's full body, response notes, and evidence. `cmos_message(list)` now returns byte-capped **summaries** (dropping the heavy body/notes/evidence that produced a ~410 KB / 250-message overflow), with the sender labeled from the populated `senderProject` / `senderDisplayName` rather than a misleading "unknown source". The sent tab carries a user-scoped advisory.
+- **Always-on cross-store `portfolio` section on `cmos_review`.** The session-opener digest carries a ≤4 KB portfolio rollup — active missions across your registered projects — built on `queryAcrossStores`. Stores are classified into a strict **partition** (`reachable` = read & fresh, `silent` = read but no CMOS write in >21 d, `unmigrated` = missions table predates the per-row rebuild, `unreadable` = other) that sums to the queried count, plus a top-N **drift** list naming the projects that need attention (with a backfill hint for un-migrated stores). Degrades to `portfolio=null` for a single-project setup. Supersedes the decision-#672 project-only exclusion.
+- **Self-capture advisory on `cmos_agent_onboard` + `cmos_review`.** When your local commits run more than 7 days ahead of the last CMOS write (decision / learning / mission — sessions excluded), the opener nudges you to capture the work. Fail-open and project-local; never fires without both signals.
+
+### Changed
+
+- **The project-graph registry is the GENUINE single discovery source.** Every registration/mutation (`cmos_project` init/register/unregister, cwd auto-register) and every internal discovery read resolves through `~/.config/cmos-mcp/project-graph.sqlite`. There is no `project-registry.json` mirror any more; a leftover file from a pre-2.1.0 install is inert and **safe to delete**.
+- **`cmos_mission(status)` / `cmos_session(list)` (and every other unpinned read) pin to the sender.** They no longer fan out across every registered project — a neutral multi-project dir now fails closed rather than returning colliding cross-project rows. "Across the portfolio" is the explicit `acrossProjects=true` opt-in.
+
+### Removed
+
+- **BREAKING (internal API) — the JSON `ProjectRegistry` + `project-registry.json` compat layer removed.** The JSON `ProjectRegistry` class, its `deriveJson()` / `replaceWithDerived()` derivation writers, and the five graph→JSON write sites are deleted; a ~10-line marker-gated `readLegacyJsonRegistry()` preserves the one-time v1.x→2.1.0 default-pointer migration (reads the legacy file once if present, writes nothing). Also removed: `withMultiClient` / `MultiClientEntry` (the last fan-out vestiges) and the dead `FTS5Retriever` class + sync `IRetriever` interface. None are on the package `.` export surface or the 15-tool contract — only code importing these internal helpers directly is affected. **Operator note:** `~/.config/cmos-mcp/project-registry.json` is safe to delete.
+
 ## 2.0.0 — 2026-07-09
 
 Major release cutting the **honest surface + trustworthy base** work (sprints 76–78). One BREAKING change — the unauthenticated HTTP transport is removed — drives the major bump. The stdio server (`cmos-mcp`), which is the product, is unchanged in its tool contract: the surface holds at **15 tools** and gains only additive actions/flags. What changed is the posture: one truthful identity, a generated tool reference, machine-enforced read-only review agents, foreign-content provenance framing, offline-capable embeddings, a verified-truthful `SECURITY.md`, and a large internal deletion that ships a much leaner tarball with no dead code. A security-skeptical reader can now grep the package and find nothing alarming.

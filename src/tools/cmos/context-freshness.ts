@@ -463,7 +463,12 @@ function createContextSnapshotWithDedup(
   return Number(insertResult.data?.lastInsertRowid);
 }
 
-function calculateLagDays(
+/**
+ * Days `latestActivityAt` runs ahead of `contextUpdatedAt` (0 when not ahead, null
+ * when either is absent/unparseable). s80-m07 exports this so the self-capture guard
+ * can reuse the exact same delta semantics.
+ */
+export function calculateLagDays(
   contextUpdatedAt: string | null,
   latestActivityAt: string | null
 ): number | null {

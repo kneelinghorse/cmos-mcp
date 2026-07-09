@@ -9,18 +9,27 @@ const isFocusedRun = process.argv.some((arg) => /combination|intelligence/.test(
 // Sprint 51: removing dead condense functions (all tested) lowered ratio by 0.1%.
 // Sprint 76 (Great Deletion G2): deleting the heavily-covered dead agentic island +
 //   its edge-padder tests dropped global functions 83.94 -> 80.51; lowered 82 -> 80.
-// Sprint 77 m03 (2026-07-08, gpt-tokenizer excision — OWNS the definitive re-set):
-//   removed the well-covered GPT counting + preload/health apparatus AND its tests,
-//   and added Claude-path + keep-branch-guard coverage. Re-measured full-suite green:
-//   statements 84.74, branches 69.60, functions 80.17, lines 85.45. Floors held at
-//   the values below (each sits under measured with headroom); m04-m06 only ADD
-//   coverage and re-confirm-green, so the ratios rise from here. Floors are final
-//   after m06.
+// Sprint 77 m03 (2026-07-08, gpt-tokenizer excision): re-measured green at
+//   statements 84.74, branches 69.60, functions 80.17, lines 85.45.
+// Sprint 79 m06 (2026-07-09, Arc D convergence — OWNS the re-set): the fan-out
+//   deletion (m04) plus the new tested registry/authority/acrossProjects/portfolio
+//   modules net-RAISED coverage. Re-measured full-suite green:
+//   statements 85.76, branches 70.40, functions 81.58, lines 86.40. Floors raised
+//   to sit just under measured (deliberate headroom; never bolt filler tests to
+//   hold a number — design doc §5.4).
+// Sprint 80 m07 (2026-07-09, Arc D Sprint 2 — OWNS the re-set): the m02 JSON
+//   ProjectRegistry deletion (a ~95%-covered class + suite, F5 spike) lowered ratios;
+//   the m01/m05/m06/m07 net-ADD tested code (project-resolution, message summary/get,
+//   deriveDrift, self-capture-guard) partially recovered them. Re-measured full-suite
+//   green: statements 85.5, branches 70.14, functions 81.45, lines 86.15 — all still
+//   ABOVE the floors, so single-owner-last-mission holds them UNTOUCHED (F5: no
+//   defensive down-adjust was needed). Branches headroom is thin (+0.16) but the floor
+//   already sits at 70; raising it would red CI on noise. NO filler tests were added.
 const baselineThresholds = {
-  branches: 69,
-  functions: 80,
-  lines: 84,
-  statements: 84,
+  branches: 70,
+  functions: 81,
+  lines: 85,
+  statements: 85,
 };
 
 module.exports = {

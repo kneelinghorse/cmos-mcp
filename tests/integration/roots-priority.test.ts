@@ -7,7 +7,7 @@ import os from 'os';
 import path from 'path';
 
 import { CmosDetector } from '../../src/intelligence/cmos-detector';
-import { ProjectRegistry } from '../../src/intelligence/project-registry';
+import { ProjectGraphRegistry } from '../../src/intelligence/project-graph-registry';
 import { resolveSenderContext } from '../../src/intelligence/sender-context';
 import { createSeededCmosProject, type SeededCmosProject } from '../helpers/seedCmosDb';
 
@@ -26,12 +26,12 @@ describe('sender-context precedence', () => {
 
   beforeEach(() => {
     CmosDetector.resetInstance();
-    ProjectRegistry.resetInstance();
+    ProjectGraphRegistry.resetInstance();
   });
 
   afterEach(async () => {
     CmosDetector.resetInstance();
-    ProjectRegistry.resetInstance();
+    ProjectGraphRegistry.resetInstance();
     for (const dir of cleanupDirs.splice(0)) {
       await fs.rm(dir, { recursive: true, force: true }).catch(() => void 0);
     }
@@ -62,8 +62,8 @@ describe('sender-context precedence', () => {
 
     const configDir = await trackDir('roots-priority-cfg-');
     const emptyCwd = await trackDir('roots-priority-empty-');
-    const registry = await ProjectRegistry.create({ configDir });
-    await registry.register(registryProject.projectRoot, { setAsDefault: true });
+    const registry = await ProjectGraphRegistry.create({ configDir });
+    registry.registerStore(registryProject.projectRoot, { setAsDefault: true });
 
     const result = await resolveSenderContext({
       mcpRoots: [rootsProject.projectRoot],
@@ -102,7 +102,7 @@ describe('sender-context precedence', () => {
     cleanupDirs.push(explicitProject.projectRoot, rootsProject.projectRoot);
 
     const configDir = await trackDir('roots-priority-cfg-');
-    const registry = await ProjectRegistry.create({ configDir });
+    const registry = await ProjectGraphRegistry.create({ configDir });
 
     const result = await resolveSenderContext({
       explicitProjectRoot: explicitProject.projectRoot,

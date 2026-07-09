@@ -13,6 +13,7 @@ import { createError, CmosErrors } from './errors';
 import type { CmosToolResult } from './types';
 import {
   cmosLearningsList,
+  cmosLearningsListAcrossProjects,
   formatLearningsListForLLM,
   type CmosLearningsListParams,
   type CmosLearningsListResult,
@@ -69,6 +70,12 @@ export const cmosLearningsSchema = z
     until: z.string().optional().describe('ISO date upper bound for list action'),
     page: z.number().int().positive().optional().describe('Page number for list action'),
     pageSize: z.number().int().positive().max(100).optional().describe('Page size for list action'),
+    acrossProjects: z
+      .boolean()
+      .optional()
+      .describe(
+        'list action: learnings tagged `category` across all registered projects (cross-store portfolio view; requires category)'
+      ),
     // search params
     query: z.string().optional().describe('Search query for search action (required for search)'),
     limit: z
@@ -132,6 +139,11 @@ export const cmosLearningsToolDefinition = {
         maximum: 100,
         description: 'Page size for list action',
       },
+      acrossProjects: {
+        type: 'boolean',
+        description:
+          'list action: learnings tagged `category` across all registered projects (cross-store portfolio view; requires category)',
+      },
       query: { type: 'string', description: 'Search query for search action' },
       limit: {
         type: 'number',
@@ -177,6 +189,14 @@ export async function cmosLearnings(
 
   switch (actionValue) {
     case 'list':
+      // s79-m05: acrossProjects → the §5.4 "learnings tagged X" portfolio query
+      // (graph-backed queryAcrossStores). index.ts skips local-root resolution.
+      if (params.acrossProjects) {
+        return cmosLearningsListAcrossProjects({
+          category: params.category,
+          limit: params.pageSize ?? params.limit,
+        });
+      }
       return cmosLearningsList({
         category: params.category,
         sprintId: params.sprintId,

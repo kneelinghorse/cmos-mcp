@@ -1,32 +1,37 @@
-// ABOUTME: One-shot CLI to validate + prune dead entries from ~/.config/cmos-mcp/project-registry.json.
-// ABOUTME: Mirrors the server-startup auto-prune so operators can drain the registry between runs.
+// ABOUTME: One-shot CLI to archive dead entries from the project-graph registry
+// ABOUTME: (~/.config/cmos-mcp/project-graph.sqlite). Mirrors the server-startup auto-prune.
 
-import { ProjectRegistry } from '../src/intelligence/project-registry';
+import { existsSync } from 'fs';
+import path from 'path';
+import { ProjectGraphRegistry } from '../src/intelligence/project-graph-registry';
 
 async function main(): Promise<number> {
-  const registry = await ProjectRegistry.create();
-  const before = await registry.list();
-  console.log(`[prune] ${before.length} entries in ${registry.path}`);
+  // s80-m02: the project-graph registry is the single discovery source (the JSON
+  // ProjectRegistry was deleted). Prune = archive rows whose store's cmos.sqlite is gone.
+  const graph = await ProjectGraphRegistry.create();
+  const before = graph.list();
+  console.log(`[prune] ${before.length} entries in ${graph.path}`);
 
-  const validations = await registry.validate();
-  const stale = validations.filter((v) => v.status !== 'active');
+  const stale = before.filter(
+    (e) => !existsSync(path.join(e.store_path, 'cmos', 'db', 'cmos.sqlite'))
+  );
 
   if (stale.length === 0) {
     console.log('[prune] registry is clean, nothing to remove');
     return 0;
   }
 
-  console.log(`[prune] removing ${stale.length} stale/missing entries:`);
-  for (const v of stale.slice(0, 20)) {
-    console.log(`  - [${v.status}] ${v.project.projectRoot}`);
+  console.log(`[prune] archiving ${stale.length} stale/missing entries:`);
+  for (const e of stale.slice(0, 20)) {
+    console.log(`  - ${e.store_path}`);
   }
   if (stale.length > 20) {
     console.log(`  ... and ${stale.length - 20} more`);
   }
 
-  const removed = await registry.prune();
-  const after = await registry.list();
-  console.log(`[prune] removed ${removed} entries; ${after.length} remain`);
+  const removed = graph.pruneMissingStores();
+  const after = graph.list();
+  console.log(`[prune] archived ${removed} entries; ${after.length} remain`);
   return 0;
 }
 

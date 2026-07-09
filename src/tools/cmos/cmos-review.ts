@@ -9,27 +9,37 @@
  * fresh agent can boot from one tool call instead of four.
  *
  * Scope is locked per sprint-64 m03 decision #671: cmos_review calls into the
- * existing handlers and shapes their output — it does NOT introduce new SQL
- * queries of its own. cmos_agent_onboard and cmos_context_view themselves
- * stay unchanged for back-compat; this tool is purely additive.
+ * existing handlers and shapes their output — it does NOT author new SQL of its
+ * own. The s79-m06 portfolio section (below) likewise CONSUMES an existing
+ * cross-store helper (`activeMissionsAcrossProjects`), which owns its SQL — so
+ * #671 still holds. cmos_agent_onboard and cmos_context_view stay unchanged for
+ * back-compat; this tool is purely additive.
  *
- * Cross-project exclusion (decision #672): the registry-aware cross-project
- * status was built for a different operating model where one CMOS aggregates
- * across all projects. The current model is one CMOS per project with
- * explicit cross-project messaging via cmos_message, so cmos_review is
- * project-scoped by design and does NOT walk the project registry.
+ * Cross-store portfolio rollup (s79-m06 — SUPERSEDES the #672 project-only
+ * exclusion). #672 excluded cross-project status because the old model was one
+ * CMOS aggregating all projects; Arc D makes the sqlite ProjectGraphRegistry the
+ * one discovery source + `queryAcrossStores` the one portfolio read path. So
+ * cmos_review now carries an ALWAYS-ON, graceful-degrading ≤4KB portfolio section
+ * (active missions across the registered projects) built on that graph-backed
+ * fan-out. It degrades to `portfolio=null` for a single-project operator (registry
+ * lists ≤1 active project) or when the fan-out fails. Latency-fenced to the
+ * active-missions query only (no second decisions-pulse fan-out).
  *
  * @module tools/cmos/cmos-review
  */
 
+import { statSync } from 'fs';
+import * as path from 'path';
 import { z } from 'zod';
 import type { CmosToolResult } from './types';
 import { createSuccess } from './errors';
 import { cmosAgentOnboard, type CmosAgentOnboardResult } from './cmos-agent-onboard';
+import type { SelfCaptureGap } from './self-capture-guard';
 import { cmosMissionStatus, type StatusMissionItem } from './cmos-mission-status';
 import { checkBuildFreshness, type BuildFreshnessReport } from './build-freshness';
-import { resolveProjectRootEnhanced } from '../../intelligence/project-registry';
+import { resolveProjectRootEnhanced } from '../../intelligence/project-resolution';
 import { ProjectGraphRegistry } from '../../intelligence/project-graph-registry';
+import { activeMissionsAcrossProjects } from '../../intelligence/cross-store-queries';
 import { isReadOnlyAgentSession } from './read-only-agent-guard';
 
 /**
@@ -55,6 +65,58 @@ export interface WorkItem {
 export interface WorkQueueBucket {
   count: number;
   top: WorkItem[];
+}
+
+/** s80-m06 — one drifting project in the portfolio drift list. */
+export interface PortfolioDriftItem {
+  projectId: string;
+  /** Display name, capped to {@link DRIFT_NAME_CAP_CHARS}. */
+  name: string;
+  /** Why it drifted, e.g. "no CMOS write in 37d" or "un-migrated (…)". */
+  reason: string;
+  /** Store mtime age in whole days (0 when the store could not be stat'd). */
+  ageDays: number;
+  /** Optional operator action, e.g. "run cmos_db backfill/rebuild" for un-migrated stores. */
+  hint?: string;
+}
+
+/** s80-m06 — per-project freshness drift within the portfolio. */
+export interface PortfolioDrift {
+  /** The "silent" threshold in days (a store past it is flagged). */
+  staleThresholdDays: number;
+  /** The drifting projects (silent + un-migrated), top-N by ageDays desc. */
+  stale: PortfolioDriftItem[];
+}
+
+/**
+ * s79-m06 / s80-m06 — cross-store portfolio rollup. Active missions (In Progress/
+ * Current) across the registered projects, built on the graph-backed
+ * `queryAcrossStores`. `null` for a single-project operator or when the fan-out fails
+ * (graceful degrade). s80-m06 reclassified the old `reachable`/`unreachable` split into
+ * a STRICT PARTITION — `reachable + silent + unmigrated + unreadable === projects` — so
+ * "reachable" regains its literal meaning (a succeeded, non-stale store) and per-project
+ * drift is visible without a fan-out.
+ */
+export interface PortfolioSection {
+  /** Active projects the graph registry lists (= stores queried). */
+  projects: number;
+  /** Succeeded ∧ fresh (written within `drift.staleThresholdDays`). */
+  reachable: number;
+  /** Succeeded ∧ stale (no CMOS write in > `drift.staleThresholdDays`). */
+  silent: number;
+  /** Failed with "no such column" — the missions table predates the s79 per-row rebuild. */
+  unmigrated: number;
+  /** Failed for another reason (store DB moved/locked/unreadable). */
+  unreadable: number;
+  /** Active missions across the portfolio: total count + the top ≤5 (trimmed first under budget). */
+  activeMissions: {
+    count: number;
+    top: Array<{ id: string; name: string; projectId: string }>;
+  };
+  /** p95 per-store fan-in latency in ms (App-View Trigger-A signal); overall wall-clock when no store succeeded. */
+  fanInP95Ms: number;
+  /** Per-project freshness drift (silent + un-migrated stores); null when nothing drifted. */
+  drift: PortfolioDrift | null;
 }
 
 /**
@@ -96,6 +158,12 @@ export interface CmosReviewResult {
   /** Up to 5 most recent decisions in compact {text, createdAt} form. */
   recentDecisions: Array<{ text: string; createdAt: string }>;
 
+  /** s79-m06 — always-on cross-store portfolio rollup; null when degraded (≤1 project / fan-out failed). */
+  portfolio: PortfolioSection | null;
+
+  /** s80-m07 — self-capture gap, present ONLY when it fires (commits ahead of the last CMOS write). */
+  selfCapture?: SelfCaptureGap;
+
   /** Master-context freshness signal. */
   freshness: {
     lagDays: number;
@@ -132,7 +200,7 @@ export type CmosReviewParams = z.infer<typeof cmosReviewSchema>;
 export const cmosReviewToolDefinition = {
   name: 'cmos_review',
   description:
-    'Bundled session-opener digest (≤4KB). Replaces the cmos_agent_onboard + cmos_context_view + cmos_mission_status opener with one project-scoped payload. Top-3 next_actions are promoted to a flat top-level field. Does NOT walk the project registry — use cmos_message for cross-project workflows.',
+    'Bundled session-opener digest (≤4KB). Replaces the cmos_agent_onboard + cmos_context_view + cmos_mission_status opener with one payload. Top-3 next_actions are promoted to a flat top-level field. Includes an always-on cross-store `portfolio` rollup (active missions across your registered projects) built on the graph-backed queryAcrossStores; it degrades to null for a single-project setup.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -166,6 +234,27 @@ const RECENT_DECISIONS_MAX = 5;
 /** Payload budget in bytes (mission spec). */
 const DIGEST_BUDGET_BYTES = 4096;
 
+/** s79-m06 — max active missions shown in the portfolio section (count is unbounded up to the fetch limit). */
+const PORTFOLIO_TOP_N = 5;
+
+/** s79-m06 — per-store fan-out cap for the portfolio active-missions count (bounded, latency-fenced). */
+const PORTFOLIO_FETCH_LIMIT = 50;
+
+/** s79-m06 — cap on a portfolio mission name (tighter than the local work-queue cap to protect the budget). */
+const PORTFOLIO_MISSION_NAME_CAP_CHARS = 60;
+
+/** s79-m06 — under-budget re-truncation cap for sprint.focus (trim stage 2). */
+const SPRINT_FOCUS_TRIM_CAP_CHARS = 160;
+
+/** s80-m06 — a store with no CMOS write in more than this many days is "silent" (drift). */
+const STALE_THRESHOLD_DAYS = 21;
+
+/** s80-m06 — cap on the per-project drift list (top-N by ageDays) to bound digest bytes. */
+const DRIFT_TOP_N = 8;
+
+/** s80-m06 — cap on a drifting project's display name in the drift list. */
+const DRIFT_NAME_CAP_CHARS = 30;
+
 /**
  * Execute cmos_review.
  *
@@ -174,21 +263,28 @@ const DIGEST_BUDGET_BYTES = 4096;
  * No new database queries are added by this tool.
  */
 export async function cmosReview(
-  params: CmosReviewParams = {}
+  params: CmosReviewParams = {},
+  // s79-m06 — internal, NON-schema seam: an injectable ProjectGraphRegistry for
+  // deterministic tests of the portfolio section. NOT exposed on the tool
+  // inputSchema (it must never reach the MCP boundary).
+  internalOpts: { registry?: ProjectGraphRegistry } = {}
 ): Promise<CmosToolResult<CmosReviewResult>> {
   const projectRoot = params.projectRoot;
 
-  const [onboardResult, missionStatusResult, buildFreshness] = await Promise.all([
+  const [onboardResult, missionStatusResult, buildFreshness, portfolio] = await Promise.all([
     cmosAgentOnboard(projectRoot ? { projectRoot } : {}),
     cmosMissionStatus(
       projectRoot ? { projectRoot, includeBlocked: true } : { includeBlocked: true }
     ),
     resolveReviewFreshness(projectRoot),
+    // s79-m06 — the always-on cross-store portfolio rollup (active missions across
+    // the registered projects). Runs in the same parallel batch as onboard/status
+    // so it adds no serial latency; latency-fenced to the active-missions query.
+    // Degrades to null (never throws) on ≤1 project or fan-out failure.
+    buildPortfolioSection(internalOpts.registry),
     // s69-m05 — record this project's last_seen_at in the per-user project-graph
-    // registry (auto-registering it if absent). This is a write SIDE-EFFECT only:
-    // it does NOT add cross-project data to the digest, so decision #672 still
-    // holds — the payload stays strictly project-scoped. Never throws, never
-    // blocks the opener (runs in the same parallel batch; result discarded).
+    // registry (auto-registering it if absent). Never throws, never blocks the
+    // opener (runs in the same parallel batch; result discarded).
     touchProjectGraphRegistry(projectRoot),
   ]);
 
@@ -206,7 +302,7 @@ export async function cmosReview(
   const missionStatus =
     missionStatusResult.success && missionStatusResult.data ? missionStatusResult.data : null;
 
-  const digest = buildDigest(onboard, missionStatus, buildFreshness);
+  const digest = buildDigest(onboard, missionStatus, buildFreshness, portfolio);
 
   // Filter to auth + sync warnings only. Drop staleness/orphan/context-size
   // warnings — those live on the long-form cmos_agent_onboard payload.
@@ -222,7 +318,8 @@ export async function cmosReview(
 function buildDigest(
   onboard: CmosAgentOnboardResult,
   missionStatus: import('./cmos-mission-status').CmosMissionStatusResult | null,
-  buildFreshness: BuildFreshnessReport | null
+  buildFreshness: BuildFreshnessReport | null,
+  portfolio: PortfolioSection | null
 ): CmosReviewResult {
   const sprintFocus = onboard.currentSprint?.focus
     ? truncate(onboard.currentSprint.focus, SPRINT_FOCUS_CAP_CHARS)
@@ -304,6 +401,7 @@ function buildDigest(
     sprint,
     workQueue,
     recentDecisions,
+    portfolio,
     freshness,
     warnings: [],
     digestSizeBytes: 0,
@@ -311,6 +409,14 @@ function buildDigest(
 
   if (buildFreshness?.stale) {
     draft.buildFreshness = buildFreshness;
+  }
+
+  // s80-m07 — surface the self-capture gap via the structured path (NOT the warning
+  // string, which filterReviewWarnings drops). The `selfCapture` struct + the
+  // formatReviewForLLM line are the GUARANTEED surfaces; the priority-2 action also
+  // rides in via onboard.suggestedActions → next_actions when it ranks in the top-3.
+  if (onboard.selfCapture?.fires) {
+    draft.selfCapture = onboard.selfCapture;
   }
 
   const trimmed = trimToBudget(draft);
@@ -386,32 +492,199 @@ async function touchProjectGraphRegistry(explicitRoot: string | undefined): Prom
 }
 
 /**
- * Trim the digest in stages until it fits the 4KB budget. Order of stages is
- * chosen so we preserve the most decision-relevant signal: cut decision
- * volume first, then per-decision text, then work-queue entry counts.
+ * s79-m06 — build the always-on cross-store portfolio section. Discovers stores
+ * via the graph registry (injectable for tests) and merges active missions across
+ * the portfolio through `activeMissionsAcrossProjects` (§5.4 query b — no new SQL,
+ * #671 holds). Graceful degrade: returns null when the registry lists ≤1 active
+ * project (a portfolio rollup is meaningless for one project) OR when the whole
+ * fan-out throws. Latency-fenced: the single active-missions query only.
+ */
+/** s80-m06 — return a store file's mtime in Unix ms, or null if it can't be stat'd. */
+export type StoreStatFn = (filePath: string) => number | null;
+
+const defaultStoreStatFn: StoreStatFn = (filePath) => {
+  try {
+    return statSync(filePath).mtimeMs;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * s80-m06 — a store's freshness age in days, from the NEWEST of its `cmos.sqlite` +
+ * `cmos.sqlite-wal` mtimes (the WAL sidecar advances on every write before checkpoint).
+ * Store mtime is the primary signal — the graph registry's `last_seen_at` is inflated
+ * by `cmos_review`'s own touch, so it is NOT used here. Returns null when neither file
+ * can be stat'd.
+ */
+function storeAgeDays(storePath: string, statFn: StoreStatFn, nowMs: number): number | null {
+  const base = path.join(storePath, 'cmos', 'db', 'cmos.sqlite');
+  let newest = 0;
+  for (const p of [base, `${base}-wal`]) {
+    const mtime = statFn(p);
+    if (mtime !== null && mtime > newest) newest = mtime;
+  }
+  if (newest === 0) return null;
+  return (nowMs - newest) / (1000 * 60 * 60 * 24);
+}
+
+/** s80-m06 — the strict reachability partition + the drift list. */
+export interface DriftPartition {
+  reachable: number;
+  silent: number;
+  unmigrated: number;
+  unreadable: number;
+  drift: PortfolioDrift | null;
+}
+
+/**
+ * s80-m06 — classify every queried store into the strict partition and build the
+ * per-project drift list, consuming ONLY existing outputs (`registry.list()` +
+ * `fanout.errors`) plus `fs.stat` on each store file (#671 holds — no new SQL/opens/
+ * network). A store is:
+ *   - `unmigrated` — failed with "no such column" (its missions table predates the s79
+ *      per-row rebuild) → drift item with a backfill hint;
+ *   - `unreadable` — failed otherwise (moved/locked/I/O; classified transient);
+ *   - `silent`     — succeeded but its store mtime is > `STALE_THRESHOLD_DAYS` old → drift;
+ *   - `reachable`  — succeeded ∧ fresh.
+ * By construction `reachable + silent + unmigrated + unreadable === stores.length`.
+ * The drift list is capped top-N by `ageDays` desc to bound digest bytes.
+ */
+export function deriveDrift(
+  stores: ReadonlyArray<{ project_id: string; store_path: string; name: string }>,
+  errors: ReadonlyArray<{ projectId: string; error: string }>,
+  statFn: StoreStatFn,
+  nowMs: number
+): DriftPartition {
+  const errorById = new Map(errors.map((e) => [e.projectId, e.error]));
+  let reachable = 0;
+  let silent = 0;
+  let unmigrated = 0;
+  let unreadable = 0;
+  const items: PortfolioDriftItem[] = [];
+
+  for (const store of stores) {
+    const name = truncate(store.name, DRIFT_NAME_CAP_CHARS);
+    const err = errorById.get(store.project_id);
+    if (err !== undefined) {
+      if (/no such column/i.test(err)) {
+        unmigrated++;
+        items.push({
+          projectId: store.project_id,
+          name,
+          reason: 'un-migrated (missions table predates the per-row rebuild)',
+          ageDays: Math.round(storeAgeDays(store.store_path, statFn, nowMs) ?? 0),
+          hint: 'run cmos_db backfill/rebuild',
+        });
+      } else {
+        // moved / locked / I/O / unknown → transient, classified defensively.
+        unreadable++;
+      }
+      continue;
+    }
+    // Succeeded — freshness by store mtime.
+    const age = storeAgeDays(store.store_path, statFn, nowMs);
+    if (age !== null && age > STALE_THRESHOLD_DAYS) {
+      silent++;
+      items.push({
+        projectId: store.project_id,
+        name,
+        reason: `no CMOS write in ${Math.round(age)}d`,
+        ageDays: Math.round(age),
+      });
+    } else {
+      reachable++;
+    }
+  }
+
+  items.sort((a, b) => b.ageDays - a.ageDays);
+  const drift: PortfolioDrift | null = items.length
+    ? { staleThresholdDays: STALE_THRESHOLD_DAYS, stale: items.slice(0, DRIFT_TOP_N) }
+    : null;
+  return { reachable, silent, unmigrated, unreadable, drift };
+}
+
+async function buildPortfolioSection(
+  registryOverride?: ProjectGraphRegistry,
+  statFn: StoreStatFn = defaultStoreStatFn,
+  nowMs: number = Date.now()
+): Promise<PortfolioSection | null> {
+  try {
+    const registry = registryOverride ?? (await ProjectGraphRegistry.create());
+    const stores = registry.list();
+    if (stores.length <= 1) return null; // single-project → degrade
+
+    const fanout = await activeMissionsAcrossProjects({
+      limit: PORTFOLIO_FETCH_LIMIT,
+      registry,
+    });
+    const meta = fanout.metadata;
+    // s80-m06: strict partition + drift over the SAME store set the fan-out queried.
+    const partition = deriveDrift(stores, fanout.errors, statFn, nowMs);
+    return {
+      projects: stores.length,
+      reachable: partition.reachable,
+      silent: partition.silent,
+      unmigrated: partition.unmigrated,
+      unreadable: partition.unreadable,
+      activeMissions: {
+        count: fanout.results.length,
+        top: fanout.results.slice(0, PORTFOLIO_TOP_N).map((m) => ({
+          id: m.id,
+          name: truncate(m.name, PORTFOLIO_MISSION_NAME_CAP_CHARS),
+          projectId: m.project_id,
+        })),
+      },
+      fanInP95Ms: Math.round(meta.perStoreP95Ms ?? meta.overallMs),
+      drift: partition.drift,
+    };
+  } catch {
+    return null; // fan-out failed → degrade, never break the opener
+  }
+}
+
+/**
+ * Trim the digest in stages until it fits the 4KB budget (s79-m06 F9 order). The
+ * NEW cross-store portfolio signal is the point of this digest, so it is trimmed
+ * LAST: recentDecisions → sprint.focus → warnings → workQueue tops →
+ * portfolio.activeMissions.top (5→3→0) → portfolio=null. Everything cheaper and
+ * more local is sacrificed before the portfolio rollup degrades.
  */
 function trimToBudget(digest: CmosReviewResult): CmosReviewResult {
   const measure = (d: CmosReviewResult): number => Buffer.byteLength(JSON.stringify(d), 'utf8');
 
-  // The body is already capped at the top of buildDigest. Run a defensive
-  // shrink loop in case real-world payloads slip over the limit — trim
-  // decisions and warnings before touching anything else.
   let current = digest;
   let size = measure(current);
 
-  // Stage 1: drop recentDecisions one at a time until under budget.
+  // Stage 1: drop recentDecisions one at a time (largest existing field).
   while (size > DIGEST_BUDGET_BYTES && current.recentDecisions.length > 0) {
     current = { ...current, recentDecisions: current.recentDecisions.slice(0, -1) };
     size = measure(current);
   }
 
-  // Stage 2: drop warnings.
+  // Stage 2: re-truncate sprint.focus to a tighter cap.
+  if (
+    size > DIGEST_BUDGET_BYTES &&
+    current.sprint?.focus &&
+    current.sprint.focus.length > SPRINT_FOCUS_TRIM_CAP_CHARS
+  ) {
+    current = {
+      ...current,
+      sprint: {
+        ...current.sprint,
+        focus: truncate(current.sprint.focus, SPRINT_FOCUS_TRIM_CAP_CHARS),
+      },
+    };
+    size = measure(current);
+  }
+
+  // Stage 3: drop warnings.
   while (size > DIGEST_BUDGET_BYTES && current.warnings.length > 0) {
     current = { ...current, warnings: current.warnings.slice(0, -1) };
     size = measure(current);
   }
 
-  // Stage 3: trim work-queue top arrays.
+  // Stage 4: trim work-queue top arrays.
   while (
     size > DIGEST_BUDGET_BYTES &&
     (current.workQueue.inProgress.top.length > 0 ||
@@ -436,6 +709,49 @@ function trimToBudget(digest: CmosReviewResult): CmosReviewResult {
         },
       },
     };
+    size = measure(current);
+  }
+
+  // Stage 5: shrink portfolio.activeMissions.top (5→3→0), one at a time.
+  while (
+    size > DIGEST_BUDGET_BYTES &&
+    current.portfolio &&
+    current.portfolio.activeMissions.top.length > 0
+  ) {
+    current = {
+      ...current,
+      portfolio: {
+        ...current.portfolio,
+        activeMissions: {
+          ...current.portfolio.activeMissions,
+          top: current.portfolio.activeMissions.top.slice(0, -1),
+        },
+      },
+    };
+    size = measure(current);
+  }
+
+  // Stage 5b (s80-m06): shrink portfolio.drift.stale one at a time before dropping the
+  // whole portfolio — the drift list is capped but still yields under extreme pressure.
+  while (
+    size > DIGEST_BUDGET_BYTES &&
+    current.portfolio?.drift &&
+    current.portfolio.drift.stale.length > 0
+  ) {
+    const stale = current.portfolio.drift.stale.slice(0, -1);
+    current = {
+      ...current,
+      portfolio: {
+        ...current.portfolio,
+        drift: stale.length ? { ...current.portfolio.drift, stale } : null,
+      },
+    };
+    size = measure(current);
+  }
+
+  // Stage 6 (last resort): drop the whole portfolio section.
+  if (size > DIGEST_BUDGET_BYTES && current.portfolio) {
+    current = { ...current, portfolio: null };
     size = measure(current);
   }
 
@@ -580,6 +896,39 @@ export function formatReviewForLLM(result: CmosToolResult<CmosReviewResult>): st
     for (const dec of d.recentDecisions) {
       lines.push(`  • ${dec.text}`);
     }
+  }
+
+  if (d.portfolio) {
+    const p = d.portfolio;
+    lines.push('');
+    // s80-m06: strict partition — reachable + silent + unmigrated + unreadable === projects.
+    const parts = [`${p.reachable} reachable`];
+    if (p.silent > 0) parts.push(`${p.silent} silent`);
+    if (p.unmigrated > 0) parts.push(`${p.unmigrated} un-migrated`);
+    if (p.unreadable > 0) parts.push(`${p.unreadable} unreadable`);
+    lines.push(
+      `🌐 Portfolio — ${p.activeMissions.count} active mission(s) across ${p.projects} store(s): ` +
+        `${parts.join(', ')} · fan-in p95 ${p.fanInP95Ms}ms`
+    );
+    for (const m of p.activeMissions.top) {
+      lines.push(`  📋 ${m.id} — ${m.name} [proj:${m.projectId}]`);
+    }
+    if (p.drift && p.drift.stale.length > 0) {
+      lines.push(`  ⚠ drift (>${p.drift.staleThresholdDays}d): ${p.drift.stale.length} project(s)`);
+      for (const s of p.drift.stale) {
+        lines.push(`    · ${s.name} — ${s.reason}${s.hint ? ` (${s.hint})` : ''}`);
+      }
+    }
+  }
+
+  // s80-m07 — self-capture advisory (present only when it fires). Rendered here, not
+  // via d.warnings, because filterReviewWarnings drops non-auth/sync warnings.
+  if (d.selfCapture?.fires) {
+    lines.push('');
+    lines.push(
+      `📝 Self-capture: local commits are ~${Math.round(d.selfCapture.gapDays)}d ahead of the last ` +
+        `CMOS write — capture recent work (cmos_session action="capture")`
+    );
   }
 
   if (d.warnings.length > 0) {

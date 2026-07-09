@@ -32,7 +32,6 @@ import {
   cmosSprintToolDefinition,
   formatSprintForLLM,
 } from '../../../src/tools/cmos/cmos-sprint';
-import { isReadAction } from '../../../src/tools/cmos/client';
 import { cmosSprintList, formatSprintListForLLM } from '../../../src/tools/cmos/cmos-sprint-list';
 import { cmosSprintShow, formatSprintShowForLLM } from '../../../src/tools/cmos/cmos-sprint-show';
 import { cmosSprintAdd, formatSprintAddForLLM } from '../../../src/tools/cmos/cmos-sprint-add';
@@ -258,17 +257,7 @@ describe('cmos_sprint', () => {
     ]);
   });
 
-  describe('Sprint 55 m01: project-scope fanout regression', () => {
-    // Bug: cmos_sprint(list|show) fanned out over every registered project when
-    // projectRoot was omitted, returning ~1675 SPRINT_NOT_FOUND errors and a
-    // ~681KB payload on the observed registry. After the fix these actions pin
-    // to the caller's project via resolveToolSenderContext at dispatch time.
-    it('cmos_sprint(list) is not registered for fan-out', () => {
-      expect(isReadAction('cmos_sprint', 'list')).toBe(false);
-    });
-
-    it('cmos_sprint(show) is not registered for fan-out', () => {
-      expect(isReadAction('cmos_sprint', 'show')).toBe(false);
-    });
-  });
+  // Sprint 79 m04: the fan-out model (isReadAction/READ_ACTIONS/fanOutRead) was
+  // deleted; cmos_sprint always pins to the sender at dispatch. The former
+  // fan-out-eligibility assertions were removed with it.
 });

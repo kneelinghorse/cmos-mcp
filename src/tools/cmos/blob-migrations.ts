@@ -74,7 +74,7 @@ export const BLOB_MIGRATIONS: BlobMigration[] = [
     description:
       'Remove five duplicated sections from master_context blob (Sprint 51). ' +
       'completed_missions, completed_sprints, decisions_made, learnings, and recent_sessions ' +
-      'are fully queryable from structured tables via FTS5Retriever or direct SQL.',
+      'are fully queryable from structured tables via HybridRetriever or direct SQL.',
     up: (blob) => {
       const {
         // eslint-disable-next-line @typescript-eslint/no-unused-vars

@@ -703,7 +703,7 @@ function aggregateCapturesFromSessions(sessions: SessionWithCaptures[]): Aggrega
  * Update master_context with aggregated items.
  *
  * decisions and learnings are no longer stored in the blob (Sprint 51 blob reduction).
- * They are queryable from strategic_decisions and learnings tables via FTS5Retriever.
+ * They are queryable from strategic_decisions and learnings tables via HybridRetriever.
  * Only constraints remain blob-backed (low-volume, no dedicated table yet).
  */
 function updateMasterContext(

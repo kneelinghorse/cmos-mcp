@@ -15,29 +15,19 @@
 import Database, { type Database as DatabaseType, type Statement } from 'better-sqlite3';
 import { CmosDetector, type CmosDetectionResult } from '../../intelligence/cmos-detector';
 import {
-  ProjectRegistry,
   resolveProjectRootEnhanced,
-  resolveProjectRootPath,
   ProjectResolutionError,
-  type ProjectResolutionResult,
-  type RegisteredProject,
-  type ProjectValidation,
-} from '../../intelligence/project-registry';
+} from '../../intelligence/project-resolution';
 import type { CmosToolResult, DbHealthResult } from './types';
 import { createError, createSuccess, CmosErrors, CMOS_ERROR_CODES } from './errors';
 import { loadVecExtension } from './vec-loader';
 import { assertJestDbPathIsolated, RealStoreGuardError } from './real-store-guard';
 
-// Re-export project registry types and functions for convenience
-export {
-  ProjectRegistry,
-  resolveProjectRootEnhanced,
-  resolveProjectRootPath,
-  ProjectResolutionError,
-  type ProjectResolutionResult,
-  type RegisteredProject,
-  type ProjectValidation,
-};
+// Re-export the resolver for convenience. s80-m01 trimmed the dead JSON
+// `ProjectRegistry` / `RegisteredProject` / `ProjectValidation` /
+// `resolveProjectRootPath` / `ProjectResolutionResult` re-exports (grep-confirmed
+// no importers); the resolver now lives in `intelligence/project-resolution.ts`.
+export { resolveProjectRootEnhanced, ProjectResolutionError };
 
 /**
  * Environment variable for CMOS project root.
@@ -731,112 +721,6 @@ export async function withClientAsync<T>(
   } finally {
     client.close();
   }
-}
-
-/**
- * A single entry in a multi-client fan-out result.
- * Each entry carries the projectRoot that was queried alongside the result.
- */
-export interface MultiClientEntry<T> {
-  /** The projectRoot that was queried to produce this entry */
-  resolvedFrom: string;
-  /** Whether this instance's query succeeded */
-  success: boolean;
-  /** The query result data (present when success is true) */
-  data?: T;
-  /** Error details (present when success is false) */
-  error?: import('./types').CmosToolError;
-}
-
-/**
- * Fan-out a read operation across multiple CMOS instances.
- *
- * Runs fn against each projectRoot in parallel. Each result is tagged with
- * resolvedFrom so callers can attribute results to their source instance.
- * Partial failures are included in the result array rather than failing the
- * whole call — the outer success is true as long as the fan-out itself ran.
- *
- * @param fn - Async operation to run against each client
- * @param projectRoots - List of projectRoot paths to fan out across
- * @returns Success result containing one entry per projectRoot
- */
-export async function withMultiClient<T>(
-  fn: (client: CmosDatabaseClient) => Promise<CmosToolResult<T>>,
-  projectRoots: string[]
-): Promise<CmosToolResult<MultiClientEntry<T>[]>> {
-  const entries = await Promise.all(
-    projectRoots.map(async (root): Promise<MultiClientEntry<T>> => {
-      const clientResult = await CmosDatabaseClient.create({ projectRoot: root });
-      if (!clientResult.success || !clientResult.data) {
-        return {
-          resolvedFrom: root,
-          success: false,
-          error: clientResult.error,
-        };
-      }
-
-      const client = clientResult.data;
-      try {
-        const result = await fn(client);
-        return {
-          resolvedFrom: root,
-          success: result.success,
-          data: result.data,
-          error: result.error,
-        };
-      } finally {
-        client.close();
-      }
-    })
-  );
-
-  return createSuccess(entries);
-}
-
-/**
- * Read-only CMOS actions eligible for projectRoot fan-out.
- *
- * When a caller omits projectRoot on one of these tool+action combinations,
- * the server fans out across all registered instances instead of erroring.
- * Write actions are intentionally absent — they always require an explicit
- * projectRoot to prevent cross-instance contamination.
- *
- * Sprint 55 m01: cmos_sprint(list|show) and cmos_mission(list) were removed
- * from the fan-out set. Their per-project payloads (full mission rosters and
- * sprint_summary rows with decision counts) are large enough that fanning
- * across a populated registry blew the tool-result size cap (~681KB for a
- * single cmos_sprint(show) on the observed 1674-entry registry). The
- * dispatcher now pins these actions to the caller's project via
- * resolveToolSenderContext, the same resolution used by write actions.
- *
- * Sprint 65 m01: cmos_mission(show) was removed for a different reason —
- * cross-project ID collisions. Mission IDs like "s64-m01" are not globally
- * unique; the same ID exists in many projects. Fanning out on show returned
- * one row per matching project, surfacing missions from unrelated codebases
- * (feedback row #1; decision #675). Per-project payload is small here, so
- * the cap is not the issue — caller intent is. show should resolve to the
- * caller's project and nothing else. cmos_mission(status), cmos_session(list),
- * and cmos_context(show) remain fan-out-eligible because their semantics are
- * inherently cross-project (status overview, session list, context spread).
- */
-const READ_ACTIONS: Record<string, readonly string[]> = {
-  cmos_mission: ['status'],
-  cmos_session: ['list'],
-  cmos_context: ['show'],
-};
-
-/**
- * Return true if toolName+action is a read-only operation eligible for fan-out.
- *
- * cmos_agent_onboard is intentionally excluded — it has single-instance
- * semantics (onboarding one project at a time is correct behavior).
- *
- * @param toolName - MCP tool name (e.g. 'cmos_mission')
- * @param action - Action parameter value (e.g. 'list')
- */
-export function isReadAction(toolName: string, action: string): boolean {
-  const allowed = READ_ACTIONS[toolName];
-  return allowed !== undefined && allowed.includes(action);
 }
 
 /**

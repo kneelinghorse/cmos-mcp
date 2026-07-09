@@ -7,7 +7,7 @@ import * as os from 'os';
 import * as path from 'path';
 
 import { CmosDetector } from '../../../src/intelligence/cmos-detector';
-import { ProjectRegistry } from '../../../src/intelligence/project-registry';
+import { ProjectGraphRegistry } from '../../../src/intelligence/project-graph-registry';
 import {
   cmosMissionDefer,
   formatMissionDeferForLLM,
@@ -134,7 +134,7 @@ describe('cmosMissionDefer', () => {
 
   beforeEach(() => {
     CmosDetector.resetInstance();
-    ProjectRegistry.resetInstance();
+    ProjectGraphRegistry.resetInstance();
     env = createTestEnv();
   });
 

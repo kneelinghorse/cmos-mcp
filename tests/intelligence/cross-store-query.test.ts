@@ -27,7 +27,6 @@ import {
   citationGraphAcrossProjects,
 } from '../../src/intelligence/cross-store-queries';
 import { ProjectGraphRegistry } from '../../src/intelligence/project-graph-registry';
-import { ProjectRegistry } from '../../src/intelligence/project-registry';
 import { cmosDecisionsList } from '../../src/tools/cmos/cmos-decisions-list';
 
 interface DecisionSeed {
@@ -67,12 +66,10 @@ describe('cross-store fan-out read API (Sprint 69 m06)', () => {
     prevConfigEnv = process.env.CMOS_CONFIG_DIR;
     process.env.CMOS_CONFIG_DIR = configDir;
     ProjectGraphRegistry.resetInstance();
-    ProjectRegistry.resetInstance();
   });
 
   afterEach(() => {
     ProjectGraphRegistry.resetInstance();
-    ProjectRegistry.resetInstance();
     if (prevConfigEnv === undefined) delete process.env.CMOS_CONFIG_DIR;
     else process.env.CMOS_CONFIG_DIR = prevConfigEnv;
     fs.rmSync(tmpDir, { recursive: true, force: true });

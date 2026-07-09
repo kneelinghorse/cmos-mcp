@@ -36,7 +36,6 @@ import {
   cmosMissionToolDefinition,
   formatMissionForLLM,
 } from '../../../src/tools/cmos/cmos-mission';
-import { isReadAction } from '../../../src/tools/cmos/client';
 import {
   cmosMissionList,
   formatMissionListForLLM,
@@ -302,23 +301,8 @@ describe('cmos_mission', () => {
     });
   });
 
-  describe('Sprint 55 m01 + Sprint 65 m01: project-scope fanout regression', () => {
-    // Sprint 55 m01: cmos_mission(list) was pinned to the caller's project to
-    // avoid blowing the tool-result size cap on large registries.
-    // Sprint 65 m01: cmos_mission(show) was pinned for a different reason —
-    // mission IDs like "s64-m01" collide across projects, so fanning surfaced
-    // missions from unrelated codebases (feedback row #1; decision #675).
-    // After both fixes, only `status` remains fan-out-eligible on cmos_mission.
-    it('cmos_mission(list) is not registered for fan-out (Sprint 55 m01)', () => {
-      expect(isReadAction('cmos_mission', 'list')).toBe(false);
-    });
-
-    it('cmos_mission(show) is not registered for fan-out (Sprint 65 m01)', () => {
-      expect(isReadAction('cmos_mission', 'show')).toBe(false);
-    });
-
-    it('cmos_mission(status) remains fan-out-eligible — overview semantics are cross-project', () => {
-      expect(isReadAction('cmos_mission', 'status')).toBe(true);
-    });
-  });
+  // Sprint 79 m04: the per-handler fan-out model (isReadAction/READ_ACTIONS/
+  // fanOutRead) was deleted — every cmos_mission read now pins to the sender, and
+  // "active missions across the portfolio" is served by acrossProjects=true (m05).
+  // The former isReadAction fan-out-eligibility assertions were removed with it.
 });

@@ -7,8 +7,9 @@
  * @module tools/cmos/cmos-project-unregister
  */
 
+import * as path from 'path';
 import { z } from 'zod';
-import { ProjectRegistry } from '../../intelligence/project-registry';
+import { ProjectGraphRegistry } from '../../intelligence/project-graph-registry';
 import type { CmosToolResult } from './types';
 import { createError, createSuccess, CmosErrors } from './errors';
 
@@ -75,21 +76,24 @@ export async function cmosProjectUnregister(
   }
 
   try {
-    const registry = await ProjectRegistry.create();
-    const result = await registry.unregister(projectRoot);
+    // s79-m02 — remove from the project-graph registry (the sole discovery store).
+    // s80-m02: the graph is the single source — no JSON mirror to re-derive.
+    const resolvedPath = path.resolve(projectRoot);
+    const graph = await ProjectGraphRegistry.create();
+    const { removed, wasDefault } = graph.unregisterStore(resolvedPath);
 
-    if (!result.success) {
+    if (!removed) {
       return createError({
         code: 'MISSION_NOT_FOUND',
-        message: result.message,
+        message: `Project not found in registry: ${resolvedPath}`,
         suggestion: 'Use cmos_project_list to see registered projects',
       });
     }
 
     return createSuccess({
       projectRoot,
-      wasDefault: result.wasDefault ?? false,
-      message: result.message,
+      wasDefault,
+      message: `Unregistered project: ${resolvedPath}`,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

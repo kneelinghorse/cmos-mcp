@@ -7,9 +7,10 @@
  * @module tools/cmos/cmos-project-validate
  */
 
+import * as fs from 'fs';
+import * as path from 'path';
 import { z } from 'zod';
-import { ProjectRegistry } from '../../intelligence/project-registry';
-import type { ProjectValidation } from '../../intelligence/project-registry';
+import { ProjectGraphRegistry } from '../../intelligence/project-graph-registry';
 import type { CmosToolResult } from './types';
 import { createError, createSuccess } from './errors';
 
@@ -105,15 +106,26 @@ export async function cmosProjectValidate(
   const { prune = false } = params;
 
   try {
-    const registry = await ProjectRegistry.create();
-    const validations: ProjectValidation[] = await registry.validate();
-
-    const items: ProjectValidationItem[] = validations.map((v) => ({
-      projectRoot: v.project.projectRoot,
-      name: v.project.name ?? v.project.projectRoot,
-      status: v.status,
-      message: v.message,
-    }));
+    // s79-m03 — validate the project-graph registry's active projects (the sole
+    // discovery source): missing = project dir gone, stale = dir present but the
+    // CMOS db is gone, else active.
+    const graph = await ProjectGraphRegistry.create();
+    const items: ProjectValidationItem[] = graph.list().map((row) => {
+      const dirExists = fs.existsSync(row.store_path);
+      const dbExists = fs.existsSync(path.join(row.store_path, 'cmos', 'db', 'cmos.sqlite'));
+      const status: ProjectValidationItem['status'] = !dirExists
+        ? 'missing'
+        : !dbExists
+          ? 'stale'
+          : 'active';
+      const message =
+        status === 'missing'
+          ? `Project directory does not exist: ${row.store_path}`
+          : status === 'stale'
+            ? `CMOS database no longer exists at: ${row.store_path}`
+            : `Project is active: ${row.name ?? row.store_path}`;
+      return { projectRoot: row.store_path, name: row.name ?? row.store_path, status, message };
+    });
 
     const summary: ValidationSummary = {
       total: items.length,
@@ -122,9 +134,10 @@ export async function cmosProjectValidate(
       missing: items.filter((v) => v.status === 'missing').length,
     };
 
-    // Optionally prune invalid entries
+    // Optionally prune invalid entries — archive stale/missing rows in the graph.
+    // s80-m02: the graph is the single source — no JSON mirror to re-derive.
     if (prune && (summary.stale > 0 || summary.missing > 0)) {
-      await registry.prune();
+      graph.pruneMissingStores();
     }
 
     return createSuccess({

@@ -10,7 +10,7 @@ import { promises as fs } from 'fs';
 import os from 'os';
 import path from 'path';
 import { CmosDetector } from '../../../src/intelligence/cmos-detector';
-import { ProjectRegistry } from '../../../src/intelligence/project-registry';
+import { ProjectGraphRegistry } from '../../../src/intelligence/project-graph-registry';
 import {
   cmosProjectRegister,
   cmosProjectRegisterToolDefinition,
@@ -39,9 +39,9 @@ describe('cmos_project_register', () => {
     workspace = await createTempWorkspace('cmos-project-register-');
     configDir = await createTempWorkspace('config-');
     CmosDetector.resetInstance();
-    ProjectRegistry.resetInstance();
+    ProjectGraphRegistry.resetInstance();
     // Initialize with test config dir
-    await ProjectRegistry.create({ configDir });
+    await ProjectGraphRegistry.create({ configDir });
   });
 
   afterEach(async () => {

@@ -12,10 +12,13 @@ import {
   type CmosReviewResult,
 } from '../../../src/tools/cmos/cmos-review';
 import { CmosDetector } from '../../../src/intelligence/cmos-detector';
+import { ProjectGraphRegistry } from '../../../src/intelligence/project-graph-registry';
 
 describe('cmos_review', () => {
   let tempDir: string;
   let dbPath: string;
+  let reviewConfigDir: string;
+  let prevReviewConfigEnv: string | undefined;
 
   function seedMinimalDb(): void {
     const cmosDbDir = path.join(tempDir, 'cmos', 'db');
@@ -120,11 +123,23 @@ describe('cmos_review', () => {
 
   beforeEach(() => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-review-test-'));
+    // s79-m06: cmos_review now reads the project-graph registry for its portfolio
+    // section. Isolate CMOS_CONFIG_DIR to a per-test EMPTY graph so the shared
+    // run-wide graph file can't leak in — the single-project tests here get a
+    // deterministic portfolio=null (≤1 active project).
+    reviewConfigDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-review-cfg-'));
+    prevReviewConfigEnv = process.env.CMOS_CONFIG_DIR;
+    process.env.CMOS_CONFIG_DIR = reviewConfigDir;
+    ProjectGraphRegistry.resetInstance();
     seedMinimalDb();
     CmosDetector.resetInstance();
   });
 
   afterEach(() => {
+    ProjectGraphRegistry.resetInstance();
+    if (prevReviewConfigEnv === undefined) delete process.env.CMOS_CONFIG_DIR;
+    else process.env.CMOS_CONFIG_DIR = prevReviewConfigEnv;
+    fs.rmSync(reviewConfigDir, { recursive: true, force: true });
     if (tempDir) {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }

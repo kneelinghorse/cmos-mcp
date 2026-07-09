@@ -6,7 +6,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { CredentialStore } from '../src/intelligence/credential-store';
-import { ProjectRegistry } from '../src/intelligence/project-registry';
+import { ProjectGraphRegistry } from '../src/intelligence/project-graph-registry';
 
 interface CleanupRow {
   keyId: string;
@@ -44,14 +44,15 @@ export interface CleanupOptions {
  */
 export async function runCleanup(options: CleanupOptions = {}): Promise<CleanupSummary> {
   CredentialStore.resetInstance();
-  ProjectRegistry.resetInstance();
+  ProjectGraphRegistry.resetInstance();
 
   const credStore = await CredentialStore.create({ configDir: options.configDir });
-  const registry = await ProjectRegistry.create({ configDir: options.configDir });
+  // s80-m02: the project-graph registry is the single discovery source.
+  const graph = await ProjectGraphRegistry.create({ configDir: options.configDir });
 
   const projectKeys = await credStore.listProjectKeys();
-  const registeredProjects = await registry.list();
-  const registeredRoots = new Set(registeredProjects.map((p) => path.resolve(p.projectRoot)));
+  const registeredProjects = graph.list();
+  const registeredRoots = new Set(registeredProjects.map((p) => path.resolve(p.store_path)));
 
   const rows: CleanupRow[] = [];
   let removed = 0;

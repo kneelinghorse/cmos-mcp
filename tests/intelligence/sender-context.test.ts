@@ -8,7 +8,7 @@ import os from 'os';
 import path from 'path';
 
 import { CmosDetector } from '../../src/intelligence/cmos-detector';
-import { ProjectRegistry } from '../../src/intelligence/project-registry';
+import { ProjectGraphRegistry } from '../../src/intelligence/project-graph-registry';
 import {
   SenderResolutionError,
   resolveSenderContext,
@@ -96,20 +96,20 @@ describe('sender-context', () => {
     return p;
   }
 
-  async function isolatedRegistry(): Promise<ProjectRegistry> {
+  async function isolatedRegistry(): Promise<ProjectGraphRegistry> {
     const configDir = await trackTmp('sctx-cfg-');
-    ProjectRegistry.resetInstance();
-    return ProjectRegistry.create({ configDir });
+    ProjectGraphRegistry.resetInstance();
+    return ProjectGraphRegistry.create({ configDir });
   }
 
   beforeEach(() => {
     CmosDetector.resetInstance();
-    ProjectRegistry.resetInstance();
+    ProjectGraphRegistry.resetInstance();
   });
 
   afterEach(async () => {
     CmosDetector.resetInstance();
-    ProjectRegistry.resetInstance();
+    ProjectGraphRegistry.resetInstance();
     for (const dir of tmpDirs.splice(0)) {
       await fs.rm(dir, { recursive: true, force: true }).catch(() => void 0);
     }
@@ -293,7 +293,7 @@ describe('sender-context', () => {
       });
 
       const registry = await isolatedRegistry();
-      await registry.register(registered);
+      registry.registerStore(registered);
 
       const cwdEmpty = await trackTmp('sctx-p4-empty-cwd-');
       const ctx = await resolveSenderContext({
@@ -321,8 +321,8 @@ describe('sender-context', () => {
       });
 
       const registry = await isolatedRegistry();
-      await registry.register(rootA);
-      await registry.register(rootB);
+      registry.registerStore(rootA);
+      registry.registerStore(rootB);
 
       const cwdEmpty = await trackTmp('sctx-reg-multi-cwd-');
       await expect(

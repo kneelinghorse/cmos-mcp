@@ -22,7 +22,7 @@ import {
 import { CMOS_SCHEMA_VERSION, CMOS_SCHEMA } from '../../../src/tools/cmos/schema';
 import { CMOS_ERROR_CODES } from '../../../src/tools/cmos/errors';
 import { CmosDetector } from '../../../src/intelligence/cmos-detector';
-import { ProjectRegistry } from '../../../src/intelligence/project-registry';
+import { ProjectGraphRegistry } from '../../../src/intelligence/project-graph-registry';
 
 describe('cmos_project_init', () => {
   let tempDir: string;
@@ -672,13 +672,13 @@ describe('cmos_project_init', () => {
     beforeEach(async () => {
       configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-init-registry-'));
       CmosDetector.resetInstance();
-      ProjectRegistry.resetInstance();
-      await ProjectRegistry.create({ configDir });
+      ProjectGraphRegistry.resetInstance();
+      await ProjectGraphRegistry.create({ configDir });
     });
 
     afterEach(async () => {
       CmosDetector.resetInstance();
-      ProjectRegistry.resetInstance();
+      ProjectGraphRegistry.resetInstance();
       if (configDir && fs.existsSync(configDir)) {
         fs.rmSync(configDir, { recursive: true, force: true });
       }
@@ -687,10 +687,11 @@ describe('cmos_project_init', () => {
     it('should auto-register the project after init', async () => {
       await cmosProjectInit({ projectRoot: tempDir, projectName: 'auto-reg-test' });
 
-      const registry = await ProjectRegistry.create({ configDir });
-      const project = await registry.getProject(tempDir);
-      expect(project).not.toBeNull();
-      expect(project?.projectRoot).toBe(tempDir);
+      // s80-m02: init registers into the graph (the single discovery source).
+      const graph = await ProjectGraphRegistry.create({ configDir });
+      const projectId = graph.getByStorePath(tempDir);
+      expect(projectId).not.toBeNull();
+      expect(graph.get(projectId!)?.store_path).toBe(tempDir);
     });
 
     it('should succeed even if registration fails (best-effort)', async () => {
@@ -704,9 +705,9 @@ describe('cmos_project_init', () => {
     it('should register with project name when provided', async () => {
       await cmosProjectInit({ projectRoot: tempDir, projectName: 'My Named Project' });
 
-      const registry = await ProjectRegistry.create({ configDir });
-      const project = await registry.getProject(tempDir);
-      expect(project?.name).toBe('My Named Project');
+      const graph = await ProjectGraphRegistry.create({ configDir });
+      const projectId = graph.getByStorePath(tempDir);
+      expect(graph.get(projectId!)?.name).toBe('My Named Project');
     });
   });
 

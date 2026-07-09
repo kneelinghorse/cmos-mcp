@@ -20,6 +20,9 @@ import { withClient, type CmosDatabaseClient } from './client';
 import type { CmosToolResult, Mission, MissionStatus, Sprint } from './types';
 import { createError, createSuccess } from './errors';
 import { resolveCurrentSprintId } from './current-sprint';
+import { activeMissionsAcrossProjects } from '../../intelligence/cross-store-queries';
+import type { CrossStoreError, CrossStoreQueryResult } from '../../intelligence/cross-store-query';
+import type { ProjectGraphRegistry } from '../../intelligence/project-graph-registry';
 
 /**
  * Mission item with sprint context for the status view.
@@ -482,6 +485,108 @@ function determineNextAction(
 
   // Queue is empty
   return 'No missions in queue. Add new missions to continue work.';
+}
+
+/**
+/**
+ * One active mission in the cross-store portfolio view (s79-m05), carrying its
+ * source `projectId`. Deliberately flat — this is the §5.4 named query, not the
+ * single-store work-queue shape of {@link CmosMissionStatusResult}.
+ */
+export interface PortfolioMissionItem {
+  id: string;
+  name: string;
+  status: string;
+  projectId: string;
+}
+
+/**
+ * Cross-store active-missions envelope (s79-m05). The metadata shape is IDENTICAL
+ * to `cmos_decisions(acrossProjects)` (ADR §5.5 transparent-upgrade contract); only
+ * the domain payload key differs (`missions`, not `decisions`).
+ */
+export interface CmosMissionPortfolioResult {
+  missions: PortfolioMissionItem[];
+  totalCount: number;
+  page: number;
+  pageSize: number;
+  hasMore: boolean;
+  acrossProjects: true;
+  errors: CrossStoreError[];
+  crossStoreMetadata: CrossStoreQueryResult['metadata'];
+}
+
+/**
+ * s79-m05 — `cmos_mission(status, acrossProjects=true)`. Active missions (In
+ * Progress/Current) merged across the portfolio via the graph-backed
+ * {@link activeMissionsAcrossProjects} (§5.4 query b). Discovers stores through the
+ * project-graph registry; per-store failures are isolated on `errors`. The optional
+ * `registry` seam is for deterministic tests (not exposed on the tool schema).
+ */
+export async function missionStatusAcrossProjects(
+  opts: { limit?: number; registry?: ProjectGraphRegistry } = {}
+): Promise<CmosToolResult<CmosMissionPortfolioResult>> {
+  const pageSize = opts.limit ?? 50;
+  const fanout = await activeMissionsAcrossProjects({ limit: pageSize, registry: opts.registry });
+
+  const missions: PortfolioMissionItem[] = fanout.results.map((row) => ({
+    id: row.id,
+    name: row.name,
+    status: row.status,
+    projectId: row.project_id,
+  }));
+
+  return createSuccess<CmosMissionPortfolioResult>({
+    missions,
+    totalCount: missions.length,
+    page: 1,
+    pageSize,
+    hasMore: fanout.metadata.truncated,
+    acrossProjects: true,
+    errors: fanout.errors,
+    crossStoreMetadata: fanout.metadata,
+  });
+}
+
+/**
+ * Format the cross-store active-missions portfolio result for LLM readability.
+ */
+export function formatMissionPortfolioForLLM(
+  result: CmosToolResult<CmosMissionPortfolioResult>
+): string {
+  if (!result.success || !result.data) {
+    const error = result.error;
+    return [
+      '❌ Failed to retrieve portfolio missions',
+      '',
+      `Error: ${error?.message ?? 'Unknown error'}`,
+      error?.suggestion ? `Suggestion: ${error.suggestion}` : '',
+    ]
+      .filter(Boolean)
+      .join('\n');
+  }
+
+  const data = result.data;
+  const lines: string[] = ['🌐 **Active Missions (portfolio)**', ''];
+  const meta = data.crossStoreMetadata;
+  lines.push(
+    `${data.missions.length} active mission(s) across ${meta.storesQueried} store(s)` +
+      (meta.storesFailed > 0 ? ` — ${meta.storesFailed} unreachable` : '')
+  );
+  lines.push('');
+  if (data.missions.length === 0) {
+    lines.push('No active missions across the portfolio.');
+  } else {
+    for (const m of data.missions) {
+      lines.push(`  📋 [${m.status}] ${m.id} — ${m.name}  [proj:${m.projectId}]`);
+    }
+  }
+  if (data.errors.length > 0) {
+    lines.push('');
+    lines.push('⚠️  Per-store errors:');
+    for (const e of data.errors) lines.push(`  - ${e.projectId || e.storePath}: ${e.error}`);
+  }
+  return lines.join('\n');
 }
 
 /**

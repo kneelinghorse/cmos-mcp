@@ -13,6 +13,9 @@ import { createSuccess } from './errors';
 import { ensureLearningsTable } from './schema-migrations';
 import { getProjectId } from './genesis-columns';
 import { frameForeignText } from '../../intelligence/provenance-frame';
+import { learningsTaggedAcrossProjects } from '../../intelligence/cross-store-queries';
+import type { CrossStoreError, CrossStoreQueryResult } from '../../intelligence/cross-store-query';
+import type { ProjectGraphRegistry } from '../../intelligence/project-graph-registry';
 
 /**
  * Learning record surfaced to clients.
@@ -76,6 +79,15 @@ export interface CmosLearningsListResult {
   /** s78-m05: the querying store's own project_id; rows with a different projectId are
    *  foreign (pull-merged) and framed as untrusted in the render. */
   localProjectId?: string | null;
+
+  /** s79-m05: true on the cross-store (acrossProjects) path — learnings tagged X across the portfolio. */
+  acrossProjects?: boolean;
+
+  /** s79-m05: per-store failures (isolated) — present only on the cross-store path. */
+  errors?: CrossStoreError[];
+
+  /** s79-m05: fan-out instrumentation — present only on the cross-store path. */
+  crossStoreMetadata?: CrossStoreQueryResult['metadata'];
 }
 
 /**
@@ -226,6 +238,65 @@ export async function cmosLearningsList(
 }
 
 /**
+ * s79-m05 — `cmos_learnings(list, acrossProjects=true)`. The §5.4 "learnings tagged
+ * X across projects" query (query c), backed by the graph-fan-out
+ * {@link learningsTaggedAcrossProjects}. The `category` param IS the tag and is
+ * REQUIRED (the named query keys on it); a missing category returns a validation
+ * error. Rows carry their source `projectId`; per-store failures ride on `errors`.
+ * The metadata envelope is identical to `cmos_decisions(acrossProjects)`; the domain
+ * payload key is `learnings`. The `registry` seam is for deterministic tests only.
+ */
+export async function cmosLearningsListAcrossProjects(params: {
+  category?: string;
+  limit?: number;
+  registry?: ProjectGraphRegistry;
+}): Promise<CmosToolResult<CmosLearningsListResult>> {
+  const tag = params.category?.trim();
+  if (!tag) {
+    return {
+      success: false,
+      error: {
+        code: 'MISSING_PARAMETER',
+        message:
+          'cmos_learnings(acrossProjects) requires `category` — the portfolio query is "learnings tagged X".',
+        suggestion:
+          'Pass a category, e.g. cmos_learnings(action="list", acrossProjects=true, category="technical").',
+      },
+    };
+  }
+
+  const pageSize = params.limit ?? 20;
+  const fanout = await learningsTaggedAcrossProjects(tag, {
+    limit: pageSize,
+    registry: params.registry,
+  });
+
+  const learnings: Learning[] = fanout.results.map((row) => ({
+    id: row.id,
+    content: row.content,
+    category: row.category,
+    status: 'active',
+    sprintId: null,
+    sessionId: null,
+    missionId: null,
+    createdAt: '',
+    projectId: row.project_id,
+    evergreen: false,
+  }));
+
+  return createSuccess<CmosLearningsListResult>({
+    learnings,
+    totalCount: learnings.length,
+    page: 1,
+    pageSize,
+    hasMore: fanout.metadata.truncated,
+    acrossProjects: true,
+    errors: fanout.errors,
+    crossStoreMetadata: fanout.metadata,
+  });
+}
+
+/**
  * Format learnings list result for LLM readability.
  */
 export function formatLearningsListForLLM(result: CmosToolResult<CmosLearningsListResult>): string {
@@ -244,11 +315,19 @@ export function formatLearningsListForLLM(result: CmosToolResult<CmosLearningsLi
   const data = result.data;
   const lines: string[] = [];
 
-  lines.push('📚 **Learnings**');
+  lines.push(data.acrossProjects ? '🌐 **Learnings (portfolio)**' : '📚 **Learnings**');
   lines.push('');
-  lines.push(
-    `Showing ${data.learnings.length} of ${data.totalCount} learnings (page ${data.page})`
-  );
+  if (data.acrossProjects && data.crossStoreMetadata) {
+    const meta = data.crossStoreMetadata;
+    lines.push(
+      `${data.learnings.length} learning(s) across ${meta.storesQueried} store(s)` +
+        (meta.storesFailed > 0 ? ` — ${meta.storesFailed} unreachable` : '')
+    );
+  } else {
+    lines.push(
+      `Showing ${data.learnings.length} of ${data.totalCount} learnings (page ${data.page})`
+    );
+  }
   lines.push('');
 
   if (data.learnings.length === 0) {

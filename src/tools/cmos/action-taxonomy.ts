@@ -40,9 +40,11 @@ export const READ_ONLY_TOOLS: ReadonlySet<string> = new Set(['cmos_review', 'cmo
  *     that may persist; promote here with per-handler proof if a reviewer needs them.
  *   - cmos_project validate — carries a mutating `prune` option.
  *
- * NOTE: this is a DIFFERENT concept from client.ts `isReadAction`/`READ_ACTIONS`,
- * which is a narrow *fan-out-eligibility* subset (it deliberately omits large-payload
- * and ID-colliding reads, and is not exhaustive). Do not unify the two.
+ * NOTE: this is the s78 read/write SECURITY gate (fail-closed dispatch guard for
+ * review agents). It is a DIFFERENT concept from the former client.ts
+ * `isReadAction`/`READ_ACTIONS` fan-out-eligibility set — which was deleted in
+ * s79-m04 along with the whole per-handler fan-out model (portfolio reads now go
+ * through `acrossProjects=true` + the graph-backed `queryAcrossStores`).
  */
 export const READ_ONLY_ACTIONS: Readonly<Record<string, readonly string[]>> = {
   cmos_context: ['view', 'history', 'search'],

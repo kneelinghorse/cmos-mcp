@@ -3,7 +3,7 @@
 
 import * as path from 'path';
 import Database from 'better-sqlite3';
-import { ProjectRegistry } from '../src/intelligence/project-registry';
+import { ProjectGraphRegistry } from '../src/intelligence/project-graph-registry';
 import { sanitizeContentField } from '../src/intelligence/content-sanitizer';
 
 interface CorruptionEntry {
@@ -61,10 +61,12 @@ function scanTable(db: InstanceType<typeof Database>, scan: TableScan): Corrupti
 }
 
 async function resolveDbPath(): Promise<string> {
-  const registry = await ProjectRegistry.create();
-  const defaultProject = await registry.getDefault();
+  // s80-m02: resolve the default project via the project-graph registry (the JSON
+  // ProjectRegistry was deleted; the graph is the single discovery source).
+  const graph = await ProjectGraphRegistry.create();
+  const defaultProject = graph.getDefault();
   if (defaultProject) {
-    return path.join(defaultProject.projectRoot, 'cmos', 'db', 'cmos.sqlite');
+    return path.join(defaultProject.store_path, 'cmos', 'db', 'cmos.sqlite');
   }
   return path.resolve(process.cwd(), 'cmos', 'db', 'cmos.sqlite');
 }

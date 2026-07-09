@@ -17,9 +17,9 @@ import * as path from 'path';
 import {
   ProjectGraphRegistry,
   readStoreIdentity,
+  mintProjectId,
   PROJECT_GRAPH_SCHEMA_VERSION,
 } from '../../src/intelligence/project-graph-registry';
-import { ProjectRegistry } from '../../src/intelligence/project-registry';
 import { CmosDetector } from '../../src/intelligence/cmos-detector';
 import { seedCmosDb } from '../helpers/seedCmosDb';
 import { cmosProjectRegister } from '../../src/tools/cmos/cmos-project-register';
@@ -33,19 +33,18 @@ describe('ProjectGraphRegistry (Sprint 69 m05)', () => {
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pgr-test-'));
     configDir = path.join(tmpDir, 'config');
-    // Point BOTH registries (and the integration handlers) at an isolated config
-    // dir so the JSON ProjectRegistry and the SQLite project-graph registry
-    // resolve the same location and don't touch the developer's real registries.
+    // Point the graph registry (and the integration handlers) at an isolated config
+    // dir so it doesn't touch the developer's real registry. (s80-m02: the JSON
+    // ProjectRegistry is deleted; the graph reads the legacy JSON only via
+    // readLegacyJsonRegistry, which the backfill tests seed directly on disk.)
     prevConfigEnv = process.env.CMOS_CONFIG_DIR;
     process.env.CMOS_CONFIG_DIR = configDir;
     ProjectGraphRegistry.resetInstance();
-    ProjectRegistry.resetInstance();
     CmosDetector.resetInstance();
   });
 
   afterEach(() => {
     ProjectGraphRegistry.resetInstance();
-    ProjectRegistry.resetInstance();
     CmosDetector.resetInstance();
     if (prevConfigEnv === undefined) delete process.env.CMOS_CONFIG_DIR;
     else process.env.CMOS_CONFIG_DIR = prevConfigEnv;
@@ -57,6 +56,37 @@ describe('ProjectGraphRegistry (Sprint 69 m05)', () => {
     const root = path.join(tmpDir, 'projects', name);
     seedCmosDb(root, { projectId, projectName: name });
     return root;
+  }
+
+  /**
+   * Write a legacy `project-registry.json` directly into `dir` so the graph's
+   * one-time backfill (via `readLegacyJsonRegistry`) can migrate pre-s80 operators.
+   * Replaces the deleted JSON `ProjectRegistry.register`/`setDefault` seeding.
+   */
+  function seedLegacyJson(
+    dir: string,
+    entries: Array<{ projectRoot: string; name?: string }>,
+    defaultProject?: string
+  ): void {
+    fs.mkdirSync(dir, { recursive: true });
+    const now = new Date().toISOString();
+    const projects: Record<string, unknown> = {};
+    for (const e of entries) {
+      const resolved = path.resolve(e.projectRoot);
+      projects[resolved] = {
+        projectRoot: resolved,
+        name: e.name ?? path.basename(resolved),
+        registeredAt: now,
+        lastAccessedAt: now,
+      };
+    }
+    const file = {
+      version: 1,
+      defaultProject: defaultProject ? path.resolve(defaultProject) : undefined,
+      projects,
+      updatedAt: now,
+    };
+    fs.writeFileSync(path.join(dir, 'project-registry.json'), JSON.stringify(file, null, 2));
   }
 
   // ── (a) register / unregister / get ─────────────────────────────────────────
@@ -195,13 +225,11 @@ describe('ProjectGraphRegistry (Sprint 69 m05)', () => {
   });
 
   // ── (c) one-time backfill from ProjectRegistry + store metadata ─────────────
-  it('backfills from the existing ProjectRegistry on first run, then does not re-scan', async () => {
-    // Two known projects in the JSON ProjectRegistry, each a real store.
+  it('backfills from the legacy project-registry.json on first run, then does not re-scan', async () => {
+    // Two known projects in the legacy JSON registry, each a real store.
     const rootA = makeStore('proj-a', 'proj-a-id');
     const rootB = makeStore('proj-b', 'proj-b-id');
-    const jsonReg = await ProjectRegistry.create();
-    await jsonReg.register(rootA);
-    await jsonReg.register(rootB);
+    seedLegacyJson(configDir, [{ projectRoot: rootA }, { projectRoot: rootB }]);
 
     // First create() of the project-graph registry backfills both.
     const reg = await ProjectGraphRegistry.create();
@@ -212,10 +240,14 @@ describe('ProjectGraphRegistry (Sprint 69 m05)', () => {
     expect(ids).toEqual(['proj-a-id', 'proj-b-id']);
     expect(reg.get('proj-a-id')?.store_path).toBe(rootA);
 
-    // A THIRD project registered in the JSON registry after backfill is NOT
-    // re-scanned on the next create() (marker-gated one-time backfill).
+    // A THIRD project added to the legacy JSON after backfill is NOT re-scanned on
+    // the next create() (marker-gated one-time backfill).
     const rootC = makeStore('proj-c', 'proj-c-id');
-    await jsonReg.register(rootC);
+    seedLegacyJson(configDir, [
+      { projectRoot: rootA },
+      { projectRoot: rootB },
+      { projectRoot: rootC },
+    ]);
     ProjectGraphRegistry.resetInstance();
     const reg2 = await ProjectGraphRegistry.create();
     expect(reg2.get('proj-c-id')).toBeUndefined(); // backfill did not re-run
@@ -302,21 +334,18 @@ describe('ProjectGraphRegistry (Sprint 69 m05)', () => {
   // ── regression: explicit configDir is honored ON THE BACKFILL PATH ──────────
   // (workflow-found) The other tests isolate ONLY via CMOS_CONFIG_DIR. With the
   // env var UNSET and isolation via the explicit `configDir` option, the backfill
-  // must read the JSON ProjectRegistry from that SAME dir — not ~/.config — or it
-  // would ingest unrelated projects into a supposedly-isolated registry.
+  // must read the legacy JSON from that SAME dir — not ~/.config — or it would
+  // ingest unrelated projects into a supposedly-isolated registry.
   it('honors an explicit configDir option on the backfill path (CMOS_CONFIG_DIR unset)', async () => {
     const savedEnv = process.env.CMOS_CONFIG_DIR;
     delete process.env.CMOS_CONFIG_DIR;
-    ProjectRegistry.resetInstance();
     ProjectGraphRegistry.resetInstance();
     try {
       const isoConfig = path.join(tmpDir, 'iso-config');
       const root = makeStore('iso', 'iso-id');
 
-      // Seed a JSON ProjectRegistry in the isolated dir with the one store.
-      const jsonReg = await ProjectRegistry.create({ configDir: isoConfig });
-      await jsonReg.register(root);
-      ProjectRegistry.resetInstance();
+      // Seed a legacy project-registry.json in the isolated dir with the one store.
+      seedLegacyJson(isoConfig, [{ projectRoot: root }]);
       ProjectGraphRegistry.resetInstance();
 
       // The graph registry's backfill must read the SAME isolated dir.
@@ -334,8 +363,177 @@ describe('ProjectGraphRegistry (Sprint 69 m05)', () => {
     } finally {
       if (savedEnv === undefined) delete process.env.CMOS_CONFIG_DIR;
       else process.env.CMOS_CONFIG_DIR = savedEnv;
-      ProjectRegistry.resetInstance();
       ProjectGraphRegistry.resetInstance();
     }
+  });
+
+  // ── Sprint 79 m01 — authority affordances ───────────────────────────────────
+  describe('authority affordances (Sprint 79 m01)', () => {
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+    // ── mintProjectId ─────────────────────────────────────────────────────────
+    it('mintProjectId mints a UUID into an id-less store, and never churns an existing id', () => {
+      // id-less store → a UUID is minted into metadata.project_id and returned.
+      const idless = path.join(tmpDir, 'projects', 'noid');
+      seedCmosDb(idless, { projectId: '', projectName: 'noid' });
+      expect(readStoreIdentity(idless)).toBeNull(); // no id to key on yet
+      const minted = mintProjectId(idless);
+      expect(minted).toMatch(UUID_RE);
+      // Persisted: a re-read now resolves the freshly-minted id.
+      expect(readStoreIdentity(idless)?.project_id).toBe(minted);
+
+      // A store that already has an id (slug OR uuid) is returned untouched.
+      const withSlug = makeStore('keepme', 'keepme'); // slug id
+      expect(mintProjectId(withSlug)).toBe('keepme');
+      expect(readStoreIdentity(withSlug)?.project_id).toBe('keepme');
+
+      // Absent store → null (nothing to mint into).
+      expect(mintProjectId(path.join(tmpDir, 'does-not-exist'))).toBeNull();
+    });
+
+    // ── getByStorePath ────────────────────────────────────────────────────────
+    it('getByStorePath resolves a store path to its project_id (path-insensitive to trailing slash)', async () => {
+      const reg = await ProjectGraphRegistry.create();
+      reg.register({ project_id: 'p1', store_path: '/tmp/proj-one', name: 'One' });
+      expect(reg.getByStorePath('/tmp/proj-one')).toBe('p1');
+      expect(reg.getByStorePath('/tmp/proj-one/')).toBe('p1'); // resolved before lookup
+      expect(reg.getByStorePath('/tmp/nope')).toBeNull();
+    });
+
+    // ── default project (registry_meta) ─────────────────────────────────────────
+    it('setDefault requires a registered project; getDefault resolves it; clearDefault removes it', async () => {
+      const reg = await ProjectGraphRegistry.create();
+      expect(reg.getDefault()).toBeNull();
+      // setDefault on an unknown id is refused.
+      expect(reg.setDefault('ghost')).toBe(false);
+      expect(reg.getDefault()).toBeNull();
+
+      reg.register({ project_id: 'p1', store_path: '/tmp/p1', name: 'P1' });
+      expect(reg.setDefault('p1')).toBe(true);
+      expect(reg.getDefault()?.project_id).toBe('p1');
+      expect(reg.getDefault()?.store_path).toBe('/tmp/p1');
+
+      // The default survives a reopen (persisted in registry_meta, not memory).
+      ProjectGraphRegistry.resetInstance();
+      const reg2 = await ProjectGraphRegistry.create();
+      expect(reg2.getDefault()?.project_id).toBe('p1');
+
+      reg2.clearDefault();
+      expect(reg2.getDefault()).toBeNull();
+    });
+
+    // ── collision guard ─────────────────────────────────────────────────────────
+    it('collision guard refuses to clobber a LIVE incumbent, but updates a moved or re-touched store', async () => {
+      const reg = await ProjectGraphRegistry.create();
+      const rootA = path.join(tmpDir, 'stores', 'a');
+      const rootB = path.join(tmpDir, 'stores', 'b');
+      const rootC = path.join(tmpDir, 'stores', 'c');
+      // Two DIFFERENT live stores that (wrongly) both hold 'dup-id'.
+      seedCmosDb(rootA, { projectId: 'dup-id', projectName: 'A' });
+      seedCmosDb(rootB, { projectId: 'dup-id', projectName: 'B' });
+
+      reg.register({ project_id: 'dup-id', store_path: rootA, name: 'A' });
+      // B claims 'dup-id' while A is still a live store holding it → REFUSED.
+      const refused = reg.register({ project_id: 'dup-id', store_path: rootB, name: 'B' });
+      expect(refused.store_path).toBe(path.resolve(rootA)); // incumbent unchanged
+      expect(reg.get('dup-id')?.store_path).toBe(path.resolve(rootA));
+
+      // Same-path re-touch legitimately updates (name + last_seen), no refusal.
+      const retouched = reg.register({
+        project_id: 'dup-id',
+        store_path: rootA,
+        name: 'A-renamed',
+      });
+      expect(retouched.name).toBe('A-renamed');
+
+      // A MOVED store: the incumbent path no longer resolves 'dup-id' (store gone),
+      // so a new path legitimately takes over the id.
+      fs.rmSync(rootA, { recursive: true, force: true });
+      seedCmosDb(rootC, { projectId: 'dup-id', projectName: 'C' });
+      const moved = reg.register({ project_id: 'dup-id', store_path: rootC, name: 'C' });
+      expect(moved.store_path).toBe(path.resolve(rootC)); // moved store wins
+    });
+
+    // ── identity backfill (separate marker) migrates ids + the default ──────────
+    it('identity backfill mints ids for id-less JSON-known stores and migrates the JSON default', async () => {
+      const idless = path.join(tmpDir, 'projects', 'legacy-noid');
+      seedCmosDb(idless, { projectId: '', projectName: 'legacy-noid' });
+      const withId = makeStore('has-id', 'has-id-uuid');
+
+      seedLegacyJson(configDir, [{ projectRoot: idless }, { projectRoot: withId }], withId);
+
+      // First graph create() runs the identity backfill.
+      const reg = await ProjectGraphRegistry.create();
+
+      // The id-less store now carries a minted UUID and is in the graph.
+      const mintedId = readStoreIdentity(idless)?.project_id;
+      expect(mintedId).toMatch(UUID_RE);
+      expect(reg.get(mintedId!)?.store_path).toBe(idless);
+
+      // The store that already had an id is present, id untouched.
+      expect(reg.get('has-id-uuid')?.store_path).toBe(withId);
+
+      // The legacy JSON default is migrated to the graph default.
+      expect(reg.getDefault()?.project_id).toBe('has-id-uuid');
+
+      // A fourth JSON project added later is NOT re-scanned (marker-gated).
+      const late = makeStore('late', 'late-id');
+      seedLegacyJson(
+        configDir,
+        [{ projectRoot: idless }, { projectRoot: withId }, { projectRoot: late }],
+        withId
+      );
+      ProjectGraphRegistry.resetInstance();
+      const reg2 = await ProjectGraphRegistry.create();
+      expect(reg2.get('late-id')).toBeUndefined();
+    });
+  });
+
+  // ── Sprint 79 m02 — authoritative writes (JSON derivation deleted in s80-m02) ─
+  describe('authoritative writes (Sprint 79 m02 / s80-m02)', () => {
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+    it('registerStore mints a UUID for a readable id-less store and reuses it on re-register', async () => {
+      const reg = await ProjectGraphRegistry.create();
+      const idless = path.join(tmpDir, 'projects', 'store-a');
+      seedCmosDb(idless, { projectId: '', projectName: 'store-a' });
+
+      const e1 = reg.registerStore(idless, { name: 'Store A' });
+      expect(e1.project_id).toMatch(UUID_RE);
+      expect(e1.name).toBe('Store A');
+      expect(readStoreIdentity(idless)?.project_id).toBe(e1.project_id); // persisted
+
+      // Re-register reuses the same id (stable) and updates in place — one row.
+      const e2 = reg.registerStore(idless, { name: 'Store A v2' });
+      expect(e2.project_id).toBe(e1.project_id);
+      expect(e2.name).toBe('Store A v2');
+      expect(reg.list()).toHaveLength(1);
+    });
+
+    it('registerStore falls back to a basename slug when the store DB is unreadable', async () => {
+      const reg = await ProjectGraphRegistry.create();
+      const root = path.join(tmpDir, 'unreadable-store');
+      fs.mkdirSync(path.join(root, 'cmos', 'db'), { recursive: true });
+      fs.writeFileSync(path.join(root, 'cmos', 'db', 'cmos.sqlite'), 'not a sqlite db');
+
+      const entry = reg.registerStore(root);
+      expect(entry.project_id).toBe('unreadable-store'); // slug of basename
+      expect(reg.getByStorePath(root)).toBe('unreadable-store');
+    });
+
+    it('unregisterStore removes the row + clears the default when it was the default', async () => {
+      const reg = await ProjectGraphRegistry.create();
+      const rootA = makeStore('u-a', 'ua-id');
+      reg.registerStore(rootA, { setAsDefault: true });
+
+      const { removed, wasDefault } = reg.unregisterStore(rootA);
+      expect(removed).toBe(true);
+      expect(wasDefault).toBe(true);
+      expect(reg.getDefault()).toBeNull();
+      expect(reg.list()).toHaveLength(0);
+
+      // Unregistering an unknown path is a no-op (removed:false).
+      expect(reg.unregisterStore(path.join(tmpDir, 'never')).removed).toBe(false);
+    });
   });
 });

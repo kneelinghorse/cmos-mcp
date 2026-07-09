@@ -40,7 +40,7 @@ import { backfillUnknownCmosAddress, getProjectIdentity } from '../tools/cmos/pr
 import type { CmosDatabaseClient } from '../tools/cmos/client';
 import { withClientAsync } from '../tools/cmos/client';
 import { CmosDetector } from './cmos-detector';
-import { ProjectRegistry } from './project-registry';
+import { ProjectGraphRegistry } from './project-graph-registry';
 
 /**
  * The directory where the compiled server binary lives. Computed at module-import time
@@ -116,7 +116,7 @@ export interface ResolveSenderContextOptions {
    */
   readonly requireSenderIdentity?: boolean;
   readonly cwdOverride?: string;
-  readonly registryOverride?: ProjectRegistry;
+  readonly registryOverride?: ProjectGraphRegistry;
   readonly serverInstallRootOverride?: string;
 }
 
@@ -335,12 +335,12 @@ export async function resolveSenderContext(
     });
   }
 
-  // ─── Step 4: registry singleton ─────────────────────────────────────────
+  // ─── Step 4: registry singleton (s79-m03: graph is the discovery source) ──
   try {
-    const registry = opts.registryOverride ?? (await ProjectRegistry.create());
-    const projects = await registry.list();
+    const registry = opts.registryOverride ?? (await ProjectGraphRegistry.create());
+    const projects = registry.list();
     if (projects.length === 1) {
-      const root = path.resolve(projects[0].projectRoot);
+      const root = path.resolve(projects[0].store_path);
       const validation = await validateProject(root);
       if (isAcceptable(validation)) {
         return accept('registry-singleton', root, validation);

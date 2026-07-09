@@ -25,9 +25,12 @@ import {
 } from './cmos-mission-show';
 import {
   cmosMissionStatus,
+  missionStatusAcrossProjects,
   formatMissionStatusForLLM,
+  formatMissionPortfolioForLLM,
   type CmosMissionStatusParams,
   type CmosMissionStatusResult,
+  type CmosMissionPortfolioResult,
 } from './cmos-mission-status';
 import {
   cmosMissionAdd,
@@ -71,6 +74,7 @@ export type CmosMissionResult =
   | CmosMissionListResult
   | MissionShowResult
   | CmosMissionStatusResult
+  | CmosMissionPortfolioResult
   | MissionAddResult
   | MissionUpdateResult
   | MissionDependsResult
@@ -110,6 +114,12 @@ export const cmosMissionSchema = z
       .optional()
       .describe('Maximum missions to return for list action'),
     includeBlocked: z.boolean().optional().describe('Include blocked missions in status action'),
+    acrossProjects: z
+      .boolean()
+      .optional()
+      .describe(
+        'status action: active missions (In Progress/Current) across all registered projects (cross-store portfolio view)'
+      ),
     queuedLimit: z
       .number()
       .int()
@@ -258,6 +268,11 @@ export const cmosMissionToolDefinition = {
         enum: ['Blocks', 'Requires', 'Enables'],
         description: 'Dependency type for depends action',
       },
+      acrossProjects: {
+        type: 'boolean',
+        description:
+          'status action: active missions (In Progress/Current) across all registered projects (cross-store portfolio view)',
+      },
       projectRoot: {
         type: 'string',
         description: 'Project root directory to search for CMOS database (defaults to cwd)',
@@ -298,6 +313,12 @@ export async function cmosMission(
         projectRoot: params.projectRoot,
       } satisfies CmosMissionShowParams);
     case 'status':
+      // s79-m05: acrossProjects → the §5.4 active-missions portfolio query (graph-
+      // backed queryAcrossStores), NOT the single-store work queue. index.ts skips
+      // local-root resolution for this branch.
+      if (params.acrossProjects) {
+        return missionStatusAcrossProjects({ limit: params.limit });
+      }
       return cmosMissionStatus({
         includeBlocked: params.includeBlocked,
         queuedLimit: params.queuedLimit,
@@ -372,6 +393,10 @@ export function formatMissionForLLM(
     case 'show':
       return formatMissionShowForLLM(result as CmosToolResult<MissionShowResult>);
     case 'status':
+      // s79-m05: the acrossProjects branch returns the flat portfolio envelope.
+      if (result.success && result.data && 'acrossProjects' in result.data) {
+        return formatMissionPortfolioForLLM(result as CmosToolResult<CmosMissionPortfolioResult>);
+      }
       return formatMissionStatusForLLM(result as CmosToolResult<CmosMissionStatusResult>);
     case 'add':
       return formatMissionAddForLLM(result as CmosToolResult<MissionAddResult>);

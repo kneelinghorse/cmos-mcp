@@ -28,6 +28,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { connectStdioServer, textOf, dataOf } from './stdio-harness';
 
 const REPO_ROOT = path.resolve(__dirname, '../..');
 const PKG = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8')) as {
@@ -49,15 +50,8 @@ let configDir = ''; // isolated CMOS_CONFIG_DIR
 let client: Client;
 let transport: StdioClientTransport;
 
-/** Text payload of a tool result. */
-function textOf(res: { content?: Array<{ text?: string }> }): string {
-  return (res.content ?? []).map((c) => c.text ?? '').join('\n');
-}
-
-/** structuredContent (JSON digest) of a tool result, if present. */
-function dataOf(res: { structuredContent?: { data?: unknown } }): any {
-  return res.structuredContent?.data;
-}
+// textOf / dataOf come from the shared stdio harness (s80-m01) so the first-run
+// E2E and scripts/verify-dist.ts never drift on payload extraction.
 
 async function callOk(name: string, args: Record<string, unknown>): Promise<any> {
   const res = (await client.callTool({ name, arguments: args })) as {
@@ -112,15 +106,15 @@ describe('first-run E2E: pack -> install -> drive quickstart over stdio (s77-m10
     const env = { ...process.env, CMOS_CONFIG_DIR: configDir } as Record<string, string>;
     delete env.CMOS_PROJECT_ROOT;
 
-    transport = new StdioClientTransport({
-      command: process.execPath,
-      args: [installedServer],
+    // s80-m01: connect via the shared stdio bootstrap (also used by verify:dist).
+    const harness = await connectStdioServer({
+      serverPath: installedServer,
       cwd: projectDir,
       env,
-      stderr: 'ignore', // expected P0 SENDER_UNRESOLVABLE noise — do not assert on it
+      clientName: 'first-run-e2e',
     });
-    client = new Client({ name: 'first-run-e2e', version: '0.0.0' }, { capabilities: {} });
-    await client.connect(transport);
+    client = harness.client;
+    transport = harness.transport;
   }, 180000);
 
   afterAll(async () => {

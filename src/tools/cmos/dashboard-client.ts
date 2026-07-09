@@ -153,6 +153,32 @@ export interface DashboardMessage {
       cmosAddress?: string | null;
     };
   };
+  // ── Live dashboard fields (s80-m05 probe, 2026-07-09) ──────────────────────
+  // The dashboard returns a RICHER row than the s31-era typed set above. These are
+  // the fields observed on a real inbox row; the summary shape (MessageSummary) picks
+  // from them, and body-on-get returns the whole row. NOTE: the human-readable
+  // attribution the dashboard actually populates is `senderProject`/`senderDisplayName`
+  // (NOT `from`/`from_project_id`/`senderAddress`, which are empty on live rows).
+  /** ActivityPub verb (e.g. "update"), mirrors MESSAGE_TYPE_MAP. */
+  verb?: string;
+  /** ActivityPub object type (e.g. "mission"). */
+  objectType?: string;
+  /** Nested payload; `payload.body` is the full message text (the bulk of list bytes). */
+  payload?: { body?: string } & Record<string, unknown>;
+  /** When the recipient responded (accept/decline/reply). */
+  respondedAt?: string | null;
+  /** Free-text response notes (heavy; body-on-get only). */
+  responseNotes?: string | null;
+  /** Inbox: the sender project's display name (e.g. "CMOS-MCP Pro"). */
+  senderProject?: string | null;
+  /** Inbox: the sender operator's display name (e.g. "kneelinghorse"). */
+  senderDisplayName?: string | null;
+  /** Inbox: the sender operator's email. */
+  senderEmail?: string | null;
+  /** Sent: the recipient project's display name. */
+  targetProject?: string | null;
+  /** Sent: the target mission id, when the message was addressed to one. */
+  targetMissionId?: string | null;
 }
 
 export interface SendMessageParams {

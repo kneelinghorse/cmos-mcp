@@ -26,7 +26,7 @@ jest.mock('../../src/tools/cmos/owner-resolution', () => ({
 
 import { executeMissionProtocolTool } from '../../src/index';
 import { CmosDetector } from '../../src/intelligence/cmos-detector';
-import { ProjectRegistry } from '../../src/intelligence/project-registry';
+import { ProjectGraphRegistry } from '../../src/intelligence/project-graph-registry';
 import { DashboardClient } from '../../src/tools/cmos/dashboard-client';
 import { createSuccess } from '../../src/tools/cmos/errors';
 import { createSeededCmosProject, type SeededCmosProject } from '../helpers/seedCmosDb';
@@ -86,7 +86,7 @@ describe('P0 regression: Stage1 mis-attributed as cmos-mcp', () => {
   beforeEach(async () => {
     jest.clearAllMocks();
     CmosDetector.resetInstance();
-    ProjectRegistry.resetInstance();
+    ProjectGraphRegistry.resetInstance();
     cmosMcpProject = await createSeededCmosProject(
       {
         projectName: 'CMOS MCP',
@@ -108,7 +108,7 @@ describe('P0 regression: Stage1 mis-attributed as cmos-mcp', () => {
       'p0-regression-stage1-'
     );
     configDir = await makeTempDir('p0-regression-cfg-');
-    await ProjectRegistry.create({ configDir });
+    await ProjectGraphRegistry.create({ configDir });
     process.cwd = () => stage1Project.projectRoot;
     process.env['CMOS_PROJECT_ROOT'] = cmosMcpProject.projectRoot;
   });
@@ -121,7 +121,7 @@ describe('P0 regression: Stage1 mis-attributed as cmos-mcp', () => {
       process.env['CMOS_PROJECT_ROOT'] = originalEnvProjectRoot;
     }
     CmosDetector.resetInstance();
-    ProjectRegistry.resetInstance();
+    ProjectGraphRegistry.resetInstance();
     await Promise.all([
       cmosMcpProject.cleanup(),
       stage1Project.cleanup(),

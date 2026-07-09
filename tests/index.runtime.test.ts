@@ -804,21 +804,21 @@ describe('runStartupRegistryPrune (real implementation)', () => {
 
   test('drops entries whose cmos database is missing and reports counts', async () => {
     jest.resetModules();
-    const { ProjectRegistry } = await import('../src/intelligence/project-registry');
+    const { ProjectGraphRegistry } = await import('../src/intelligence/project-graph-registry');
     const indexModule = await import('../src/index');
 
-    ProjectRegistry.resetInstance();
+    ProjectGraphRegistry.resetInstance();
     const liveProject = await fs.mkdtemp(path.join(os.tmpdir(), 'live-'));
     await fs.mkdir(path.join(liveProject, 'cmos', 'db'), { recursive: true });
     await fs.writeFile(path.join(liveProject, 'cmos', 'db', 'cmos.sqlite'), '');
 
-    const registry = await ProjectRegistry.create();
-    await registry.register(liveProject);
+    const registry = await ProjectGraphRegistry.create();
+    registry.registerStore(liveProject);
 
     const deadProject = await fs.mkdtemp(path.join(os.tmpdir(), 'dead-'));
     await fs.mkdir(path.join(deadProject, 'cmos', 'db'), { recursive: true });
     await fs.writeFile(path.join(deadProject, 'cmos', 'db', 'cmos.sqlite'), '');
-    await registry.register(deadProject);
+    registry.registerStore(deadProject);
     await fs.rm(deadProject, { recursive: true, force: true });
 
     try {
@@ -829,22 +829,22 @@ describe('runStartupRegistryPrune (real implementation)', () => {
       expect(result.remaining).toBe(1);
     } finally {
       await fs.rm(liveProject, { recursive: true, force: true });
-      ProjectRegistry.resetInstance();
+      ProjectGraphRegistry.resetInstance();
     }
   });
 
   test('reports zero pruned on a clean registry', async () => {
     jest.resetModules();
-    const { ProjectRegistry } = await import('../src/intelligence/project-registry');
+    const { ProjectGraphRegistry } = await import('../src/intelligence/project-graph-registry');
     const indexModule = await import('../src/index');
 
-    ProjectRegistry.resetInstance();
+    ProjectGraphRegistry.resetInstance();
     const liveProject = await fs.mkdtemp(path.join(os.tmpdir(), 'live-'));
     await fs.mkdir(path.join(liveProject, 'cmos', 'db'), { recursive: true });
     await fs.writeFile(path.join(liveProject, 'cmos', 'db', 'cmos.sqlite'), '');
 
-    const registry = await ProjectRegistry.create();
-    await registry.register(liveProject);
+    const registry = await ProjectGraphRegistry.create();
+    registry.registerStore(liveProject);
 
     try {
       const result = await indexModule.__test__.runStartupRegistryPrune();
@@ -853,7 +853,7 @@ describe('runStartupRegistryPrune (real implementation)', () => {
       expect(result.remaining).toBe(1);
     } finally {
       await fs.rm(liveProject, { recursive: true, force: true });
-      ProjectRegistry.resetInstance();
+      ProjectGraphRegistry.resetInstance();
     }
   });
 });

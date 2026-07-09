@@ -10,7 +10,7 @@ import { promises as fs } from 'fs';
 import os from 'os';
 import path from 'path';
 import { CmosDetector } from '../../../src/intelligence/cmos-detector';
-import { ProjectRegistry } from '../../../src/intelligence/project-registry';
+import { ProjectGraphRegistry } from '../../../src/intelligence/project-graph-registry';
 import {
   cmosProjectValidate,
   cmosProjectValidateToolDefinition,
@@ -33,18 +33,25 @@ describe('cmos_project_validate', () => {
   let workspace: string;
   let workspace2: string;
   let configDir: string;
-  let registry: ProjectRegistry;
+  let graph: ProjectGraphRegistry;
+  let prevConfigEnv: string | undefined;
 
   beforeEach(async () => {
     workspace = await createTempWorkspace('cmos-project-validate-');
     workspace2 = await createTempWorkspace('cmos-project-validate-2-');
     configDir = await createTempWorkspace('config-');
+    prevConfigEnv = process.env.CMOS_CONFIG_DIR;
+    process.env.CMOS_CONFIG_DIR = configDir;
     CmosDetector.resetInstance();
-    ProjectRegistry.resetInstance();
-    registry = await ProjectRegistry.create({ configDir });
+    ProjectGraphRegistry.resetInstance();
+    // s79-m03 — cmos_project validate reads/prunes the graph registry.
+    graph = await ProjectGraphRegistry.create({ configDir });
   });
 
   afterEach(async () => {
+    ProjectGraphRegistry.resetInstance();
+    if (prevConfigEnv === undefined) delete process.env.CMOS_CONFIG_DIR;
+    else process.env.CMOS_CONFIG_DIR = prevConfigEnv;
     await fs.rm(workspace, { recursive: true, force: true }).catch(() => {});
     await fs.rm(workspace2, { recursive: true, force: true }).catch(() => {});
     await fs.rm(configDir, { recursive: true, force: true });
@@ -61,7 +68,7 @@ describe('cmos_project_validate', () => {
 
     it('should validate active project', async () => {
       await ensureCmosDatabase(workspace);
-      await registry.register(workspace, { name: 'Active Project' });
+      graph.registerStore(workspace, { name: 'Active Project' });
 
       const result = await cmosProjectValidate({});
 
@@ -73,7 +80,7 @@ describe('cmos_project_validate', () => {
 
     it('should detect stale project (database removed)', async () => {
       const sqlitePath = await ensureCmosDatabase(workspace);
-      await registry.register(workspace, { name: 'Stale Project' });
+      graph.registerStore(workspace, { name: 'Stale Project' });
 
       // Remove database
       await fs.unlink(sqlitePath);
@@ -88,7 +95,7 @@ describe('cmos_project_validate', () => {
 
     it('should detect missing project (directory removed)', async () => {
       await ensureCmosDatabase(workspace);
-      await registry.register(workspace, { name: 'Missing Project' });
+      graph.registerStore(workspace, { name: 'Missing Project' });
 
       // Remove entire workspace
       await fs.rm(workspace, { recursive: true, force: true });
@@ -103,8 +110,8 @@ describe('cmos_project_validate', () => {
     it('should validate multiple projects with different statuses', async () => {
       await ensureCmosDatabase(workspace);
       await ensureCmosDatabase(workspace2);
-      await registry.register(workspace, { name: 'Active' });
-      await registry.register(workspace2, { name: 'Will be Missing' });
+      graph.registerStore(workspace, { name: 'Active' });
+      graph.registerStore(workspace2, { name: 'Will be Missing' });
 
       // Remove one
       await fs.rm(workspace2, { recursive: true, force: true });
@@ -122,8 +129,8 @@ describe('cmos_project_validate', () => {
     it('should prune invalid entries when prune=true', async () => {
       await ensureCmosDatabase(workspace);
       await ensureCmosDatabase(workspace2);
-      await registry.register(workspace, { name: 'Active' });
-      await registry.register(workspace2, { name: 'Will be Missing' });
+      graph.registerStore(workspace, { name: 'Active' });
+      graph.registerStore(workspace2, { name: 'Will be Missing' });
 
       // Remove one
       await fs.rm(workspace2, { recursive: true, force: true });
@@ -131,7 +138,7 @@ describe('cmos_project_validate', () => {
       await cmosProjectValidate({ prune: true });
 
       // Verify pruned
-      const projects = await registry.list();
+      const projects = graph.list();
       expect(projects).toHaveLength(1);
       expect(projects[0].name).toBe('Active');
     });
@@ -139,8 +146,8 @@ describe('cmos_project_validate', () => {
     it('should not prune when prune=false', async () => {
       await ensureCmosDatabase(workspace);
       await ensureCmosDatabase(workspace2);
-      await registry.register(workspace, { name: 'Active' });
-      await registry.register(workspace2, { name: 'Will be Missing' });
+      graph.registerStore(workspace, { name: 'Active' });
+      graph.registerStore(workspace2, { name: 'Will be Missing' });
 
       // Remove one
       await fs.rm(workspace2, { recursive: true, force: true });
@@ -148,7 +155,7 @@ describe('cmos_project_validate', () => {
       await cmosProjectValidate({ prune: false });
 
       // Verify not pruned
-      const projects = await registry.list();
+      const projects = graph.list();
       expect(projects).toHaveLength(2);
     });
   });
@@ -180,7 +187,7 @@ describe('cmos_project_validate', () => {
 
     it('should format all-active validation with checkmark', async () => {
       await ensureCmosDatabase(workspace);
-      await registry.register(workspace, { name: 'Active' });
+      graph.registerStore(workspace, { name: 'Active' });
 
       const result = await cmosProjectValidate({});
       const formatted = formatProjectValidateForLLM(result);
@@ -193,8 +200,8 @@ describe('cmos_project_validate', () => {
     it('should show warning icon for mixed results', async () => {
       await ensureCmosDatabase(workspace);
       await ensureCmosDatabase(workspace2);
-      await registry.register(workspace, { name: 'Active' });
-      await registry.register(workspace2, { name: 'Missing' });
+      graph.registerStore(workspace, { name: 'Active' });
+      graph.registerStore(workspace2, { name: 'Missing' });
 
       await fs.rm(workspace2, { recursive: true, force: true });
 
@@ -208,7 +215,7 @@ describe('cmos_project_validate', () => {
 
     it('should show prune tip when there are invalid projects', async () => {
       await ensureCmosDatabase(workspace);
-      await registry.register(workspace, { name: 'Missing' });
+      graph.registerStore(workspace, { name: 'Missing' });
       await fs.rm(workspace, { recursive: true, force: true });
 
       const result = await cmosProjectValidate({});
@@ -219,7 +226,7 @@ describe('cmos_project_validate', () => {
 
     it('should group projects by status', async () => {
       await ensureCmosDatabase(workspace);
-      await registry.register(workspace, { name: 'Active Project' });
+      graph.registerStore(workspace, { name: 'Active Project' });
 
       const result = await cmosProjectValidate({});
       const formatted = formatProjectValidateForLLM(result);

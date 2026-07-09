@@ -10,8 +10,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { z } from 'zod';
-import { ProjectRegistry } from '../../intelligence/project-registry';
-import type { RegisteredProject } from '../../intelligence/project-registry';
+import { ProjectGraphRegistry } from '../../intelligence/project-graph-registry';
 import type { CmosToolResult } from './types';
 import { createError, createSuccess } from './errors';
 
@@ -96,17 +95,18 @@ export async function cmosProjectList(
   _params: CmosProjectListParams
 ): Promise<CmosToolResult<ProjectListResult>> {
   try {
-    const registry = await ProjectRegistry.create();
-    const projects: RegisteredProject[] = await registry.list();
-    const defaultProject = await registry.getDefault();
+    // s79-m03 — the project-graph registry is the sole discovery read source.
+    const graph = await ProjectGraphRegistry.create();
+    const rows = graph.list();
+    const defaultId = graph.getDefault()?.project_id;
 
-    const items: ProjectListItem[] = projects.map((project) => ({
-      projectRoot: project.projectRoot,
-      name: project.name ?? project.projectRoot,
-      isDefault: project.projectRoot === defaultProject?.projectRoot,
-      dbExists: fs.existsSync(path.join(project.projectRoot, 'cmos', 'db', 'cmos.sqlite')),
-      registeredAt: project.registeredAt,
-      lastAccessedAt: project.lastAccessedAt,
+    const items: ProjectListItem[] = rows.map((row) => ({
+      projectRoot: row.store_path,
+      name: row.name ?? row.store_path,
+      isDefault: row.project_id === defaultId,
+      dbExists: fs.existsSync(path.join(row.store_path, 'cmos', 'db', 'cmos.sqlite')),
+      registeredAt: new Date(row.registered_at).toISOString(),
+      lastAccessedAt: new Date(row.last_seen_at).toISOString(),
     }));
 
     const missingCount = items.filter((p) => !p.dbExists).length;
@@ -117,7 +117,7 @@ export async function cmosProjectList(
       summary: {
         total: items.length,
       },
-      registryPath: registry.path,
+      registryPath: graph.path,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

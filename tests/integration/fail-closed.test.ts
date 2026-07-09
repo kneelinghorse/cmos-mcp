@@ -22,7 +22,7 @@ jest.mock('../../src/tools/cmos/dashboard-client', () => {
 
 import { executeMissionProtocolTool } from '../../src/index';
 import { CmosDetector } from '../../src/intelligence/cmos-detector';
-import { ProjectRegistry } from '../../src/intelligence/project-registry';
+import { ProjectGraphRegistry } from '../../src/intelligence/project-graph-registry';
 import { SenderResolutionError } from '../../src/intelligence/sender-context';
 import { DashboardClient } from '../../src/tools/cmos/dashboard-client';
 
@@ -38,10 +38,10 @@ describe('dispatcher fail-closed behavior', () => {
   beforeEach(async () => {
     jest.clearAllMocks();
     CmosDetector.resetInstance();
-    ProjectRegistry.resetInstance();
+    ProjectGraphRegistry.resetInstance();
     emptyWorkspace = await makeTempDir('fail-closed-empty-');
     configDir = await makeTempDir('fail-closed-cfg-');
-    await ProjectRegistry.create({ configDir });
+    await ProjectGraphRegistry.create({ configDir });
     process.cwd = () => emptyWorkspace;
     delete process.env['CMOS_PROJECT_ROOT'];
   });
@@ -49,7 +49,7 @@ describe('dispatcher fail-closed behavior', () => {
   afterEach(async () => {
     process.cwd = originalCwd;
     CmosDetector.resetInstance();
-    ProjectRegistry.resetInstance();
+    ProjectGraphRegistry.resetInstance();
     await Promise.all([
       fs.rm(emptyWorkspace, { recursive: true, force: true }),
       fs.rm(configDir, { recursive: true, force: true }),

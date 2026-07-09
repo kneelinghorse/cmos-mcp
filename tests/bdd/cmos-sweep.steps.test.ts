@@ -10,7 +10,7 @@ import { loadFeature, defineFeature } from 'jest-cucumber';
 
 import { cmosProjectSweep } from '../../src/tools/cmos/cmos-project-sweep';
 import type { SweepResult } from '../../src/tools/cmos/cmos-project-sweep';
-import { ProjectRegistry } from '../../src/intelligence/project-registry';
+import { ProjectGraphRegistry } from '../../src/intelligence/project-graph-registry';
 import { CmosDetector } from '../../src/intelligence/cmos-detector';
 import { CMOS_SCHEMA } from '../../src/tools/cmos/schema';
 import type { CmosToolResult } from '../../src/tools/cmos/types';
@@ -64,7 +64,8 @@ function insertSession(dbPath: string, opts: { id: string; title: string; status
 defineFeature(feature, (test) => {
   let rootDir: string;
   let configDir: string;
-  let registry: ProjectRegistry;
+  let graph: ProjectGraphRegistry;
+  let prevConfigEnv: string | undefined;
   // Map from instance name to dbPath — populated by Given steps, consumed by Then steps
   const dbPaths: Record<string, string> = {};
   let result: CmosToolResult<SweepResult>;
@@ -72,10 +73,12 @@ defineFeature(feature, (test) => {
   beforeEach(async () => {
     rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sweep-bdd-root-'));
     configDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sweep-bdd-cfg-'));
-    // Reset singletons so each test gets a clean registry
+    prevConfigEnv = process.env.CMOS_CONFIG_DIR;
+    process.env.CMOS_CONFIG_DIR = configDir;
+    // Reset singletons so each test gets a clean registry (s79-m02: graph-backed).
     CmosDetector.resetInstance();
-    ProjectRegistry.resetInstance();
-    registry = await ProjectRegistry.create({ configDir });
+    ProjectGraphRegistry.resetInstance();
+    graph = await ProjectGraphRegistry.create({ configDir });
     // Clear the name→dbPath map for this test
     for (const key of Object.keys(dbPaths)) {
       delete dbPaths[key];
@@ -83,9 +86,11 @@ defineFeature(feature, (test) => {
   });
 
   afterEach(async () => {
+    ProjectGraphRegistry.resetInstance();
+    if (prevConfigEnv === undefined) delete process.env.CMOS_CONFIG_DIR;
+    else process.env.CMOS_CONFIG_DIR = prevConfigEnv;
     await fs.rm(rootDir, { recursive: true, force: true });
     await fs.rm(configDir, { recursive: true, force: true });
-    ProjectRegistry.resetInstance();
   });
 
   // ---------------------------------------------------------------------------
@@ -97,7 +102,7 @@ defineFeature(feature, (test) => {
    */
   async function registerInstance(name: string): Promise<string> {
     const { projectRoot, dbPath } = await makeInstance(rootDir, name);
-    await registry.register(projectRoot, { name });
+    graph.registerStore(projectRoot, { name });
     dbPaths[name] = dbPath;
     return dbPath;
   }
@@ -144,7 +149,7 @@ defineFeature(feature, (test) => {
     });
 
     when(/^I call cmos_project with action "sweep"$/, async () => {
-      result = await cmosProjectSweep({}, registry);
+      result = await cmosProjectSweep({}, graph);
     });
 
     then(/^the result contains 3 items \(In Progress, Queued, Blocked\)$/, () => {
@@ -200,7 +205,7 @@ defineFeature(feature, (test) => {
     });
 
     when(/^I call cmos_project with action "sweep"$/, async () => {
-      result = await cmosProjectSweep({}, registry);
+      result = await cmosProjectSweep({}, graph);
     });
 
     then(/^the result includes the active session with item_type "session"$/, () => {
@@ -242,7 +247,7 @@ defineFeature(feature, (test) => {
     });
 
     when(/^I call cmos_project with action "sweep"$/, async () => {
-      result = await cmosProjectSweep({}, registry);
+      result = await cmosProjectSweep({}, graph);
     });
 
     then(/^the response groups items under their respective instance_id$/, () => {
@@ -284,7 +289,7 @@ defineFeature(feature, (test) => {
     });
 
     when(/^I call cmos_project with action "sweep"$/, async () => {
-      result = await cmosProjectSweep({}, registry);
+      result = await cmosProjectSweep({}, graph);
     });
 
     then(/^the result is an empty list$/, () => {
@@ -324,7 +329,7 @@ defineFeature(feature, (test) => {
     when(
       /^I call cmos_project with action "sweep" and instances \["vault-minerva"\]$/,
       async () => {
-        result = await cmosProjectSweep({ instances: ['vault-minerva'] }, registry);
+        result = await cmosProjectSweep({ instances: ['vault-minerva'] }, graph);
       }
     );
 
@@ -369,7 +374,7 @@ defineFeature(feature, (test) => {
     });
 
     when(/^I call cmos_project with action "sweep" and statusFilter \["Blocked"\]$/, async () => {
-      result = await cmosProjectSweep({ statusFilter: ['Blocked'] }, registry);
+      result = await cmosProjectSweep({ statusFilter: ['Blocked'] }, graph);
     });
 
     then(/^only the Blocked mission is returned$/, () => {
@@ -403,7 +408,7 @@ defineFeature(feature, (test) => {
     });
 
     when(/^I call cmos_project with action "sweep" and itemType "mission"$/, async () => {
-      result = await cmosProjectSweep({ itemType: 'mission' }, registry);
+      result = await cmosProjectSweep({ itemType: 'mission' }, graph);
     });
 
     then(/^only the mission is returned$/, () => {
@@ -441,7 +446,7 @@ defineFeature(feature, (test) => {
     });
 
     when(/^I call cmos_project with action "sweep" and itemType "session"$/, async () => {
-      result = await cmosProjectSweep({ itemType: 'session' }, registry);
+      result = await cmosProjectSweep({ itemType: 'session' }, graph);
     });
 
     then(/^only the session is returned$/, () => {
@@ -489,7 +494,7 @@ defineFeature(feature, (test) => {
     });
 
     when(/^I call cmos_project with action "sweep"$/, async () => {
-      result = await cmosProjectSweep({}, registry);
+      result = await cmosProjectSweep({}, graph);
     });
 
     then(/^the Blocked mission appears first in the vault-minerva group$/, () => {
@@ -532,7 +537,7 @@ defineFeature(feature, (test) => {
     });
 
     when(/^I call cmos_project with action "sweep"$/, async () => {
-      result = await cmosProjectSweep({}, registry);
+      result = await cmosProjectSweep({}, graph);
     });
 
     then(/^the result includes the vault-minerva mission$/, () => {
@@ -563,7 +568,7 @@ defineFeature(feature, (test) => {
     });
 
     when(/^I call cmos_project with action "sweep"$/, async () => {
-      result = await cmosProjectSweep({}, registry);
+      result = await cmosProjectSweep({}, graph);
     });
 
     then(/^the result is an empty list$/, () => {
@@ -600,7 +605,7 @@ defineFeature(feature, (test) => {
     });
 
     when(/^I call cmos_project with action "sweep"$/, async () => {
-      result = await cmosProjectSweep({}, registry);
+      result = await cmosProjectSweep({}, graph);
     });
 
     then(/^no write operations are performed against "code-deety"$/, async () => {

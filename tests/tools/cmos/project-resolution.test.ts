@@ -17,8 +17,8 @@ import path from 'path';
 import Database from 'better-sqlite3';
 
 import { CmosDetector } from '../../../src/intelligence/cmos-detector';
-import { ProjectRegistry } from '../../../src/intelligence/project-registry';
-import { CmosDatabaseClient, withMultiClient, isReadAction } from '../../../src/tools/cmos/client';
+import { ProjectGraphRegistry } from '../../../src/intelligence/project-graph-registry';
+import { CmosDatabaseClient } from '../../../src/tools/cmos/client';
 import { CMOS_ERROR_CODES } from '../../../src/tools/cmos/errors';
 
 async function createTempWorkspace(prefix: string): Promise<string> {
@@ -64,7 +64,9 @@ describe('CmosDatabaseClient project resolution', () => {
     workspace = await createTempWorkspace('client-resolution-');
     configDir = await createTempWorkspace('config-client-');
     CmosDetector.resetInstance();
-    ProjectRegistry.resetInstance();
+    // The resolver's Step-4 fallback reads the GRAPH default (s80-m01), so tests
+    // seed/isolate the graph. (s80-m02: the JSON ProjectRegistry is deleted.)
+    ProjectGraphRegistry.resetInstance();
     process.env = { ...originalEnv };
     delete process.env['CMOS_PROJECT_ROOT'];
   });
@@ -72,6 +74,7 @@ describe('CmosDatabaseClient project resolution', () => {
   afterEach(async () => {
     process.env = originalEnv;
     process.cwd = originalCwd;
+    ProjectGraphRegistry.resetInstance();
     await fs.rm(workspace, { recursive: true, force: true });
     await fs.rm(configDir, { recursive: true, force: true });
   });
@@ -129,10 +132,10 @@ describe('CmosDatabaseClient project resolution', () => {
   describe('Resolution scenario 3 (removed): CMOS_PROJECT_ROOT env var', () => {
     it('Sprint 53 m02: env var is NOT consulted, resolver falls through to cwd/registry', async () => {
       // Env var now only feeds .env bootstrap at src/index.ts:17. With only the
-      // env set and no cwd CMOS / no registry default, resolution must fail.
-      // Initialize an isolated registry so the real user's ~/.config entries
+      // env set and no cwd CMOS / no graph default, resolution must fail.
+      // Initialize an isolated graph registry so the real user's config entries
       // can't satisfy the fallback.
-      await ProjectRegistry.create({ configDir });
+      await ProjectGraphRegistry.create({ configDir });
       await createCmosDatabase(workspace);
       process.env['CMOS_PROJECT_ROOT'] = workspace;
       const emptyDir = await createTempWorkspace('empty-');
@@ -159,19 +162,18 @@ describe('CmosDatabaseClient project resolution', () => {
       result.data?.close();
     });
 
-    it('auto-registers discovered project', async () => {
+    it('auto-registers discovered project into the graph', async () => {
       await createCmosDatabase(workspace);
       process.cwd = () => workspace;
 
-      // Initialize registry first
-      await ProjectRegistry.create({ configDir });
+      // Initialize the graph registry (bound to the isolated configDir) first so
+      // the resolver's auto-register writes here, not the shared config dir.
+      const graph = await ProjectGraphRegistry.create({ configDir });
 
       await CmosDatabaseClient.create();
 
-      // Verify it was registered
-      const registry = ProjectRegistry.getInstance({ configDir });
-      const project = await registry.getProject(workspace);
-      expect(project).toBeDefined();
+      // Verify it was registered in the graph.
+      expect(graph.getByStorePath(workspace)).not.toBeNull();
     });
   });
 
@@ -180,9 +182,9 @@ describe('CmosDatabaseClient project resolution', () => {
       const registeredWorkspace = await createTempWorkspace('registered-');
       await createCmosDatabase(registeredWorkspace);
 
-      // Set up registry with default project
-      const registry = await ProjectRegistry.create({ configDir });
-      await registry.register(registeredWorkspace, { setAsDefault: true });
+      // Set up the GRAPH registry with a default project
+      const graph = await ProjectGraphRegistry.create({ configDir });
+      graph.registerStore(registeredWorkspace, { setAsDefault: true });
 
       // Point cwd to non-CMOS directory
       process.cwd = () => workspace;
@@ -197,9 +199,9 @@ describe('CmosDatabaseClient project resolution', () => {
     });
 
     it('fails with actionable error when no fallback available', async () => {
-      // Empty cwd, no env, empty registry
+      // Empty cwd, no env, empty graph registry
       process.cwd = () => workspace;
-      await ProjectRegistry.create({ configDir });
+      await ProjectGraphRegistry.create({ configDir });
 
       const result = await CmosDatabaseClient.create();
 
@@ -252,9 +254,9 @@ describe('CmosDatabaseClient project resolution', () => {
       await createCmosDatabase(workspace);
       await createCmosDatabase(registeredWorkspace);
 
-      // Set up registry
-      const registry = await ProjectRegistry.create({ configDir });
-      await registry.register(registeredWorkspace, { setAsDefault: true });
+      // Set up a graph default (which auto-discovery should beat)
+      const graph = await ProjectGraphRegistry.create({ configDir });
+      graph.registerStore(registeredWorkspace, { setAsDefault: true });
 
       // Point cwd to workspace with CMOS
       process.cwd = () => workspace;
@@ -274,9 +276,9 @@ describe('CmosDatabaseClient project resolution', () => {
       const registeredWorkspace = await createTempWorkspace('stale-');
       await createCmosDatabase(registeredWorkspace);
 
-      // Register and set as default
-      const registry = await ProjectRegistry.create({ configDir });
-      await registry.register(registeredWorkspace, { setAsDefault: true });
+      // Register and set as default in the GRAPH
+      const graph = await ProjectGraphRegistry.create({ configDir });
+      graph.registerStore(registeredWorkspace, { setAsDefault: true });
 
       // Remove the CMOS database (making it stale)
       await fs.rm(path.join(registeredWorkspace, 'cmos'), { recursive: true, force: true });
@@ -308,8 +310,8 @@ describe('CmosDatabaseClient project resolution', () => {
       process.env['CMOS_PROJECT_ROOT'] = envWorkspace;
       process.cwd = () => cwdWorkspace;
 
-      const registry = await ProjectRegistry.create({ configDir });
-      await registry.register(registeredWorkspace, { setAsDefault: true });
+      const graph = await ProjectGraphRegistry.create({ configDir });
+      graph.registerStore(registeredWorkspace, { setAsDefault: true });
 
       // Explicit dbPath should win
       const result = await CmosDatabaseClient.create({ dbPath });
@@ -327,7 +329,7 @@ describe('CmosDatabaseClient project resolution', () => {
   describe('Error message quality', () => {
     it('provides actionable suggestions in error messages', async () => {
       process.cwd = () => workspace;
-      await ProjectRegistry.create({ configDir });
+      await ProjectGraphRegistry.create({ configDir });
 
       const result = await CmosDatabaseClient.create();
 
@@ -343,135 +345,6 @@ describe('CmosDatabaseClient project resolution', () => {
         suggestion.includes('cmos_project_register') ||
         suggestion.includes('cmos/db/cmos.sqlite');
       expect(mentionsOption).toBe(true);
-    });
-  });
-
-  // ---------------------------------------------------------------------------
-  // Fan-out scenarios (cmos-route-m01)
-  // ---------------------------------------------------------------------------
-
-  describe('Fan-out Scenario 6: withMultiClient fans out across registered instances', () => {
-    it('returns merged results with resolvedFrom provenance from 2 instances', async () => {
-      const ws1 = await createTempWorkspace('fanout-a-');
-      const ws2 = await createTempWorkspace('fanout-b-');
-      await createCmosDatabase(ws1);
-      await createCmosDatabase(ws2);
-
-      const result = await withMultiClient(async (client) => client.health(), [ws1, ws2]);
-
-      expect(result.success).toBe(true);
-      expect(result.data).toHaveLength(2);
-      expect(result.data?.[0].resolvedFrom).toBe(ws1);
-      expect(result.data?.[1].resolvedFrom).toBe(ws2);
-      expect(result.data?.[0].success).toBe(true);
-      expect(result.data?.[1].success).toBe(true);
-
-      await fs.rm(ws1, { recursive: true, force: true });
-      await fs.rm(ws2, { recursive: true, force: true });
-    });
-
-    it('includes per-entry failure when one instance is unreachable', async () => {
-      const ws1 = await createTempWorkspace('fanout-partial-');
-      await createCmosDatabase(ws1);
-
-      const result = await withMultiClient(
-        async (client) => client.health(),
-        [ws1, '/nonexistent/cmos-path']
-      );
-
-      expect(result.success).toBe(true); // partial success still returns success
-      expect(result.data).toHaveLength(2);
-      expect(result.data?.[0].success).toBe(true);
-      expect(result.data?.[1].success).toBe(false);
-      expect(result.data?.[1].resolvedFrom).toBe('/nonexistent/cmos-path');
-
-      await fs.rm(ws1, { recursive: true, force: true });
-    });
-
-    it('returns empty array for empty projectRoots', async () => {
-      const result = await withMultiClient(async (client) => client.health(), []);
-
-      expect(result.success).toBe(true);
-      expect(result.data).toHaveLength(0);
-    });
-  });
-
-  describe('Fan-out Scenario 7: isReadAction discriminates read vs write', () => {
-    it('returns true for read actions that may fan out', () => {
-      // cmos_mission(status), cmos_session(list), cmos_context(show) still fan out
-      // when projectRoot is omitted — these have cross-project overview semantics.
-      expect(isReadAction('cmos_mission', 'status')).toBe(true);
-      expect(isReadAction('cmos_session', 'list')).toBe(true);
-      expect(isReadAction('cmos_context', 'show')).toBe(true);
-    });
-
-    it('Sprint 55 m01: cmos_sprint(list|show) and cmos_mission(list) are pinned, not fanned', () => {
-      // These payloads explode when fanned across a large registry (681KB for a
-      // single cmos_sprint(show) on the observed 1674-entry registry). They must
-      // resolve to the caller's project via resolveToolSenderContext at dispatch.
-      expect(isReadAction('cmos_sprint', 'list')).toBe(false);
-      expect(isReadAction('cmos_sprint', 'show')).toBe(false);
-      expect(isReadAction('cmos_mission', 'list')).toBe(false);
-    });
-
-    it('Sprint 65 m01: cmos_mission(show) is pinned — mission IDs collide across projects', () => {
-      // Pre-fix, fanning out cmos_mission(show) surfaced same-ID missions from
-      // unrelated codebases (feedback row #1; decision #675). The fix pins show
-      // to the caller's project via resolveToolSenderContext.
-      expect(isReadAction('cmos_mission', 'show')).toBe(false);
-    });
-
-    it('returns false for write actions — these must never fan out', () => {
-      expect(isReadAction('cmos_mission', 'add')).toBe(false);
-      expect(isReadAction('cmos_mission', 'update')).toBe(false);
-      expect(isReadAction('cmos_mission_transition', 'start')).toBe(false);
-      expect(isReadAction('cmos_mission_transition', 'complete')).toBe(false);
-      expect(isReadAction('cmos_mission_transition', 'block')).toBe(false);
-      expect(isReadAction('cmos_session', 'start')).toBe(false);
-      expect(isReadAction('cmos_session', 'complete')).toBe(false);
-      expect(isReadAction('cmos_session', 'capture')).toBe(false);
-      expect(isReadAction('cmos_sprint', 'create')).toBe(false);
-      expect(isReadAction('cmos_sprint', 'complete')).toBe(false);
-    });
-
-    it('returns false for cmos_agent_onboard — single-instance semantics are intentional', () => {
-      expect(isReadAction('cmos_agent_onboard', '')).toBe(false);
-    });
-
-    it('returns false for unknown tools', () => {
-      expect(isReadAction('cmos_unknown_tool', 'list')).toBe(false);
-    });
-  });
-
-  describe('Fan-out Scenario 8: Single registered instance — no regression', () => {
-    it('withMultiClient with a single root returns a single-entry array', async () => {
-      const ws = await createTempWorkspace('single-fanout-');
-      await createCmosDatabase(ws);
-
-      const result = await withMultiClient(async (client) => client.health(), [ws]);
-
-      expect(result.success).toBe(true);
-      expect(result.data).toHaveLength(1);
-      expect(result.data?.[0].resolvedFrom).toBe(ws);
-      expect(result.data?.[0].success).toBe(true);
-
-      await fs.rm(ws, { recursive: true, force: true });
-    });
-
-    it('single-instance result shape matches multi-instance shape', async () => {
-      const ws = await createTempWorkspace('shape-check-');
-      await createCmosDatabase(ws);
-
-      const result = await withMultiClient(async (client) => client.health(), [ws]);
-
-      expect(result.success).toBe(true);
-      const entry = result.data?.[0];
-      expect(entry).toHaveProperty('resolvedFrom');
-      expect(entry).toHaveProperty('success');
-      // data present on success entry
-      expect(entry?.data).toBeDefined();
-
-      await fs.rm(ws, { recursive: true, force: true });
     });
   });
 
@@ -513,11 +386,11 @@ describe('CmosDatabaseClient project resolution', () => {
         { id: 'sprint-b2', title: 'Workspace B Sprint 2' },
       ]);
 
-      // Register both projects in an isolated registry, so the fallback cannot
-      // leak cross-project data if the pin is wrong.
-      const registry = await ProjectRegistry.create({ configDir });
-      await registry.register(wsA);
-      await registry.register(wsB);
+      // Register both projects in an isolated graph registry, so the fallback
+      // cannot leak cross-project data if the pin is wrong.
+      const graph = await ProjectGraphRegistry.create({ configDir });
+      graph.registerStore(wsA);
+      graph.registerStore(wsB);
 
       const resultA = await cmosSprintList({ projectRoot: wsA });
       expect(resultA.success).toBe(true);

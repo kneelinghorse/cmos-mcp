@@ -26,7 +26,7 @@ import type { CmosToolResult } from './types';
 import { createError, createSuccess, CMOS_ERROR_CODES } from './errors';
 import { CMOS_SCHEMA, CMOS_SCHEMA_VERSION } from './schema';
 import { assertJestDbPathIsolated } from './real-store-guard';
-import { ProjectRegistry } from '../../intelligence/project-registry';
+import { ProjectGraphRegistry } from '../../intelligence/project-graph-registry';
 import { CmosDetector } from '../../intelligence/cmos-detector';
 
 /**
@@ -555,13 +555,15 @@ export async function cmosProjectInit(
         missionsCreated: missionsCreated.length > 0 ? missionsCreated : undefined,
       };
 
-      // Auto-register the project. Clear the detector cache first so a stale
-      // negative result (from any pre-init tool call on this path) doesn't
-      // cause registration to fail.
+      // Auto-register the project into the project-graph registry (s79-m02, the
+      // sole discovery store). Clear the detector cache first so a stale negative
+      // result (from any pre-init tool call on this path) doesn't cause registration
+      // to fail. The store was just created with a UUID project_id, so registerStore
+      // reuses that id. (s80-m02: no JSON mirror to re-derive — graph is the source.)
       try {
         CmosDetector.getInstance().clearCache(projectRoot);
-        const registry = await ProjectRegistry.create();
-        await registry.register(projectRoot, { name: projectName || undefined });
+        const graph = await ProjectGraphRegistry.create();
+        graph.registerStore(projectRoot, { name: projectName || undefined });
       } catch {
         // Non-critical — init succeeded; user can run cmos_project register manually
       }

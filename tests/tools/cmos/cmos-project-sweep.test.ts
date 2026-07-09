@@ -7,7 +7,7 @@ import os from 'os';
 import path from 'path';
 
 import { CmosDetector } from '../../../src/intelligence/cmos-detector';
-import { ProjectRegistry } from '../../../src/intelligence/project-registry';
+import { ProjectGraphRegistry } from '../../../src/intelligence/project-graph-registry';
 import { cmosProjectSweep, type SweepParams } from '../../../src/tools/cmos/cmos-project-sweep';
 import { getTestSchema } from './fixtures/test-helpers';
 
@@ -70,20 +70,26 @@ function insertSession(
 describe('cmos_project sweep', () => {
   let rootDir: string;
   let configDir: string;
-  let registry: ProjectRegistry;
+  let graph: ProjectGraphRegistry;
+  let prevConfigEnv: string | undefined;
 
   beforeEach(async () => {
     rootDir = await makeTempDir('cmos-sweep-root-');
     configDir = await makeTempDir('cmos-sweep-cfg-');
+    prevConfigEnv = process.env.CMOS_CONFIG_DIR;
+    process.env.CMOS_CONFIG_DIR = configDir;
     CmosDetector.resetInstance();
-    ProjectRegistry.resetInstance();
-    registry = await ProjectRegistry.create({ configDir });
+    ProjectGraphRegistry.resetInstance();
+    // s79-m02 — the graph is the write-authoritative discovery store sweep reads.
+    graph = await ProjectGraphRegistry.create({ configDir });
   });
 
   afterEach(async () => {
+    ProjectGraphRegistry.resetInstance();
+    if (prevConfigEnv === undefined) delete process.env.CMOS_CONFIG_DIR;
+    else process.env.CMOS_CONFIG_DIR = prevConfigEnv;
     await fs.rm(rootDir, { recursive: true, force: true });
     await fs.rm(configDir, { recursive: true, force: true });
-    ProjectRegistry.resetInstance();
   });
 
   // --- Happy path ---
@@ -97,10 +103,10 @@ describe('cmos_project sweep', () => {
     insertMission(a.dbPath, { id: 'm-done', name: 'Finished', status: 'Completed' });
     insertMission(b.dbPath, { id: 'm-bl', name: 'Blocked task', status: 'Blocked' });
 
-    await registry.register(a.projectRoot, { name: 'vault-minerva' });
-    await registry.register(b.projectRoot, { name: 'code-deety' });
+    graph.registerStore(a.projectRoot, { name: 'vault-minerva' });
+    graph.registerStore(b.projectRoot, { name: 'code-deety' });
 
-    const result = await cmosProjectSweep({}, registry);
+    const result = await cmosProjectSweep({}, graph);
 
     expect(result.success).toBe(true);
     const items = result.data!.items;
@@ -115,9 +121,9 @@ describe('cmos_project sweep', () => {
   it('each item has the required envelope fields', async () => {
     const a = await makeInstance(rootDir, 'vault-minerva');
     insertMission(a.dbPath, { id: 'm-1', name: 'Test mission', status: 'Queued', sprint_id: null });
-    await registry.register(a.projectRoot, { name: 'vault-minerva' });
+    graph.registerStore(a.projectRoot, { name: 'vault-minerva' });
 
-    const result = await cmosProjectSweep({}, registry);
+    const result = await cmosProjectSweep({}, graph);
 
     expect(result.success).toBe(true);
     const item = result.data!.items[0]!;
@@ -136,9 +142,9 @@ describe('cmos_project sweep', () => {
     const a = await makeInstance(rootDir, 'vault-minerva');
     insertSession(a.dbPath, { id: 'sess-active', title: 'Morning planning', status: 'active' });
     insertSession(a.dbPath, { id: 'sess-done', title: 'Old session', status: 'completed' });
-    await registry.register(a.projectRoot, { name: 'vault-minerva' });
+    graph.registerStore(a.projectRoot, { name: 'vault-minerva' });
 
-    const result = await cmosProjectSweep({}, registry);
+    const result = await cmosProjectSweep({}, graph);
 
     expect(result.success).toBe(true);
     const items = result.data!.items;
@@ -154,10 +160,10 @@ describe('cmos_project sweep', () => {
     const b = await makeInstance(rootDir, 'cmos-mcp');
     insertMission(a.dbPath, { id: 'a-1', name: 'A mission', status: 'In Progress' });
     insertMission(b.dbPath, { id: 'b-1', name: 'B mission', status: 'Queued' });
-    await registry.register(a.projectRoot, { name: 'vault-minerva' });
-    await registry.register(b.projectRoot, { name: 'cmos-mcp' });
+    graph.registerStore(a.projectRoot, { name: 'vault-minerva' });
+    graph.registerStore(b.projectRoot, { name: 'cmos-mcp' });
 
-    const result = await cmosProjectSweep({}, registry);
+    const result = await cmosProjectSweep({}, graph);
 
     expect(result.success).toBe(true);
     const groups = result.data!.groups;
@@ -173,9 +179,9 @@ describe('cmos_project sweep', () => {
   it('returns empty result when instance has no open items', async () => {
     const a = await makeInstance(rootDir, 'code-deety');
     insertMission(a.dbPath, { id: 'm-done', name: 'Done', status: 'Completed' });
-    await registry.register(a.projectRoot, { name: 'code-deety' });
+    graph.registerStore(a.projectRoot, { name: 'code-deety' });
 
-    const result = await cmosProjectSweep({}, registry);
+    const result = await cmosProjectSweep({}, graph);
 
     expect(result.success).toBe(true);
     expect(result.data!.items).toHaveLength(0);
@@ -188,10 +194,10 @@ describe('cmos_project sweep', () => {
     const b = await makeInstance(rootDir, 'code-deety');
     insertMission(a.dbPath, { id: 'a-1', name: 'A', status: 'Queued' });
     insertMission(b.dbPath, { id: 'b-1', name: 'B', status: 'Queued' });
-    await registry.register(a.projectRoot, { name: 'vault-minerva' });
-    await registry.register(b.projectRoot, { name: 'code-deety' });
+    graph.registerStore(a.projectRoot, { name: 'vault-minerva' });
+    graph.registerStore(b.projectRoot, { name: 'code-deety' });
 
-    const result = await cmosProjectSweep({ instances: ['vault-minerva'] }, registry);
+    const result = await cmosProjectSweep({ instances: ['vault-minerva'] }, graph);
 
     expect(result.success).toBe(true);
     const items = result.data!.items;
@@ -204,9 +210,9 @@ describe('cmos_project sweep', () => {
     insertMission(a.dbPath, { id: 'm-ip', name: 'In Progress', status: 'In Progress' });
     insertMission(a.dbPath, { id: 'm-q', name: 'Queued', status: 'Queued' });
     insertMission(a.dbPath, { id: 'm-bl', name: 'Blocked', status: 'Blocked' });
-    await registry.register(a.projectRoot, { name: 'vault-minerva' });
+    graph.registerStore(a.projectRoot, { name: 'vault-minerva' });
 
-    const result = await cmosProjectSweep({ statusFilter: ['Blocked'] }, registry);
+    const result = await cmosProjectSweep({ statusFilter: ['Blocked'] }, graph);
 
     expect(result.success).toBe(true);
     const items = result.data!.items;
@@ -218,9 +224,9 @@ describe('cmos_project sweep', () => {
     const a = await makeInstance(rootDir, 'vault-minerva');
     insertMission(a.dbPath, { id: 'm-1', name: 'A mission', status: 'Queued' });
     insertSession(a.dbPath, { id: 's-1', title: 'A session', status: 'active' });
-    await registry.register(a.projectRoot, { name: 'vault-minerva' });
+    graph.registerStore(a.projectRoot, { name: 'vault-minerva' });
 
-    const result = await cmosProjectSweep({ itemType: 'mission' }, registry);
+    const result = await cmosProjectSweep({ itemType: 'mission' }, graph);
 
     expect(result.success).toBe(true);
     expect(result.data!.items.every((i) => i.item_type === 'mission')).toBe(true);
@@ -231,9 +237,9 @@ describe('cmos_project sweep', () => {
     const a = await makeInstance(rootDir, 'vault-minerva');
     insertMission(a.dbPath, { id: 'm-1', name: 'A mission', status: 'Queued' });
     insertSession(a.dbPath, { id: 's-1', title: 'A session', status: 'active' });
-    await registry.register(a.projectRoot, { name: 'vault-minerva' });
+    graph.registerStore(a.projectRoot, { name: 'vault-minerva' });
 
-    const result = await cmosProjectSweep({ itemType: 'session' }, registry);
+    const result = await cmosProjectSweep({ itemType: 'session' }, graph);
 
     expect(result.success).toBe(true);
     expect(result.data!.items.every((i) => i.item_type === 'session')).toBe(true);
@@ -247,9 +253,9 @@ describe('cmos_project sweep', () => {
     insertMission(a.dbPath, { id: 'm-q', name: 'Queued', status: 'Queued' });
     insertMission(a.dbPath, { id: 'm-ip', name: 'In Progress', status: 'In Progress' });
     insertMission(a.dbPath, { id: 'm-bl', name: 'Blocked', status: 'Blocked' });
-    await registry.register(a.projectRoot, { name: 'vault-minerva' });
+    graph.registerStore(a.projectRoot, { name: 'vault-minerva' });
 
-    const result = await cmosProjectSweep({}, registry);
+    const result = await cmosProjectSweep({}, graph);
 
     expect(result.success).toBe(true);
     const group = result.data!.groups.find((g) => g.instance_id === 'vault-minerva')!;
@@ -264,14 +270,14 @@ describe('cmos_project sweep', () => {
   it('skips inaccessible instance with a warning, returns reachable items', async () => {
     const a = await makeInstance(rootDir, 'vault-minerva');
     insertMission(a.dbPath, { id: 'm-1', name: 'Good mission', status: 'Queued' });
-    await registry.register(a.projectRoot, { name: 'vault-minerva' });
+    graph.registerStore(a.projectRoot, { name: 'vault-minerva' });
 
     // Create a valid instance, register it, then delete the sqlite file
     const b = await makeInstance(rootDir, 'missing-project');
-    await registry.register(b.projectRoot, { name: 'missing-project' });
+    graph.registerStore(b.projectRoot, { name: 'missing-project' });
     await fs.rm(b.dbPath);
 
-    const result = await cmosProjectSweep({}, registry);
+    const result = await cmosProjectSweep({}, graph);
 
     expect(result.success).toBe(true);
     expect(result.data!.items.some((i) => i.instance_id === 'vault-minerva')).toBe(true);
@@ -281,7 +287,7 @@ describe('cmos_project sweep', () => {
 
   it('returns empty result when registry is empty', async () => {
     // No projects registered
-    const result = await cmosProjectSweep({}, registry);
+    const result = await cmosProjectSweep({}, graph);
 
     expect(result.success).toBe(true);
     expect(result.data!.items).toHaveLength(0);
@@ -293,10 +299,10 @@ describe('cmos_project sweep', () => {
   it('does not modify foreign instance database', async () => {
     const a = await makeInstance(rootDir, 'code-deety');
     insertMission(a.dbPath, { id: 'm-1', name: 'Remote mission', status: 'Queued' });
-    await registry.register(a.projectRoot, { name: 'code-deety' });
+    graph.registerStore(a.projectRoot, { name: 'code-deety' });
 
     const statBefore = await fs.stat(a.dbPath);
-    await cmosProjectSweep({}, registry);
+    await cmosProjectSweep({}, graph);
     const statAfter = await fs.stat(a.dbPath);
 
     expect(statAfter.mtimeMs).toBe(statBefore.mtimeMs);

@@ -14,11 +14,17 @@
 import { z } from 'zod';
 import path from 'path';
 import { withClientAsync, type CmosDatabaseClient } from './client';
+import {
+  calculateSelfCaptureGap,
+  buildSelfCaptureWarning,
+  type SelfCaptureGap,
+} from './self-capture-guard';
 import { CMOS_PROJECT_ROOT_ENV } from './client';
 import type { CmosToolResult, Mission, Session, SanitizedFieldReport } from './types';
 import { createSuccess } from './errors';
 import { recordAgentFeedback } from './agent-feedback';
 import { DashboardClient, type DashboardMessage } from './dashboard-client';
+import { attributionSource } from './cmos-message';
 import {
   foreignDescriptor,
   frameForeignInline,
@@ -35,7 +41,7 @@ import {
   backfillUnknownCmosAddress,
   type ProjectIdentityData,
 } from './project-identity';
-import { ProjectRegistry } from '../../intelligence/project-registry';
+import { ProjectGraphRegistry } from '../../intelligence/project-graph-registry';
 import { SERVER_INSTALL_ROOT } from '../../intelligence/sender-context';
 import { resolveAndPersistOwner } from './owner-resolution';
 import {
@@ -234,6 +240,9 @@ export interface CmosAgentOnboardResult {
 
   /** Freshness of master_context relative to completed mission/session activity */
   contextFreshness: ContextFreshness;
+
+  /** s80-m07 — self-capture gap: are local commits ahead of the last CMOS write? */
+  selfCapture: SelfCaptureGap;
 
   /** Staleness detection results for decisions and learnings */
   staleness: {
@@ -589,6 +598,15 @@ export async function cmosAgentOnboard(
         warnings.push(serverHealth.stalenessMessage);
       }
 
+      // s80-m07 — self-capture guard: are local commits running ahead of the last CMOS
+      // write? Project-local, fail-open (never throws, no advisory when a signal is
+      // absent). onboardRoot is the project we're onboarding (defined above).
+      const selfCapture = calculateSelfCaptureGap(client, onboardRoot);
+      const selfCaptureWarning = buildSelfCaptureWarning(selfCapture);
+      if (selfCaptureWarning) {
+        warnings.push(selfCaptureWarning);
+      }
+
       // Detect stale next-steps (pending from >1 sprint ago)
       const staleNextStepsCount = getStaleNextStepsCount(client, currentSprint?.id ?? null);
 
@@ -636,6 +654,20 @@ export async function cmosAgentOnboard(
         serverCodeStaleActionable,
       });
 
+      // s80-m07 — surface the self-capture gap as a priority-2 action when it fires,
+      // so it flows into cmos_review's promoted next_actions (the structured path). The
+      // action must be re-sorted into priority order (generateSuggestedActions already
+      // sorted, and a bare push would tail the array — s80-m07 review — so a p2 nudge
+      // could be sliced out of cmos_review's top-3 by lower-priority actions).
+      if (selfCapture.fires) {
+        suggestedActions.push({
+          action: `Local commits are ~${Math.round(selfCapture.gapDays)}d ahead of the last CMOS write — capture recent decisions/learnings/mission progress`,
+          command: 'cmos_session(action="capture", category="decision", content="...")',
+          priority: 2,
+        });
+        suggestedActions.sort((a, b) => a.priority - b.priority);
+      }
+
       const result: CmosAgentOnboardResult = {
         project,
         currentSprint,
@@ -648,6 +680,7 @@ export async function cmosAgentOnboard(
         sessionStats,
         contextSizes,
         contextFreshness: freshnessResult.freshness,
+        selfCapture,
         staleness: {
           staleDecisions: stalenessResult.totalStaleDecisions,
           staleLearnings: stalenessResult.totalStaleLearnings,
@@ -1323,10 +1356,13 @@ async function fetchMessagingContext(warnings: string[]): Promise<MessagingSumma
         id: msg.id,
         type: msg.type,
         summary: msg.summary,
-        from: msg.from ?? null,
+        // s80-m05: attribute from the fields the dashboard actually populates
+        // (senderProject/senderDisplayName) via the shared mapper — was msg.from,
+        // which is empty on live rows and read "unknown source".
+        from: attributionSource(msg, 'inbox') ?? null,
         status: msg.status,
         createdAt: msg.createdAt,
-        provenance: foreignDescriptor(msg.from ?? msg.senderAddress ?? msg.from_project_id),
+        provenance: foreignDescriptor(attributionSource(msg, 'inbox')),
       })),
     };
   } catch {
@@ -1638,8 +1674,8 @@ async function detectSenderAttributionAmbiguity(
 
   if (!params.callerProvidedProjectRoot && advertisedRoots.length === 0) {
     try {
-      const registry = await ProjectRegistry.create();
-      const projects = await registry.list();
+      const registry = await ProjectGraphRegistry.create();
+      const projects = registry.list();
       const cwd = path.resolve(process.cwd());
       const currentRoot = path.resolve(resolvedProjectRoot);
 

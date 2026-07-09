@@ -10,7 +10,7 @@ import { promises as fs } from 'fs';
 import os from 'os';
 import path from 'path';
 import { CmosDetector } from '../../../src/intelligence/cmos-detector';
-import { ProjectRegistry } from '../../../src/intelligence/project-registry';
+import { ProjectGraphRegistry } from '../../../src/intelligence/project-graph-registry';
 import {
   cmosProjectList,
   cmosProjectListToolDefinition,
@@ -33,18 +33,25 @@ describe('cmos_project_list', () => {
   let workspace: string;
   let workspace2: string;
   let configDir: string;
-  let registry: ProjectRegistry;
+  let graph: ProjectGraphRegistry;
+  let prevConfigEnv: string | undefined;
 
   beforeEach(async () => {
     workspace = await createTempWorkspace('cmos-project-list-');
     workspace2 = await createTempWorkspace('cmos-project-list-2-');
     configDir = await createTempWorkspace('config-');
+    prevConfigEnv = process.env.CMOS_CONFIG_DIR;
+    process.env.CMOS_CONFIG_DIR = configDir;
     CmosDetector.resetInstance();
-    ProjectRegistry.resetInstance();
-    registry = await ProjectRegistry.create({ configDir });
+    ProjectGraphRegistry.resetInstance();
+    // s79-m03 — cmos_project list reads the write-authoritative graph registry.
+    graph = await ProjectGraphRegistry.create({ configDir });
   });
 
   afterEach(async () => {
+    ProjectGraphRegistry.resetInstance();
+    if (prevConfigEnv === undefined) delete process.env.CMOS_CONFIG_DIR;
+    else process.env.CMOS_CONFIG_DIR = prevConfigEnv;
     await fs.rm(workspace, { recursive: true, force: true });
     await fs.rm(workspace2, { recursive: true, force: true });
     await fs.rm(configDir, { recursive: true, force: true });
@@ -61,7 +68,7 @@ describe('cmos_project_list', () => {
 
     it('should list registered projects', async () => {
       await ensureCmosDatabase(workspace);
-      await registry.register(workspace, { name: 'Project 1' });
+      graph.registerStore(workspace, { name: 'Project 1' });
 
       const result = await cmosProjectList({});
 
@@ -74,8 +81,8 @@ describe('cmos_project_list', () => {
     it('should list multiple projects', async () => {
       await ensureCmosDatabase(workspace);
       await ensureCmosDatabase(workspace2);
-      await registry.register(workspace, { name: 'Project 1' });
-      await registry.register(workspace2, { name: 'Project 2' });
+      graph.registerStore(workspace, { name: 'Project 1' });
+      graph.registerStore(workspace2, { name: 'Project 2' });
 
       const result = await cmosProjectList({});
 
@@ -86,7 +93,7 @@ describe('cmos_project_list', () => {
 
     it('should indicate default project', async () => {
       await ensureCmosDatabase(workspace);
-      await registry.register(workspace, { name: 'Default Project', setAsDefault: true });
+      graph.registerStore(workspace, { name: 'Default Project', setAsDefault: true });
 
       const result = await cmosProjectList({});
 
@@ -99,7 +106,7 @@ describe('cmos_project_list', () => {
       const result = await cmosProjectList({});
 
       expect(result.success).toBe(true);
-      expect(result.data?.registryPath).toContain('project-registry.json');
+      expect(result.data?.registryPath).toContain('project-graph.sqlite');
     });
   });
 
@@ -131,7 +138,7 @@ describe('cmos_project_list', () => {
 
     it('should format project list', async () => {
       await ensureCmosDatabase(workspace);
-      await registry.register(workspace, { name: 'My Project' });
+      graph.registerStore(workspace, { name: 'My Project' });
 
       const result = await cmosProjectList({});
       const formatted = formatProjectListForLLM(result);
@@ -143,7 +150,7 @@ describe('cmos_project_list', () => {
 
     it('should indicate default project', async () => {
       await ensureCmosDatabase(workspace);
-      await registry.register(workspace, { name: 'Default', setAsDefault: true });
+      graph.registerStore(workspace, { name: 'Default', setAsDefault: true });
 
       const result = await cmosProjectList({});
       const formatted = formatProjectListForLLM(result);
@@ -153,7 +160,7 @@ describe('cmos_project_list', () => {
 
     it('should show project paths', async () => {
       await ensureCmosDatabase(workspace);
-      await registry.register(workspace, { name: 'My Project' });
+      graph.registerStore(workspace, { name: 'My Project' });
 
       const result = await cmosProjectList({});
       const formatted = formatProjectListForLLM(result);
@@ -165,7 +172,7 @@ describe('cmos_project_list', () => {
   describe('liveness check', () => {
     it('should set dbExists true when database is present', async () => {
       await ensureCmosDatabase(workspace);
-      await registry.register(workspace, { name: 'Live Project' });
+      graph.registerStore(workspace, { name: 'Live Project' });
 
       const result = await cmosProjectList({});
 
@@ -175,7 +182,7 @@ describe('cmos_project_list', () => {
 
     it('should set dbExists false when database has been deleted', async () => {
       await ensureCmosDatabase(workspace);
-      await registry.register(workspace, { name: 'Dead Project' });
+      graph.registerStore(workspace, { name: 'Dead Project' });
       // Delete the DB after registration
       await fs.rm(path.join(workspace, 'cmos'), { recursive: true, force: true });
 
@@ -188,8 +195,8 @@ describe('cmos_project_list', () => {
     it('should report correct missingCount across mixed entries', async () => {
       await ensureCmosDatabase(workspace);
       await ensureCmosDatabase(workspace2);
-      await registry.register(workspace, { name: 'Live' });
-      await registry.register(workspace2, { name: 'Dead' });
+      graph.registerStore(workspace, { name: 'Live' });
+      graph.registerStore(workspace2, { name: 'Dead' });
       await fs.rm(path.join(workspace2, 'cmos'), { recursive: true, force: true });
 
       const result = await cmosProjectList({});
@@ -201,7 +208,7 @@ describe('cmos_project_list', () => {
 
     it('should flag [MISSING] in formatted output for dead entries', async () => {
       await ensureCmosDatabase(workspace);
-      await registry.register(workspace, { name: 'Dead Project' });
+      graph.registerStore(workspace, { name: 'Dead Project' });
       await fs.rm(path.join(workspace, 'cmos'), { recursive: true, force: true });
 
       const result = await cmosProjectList({});
@@ -213,7 +220,7 @@ describe('cmos_project_list', () => {
 
     it('should not show missing tip when all entries are live', async () => {
       await ensureCmosDatabase(workspace);
-      await registry.register(workspace, { name: 'Live Project' });
+      graph.registerStore(workspace, { name: 'Live Project' });
 
       const result = await cmosProjectList({});
       const formatted = formatProjectListForLLM(result);
