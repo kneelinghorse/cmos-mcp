@@ -85,6 +85,58 @@ describe('deriveDrift (s80-m06 strict partition + drift)', () => {
     expect(r.drift).toBeNull();
   });
 
+  // ── s81-m03: the "unsynced" (local-ahead-of-dashboard) overlay ──────────────
+  it('s81-m03: flags a FRESH store whose mtime is > threshold ahead of last_synced_at as unsynced, without changing the partition', () => {
+    const stores = [
+      // Fresh store (mtime 1d) but last pushed 10d ago → 9d unsynced (> 3d threshold).
+      {
+        project_id: 'ahead',
+        store_path: '/s/ahead',
+        name: 'Ahead',
+        last_synced_at: NOW - 10 * DAY,
+      },
+      // Fresh + recently synced (1d ago) → within threshold → no signal.
+      {
+        project_id: 'synced',
+        store_path: '/s/synced',
+        name: 'Synced',
+        last_synced_at: NOW - 1 * DAY,
+      },
+      // Fresh but last_synced_at NULL (never pushed from here) → no-signal.
+      { project_id: 'nullsync', store_path: '/s/nullsync', name: 'NullSync', last_synced_at: null },
+    ];
+    const mtimes: Record<string, number> = {
+      [dbFile('/s/ahead')]: NOW - 1 * DAY,
+      [dbFile('/s/synced')]: NOW - 1 * DAY,
+      [dbFile('/s/nullsync')]: NOW - 1 * DAY,
+    };
+    const statFn: StoreStatFn = (p) => (p in mtimes ? mtimes[p] : null);
+
+    const r = deriveDrift(stores, [], statFn, NOW);
+
+    // Partition unchanged — all three are fresh → reachable; unsynced is an OVERLAY item.
+    expect(r.reachable).toBe(3);
+    expect(r.silent).toBe(0);
+    expect(r.reachable + r.silent + r.unmigrated + r.unreadable).toBe(stores.length);
+
+    // Exactly the 'ahead' store gets an unsynced drift item.
+    const unsynced = r.drift!.stale.filter((s) => /unsynced/.test(s.reason));
+    expect(unsynced.map((s) => s.projectId)).toEqual(['ahead']);
+    expect(unsynced[0].reason).toMatch(/local ahead of dashboard by 9d \(unsynced; this machine\)/);
+    expect(unsynced[0].ageDays).toBe(9);
+  });
+
+  it('s81-m03: NULL last_synced_at on every store yields no unsynced signal (drift=null when all fresh)', () => {
+    const stores = [
+      { project_id: 'a', store_path: '/a', name: 'A', last_synced_at: null },
+      { project_id: 'b', store_path: '/b', name: 'B' }, // last_synced_at absent → undefined
+    ];
+    const statFn: StoreStatFn = () => NOW - 1 * DAY; // both fresh
+    const r = deriveDrift(stores, [], statFn, NOW);
+    expect(r.reachable).toBe(2);
+    expect(r.drift).toBeNull();
+  });
+
   it('caps the drift list to the top-N by ageDays desc', () => {
     const stores = Array.from({ length: 12 }, (_, i) => ({
       project_id: `p${i}`,

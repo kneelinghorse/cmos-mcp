@@ -8,6 +8,15 @@ import { DashboardClient } from './dashboard-client';
 export interface OwnerResolutionResult {
   owner: string | null;
   source: 'metadata' | 'dashboard' | 'unresolved';
+  /**
+   * s81-m02 — true only when the incumbent dashboard project was POSITIVELY confirmed
+   * against a live dashboard row THIS cycle (a trusted id/slug/address match, not a
+   * self-referential dashboard_slug-hint reaffirmation). The push path relaxes its
+   * expectedSlug guard only when this is true; otherwise it keeps the stricter
+   * derive(project_name) check so a stale/wrong dashboard_slug is refused, not mis-routed.
+   * Every early return (reconcile skipped / dashboard unreachable) reports false.
+   */
+  incumbentConfirmed: boolean;
 }
 
 interface DashboardProjectLike {
@@ -35,6 +44,20 @@ function normalizeSlug(value: string | null | undefined): string | null {
   return trimmed.length > 0 ? trimmed.toLowerCase().replace(/\s+/g, '-') : null;
 }
 
+/**
+ * The result of matching the local store against the owner's dashboard projects.
+ * `confirmed` distinguishes a POSITIVE identity match (by dashboard_project_id with a
+ * passing slug cross-check, by a LOCAL stable-identity slug — project_id/project_name —
+ * or by cmos_address) from a WEAK adoption (matched only by reaffirming the local
+ * dashboard_slug hint, or the single-project fallback). Only a confirmed match may relax
+ * the push's expectedSlug guard (s81-m02 adversarial-review fix): a wrong dashboard_slug
+ * can reaffirm itself via the weak tier, so trusting it there would mis-route a push.
+ */
+interface ProjectMatch {
+  project: DashboardProjectLike | undefined;
+  confirmed: boolean;
+}
+
 function selectMatchingProject(
   projects: DashboardProjectLike[],
   hints: {
@@ -44,7 +67,7 @@ function selectMatchingProject(
     projectName: string | null;
     dashboardSlug: string | null;
   }
-): DashboardProjectLike | undefined {
+): ProjectMatch {
   const trustedSlugs = new Set(
     [hints.projectId, hints.projectName]
       .map((value) => normalizeSlug(value))
@@ -62,34 +85,48 @@ function selectMatchingProject(
       const matchedSlug = normalizeSlug(byId.slug ?? byId.name ?? null);
       const slugSetToTrust = trustedSlugs.size > 0 ? trustedSlugs : expectedSlugs;
       if (slugSetToTrust.size === 0 || (matchedSlug !== null && slugSetToTrust.has(matchedSlug))) {
-        return byId;
+        return { project: byId, confirmed: true };
       }
     }
   }
 
   if (expectedSlugs.size > 0) {
-    const bySlug =
-      (trustedSlugs.size > 0
-        ? projects.find((project) => {
-            const projectSlug = normalizeSlug(project.slug ?? project.name ?? null);
-            return projectSlug !== null && trustedSlugs.has(projectSlug);
-          })
-        : undefined) ??
-      projects.find((project) => {
+    // Trusted tier: match by a LOCAL stable-identity slug (project_id / project_name).
+    // These are the store's own identity, not dashboard-echoed state — a positive match.
+    if (trustedSlugs.size > 0) {
+      const byTrusted = projects.find((project) => {
         const projectSlug = normalizeSlug(project.slug ?? project.name ?? null);
-        return projectSlug !== null && expectedSlugs.has(projectSlug);
+        return projectSlug !== null && trustedSlugs.has(projectSlug);
       });
-    if (bySlug) return bySlug;
+      if (byTrusted) return { project: byTrusted, confirmed: true };
+    }
+    // Weak tier: the only slug in expectedSlugs NOT already tried above is the local
+    // dashboard_slug hint, so a match here is self-referential — a wrong dashboard_slug
+    // reaffirms itself. Adopt the row (so a legit divergent-name copy still resolves an
+    // owner) but mark it UNCONFIRMED so the push guard is NOT relaxed on its say-so.
+    const byExpected = projects.find((project) => {
+      const projectSlug = normalizeSlug(project.slug ?? project.name ?? null);
+      return projectSlug !== null && expectedSlugs.has(projectSlug);
+    });
+    if (byExpected) return { project: byExpected, confirmed: false };
   }
 
   if (hints.cmosAddress) {
     const byAddress = projects.find(
       (project) => (project.cmosAddress ?? project.address ?? null) === hints.cmosAddress
     );
-    if (byAddress) return byAddress;
+    if (byAddress) return { project: byAddress, confirmed: true };
   }
 
-  return projects[0];
+  // s81-m02: only fall back to projects[0] when the account holds exactly ONE project
+  // (unambiguous — a fresh store adopting the account's sole project). In a MULTI-project
+  // account with no confident id/slug/address match, return undefined rather than
+  // mis-adopting an arbitrary first project's slug/id — resolveAndPersistOwner persists
+  // the matched slug/id back to local metadata (below), so a wrong pick corrupts the
+  // push key and mints a dup container on the next checkpoint. Undefined = "no confident
+  // incumbent" → the caller leaves the local key untouched. The single-project fallback is
+  // unambiguous but is NOT a positive identity confirmation, so it stays `confirmed: false`.
+  return { project: projects.length === 1 ? projects[0] : undefined, confirmed: false };
 }
 
 function readMetadata(client: CmosDatabaseClient, key: string): string | null {
@@ -148,7 +185,7 @@ export async function resolveAndPersistOwner(
   const localProjectName = readMetadata(client, 'project_name');
 
   if (existing && !needsProjectIdentityRepair && !localProjectId) {
-    return { owner: existing, source: 'metadata' };
+    return { owner: existing, source: 'metadata', incumbentConfirmed: false };
   }
 
   let dashClient: DashboardClient | null = dashClientOverride ?? null;
@@ -156,8 +193,8 @@ export async function resolveAndPersistOwner(
     const envResult = DashboardClient.fromEnv();
     if (!envResult.success || !envResult.data) {
       return existing
-        ? { owner: existing, source: 'metadata' }
-        : { owner: null, source: 'unresolved' };
+        ? { owner: existing, source: 'metadata', incumbentConfirmed: false }
+        : { owner: null, source: 'unresolved', incumbentConfirmed: false };
     }
     dashClient = envResult.data;
   }
@@ -167,20 +204,21 @@ export async function resolveAndPersistOwner(
   const probe = await dashClient.getMyProjects();
   if (!probe.success) {
     return existing
-      ? { owner: existing, source: 'metadata' }
-      : { owner: null, source: 'unresolved' };
+      ? { owner: existing, source: 'metadata', incumbentConfirmed: false }
+      : { owner: null, source: 'unresolved', incumbentConfirmed: false };
   }
 
   const identity = dashClient.userIdentity;
   let username = identity?.username ?? null;
   const projects = (probe.data?.projects ?? []) as DashboardProjectLike[];
-  const matchedProject = selectMatchingProject(projects, {
+  const match = selectMatchingProject(projects, {
     dashboardProjectId: localProjectId,
     cmosAddress: currentAddress,
     projectId: localProjectKey,
     projectName: localProjectName,
     dashboardSlug: localDashboardSlug,
   });
+  const matchedProject = match.project;
 
   if (matchedProject?.slug && matchedProject.slug.trim().length > 0) {
     writeMetadata(client, 'dashboard_slug', matchedProject.slug.trim());
@@ -201,12 +239,12 @@ export async function resolveAndPersistOwner(
 
   if (!username || username.trim().length === 0) {
     return existing
-      ? { owner: existing, source: 'metadata' }
-      : { owner: null, source: 'unresolved' };
+      ? { owner: existing, source: 'metadata', incumbentConfirmed: match.confirmed }
+      : { owner: null, source: 'unresolved', incumbentConfirmed: match.confirmed };
   }
 
   const trimmed = username.trim();
   writeMetadata(client, 'owner', trimmed);
   writeMetadata(client, 'dashboard_username', trimmed);
-  return { owner: trimmed, source: 'dashboard' };
+  return { owner: trimmed, source: 'dashboard', incumbentConfirmed: match.confirmed };
 }

@@ -27,6 +27,7 @@ import { resolveAndPersistOwner } from './owner-resolution';
 import { backfillUnknownCmosAddress } from './project-identity';
 import { captureRegisterResponse } from '../../auth/project-key-capture';
 import { CredentialStore } from '../../intelligence/credential-store';
+import { ProjectGraphRegistry } from '../../intelligence/project-graph-registry';
 
 // ─── Sprint 70 m04: device-code credential gate ──────────────────────────────
 
@@ -60,6 +61,8 @@ interface CheckResult {
   sqlitePath: string;
   projectSlug: string | null;
   expectedSlug: string | null;
+  /** s81-m03 — the store's stable metadata.project_id (registry key for last_synced_at). */
+  projectId: string | null;
 }
 
 function deriveProjectSlug(projectName: string): string {
@@ -81,7 +84,12 @@ async function checkAndRegister(
   try {
     await withClientAsync(
       async (client) => {
-        captured = { sqlitePath: client.path, projectSlug: null, expectedSlug: null };
+        captured = {
+          sqlitePath: client.path,
+          projectSlug: null,
+          expectedSlug: null,
+          projectId: null,
+        };
 
         const nameResult = client.getOne<{ value: string }>(
           `SELECT value FROM metadata WHERE key = 'project_name'`
@@ -89,11 +97,22 @@ async function checkAndRegister(
         const projectName = (nameResult.success && nameResult.data?.value) || '';
         captured.expectedSlug = projectName ? deriveProjectSlug(projectName) : null;
 
+        // s81-m03: capture the stable project_id — the project-graph registry key for
+        // recording the converged-push time (last_synced_at) after a successful sync.
+        const pidResult = client.getOne<{ value: string }>(
+          `SELECT value FROM metadata WHERE key = 'project_id'`
+        );
+        captured.projectId = (pidResult.success && pidResult.data?.value) || null;
+
         // Sprint 52 m01: seed metadata.owner from dashboard identity and rewrite any
         // legacy `cmos://unknown/*` address. Runs on every checkpoint so downstream
         // dashboard relays see the canonical address for sender attribution.
+        // s81-m02: capture whether the reconcile POSITIVELY confirmed the incumbent this
+        // cycle — only then may the expectedSlug guard be relaxed (below).
+        let incumbentConfirmed = false;
         try {
-          await resolveAndPersistOwner(client, dashClient);
+          const ownerResult = await resolveAndPersistOwner(client, dashClient);
+          incumbentConfirmed = ownerResult.incumbentConfirmed;
           backfillUnknownCmosAddress(client);
         } catch {
           // best-effort — never block the registration/sync flow
@@ -109,6 +128,19 @@ async function checkAndRegister(
             `SELECT value FROM metadata WHERE key = 'dashboard_slug'`
           );
           captured.projectSlug = (slugResult.success && slugResult.data?.value) || null;
+          // s81-m02 defect-2 (adversarial-review-hardened): on the SYNC path, relax the
+          // expectedSlug guard to the RECONCILED incumbent dashboard_slug ONLY when the
+          // reconcile CONFIRMED that incumbent against a live dashboard row this cycle
+          // (trusted id/slug/address match — not a self-referential dashboard_slug-hint
+          // reaffirmation, not a getMyProjects failure). A confirmed incumbent lets a
+          // same-owner byte-copy under a divergent name sync (the T4 goal). When NOT
+          // confirmed we KEEP the stricter derive(project_name) guard (set at line 90) so
+          // a stale/wrong dashboard_slug is refused with EXPECTED_SLUG_MISMATCH rather than
+          // mis-routing the push into a sibling project's row. cmos-mcp-pro confirms via
+          // byId every cycle, so its behavior is unchanged.
+          if (incumbentConfirmed) {
+            captured.expectedSlug = captured.projectSlug;
+          }
           return createSuccess(undefined);
         }
 
@@ -258,8 +290,31 @@ export function triggerCheckpointBackfill(options: {
             (countSummary ? ` — ${countSummary}` : '') +
             (d.errors.length > 0 ? ` — ${d.errors.length} error(s)` : '')
         );
+        // s81-m03: the converged push succeeded — record last_synced_at so cmos_review
+        // can flag 'local ahead of dashboard (unsynced)' drift with NO network round-trip
+        // (read free off registry.list(), #671). ISOLATED try: this is the push path's
+        // only registry write, on a per-user file shared by sibling MCP processes — a
+        // lock/ALTER/UPDATE error must NEVER fail or block this fire-and-forget checkpoint.
+        if (info.projectId) {
+          try {
+            const registry = await ProjectGraphRegistry.create();
+            registry.updateLastSynced(info.projectId, Date.now());
+          } catch {
+            // best-effort — a registry bookkeeping write never gates a checkpoint sync.
+          }
+        }
       } else if (!result.success) {
-        console.error(`[CHECKPOINT] File sync failed: ${result.error?.message ?? 'unknown'}`);
+        // s81-m01 NO-FALLBACK GAP: unlike the direct cmosDbBackfill path (which drops
+        // to event-replay and now surfaces a warnings[] entry on file-sync failure),
+        // the auto-checkpoint path for a REGISTERED project is file-sync-ONLY. On
+        // failure there is no event-replay retry this cycle — the checkpoint simply
+        // did not sync, and the next checkpoint boundary retries the full file. This
+        // is acceptable for a fire-and-forget path (idempotent, self-healing on the
+        // next boundary), but the gap is intentional and documented so a future
+        // silent-lag investigation starts here, not from scratch.
+        console.error(
+          `[CHECKPOINT] File sync failed (no event-replay fallback on this path): ${result.error?.message ?? 'unknown'}`
+        );
       }
     } else {
       // Fallback: event-replay backfill (no slug — project not yet registered)

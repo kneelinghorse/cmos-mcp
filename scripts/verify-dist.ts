@@ -161,6 +161,58 @@ async function main(): Promise<void> {
       `digestSizeBytes=${review2?.digestSizeBytes}`
     );
 
+    // --- s81-m03: the "unsynced" drift class must NOT false-fire on a fresh store
+    //     (last_synced_at is NULL = no-signal; it never fabricates a positive). The
+    //     partition-sum + budget checks above already prove the overlay never inflates
+    //     the partition or the digest.
+    const driftStale =
+      (
+        review2 as {
+          portfolio?: { drift?: { stale?: Array<{ reason?: string }> } | null };
+        }
+      )?.portfolio?.drift?.stale ?? [];
+    check(
+      's81-m03: no false "unsynced" drift on a fresh store (NULL last_synced_at = no-signal)',
+      Array.isArray(driftStale) && !driftStale.some((d) => /unsynced/i.test(d?.reason ?? '')),
+      `drift=${JSON.stringify(driftStale)}`
+    );
+
+    // --- s81-m06: cmos_sprint(complete) carries the next_steps TABLE reconcile receipt
+    //     (nextStepsReconciled / nextStepsCarried / pendingFlagged). Drive a minimal
+    //     empty-sprint close on a fresh project and assert the receipt SHAPE shipped in dist.
+    const projectDir3 = mkTmp('cmos-verify-m06-');
+    await h.callOk('cmos_project', {
+      action: 'init',
+      projectRoot: projectDir3,
+      projectName: 'verify-m06',
+    });
+    await h.callOk('cmos_sprint', {
+      action: 'add',
+      projectRoot: projectDir3,
+      sprintId: 'sv-1',
+      title: 'SV1',
+      focus: 'verify',
+    });
+    const closeData = h.dataOf(
+      await h.callOk('cmos_sprint', {
+        action: 'complete',
+        projectRoot: projectDir3,
+        sprintId: 'sv-1',
+        summary: 'verify:dist reconcile-receipt shape',
+      })
+    ) as { nextStepsReconciled?: unknown; nextStepsCarried?: unknown; pendingFlagged?: unknown };
+    check(
+      's81-m06: cmos_sprint(complete) returns the next_steps reconcile receipt shape',
+      typeof closeData?.nextStepsReconciled === 'number' &&
+        typeof closeData?.nextStepsCarried === 'number' &&
+        Array.isArray(closeData?.pendingFlagged),
+      `receipt=${JSON.stringify({
+        reconciled: closeData?.nextStepsReconciled,
+        carried: closeData?.nextStepsCarried,
+        flagged: closeData?.pendingFlagged,
+      })}`
+    );
+
     // Mode (i): from a REAL project cwd, a pin-only read (mission list, no projectRoot)
     // resolves to the sender and succeeds — scoped, not fanned out.
     const pinnedRead = await h.callTool('cmos_mission', { action: 'list' });

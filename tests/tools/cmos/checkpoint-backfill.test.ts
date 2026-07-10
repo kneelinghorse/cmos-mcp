@@ -136,6 +136,9 @@ describe('checkpoint-backfill', () => {
 
     await new Promise((resolve) => setImmediate(resolve));
 
+    // s81-m02: the reconcile is not CONFIRMED in this mock (stub dashClient has no
+    // getMyProjects → resolveAndPersistOwner throws), so the expectedSlug guard is NOT
+    // relaxed; with no project_name it stays undefined (the strict, pre-relaxation value).
     expect(mockSyncSqliteFile).toHaveBeenCalledWith(
       '/tmp/test/cmos/db/cmos.sqlite',
       'test-project',
@@ -149,6 +152,7 @@ describe('checkpoint-backfill', () => {
 
     await new Promise((resolve) => setImmediate(resolve));
 
+    // s81-m02: not confirmed in this mock → guard not relaxed → expectedSlug undefined.
     expect(mockSyncSqliteFile).toHaveBeenCalledWith(
       '/tmp/test/cmos/db/cmos.sqlite',
       'test-project',
@@ -350,11 +354,77 @@ describe('checkpoint-backfill auto-registration', () => {
 
     // Registration skipped — registerProject not called
     expect(mockRegister).not.toHaveBeenCalled();
-    // File sync runs using existing slug
+    // File sync runs using existing slug; not confirmed in this mock (no getMyProjects) →
+    // guard not relaxed → expectedSlug undefined (no project_name) (s81-m02).
     expect(mockSyncSqliteFile).toHaveBeenCalledWith(
       '/tmp/test/cmos/db/cmos.sqlite',
       'my-project',
       undefined
+    );
+  });
+
+  it('s81-m02: relaxes expectedSlug to the incumbent slug ONLY when the reconcile CONFIRMS it (byId trusted match)', async () => {
+    // A fully-populated registered store whose local project_id slug matches the incumbent
+    // dashboard row → resolveAndPersistOwner confirms via byId → the guard is relaxed so a
+    // divergent-name copy could sync. Proven by expectedSlug == projectSlug on the call.
+    const confirmingSync = jest.fn<any>().mockResolvedValue(makeSyncResult());
+    const confirmingClient = {
+      // getMyProjects returns the incumbent row so byId('id1') passes its slug cross-check.
+      getMyProjects: jest.fn<any>().mockResolvedValue({
+        success: true,
+        data: {
+          projects: [
+            { id: 'other', name: 'Other', slug: 'other', owner: 'derek' },
+            { id: 'id1', name: 'Test Project', slug: 'test-project', owner: 'derek' },
+          ],
+          totalCount: 2,
+        },
+      }),
+      syncSqliteFile: confirmingSync,
+    };
+    mockFromEnvForProject.mockResolvedValue({
+      success: true,
+      data: { client: confirmingClient as any, keySource: 'user-scoped', matchedProjectRoot: null },
+    });
+    const META: Record<string, string> = {
+      dashboard_registered: 'true',
+      dashboard_slug: 'test-project',
+      dashboard_project_id: 'id1',
+      project_id: 'test-project',
+      project_name: 'Test Project',
+    };
+    mockWithClientAsync.mockImplementation(async (fn) => {
+      const mockClient = {
+        path: '/tmp/test/cmos/db/cmos.sqlite',
+        getOne: jest.fn().mockImplementation((sql: any, params?: any) => {
+          // resolveAndPersistOwner.readMetadata uses parameterized `key = ?` (key in params[0]).
+          if (sql.includes('WHERE key = ?') && Array.isArray(params)) {
+            const key = params[0] as string;
+            return { success: true, data: key in META ? { value: META[key] } : null };
+          }
+          // checkAndRegister uses inline keys; contexts(project_identity)/owner → null.
+          if (sql.includes('dashboard_registered'))
+            return { success: true, data: { value: 'true' } };
+          if (sql.includes('dashboard_slug'))
+            return { success: true, data: { value: 'test-project' } };
+          if (sql.includes("key = 'project_name'"))
+            return { success: true, data: { value: 'Test Project' } };
+          return { success: true, data: null };
+        }),
+        getMany: jest.fn().mockReturnValue({ success: true, data: [] }),
+        execute: jest.fn().mockReturnValue({ success: true }),
+      };
+      return fn(mockClient as any);
+    });
+
+    await triggerCheckpointBackfill({ projectRoot: '/tmp/test', force: false });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // Confirmed incumbent → expectedSlug relaxed to the incumbent slug (== projectSlug).
+    expect(confirmingSync).toHaveBeenCalledWith(
+      '/tmp/test/cmos/db/cmos.sqlite',
+      'test-project',
+      'test-project'
     );
   });
 
@@ -684,6 +754,7 @@ describe('checkpoint-backfill auto-registration', () => {
 
       await triggerCheckpointBackfill({ projectRoot: '/tmp/test', force: true });
       expect(mockFromEnvForProject).toHaveBeenCalled();
+      // s81-m02: not confirmed in this mock → guard not relaxed → expectedSlug undefined.
       expect(mockSync).toHaveBeenCalledWith(
         '/tmp/test/cmos/db/cmos.sqlite',
         'test-project',

@@ -211,6 +211,20 @@ export function ensureProjectIdentityRow(client: CmosDatabaseClient): MigrationR
     }
   }
 
+  // s81-m04: seed the description preferring a NON-EMPTY source in this order — the
+  // canonical `metadata.project_description` durability seed, then the master_context
+  // `project` section, then the chosen `projectSection`. The old
+  // `extractStr(projectSection, 'description')` alone seeded an EMPTY description whenever
+  // the `project_identity` section existed but was description-less (it wins the
+  // `?? getMasterContextSection('project')` precedence above), ignoring a non-empty
+  // `project` section — the Fork B split-brain root (Layer-0 row description went EMPTY
+  // while master_context held the correct string).
+  const seededDescription =
+    (getMetadataValue(client, 'project_description') ?? '').trim() ||
+    extractStr(getMasterContextSection(client, 'project'), 'description') ||
+    extractStr(projectSection, 'description') ||
+    '';
+
   const identity: ProjectIdentityData = {
     ...IDENTITY_TEMPLATE,
     project_id: projectId,
@@ -218,7 +232,7 @@ export function ensureProjectIdentityRow(client: CmosDatabaseClient): MigrationR
     cmos_address: buildCmosAddress(owner, slugOrName),
     tier,
     status: extractStr(projectSection, 'status') || 'active_development',
-    description: extractStr(projectSection, 'description') || '',
+    description: seededDescription,
     created_at: getMetadataValue(client, 'seeded_at') ?? now,
     updated_at: now,
   };

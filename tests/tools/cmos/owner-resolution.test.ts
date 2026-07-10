@@ -309,6 +309,110 @@ describe('resolveAndPersistOwner', () => {
     }
   });
 
+  it('s81-m02: does NOT mis-adopt an unrelated project slug/id in a multi-project account with no matching hint', async () => {
+    const { tempDir, client } = await makeTempClient();
+    try {
+      // Local store carries hints that match NONE of the account's projects.
+      client.execute(`INSERT INTO metadata (key, value) VALUES ('project_id', 'orphan-local')`);
+      client.execute(`INSERT INTO metadata (key, value) VALUES ('project_name', 'Orphan Local')`);
+
+      const result = await resolveAndPersistOwner(
+        client,
+        stubDashboardClient({
+          username: 'derek',
+          projects: [
+            { id: 'p1', name: 'Alpha', slug: 'alpha', cmosAddress: 'cmos://derek/alpha' },
+            { id: 'p2', name: 'Beta', slug: 'beta', cmosAddress: 'cmos://derek/beta' },
+          ],
+        })
+      );
+
+      // Owner still resolves from the authenticated identity (no regression)...
+      expect(result.owner).toBe('derek');
+      expect(readMeta(client, 'owner')).toBe('derek');
+      // ...but the arbitrary projects[0] slug/id are NOT persisted back to local metadata.
+      expect(readMeta(client, 'dashboard_slug')).toBeNull();
+      expect(readMeta(client, 'dashboard_project_id')).toBeNull();
+    } finally {
+      cleanup(tempDir, client);
+    }
+  });
+
+  it('s81-m02: single-project account still adopts its sole project (unambiguous fallback preserved)', async () => {
+    const { tempDir, client } = await makeTempClient();
+    try {
+      const result = await resolveAndPersistOwner(
+        client,
+        stubDashboardClient({
+          username: null,
+          projects: [{ id: 'p-solo', name: 'Solo', slug: 'solo', owner: 'derek' }],
+        })
+      );
+
+      expect(result.owner).toBe('derek');
+      expect(readMeta(client, 'dashboard_slug')).toBe('solo');
+      expect(readMeta(client, 'dashboard_project_id')).toBe('p-solo');
+    } finally {
+      cleanup(tempDir, client);
+    }
+  });
+
+  it('s81-m02: reports incumbentConfirmed=true for a TRUSTED match (local project_id slug matches the incumbent row)', async () => {
+    const { tempDir, client } = await makeTempClient();
+    try {
+      client.execute(`INSERT INTO metadata (key, value) VALUES ('dashboard_project_id', 'id1')`);
+      client.execute(`INSERT INTO metadata (key, value) VALUES ('dashboard_slug', 'stage1')`);
+      client.execute(`INSERT INTO metadata (key, value) VALUES ('project_id', 'stage1')`);
+      client.execute(`INSERT INTO metadata (key, value) VALUES ('project_name', 'Stage1')`);
+
+      const result = await resolveAndPersistOwner(
+        client,
+        stubDashboardClient({
+          username: 'derek',
+          projects: [
+            { id: 'other', name: 'Other', slug: 'other', owner: 'derek' },
+            { id: 'id1', name: 'Stage1', slug: 'stage1', owner: 'derek' },
+          ],
+        })
+      );
+
+      // byId('id1') matches and its slug 'stage1' is in trustedSlugs (from project_id) → confirmed.
+      expect(result.incumbentConfirmed).toBe(true);
+      expect(readMeta(client, 'dashboard_slug')).toBe('stage1');
+    } finally {
+      cleanup(tempDir, client);
+    }
+  });
+
+  it('s81-m02: reports incumbentConfirmed=false for a WEAK match (only the local dashboard_slug hint matches — a wrong slug reaffirms itself)', async () => {
+    const { tempDir, client } = await makeTempClient();
+    try {
+      // Local identity (project_id/name) matches NO project; dashboard_slug points at a
+      // sibling. The sibling matches only via the dashboard_slug hint (weak tier).
+      client.execute(`INSERT INTO metadata (key, value) VALUES ('project_id', 'orphan')`);
+      client.execute(`INSERT INTO metadata (key, value) VALUES ('project_name', 'Orphan')`);
+      client.execute(`INSERT INTO metadata (key, value) VALUES ('dashboard_slug', 'sibling')`);
+
+      const result = await resolveAndPersistOwner(
+        client,
+        stubDashboardClient({
+          username: 'derek',
+          projects: [
+            { id: 'ida', name: 'Alpha', slug: 'alpha', owner: 'derek' },
+            { id: 'idb', name: 'Sibling', slug: 'sibling', owner: 'derek' },
+          ],
+        })
+      );
+
+      // Owner still resolves, but the incumbent is NOT confirmed — the push must not relax
+      // its guard on a self-referential dashboard_slug-hint match.
+      expect(result.owner).toBe('derek');
+      expect(result.incumbentConfirmed).toBe(false);
+    } finally {
+      cleanup(tempDir, client);
+    }
+  });
+
   it('returns unresolved when dashboard auth fails', async () => {
     const { tempDir, client } = await makeTempClient();
     try {

@@ -1165,4 +1165,145 @@ describe('cmos_sprint_complete', () => {
       expect(formatted).toContain('Total context size');
     });
   });
+
+  describe('s81-m06 next_steps TABLE reconciliation', () => {
+    /** Create + seed the next_steps table (absent from the base fixture schema). */
+    function seedNextStepsTable(
+      rows: Array<{
+        id: number;
+        content: string;
+        status: string;
+        sprintId: string | null;
+        missionId: string | null;
+      }>
+    ): void {
+      const db = new Database(dbPath);
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS next_steps (
+          id INTEGER PRIMARY KEY,
+          content TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending',
+          session_id TEXT,
+          sprint_id TEXT,
+          mission_id TEXT,
+          created_at TEXT NOT NULL,
+          resolved_at TEXT
+        );
+      `);
+      const insert = db.prepare(
+        `INSERT INTO next_steps (id, content, status, sprint_id, mission_id, created_at)
+         VALUES (?, ?, ?, ?, ?, '2026-03-05T00:00:00Z')`
+      );
+      for (const r of rows) insert.run(r.id, r.content, r.status, r.sprintId, r.missionId);
+      db.close();
+    }
+
+    function readNextStep(id: number): { status: string; resolved_at: string | null } {
+      const db = new Database(dbPath, { readonly: true });
+      const row = db.prepare('SELECT status, resolved_at FROM next_steps WHERE id = ?').get(id) as {
+        status: string;
+        resolved_at: string | null;
+      };
+      db.close();
+      return row;
+    }
+
+    it('auto-completes ONLY mission-FK-certain rows, carries blocked-linked, flags the rest, never touches free-text', async () => {
+      seedMissions([
+        { id: 's22-m01', status: 'Completed' },
+        { id: 's22-m02', status: 'Blocked', notes: '[Blocked] waiting' },
+      ]);
+      seedContexts({}, {});
+      seedNextStepsTable([
+        // A: pending, FK to a Completed mission → AUTO-complete.
+        {
+          id: 1,
+          content: 'wrap up s22-m01',
+          status: 'pending',
+          sprintId: 'sprint-22',
+          missionId: 's22-m01',
+        },
+        // B: pending, FK to a Blocked mission → CARRY (stay pending).
+        {
+          id: 2,
+          content: 'blocked follow-up',
+          status: 'pending',
+          sprintId: 'sprint-22',
+          missionId: 's22-m02',
+        },
+        // C: pending, sprint-linked but NO mission FK (free-text) → FLAG (stay pending).
+        {
+          id: 3,
+          content: 'free-text idea, did it ship?',
+          status: 'pending',
+          sprintId: 'sprint-22',
+          missionId: null,
+        },
+        // D: pending, a DIFFERENT sprint → UNTOUCHED (not sprint-scoped to the closing sprint).
+        {
+          id: 4,
+          content: 'other sprint work',
+          status: 'pending',
+          sprintId: 'sprint-99',
+          missionId: null,
+        },
+        // E: already completed, FK to a Completed mission → UNTOUCHED (not pending).
+        {
+          id: 5,
+          content: 'already done',
+          status: 'completed',
+          sprintId: 'sprint-22',
+          missionId: 's22-m01',
+        },
+      ]);
+
+      const result = await cmosSprintComplete({
+        sprintId: 'sprint-22',
+        summary: 'closeout reconcile',
+        projectRoot: getProjectRoot(),
+      });
+
+      expect(result.success).toBe(true);
+      // Receipt counts.
+      expect(result.data?.nextStepsReconciled).toBe(1);
+      expect(result.data?.nextStepsCarried).toBe(1);
+      expect(result.data?.pendingFlagged).toEqual([
+        { id: 3, content: 'free-text idea, did it ship?', missionId: null },
+      ]);
+
+      // Row-level effects.
+      expect(readNextStep(1).status).toBe('completed'); // auto-completed
+      expect(readNextStep(1).resolved_at).not.toBeNull();
+      expect(readNextStep(2).status).toBe('pending'); // carried (blocked-linked)
+      expect(readNextStep(3).status).toBe('pending'); // flagged, never guessed-closed
+      expect(readNextStep(4).status).toBe('pending'); // other sprint, untouched
+      expect(readNextStep(5).status).toBe('completed'); // already completed, unchanged
+    });
+
+    it('no-ops safely when there are no pending sprint-linked next_steps rows', async () => {
+      seedMissions([{ id: 's22-m01', status: 'Completed' }]);
+      seedContexts({}, {});
+      seedNextStepsTable([
+        {
+          id: 1,
+          content: 'other sprint',
+          status: 'pending',
+          sprintId: 'sprint-99',
+          missionId: null,
+        },
+      ]);
+
+      const result = await cmosSprintComplete({
+        sprintId: 'sprint-22',
+        summary: 'empty reconcile',
+        projectRoot: getProjectRoot(),
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.data?.nextStepsReconciled).toBe(0);
+      expect(result.data?.nextStepsCarried).toBe(0);
+      expect(result.data?.pendingFlagged).toEqual([]);
+      expect(readNextStep(1).status).toBe('pending'); // untouched
+    });
+  });
 });

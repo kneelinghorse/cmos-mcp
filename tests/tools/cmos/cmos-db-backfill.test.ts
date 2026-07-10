@@ -499,6 +499,84 @@ describe('cmosDbBackfill', () => {
     // Fell back to event-replay — totalEvents is the sprint count, not file-based
     expect(result.data?.totalEvents).toBe(1);
     expect(result.data?.message).not.toMatch(/File-based sync/);
+    // s81-m01: the fallback is no longer silent — it surfaces a structured warning
+    // on the result (not stderr-only) so a degraded sync path is audible to callers.
+    expect(result.data?.warnings).toBeDefined();
+    expect(result.data?.warnings?.some((w) => /fell back to slower event-replay/i.test(w))).toBe(
+      true
+    );
+  });
+
+  it('s81-m02: a store missing project_id/name but registered (dashboard_slug present) repairs from the incumbent slug — never pushes as Unknown — and file-sync is NOT rejected by expectedSlug', async () => {
+    // Renamed-copy shape: no project_id/project_name (would fall to directory basename
+    // 'cmos-backfill-test-*', which ≠ the incumbent slug), but dashboard_slug carries the
+    // reconciled incumbent. Defect-3: identity repairs from dashboard_slug (not 'Unknown',
+    // not the divergent directory basename). Defect-2: expectedSlug=slug, so the file-sync
+    // guard does NOT reject with EXPECTED_SLUG_MISMATCH and we stay on the file path.
+    const db = new Database(dbPath);
+    db.exec(`
+      CREATE TABLE sprints (id TEXT PRIMARY KEY, title TEXT NOT NULL, focus TEXT, status TEXT, start_date TEXT, end_date TEXT, total_missions INTEGER, completed_missions INTEGER);
+      CREATE TABLE missions (id TEXT PRIMARY KEY, sprint_id TEXT, name TEXT NOT NULL, status TEXT NOT NULL, notes TEXT, objective TEXT, context TEXT, success_criteria TEXT, deliverables TEXT, reference_docs TEXT, domain_fields TEXT, metadata TEXT, created_at TEXT, started_at TEXT, completed_at TEXT);
+      CREATE TABLE sessions (id TEXT PRIMARY KEY, type TEXT NOT NULL, title TEXT NOT NULL, sprint_id TEXT, started_at TEXT NOT NULL, completed_at TEXT, agent TEXT NOT NULL DEFAULT 'test', summary TEXT, status TEXT NOT NULL, captures TEXT, next_steps TEXT, metadata TEXT);
+      CREATE TABLE contexts (id TEXT PRIMARY KEY, source_path TEXT NOT NULL, content TEXT NOT NULL, updated_at TEXT);
+      CREATE TABLE strategic_decisions (id INTEGER PRIMARY KEY AUTOINCREMENT, context_id TEXT NOT NULL DEFAULT 'master_context', decision_text TEXT NOT NULL, created_at TEXT NOT NULL, sprint_id TEXT, snapshot_id INTEGER, project_domain TEXT, session_id TEXT, mission_id TEXT, source_chunk_ids TEXT);
+      CREATE TABLE learnings (id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT NOT NULL, category TEXT, status TEXT NOT NULL DEFAULT 'active', sprint_id TEXT, session_id TEXT, mission_id TEXT, created_at TEXT NOT NULL);
+      CREATE TABLE mission_dependencies (from_id TEXT NOT NULL, to_id TEXT NOT NULL, type TEXT NOT NULL, PRIMARY KEY (from_id, to_id));
+      CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      INSERT INTO metadata (key, value) VALUES ('dashboard_slug', 'incumbent-proj');
+    `);
+    db.close();
+
+    const backfillBodies: string[] = [];
+    fetchMock.mockImplementation(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url.includes('/api/auth/login')) {
+        return new Response(
+          JSON.stringify({
+            success: true,
+            data: {
+              token: 'test-token',
+              expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+              user: { id: 'u1', email: 'test@example.com', projects: [] },
+            },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.includes('/api/sync/sqlite-backfill')) {
+        // FormData body — capture the projectSlug field to confirm the incumbent slug.
+        const form = init?.body as FormData | undefined;
+        backfillBodies.push(String(form?.get?.('projectSlug') ?? ''));
+        return new Response(
+          JSON.stringify({ success: true, counts: { sprints: 0 }, errors: [], durationMs: 5 }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return new Response(JSON.stringify({ success: true, data: {} }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    const result = await cmosDbBackfill({ projectRoot: tempDir });
+
+    // Defect-2: stayed on the file path (guard did not reject) — NOT event-replay.
+    expect(result.success).toBe(true);
+    expect(result.data?.message).toMatch(/File-based sync complete/);
+    expect(backfillBodies).toContain('incumbent-proj');
+
+    // Defect-3: identity was repaired from the incumbent slug, never 'Unknown'.
+    const verifyDb = new Database(dbPath);
+    const pid = verifyDb.prepare(`SELECT value FROM metadata WHERE key = 'project_id'`).get() as
+      | { value: string }
+      | undefined;
+    const pname = verifyDb
+      .prepare(`SELECT value FROM metadata WHERE key = 'project_name'`)
+      .get() as { value: string } | undefined;
+    verifyDb.close();
+    expect(pid?.value).toBe('incumbent-proj');
+    expect(pname?.value).not.toBe('Unknown');
+    expect(pname?.value).toBe('Incumbent Proj');
   });
 
   // ─── Q3 dashboard-ingest gate (dashboard msg 03064b74; carry-forward #770) ───

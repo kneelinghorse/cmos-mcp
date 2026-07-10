@@ -50,6 +50,12 @@ const ALLOWLIST = new Set<string>([
   'cmos-project-init.ts',
   'cmos-project-validate.ts',
   'cmos-project-sweep.ts',
+  // s81-m03: the checkpoint push path does a SINGLE-PROJECT registry WRITE
+  // (updateLastSynced, keyed by the store's OWN project_id) after a converged push — it
+  // records last_synced_at for the drift signal. It is NOT a pin-only read and does NOT
+  // fan out across stores (no queryAcrossStores / cross-store-queries), so it does not
+  // violate the sender-scoping this gate protects.
+  'checkpoint-backfill.ts',
 ]);
 
 // Matches an import from the cross-store fan-out modules OR the project-graph registry —

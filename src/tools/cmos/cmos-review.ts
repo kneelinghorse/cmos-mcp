@@ -249,6 +249,15 @@ const SPRINT_FOCUS_TRIM_CAP_CHARS = 160;
 /** s80-m06 — a store with no CMOS write in more than this many days is "silent" (drift). */
 const STALE_THRESHOLD_DAYS = 21;
 
+/**
+ * s81-m03 — a FRESH store whose local mtime is more than this many days ahead of its
+ * persisted `last_synced_at` (last dashboard-converged push from THIS machine) is flagged
+ * "local ahead of dashboard (unsynced)". Deliberately SHORTER than the 21d silent
+ * threshold — this catches unpushed LOCAL work, a different axis from a dead store.
+ * NULL `last_synced_at` (pre-v2 / never-pushed) = no-signal, so it never false-positives.
+ */
+const UNSYNCED_THRESHOLD_DAYS = 3;
+
 /** s80-m06 — cap on the per-project drift list (top-N by ageDays) to bound digest bytes. */
 const DRIFT_TOP_N = 8;
 
@@ -517,15 +526,22 @@ const defaultStoreStatFn: StoreStatFn = (filePath) => {
  * by `cmos_review`'s own touch, so it is NOT used here. Returns null when neither file
  * can be stat'd.
  */
-function storeAgeDays(storePath: string, statFn: StoreStatFn, nowMs: number): number | null {
+/** The newest mtime (Unix ms) across a store's cmos.sqlite + -wal sidecar, or null. */
+function storeMtimeMs(storePath: string, statFn: StoreStatFn): number | null {
   const base = path.join(storePath, 'cmos', 'db', 'cmos.sqlite');
   let newest = 0;
   for (const p of [base, `${base}-wal`]) {
     const mtime = statFn(p);
     if (mtime !== null && mtime > newest) newest = mtime;
   }
-  if (newest === 0) return null;
-  return (nowMs - newest) / (1000 * 60 * 60 * 24);
+  return newest === 0 ? null : newest;
+}
+
+const MS_PER_DAY = 1000 * 60 * 60 * 24;
+
+function storeAgeDays(storePath: string, statFn: StoreStatFn, nowMs: number): number | null {
+  const mtime = storeMtimeMs(storePath, statFn);
+  return mtime === null ? null : (nowMs - mtime) / MS_PER_DAY;
 }
 
 /** s80-m06 — the strict reachability partition + the drift list. */
@@ -549,9 +565,22 @@ export interface DriftPartition {
  *   - `reachable`  — succeeded ∧ fresh.
  * By construction `reachable + silent + unmigrated + unreadable === stores.length`.
  * The drift list is capped top-N by `ageDays` desc to bound digest bytes.
+ *
+ * s81-m03 — additionally OVERLAYS an "unsynced" drift signal: a FRESH (reachable) store
+ * whose local mtime is > {@link UNSYNCED_THRESHOLD_DAYS} ahead of its persisted
+ * `last_synced_at` (last dashboard-converged push from THIS machine) gets an extra drift
+ * ITEM. This is orthogonal to the partition — an unsynced store is still counted
+ * `reachable`, so the 4 buckets still sum to `stores.length`. NULL `last_synced_at`
+ * (pre-v2 / never-pushed-from-here) = no-signal (never a false positive). Machine-local
+ * scope by construction — it flags THIS machine's unpushed work, not another machine's.
  */
 export function deriveDrift(
-  stores: ReadonlyArray<{ project_id: string; store_path: string; name: string }>,
+  stores: ReadonlyArray<{
+    project_id: string;
+    store_path: string;
+    name: string;
+    last_synced_at?: number | null;
+  }>,
   errors: ReadonlyArray<{ projectId: string; error: string }>,
   statFn: StoreStatFn,
   nowMs: number
@@ -583,7 +612,8 @@ export function deriveDrift(
       continue;
     }
     // Succeeded — freshness by store mtime.
-    const age = storeAgeDays(store.store_path, statFn, nowMs);
+    const mtimeMs = storeMtimeMs(store.store_path, statFn);
+    const age = mtimeMs === null ? null : (nowMs - mtimeMs) / MS_PER_DAY;
     if (age !== null && age > STALE_THRESHOLD_DAYS) {
       silent++;
       items.push({
@@ -594,6 +624,22 @@ export function deriveDrift(
       });
     } else {
       reachable++;
+      // s81-m03: "unsynced" overlay — a FRESH store with local work newer than its last
+      // dashboard-converged push (from THIS machine) by more than the threshold. Extra
+      // drift ITEM only; the store stays counted `reachable` (partition sum unchanged).
+      // NULL last_synced_at = no-signal (never-pushed-from-here); no false positive.
+      const lastSynced = store.last_synced_at ?? null;
+      if (lastSynced !== null && mtimeMs !== null) {
+        const unsyncedDays = (mtimeMs - lastSynced) / MS_PER_DAY;
+        if (unsyncedDays > UNSYNCED_THRESHOLD_DAYS) {
+          items.push({
+            projectId: store.project_id,
+            name,
+            reason: `local ahead of dashboard by ${Math.round(unsyncedDays)}d (unsynced; this machine)`,
+            ageDays: Math.round(unsyncedDays),
+          });
+        }
+      }
     }
   }
 

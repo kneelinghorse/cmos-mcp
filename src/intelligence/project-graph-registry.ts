@@ -50,8 +50,16 @@ import { ensureDir } from '../utils/fs';
  */
 export const CMOS_CONFIG_DIR_ENV = 'CMOS_CONFIG_DIR';
 
-/** Current schema version stamped on each row + in registry_meta. */
-export const PROJECT_GRAPH_SCHEMA_VERSION = 1;
+/**
+ * Current schema version stamped on each row + in registry_meta.
+ * v2 (s81-m03): added the nullable `last_synced_at` column (last dashboard-converged
+ * push time, ms). The registry has no migration mechanism (ensureSchema is
+ * CREATE IF NOT EXISTS only), so v1→v2 is an explicit, column-existence-guarded ALTER
+ * (see {@link ProjectGraphRegistry.ensureLastSyncedColumn}) — safe when older 2.1.0
+ * sibling dists share the WAL file (the column is nullable, so their column-listed
+ * register() INSERT that omits it still works).
+ */
+export const PROJECT_GRAPH_SCHEMA_VERSION = 2;
 
 /** Busy timeout (ms) so concurrent writers from sibling MCP processes wait. */
 const BUSY_TIMEOUT_MS = 5000;
@@ -89,6 +97,13 @@ export interface ProjectGraphEntry {
   schema_version: number;
   /** Soft-delete timestamp (Unix ms); null = active. */
   archived_at: number | null;
+  /**
+   * s81-m03 — last time THIS machine converged a dashboard push for the project (Unix
+   * ms). Written by {@link ProjectGraphRegistry.updateLastSynced} on a successful
+   * checkpoint file-sync. null = never pushed from this machine (pre-v2 rows, or
+   * never-synced) → the drift reader treats it as no-signal (never a false positive).
+   */
+  last_synced_at: number | null;
 }
 
 /** Upsert payload for {@link ProjectGraphRegistry.register}. */
@@ -197,7 +212,8 @@ export class ProjectGraphRegistry {
         registered_at  INTEGER NOT NULL,
         last_seen_at   INTEGER NOT NULL,
         schema_version INTEGER NOT NULL DEFAULT ${PROJECT_GRAPH_SCHEMA_VERSION},
-        archived_at    INTEGER
+        archived_at    INTEGER,
+        last_synced_at INTEGER
       );
       CREATE INDEX IF NOT EXISTS idx_projects_last_seen ON projects (last_seen_at);
       CREATE INDEX IF NOT EXISTS idx_projects_archived ON projects (archived_at);
@@ -206,6 +222,32 @@ export class ProjectGraphRegistry {
         value TEXT NOT NULL
       );
     `);
+    // v1→v2 migration for registries created before s81-m03 (the CREATE above no-ops on
+    // an existing table, so a v1 registry would never gain the column without this).
+    this.ensureLastSyncedColumn();
+  }
+
+  /**
+   * s81-m03 — the v1→v2 registry migration: add the nullable `last_synced_at` column
+   * when absent. The registry has NO general migration mechanism (ensureSchema is
+   * CREATE IF NOT EXISTS only), so this explicit, column-existence-guarded ALTER is the
+   * bump. Idempotent + race-safe: a concurrent sibling MCP process may add the column
+   * between our PRAGMA check and the ALTER (SQLITE 'duplicate column name'); that (and
+   * any other ALTER failure) is swallowed so registry open never fails — if the column
+   * still doesn't exist, `updateLastSynced` no-ops and the drift reader sees no-signal.
+   * Safe under concurrent older 2.1.0 dists: the column is nullable with no default, so
+   * their column-listed register() INSERT (which omits it) keeps working.
+   */
+  private ensureLastSyncedColumn(): void {
+    const db = this.connection();
+    const cols = db.prepare(`PRAGMA table_info(projects)`).all() as Array<{ name: string }>;
+    if (cols.some((c) => c.name === 'last_synced_at')) return;
+    try {
+      db.exec(`ALTER TABLE projects ADD COLUMN last_synced_at INTEGER`);
+    } catch {
+      // Idempotent/race-safe: a concurrent sibling won the ALTER, or the ALTER failed;
+      // either way registry open must not fail. no-signal (NULL) is the safe degrade.
+    }
   }
 
   /**
@@ -343,6 +385,26 @@ export class ProjectGraphRegistry {
     const info = db
       .prepare('UPDATE projects SET last_seen_at = ? WHERE project_id = ?')
       .run(this.now(), projectId);
+    return info.changes > 0;
+  }
+
+  /**
+   * s81-m03 — record the last dashboard-converged push time for a project (Unix ms).
+   * A single atomic UPDATE (like {@link touch}), last-writer-wins. Ensures the v2
+   * column exists first (idempotent), so it works even if `create()` was never called
+   * on this instance. Returns false when the project has no row on THIS machine — the
+   * caller no-ops safely, leaving `last_synced_at` NULL (no-signal for the drift reader).
+   *
+   * Callers on the checkpoint/push hot path MUST wrap this: a registry lock/ALTER/UPDATE
+   * error must NEVER fail a checkpoint (this is the only registry write on the push path,
+   * which imported the registry zero times before s81-m03).
+   */
+  updateLastSynced(projectId: string, syncedAt: number): boolean {
+    this.ensureLastSyncedColumn();
+    const db = this.connection();
+    const info = db
+      .prepare('UPDATE projects SET last_synced_at = ? WHERE project_id = ?')
+      .run(syncedAt, projectId);
     return info.changes > 0;
   }
 

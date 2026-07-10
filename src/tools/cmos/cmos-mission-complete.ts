@@ -23,6 +23,7 @@ import {
 import { ensureStrategicDecisionsSchema, ensureMissionTimestamps } from './schema-migrations';
 import { sanitizeContentField, sanitizeStringArray } from '../../intelligence/content-sanitizer';
 import { recordEmbedding, decisionEmbeddingInput } from '../../intelligence/embedding-pipeline';
+import { patchProjectIdentity, type ProjectIdentityData } from './project-identity';
 
 interface MissionCompletionRecord {
   id: string;
@@ -628,6 +629,27 @@ function syncProjectIdentityFromMetadata(
 
   projectIdentity.last_sync_at = completedAt;
   content.project_identity = projectIdentity;
+
+  // s81-m04 (Fork B convergence): the master_context blob section stamped above is only
+  // the FIRST projection of identity. The Layer-0 `project_identity` ROW is the second,
+  // and the two drifted (the row's description went EMPTY while the blob held the correct
+  // one). Make THIS guard the SINGLE convergence point: stamp the row from the SAME
+  // metadata seed so they can no longer diverge. Pass ONLY {description,status,
+  // project_name} — NEVER cmos_address/objectives/foundational_docs, which a broad set
+  // would revert to defaults and silently undo user-set values (decision #682 precedent).
+  // ISOLATED try/failure: a Layer-0 write failure must NEVER fail a mission-complete for
+  // any sibling (dist blast radius) — the blob convergence above already succeeded.
+  try {
+    const rowUpdates: Partial<ProjectIdentityData> = {};
+    if (projectName) rowUpdates.project_name = projectName;
+    if (projectDescription) rowUpdates.description = projectDescription;
+    if (projectStatus) rowUpdates.status = projectStatus;
+    if (Object.keys(rowUpdates).length > 0) {
+      patchProjectIdentity(client, rowUpdates);
+    }
+  } catch {
+    // Best-effort Layer-0 convergence — never block or fail a mission-complete.
+  }
 }
 
 function getMetadataValue(client: CmosDatabaseClient, key: string): string | null {

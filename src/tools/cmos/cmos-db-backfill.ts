@@ -311,6 +311,12 @@ export async function cmosDbBackfill(
       // True "replay from scratch" can be achieved by clearing the cursor first.
       const since = previousCursor;
 
+      // s81-m01: when file-based sync fails and we drop to the slower event-replay
+      // path below, capture WHY so it surfaces as a structured warnings[] entry on
+      // the result — not stderr-only. A silent fallback masked the #391 choke as a
+      // slow-but-succeeding backfill; the warning makes the degraded path audible.
+      let fileSyncFallbackWarning: string | null = null;
+
       // File-based sync: if the project is registered (has a dashboard_slug), use
       // POST /api/sync/sqlite-backfill instead of event-replay. One HTTP call handles
       // any number of records without timeout or cursor issues.
@@ -320,6 +326,16 @@ export async function cmosDbBackfill(
         );
         const slug = (slugResult.success && slugResult.data?.value) || null;
         if (slug) {
+          // s81-m02: keep the STRICT expectedSlug=derive(project_name) guard on this
+          // explicit-backfill path. Unlike the checkpoint path, cmosDbBackfill has no
+          // reconcile/confirm step, so it cannot safely relax the guard against a possibly
+          // stale dashboard_slug. When project_name diverges from the incumbent slug the
+          // file-sync is refused (EXPECTED_SLUG_MISMATCH) and we fall through to
+          // event-replay below, which keys by metadata.project_id (the stable local key) —
+          // so a divergent-name store still syncs to the RIGHT project and never
+          // mis-routes. (defect-3's getProjectIdentity keeps project_name consistent with
+          // dashboard_slug when it was missing, so the common registered case still
+          // file-syncs.)
           const fileResult = await dashboardClient.syncSqliteFile(
             db.path,
             slug,
@@ -354,9 +370,12 @@ export async function cmosDbBackfill(
             });
           }
           // File sync failed — fall through to event-replay as fallback
-          console.error(
-            `[backfill] File-based sync failed (slug: ${slug}), falling back to event-replay: ${fileResult.error?.message ?? 'unknown'}`
-          );
+          const fileSyncErr = fileResult.error?.message ?? 'unknown';
+          fileSyncFallbackWarning =
+            `File-based sync failed (slug: ${slug}) — fell back to slower event-replay: ${fileSyncErr}. ` +
+            'The dashboard mirror was still updated via event-replay, but this path is cursor-bound and slower; ' +
+            'investigate the file-sync failure if it recurs.';
+          console.error(`[backfill] ${fileSyncFallbackWarning}`);
         }
       }
 
@@ -364,6 +383,12 @@ export async function cmosDbBackfill(
       migrateContentHash(db);
 
       const warnings: string[] = [];
+      // s81-m01: surface the file-sync→event-replay fallback (captured above) so the
+      // degraded path is visible on the tool response, not just stderr. Ordered first
+      // so it leads the warnings list when it fires.
+      if (fileSyncFallbackWarning) {
+        warnings.push(fileSyncFallbackWarning);
+      }
       if (identity.repaired) {
         warnings.push(
           `Project metadata was empty — repaired from ${identity.repairSource} (id: ${identity.projectId}, name: ${identity.projectName})`
@@ -908,7 +933,7 @@ export interface ProjectIdentityResult extends ProjectIdentity {
   /** Whether repair was attempted */
   repaired: boolean;
   /** Source used for repair (if any) */
-  repairSource: 'directory' | 'master_context' | null;
+  repairSource: 'dashboard_slug' | 'directory' | 'master_context' | null;
 }
 
 function getProjectIdentity(db: CmosDatabaseClient): ProjectIdentityResult {
@@ -923,6 +948,33 @@ function getProjectIdentity(db: CmosDatabaseClient): ProjectIdentityResult {
   // If both are present, return as-is
   if (projectId && projectName) {
     return { projectId, projectName, repaired: false, repairSource: null };
+  }
+
+  // s81-m02 defect-3: before deriving identity from the directory basename (which a
+  // renamed copy gets WRONG) or falling back to 'Unknown' (which pushes into an
+  // 'Unknown' dashboard container), prefer the RECONCILED incumbent dashboard identity
+  // if the store carries one. dashboard_slug is the stable key resolveAndPersistOwner
+  // adopts from the dashboard's incumbent row, so a registered/reconciled store never
+  // pushes as 'Unknown' and a renamed copy keeps the incumbent slug over its new folder.
+  const dashSlugRow = db.getOne<MetadataRow>(
+    `SELECT value FROM metadata WHERE key = 'dashboard_slug'`
+  );
+  const dashboardSlug = (dashSlugRow.success && dashSlugRow.data?.value) || '';
+  if (dashboardSlug) {
+    if (!projectId) projectId = dashboardSlug;
+    if (!projectName) {
+      projectName = dashboardSlug
+        .split('-')
+        .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+        .join(' ');
+    }
+    db.execute(`INSERT OR REPLACE INTO metadata (key, value) VALUES ('project_id', ?)`, [
+      projectId,
+    ]);
+    db.execute(`INSERT OR REPLACE INTO metadata (key, value) VALUES ('project_name', ?)`, [
+      projectName,
+    ]);
+    return { projectId, projectName, repaired: true, repairSource: 'dashboard_slug' };
   }
 
   // Attempt repair from directory name (db path: {root}/cmos/db/cmos.sqlite)

@@ -14,8 +14,10 @@
  *     timestamp (e.g. `cmos_review`'s `buildFreshness.latestSrcMtime`) may inject it via
  *     `opts.devActivityMs` to avoid a redundant stat.
  *   - Signal B (last CMOS write): a single SQL MAX over `strategic_decisions.created_at`
- *     + `learnings.created_at` (both `deleted_at IS NULL`) + `missions.created_at` +
- *     `missions.completed_at`. Sessions are EXCLUDED — a session row is auto-created at
+ *     + `learnings.created_at` + `missions.created_at` + `missions.completed_at`. NB no
+ *     `deleted_at`/status filter is applied — that column does not exist on
+ *     `strategic_decisions`/`learnings` (see {@link lastCaptureAt}), and every `created_at`
+ *     is a real capture event. Sessions are EXCLUDED — a session row is auto-created at
  *     opener time and would mask the gap.
  *
  * The gap fires ONLY when BOTH signals resolve AND dev activity is more than

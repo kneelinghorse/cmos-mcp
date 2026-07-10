@@ -171,6 +171,60 @@ describe('ProjectGraphRegistry (Sprint 69 m05)', () => {
     expect(reg.touch('nope')).toBe(false);
   });
 
+  // ── s81-m03: last_synced_at column + writer + v1→v2 migration ────────────────
+  it('updateLastSynced writes last_synced_at (visible via get + list), returns false for an unknown project', async () => {
+    const reg = await ProjectGraphRegistry.create({ now: () => 1000 });
+    reg.register({ project_id: 'p1', store_path: '/p1', name: 'P1' });
+
+    // Fresh row starts with a null last_synced_at.
+    expect(reg.get('p1')?.last_synced_at ?? null).toBeNull();
+
+    expect(reg.updateLastSynced('p1', 5_555)).toBe(true);
+    expect(reg.get('p1')?.last_synced_at).toBe(5_555);
+    // The value flows through list() (what deriveDrift consumes).
+    expect(reg.list().find((r) => r.project_id === 'p1')?.last_synced_at).toBe(5_555);
+
+    expect(reg.updateLastSynced('nope', 1)).toBe(false); // no row on this machine → no-op
+  });
+
+  it('v1→v2 migration: adds last_synced_at to a pre-existing v1 registry, idempotently, preserving rows', async () => {
+    const registryPath = path.join(configDir, 'project-graph.sqlite');
+    fs.mkdirSync(configDir, { recursive: true });
+    // Hand-build a v1-shaped registry (NO last_synced_at column), as a 2.1.0 dist wrote.
+    const v1 = new Database(registryPath);
+    v1.exec(`
+      CREATE TABLE projects (
+        project_id TEXT PRIMARY KEY, store_path TEXT NOT NULL, name TEXT NOT NULL,
+        registered_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL,
+        schema_version INTEGER NOT NULL DEFAULT 1, archived_at INTEGER
+      );
+      CREATE TABLE registry_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      INSERT INTO projects (project_id, store_path, name, registered_at, last_seen_at, schema_version, archived_at)
+      VALUES ('legacy', '/legacy', 'Legacy', 100, 100, 1, NULL);
+    `);
+    v1.close();
+
+    // Opening through create() runs ensureSchema → ensureLastSyncedColumn (the ALTER).
+    const reg = await ProjectGraphRegistry.create();
+    const cols = (
+      new Database(registryPath).pragma('table_info(projects)') as Array<{ name: string }>
+    ).map((c) => c.name);
+    expect(cols).toContain('last_synced_at');
+
+    // The pre-existing row survives and its new column reads null (no-signal).
+    const legacy = reg.get('legacy');
+    expect(legacy?.name).toBe('Legacy');
+    expect(legacy?.last_synced_at ?? null).toBeNull();
+    // The writer works on the migrated table.
+    expect(reg.updateLastSynced('legacy', 7_777)).toBe(true);
+    expect(reg.get('legacy')?.last_synced_at).toBe(7_777);
+
+    // Re-opening is idempotent (the guarded ALTER no-ops; the row + value persist).
+    ProjectGraphRegistry.resetInstance();
+    const reg2 = await ProjectGraphRegistry.create();
+    expect(reg2.get('legacy')?.last_synced_at).toBe(7_777);
+  });
+
   // ── (f) registry-not-found graceful handling on first run ───────────────────
   it('first run on an absent registry creates it cleanly and reads empty', async () => {
     const registryPath = path.join(configDir, 'project-graph.sqlite');

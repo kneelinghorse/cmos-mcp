@@ -128,6 +128,18 @@ export interface CmosSprintCompleteResult {
     totalAfterSizeKb: number;
   };
   lifecycle: SprintLifecycleTriggers;
+  /** s81-m06 — reconciliation of the next_steps TABLE at close (distinct from the
+   *  per-context JSON-array `nextStepsCleared` above, which the closeout already did).
+   *  AUTO-completes ONLY the machine-certain subset (pending rows whose `mission_id` is a
+   *  Completed, non-blocked mission of the closing sprint); CARRIES blocked-linked rows;
+   *  and FLAGS the sprint-linked remainder for the operator — it NEVER auto-closes on a
+   *  "did it ship" guess (that recreates the silent-wrong-state debt learning #433 names). */
+  nextStepsReconciled: number;
+  /** Pending sprint-linked rows carried because their `mission_id` is a Blocked mission. */
+  nextStepsCarried: number;
+  /** Sprint-linked pending rows NOT machine-certain (mission_id NULL, or a mission not
+   *  Completed/Blocked in this sprint) — surfaced for the operator to resolve by hand. */
+  pendingFlagged: Array<{ id: number; content: string; missionId: string | null }>;
   /** Build-freshness report, included ONLY when stale=true (omitted on the happy path
    *  to keep the response shape unchanged for fresh-build sprints). */
   buildFreshness?: BuildFreshnessReport;
@@ -417,6 +429,17 @@ export async function cmosSprintComplete(
         readiness.blockedMissionIds
       );
 
+      // s81-m06: reconcile the next_steps TABLE (distinct from the JSON arrays above),
+      // inside this same txn. Auto-complete only the mission-FK-certain subset; flag the
+      // rest for the operator. Never auto-close on a guess.
+      const nextStepsTable = reconcileSprintNextStepsTable(
+        client,
+        sprintId,
+        readiness.completedMissionIds,
+        readiness.blockedMissionIds,
+        completedAt
+      );
+
       // --- Lifecycle Trigger: Archive sprint-scoped decisions/learnings ---
       const archiveResult = archiveSprintDecisionsAndLearnings(client, sprintId);
       if (!archiveResult.success) {
@@ -546,6 +569,9 @@ export async function cmosSprintComplete(
           ),
         },
         lifecycle,
+        nextStepsReconciled: nextStepsTable.reconciled,
+        nextStepsCarried: nextStepsTable.carried,
+        pendingFlagged: nextStepsTable.pendingFlagged,
         message: buildCloseoutMessage(sprintId, condensation, readiness),
       };
 
@@ -760,6 +786,76 @@ function createSnapshot(
   }
 
   return { success: true, snapshotId: Number(insertResult.data?.lastInsertRowid) };
+}
+
+/**
+ * s81-m06 — reconcile the next_steps TABLE at sprint close (learning #433 / decision
+ * #926 practice #1). `clearSprintLinkedNextSteps` above only prunes the context-JSON
+ * string arrays; the next_steps TABLE has always required the operator to pass explicit
+ * ids to transition rows, so done-but-unmarked rows accumulated silently — the recurring
+ * debt this pays down.
+ *
+ * Runs inside the closeout's BEGIN IMMEDIATE txn. Reconcile-or-FLAG, never guess:
+ *   - AUTO-complete ONLY the machine-CERTAIN subset: pending rows whose `mission_id` is a
+ *     Completed, non-blocked mission of the closing sprint (a real FK to a terminal-done
+ *     mission — the one case where "done" is knowable without a "did it ship" guess).
+ *   - CARRY blocked-linked rows: `mission_id` is a Blocked mission → leave pending (mirrors
+ *     `shouldClearStep`'s blocked-mission guard, which fires FIRST).
+ *   - FLAG the rest (mission_id NULL free-text, or a mission not Completed/Blocked in this
+ *     sprint) on the receipt — NEVER auto-closed. Auto-closing these is exactly the
+ *     silent-wrong-state debt #926 forbids.
+ * Only sprint-scoped rows (`sprint_id = ?`) are considered — free-text rows with no
+ * sprint link are never touched.
+ */
+function reconcileSprintNextStepsTable(
+  client: CmosDatabaseClient,
+  sprintId: string,
+  completedMissionIds: string[],
+  blockedMissionIds: string[],
+  completedAt: string
+): {
+  reconciled: number;
+  carried: number;
+  pendingFlagged: Array<{ id: number; content: string; missionId: string | null }>;
+} {
+  const empty = { reconciled: 0, carried: 0, pendingFlagged: [] };
+  const rows = client.getMany<{ id: number; content: string; mission_id: string | null }>(
+    `SELECT id, content, mission_id FROM next_steps WHERE sprint_id = ? AND status = 'pending'`,
+    [sprintId]
+  );
+  if (!rows.success || !rows.data) return empty;
+
+  const completed = new Set(completedMissionIds);
+  const blocked = new Set(blockedMissionIds);
+  const toComplete: number[] = [];
+  let carried = 0;
+  const pendingFlagged: Array<{ id: number; content: string; missionId: string | null }> = [];
+
+  for (const row of rows.data) {
+    const mid = row.mission_id;
+    // Blocked-mission guard FIRST (mirrors shouldClearStep:817-819): carry, never close.
+    if (mid && blocked.has(mid)) {
+      carried += 1;
+      continue;
+    }
+    // The ONLY machine-certain "done": a real FK to a Completed non-blocked mission.
+    if (mid && completed.has(mid)) {
+      toComplete.push(row.id);
+      continue;
+    }
+    // No mission FK, or a mission not terminal-done in this sprint → FLAG, never guess.
+    pendingFlagged.push({ id: row.id, content: row.content, missionId: mid });
+  }
+
+  if (toComplete.length > 0) {
+    const placeholders = toComplete.map(() => '?').join(', ');
+    client.execute(
+      `UPDATE next_steps SET status = 'completed', resolved_at = ? WHERE id IN (${placeholders}) AND status = 'pending'`,
+      [completedAt, ...toComplete]
+    );
+  }
+
+  return { reconciled: toComplete.length, carried, pendingFlagged };
 }
 
 function clearSprintLinkedNextSteps(
