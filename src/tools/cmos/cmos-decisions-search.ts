@@ -10,6 +10,8 @@
 import { withClientAsync, type CmosDatabaseClient } from './client';
 import type { CmosToolResult } from './types';
 import { createError, createSuccess, CmosErrors } from './errors';
+import { getProjectId } from './genesis-columns';
+import { frameForeignText } from '../../intelligence/provenance-frame';
 import { loadUnifiedDecisionRecords, type DecisionSource } from './decision-memory';
 import { HybridRetriever } from './fts5-retriever';
 
@@ -49,6 +51,13 @@ export interface DecisionSearchResult {
 
   /** JSON array of TraceLab evidence references */
   evidence: string | null;
+
+  /**
+   * s83-m06: the decision's genesis project_id (null on ancient stores). A
+   * pull-merged decision carries the FOREIGN origin's id; the renderer frames it
+   * as untrusted when it differs from the local project.
+   */
+  projectId: string | null;
 }
 
 /**
@@ -66,6 +75,12 @@ export interface CmosDecisionsSearchResult {
 
   /** Whether results were limited */
   limited: boolean;
+
+  /**
+   * s83-m06: the local project_id, so the renderer can frame any result whose
+   * project_id differs (a pull-merged FOREIGN row) as untrusted data.
+   */
+  localProjectId: string | null;
 }
 
 /**
@@ -213,6 +228,7 @@ export async function cmosDecisionsSearch(
         category: row.category,
         status: row.status,
         evidence: row.evidence,
+        projectId: row.projectId,
       }));
 
       return createSuccess<CmosDecisionsSearchResult>({
@@ -220,6 +236,7 @@ export async function cmosDecisionsSearch(
         results,
         totalMatches,
         limited: totalMatches > limit,
+        localProjectId: getProjectId(client),
       });
     },
     { projectRoot: params.projectRoot }
@@ -324,12 +341,24 @@ export function formatDecisionsSearchForLLM(
   }
 
   // List results
+  const localProjectId = data.localProjectId ?? null;
   for (const r of data.results) {
     const domain = r.domain ? ` [${r.domain}]` : '';
     const sprint = r.sprintId ? ` (${r.sprintId})` : '';
     const mission = r.missionId ? ` {${r.missionId}}` : '';
     const source = r.source === 'session_capture' ? ' [session capture]' : '';
-    lines.push(`• ${r.decision}${domain}${sprint}${mission}${source}`);
+    const meta = `${domain}${sprint}${mission}${source}`;
+    // s83-m06: a decision pull-merged from ANOTHER project is foreign, untrusted
+    // content — frame its text inside the provenance fence, not as a bare bullet.
+    // Mirrors the ratified LIST precedent; local rows stay bare.
+    const isForeign =
+      r.projectId != null && (localProjectId == null || r.projectId !== localProjectId);
+    if (isForeign) {
+      lines.push(`•${meta} [proj:${r.projectId}]`);
+      lines.push(frameForeignText(r.decision, `proj:${r.projectId}`));
+    } else {
+      lines.push(`• ${r.decision}${meta}`);
+    }
     lines.push(`  Created: ${r.createdAt} | Relevance: ${r.relevance}`);
     lines.push('');
   }

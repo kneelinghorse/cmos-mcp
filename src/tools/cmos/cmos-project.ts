@@ -184,7 +184,8 @@ export const cmosProjectToolDefinition = {
       projectType: {
         type: 'string',
         enum: ['general', 'managed', 'build'],
-        description: 'Project type/tier for update action',
+        description:
+          'Project type/tier for the init and update actions (defaults to build for new projects)',
       },
       instances: {
         type: 'array',
@@ -232,6 +233,7 @@ export async function cmosProject(
         tracelabProjectId: params.tracelabProjectId,
         initialSprint: params.initialSprint,
         initialMissions: params.initialMissions,
+        projectType: params.projectType,
       } as CmosProjectInitInput);
     case 'register':
       return cmosProjectRegister({

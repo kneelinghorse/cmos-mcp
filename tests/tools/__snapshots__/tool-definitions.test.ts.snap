@@ -114,13 +114,19 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "type": "boolean",
         },
         "constraintAction": {
-          "description": "Sub-action for constraints: list | review | archive",
+          "description": "Sub-action for constraints: list | review | archive | reaffirm",
           "enum": [
             "list",
             "review",
             "archive",
+            "reaffirm",
           ],
           "type": "string",
+        },
+        "constraintId": {
+          "description": "Constraint ID to reaffirm (bumps last_reviewed_at without changing status; resets its staleness clock)",
+          "minimum": 1,
+          "type": "number",
         },
         "constraintIds": {
           "description": "Constraint IDs to archive",
@@ -226,7 +232,7 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "type": "string",
         },
         "recencyWeight": {
-          "description": "Recency boost weight 0–1 for search action (default: 0.5)",
+          "description": "Recency boost weight 0–1 for search action (default: 0.2)",
           "maximum": 1,
           "minimum": 0,
           "type": "number",
@@ -1055,7 +1061,7 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "type": "string",
         },
         "projectType": {
-          "description": "Project type/tier for update action",
+          "description": "Project type/tier for the init and update actions (defaults to build for new projects)",
           "enum": [
             "general",
             "managed",

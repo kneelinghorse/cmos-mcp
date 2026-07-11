@@ -310,6 +310,7 @@ describe('relevance-surfacing', () => {
               decisionText: 'Use SQLite for database storage',
               category: 'architectural',
               sprintId: 'sprint-1',
+              projectId: null,
               evidence: null,
               relevanceScore: 3,
             },

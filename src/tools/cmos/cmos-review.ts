@@ -40,6 +40,7 @@ import { checkBuildFreshness, type BuildFreshnessReport } from './build-freshnes
 import { resolveProjectRootEnhanced } from '../../intelligence/project-resolution';
 import { ProjectGraphRegistry } from '../../intelligence/project-graph-registry';
 import { activeMissionsAcrossProjects } from '../../intelligence/cross-store-queries';
+import { frameForeignInline } from '../../intelligence/provenance-frame';
 import { isReadOnlyAgentSession } from './read-only-agent-guard';
 
 /**
@@ -155,8 +156,14 @@ export interface CmosReviewResult {
     nextAction: string;
   };
 
-  /** Up to 5 most recent decisions in compact {text, createdAt} form. */
-  recentDecisions: Array<{ text: string; createdAt: string }>;
+  /** Up to 5 most recent decisions in compact {text, createdAt} form. `projectId`
+   *  carries genesis provenance so the renderer can frame a pull-merged FOREIGN
+   *  decision (project_id != localProjectId) as untrusted (s83-m06). */
+  recentDecisions: Array<{ text: string; createdAt: string; projectId: string | null }>;
+
+  /** s83-m06: the local project_id, so the renderer frames foreign recent decisions
+   *  and foreign portfolio mission names. */
+  localProjectId: string | null;
 
   /** s79-m06 — always-on cross-store portfolio rollup; null when degraded (≤1 project / fan-out failed). */
   portfolio: PortfolioSection | null;
@@ -368,6 +375,7 @@ function buildDigest(
   const recentDecisions = onboard.recentDecisions.slice(0, RECENT_DECISIONS_MAX).map((d) => ({
     text: truncate(d.decision, DECISION_TEXT_CAP_CHARS),
     createdAt: d.createdAt,
+    projectId: d.projectId,
   }));
 
   const freshness = {
@@ -410,6 +418,7 @@ function buildDigest(
     sprint,
     workQueue,
     recentDecisions,
+    localProjectId: onboard.localProjectId ?? null,
     portfolio,
     freshness,
     warnings: [],
@@ -939,8 +948,16 @@ export function formatReviewForLLM(result: CmosToolResult<CmosReviewResult>): st
   if (d.recentDecisions.length > 0) {
     lines.push('');
     lines.push('Recent decisions:');
+    // s83-m06: frame a pull-merged FOREIGN decision (project_id != local) inside the
+    // compact untrusted marker; render is text-only so the ≤4KB digestSizeBytes budget
+    // is unaffected. Local rows stay bare.
+    const localProjectId = d.localProjectId ?? null;
     for (const dec of d.recentDecisions) {
-      lines.push(`  • ${dec.text}`);
+      const isForeign =
+        dec.projectId != null && (localProjectId == null || dec.projectId !== localProjectId);
+      lines.push(
+        `  • ${isForeign ? frameForeignInline(dec.text, `proj:${dec.projectId}`) : dec.text}`
+      );
     }
   }
 
@@ -956,6 +973,11 @@ export function formatReviewForLLM(result: CmosToolResult<CmosReviewResult>): st
       `🌐 Portfolio — ${p.activeMissions.count} active mission(s) across ${p.projects} store(s): ` +
         `${parts.join(', ')} · fan-in p95 ${p.fanInP95Ms}ms`
     );
+    // NOTE (s83-m06 scope): foreign MISSION-name framing (portfolio here, plus
+    // cmos_mission status/list/show and onboard pending/blocked) is a distinct
+    // row-type sweep deferred to a follow-up — see SECURITY.md "Known limitation —
+    // foreign MISSION / SPRINT / SESSION text is not yet framed". s83-m06 covers
+    // foreign DECISION/LEARNING rows only.
     for (const m of p.activeMissions.top) {
       lines.push(`  📋 ${m.id} — ${m.name} [proj:${m.projectId}]`);
     }

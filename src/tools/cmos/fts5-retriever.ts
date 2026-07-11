@@ -37,6 +37,13 @@ export interface RankedResult {
   /** Sprint the item belongs to (null if unknown) */
   sprintId: string | null;
 
+  /**
+   * s83-m06: the row's genesis project_id (null on ancient/un-migrated stores).
+   * A pull-merged row carries the FOREIGN origin's project_id here; consumers
+   * compare it against the local project_id to frame foreign rows as untrusted.
+   */
+  projectId: string | null;
+
   /** Item category (decisions only, null otherwise) */
   category: string | null;
 
@@ -51,6 +58,13 @@ export interface RankedResult {
 
   /** Pre-recency RRF score (hybrid backend only; null otherwise) */
   rrfScore?: number | null;
+
+  /**
+   * s82-m04: same-type 1-hop graph neighbors of this row (only populated when this row was a
+   * graph-expansion seed and `expandGraph` was on). The research's faithful context-expansion —
+   * surfaced alongside the hit so a consumer sees the related decisions/learnings/missions.
+   */
+  graphNeighbors?: Array<{ id: number | string; text: string }> | null;
 }
 
 /** Options for retrieval. */
@@ -75,6 +89,19 @@ export interface RetrievalOptions {
 
   /** RRF k parameter for the hybrid backend (default: 60 per s66 ADR Decision 3). */
   rrfK?: number;
+
+  /**
+   * s82-m04: expand the candidate pool with same-type 1-hop graph neighbors of the top
+   * BM25/vector seeds (depth 1, per-seed capped), injected as a smaller-weighted third RRF
+   * term + appended to each seed's payload as `graphNeighbors`. Default OFF. Enable only on
+   * recall-oriented reads (context-search, relevance-surfacing) — never on the precision,
+   * corpus-mutating paths (supersession-detection, learning-reaffirm).
+   */
+  expandGraph?: boolean;
+
+  /** s82-m04: weight of the graph-recall RRF term (default DEFAULT_GRAPH_WEIGHT). Only used
+   *  when expandGraph is on. Kept < 1 to bound over-promotion of graph-only neighbors. */
+  graphWeight?: number;
 }
 
 /** What a retriever backend supports. */
@@ -113,7 +140,7 @@ const RECENCY_HALF_LIFE_DAYS = 60;
  *  hand-authored paraphrases) — 0.2 wins MRR@10 over the canonical 0.5 because the
  *  active-decision corpus skews older and aggressive recency decay penalizes the
  *  expected hits below their RRF-fused rank. See decision captured at s67-m02 close. */
-const DEFAULT_RECENCY_WEIGHT = 0.2;
+export const DEFAULT_RECENCY_WEIGHT = 0.2;
 
 /** Default number of results to return. */
 const DEFAULT_LIMIT = 5;
@@ -125,7 +152,25 @@ const CANDIDATE_POOL_MULTIPLIER = 5;
  *  default; the Sprint 67 m02 sweep against the production fixtures preferred k=30 (a
  *  smaller k inflates 1/(k+rank) for top ranks, sharpening the fused signal when both
  *  arms agree on a candidate). See decision captured at s67-m02 close. */
-const DEFAULT_RRF_K = 30;
+export const DEFAULT_RRF_K = 30;
+
+/**
+ * s82-m04 graph-neighbor arm parameters (MISSION-ONLY — see searchHybridForType).
+ *
+ * `GRAPH_WEIGHT` is < 1 to dampen the graph term relative to the direct BM25/vector arms. Because
+ * the term is added to a candidate's own direct term it can re-rank a borderline mission neighbor
+ * up or nudge one down — an accepted MISSION-internal trade-off (measured net-positive by the m02
+ * mission floor: top-3 recall 0.25→0.50). Decisions/learnings never receive the term.
+ * `GRAPH_SEED_COUNT` bounds how many top seeds expand; `GRAPH_PER_SEED_CAP` bounds each seed's
+ * neighbor fan-out (chiefly the same-sprint edge).
+ */
+export const DEFAULT_GRAPH_WEIGHT = 0.5;
+const GRAPH_SEED_COUNT = 5;
+const GRAPH_PER_SEED_CAP = 5;
+
+/** Mission statuses excluded from graph-neighbor injection — abandoned/parked work must not be
+ *  surfaced as "relevant context" purely by sprint adjacency (adversarial review, s82-m04). */
+const MISSION_GRAPH_EXCLUDED_STATUSES = ['Dropped', 'Deferred', 'Archived'] as const;
 
 // ─── Scoring helpers ──────────────────────────────────────────────────────────
 
@@ -163,6 +208,8 @@ interface SourceRow {
   category: string | null;
   evidence: string | null;
   createdAt: string | null;
+  /** s83-m06: genesis project_id (null on ancient stores lacking the column). */
+  projectId: string | null;
 }
 
 /**
@@ -214,6 +261,8 @@ export class HybridRetriever implements IAsyncRetriever {
       minScore = 0,
       statusFilter = ['active'],
       rrfK = DEFAULT_RRF_K,
+      expandGraph = false,
+      graphWeight = DEFAULT_GRAPH_WEIGHT,
     } = options;
 
     // Ensure the FTS5 + vec0 substrate exists. Idempotent at the migration layer.
@@ -238,7 +287,9 @@ export class HybridRetriever implements IAsyncRetriever {
               candidateLimit,
               recencyWeight,
               statusFilter,
-              rrfK
+              rrfK,
+              expandGraph,
+              graphWeight
             );
       aggregated.push(...perType);
     }
@@ -266,6 +317,7 @@ export class HybridRetriever implements IAsyncRetriever {
       recencyFactor,
       ageDays,
       sprintId: row.sprintId,
+      projectId: row.projectId,
       category: row.category,
       evidence: row.evidence,
       createdAt: row.createdAt,
@@ -321,6 +373,7 @@ export class HybridRetriever implements IAsyncRetriever {
         recencyFactor,
         ageDays,
         sprintId: row.sprintId,
+        projectId: row.projectId,
         category: row.category,
         evidence: row.evidence,
         createdAt: row.createdAt,
@@ -340,7 +393,9 @@ export class HybridRetriever implements IAsyncRetriever {
     candidateLimit: number,
     recencyWeight: number,
     statusFilter: string[],
-    rrfK: number
+    rrfK: number,
+    expandGraph: boolean,
+    graphWeight: number
   ): RankedResult[] {
     const bm25Candidates = this.fts5CandidatesForType(type, query, candidateLimit);
     const vecCandidates =
@@ -385,17 +440,80 @@ export class HybridRetriever implements IAsyncRetriever {
 
     if (allIds.length === 0) return [];
 
+    // s82-m04: graph-neighbor expansion (depth 1, per-seed capped) — MISSION-ONLY. Expand from the
+    // top GRAPH_SEED_COUNT direct candidates (by prelim RRF) to their 1-hop mission neighbors;
+    // `graphRank` = the fused rank of the best seed that surfaced a neighbor (1-indexed);
+    // `seedNeighbors` feeds the payload context-append. Off by default; the query is soft-degrading.
+    //
+    // Why mission-only (adversarial review, s82-m04): the corpus-density problem this arm solves is
+    // specific to the dense mission graph (same-sprint clusters + dependency chains). Decisions and
+    // learnings already retrieve well, their mission_id edges are sparse, and — critically — the
+    // graph term is ADDED to a candidate's own direct term, so a same-mission sibling that is also a
+    // weak direct hit could stack a boost and EVICT a genuine top-3 decision/learning hit. Restricting
+    // to missions makes the decision/learning hard-non-regression STRUCTURAL rather than merely
+    // fixture-measured (the golden-set decision/learning fixtures happen to carry no graph edges).
+    const graphRank = new Map<string, number>();
+    const seedNeighbors = new Map<string, Array<number | string>>();
+    if (expandGraph && type === 'mission') {
+      const seeds = allIds
+        .map((id) => {
+          const key = String(id);
+          const bm = bm25Rank.get(key);
+          const vk = vecRank.get(key);
+          const prelim =
+            (bm !== undefined ? 1 / (rrfK + bm) : 0) + (vk !== undefined ? 1 / (rrfK + vk) : 0);
+          return { id, key, prelim };
+        })
+        .sort((a, b) => b.prelim - a.prelim)
+        .slice(0, GRAPH_SEED_COUNT);
+
+      const neighborsBySeed = this.missionGraphNeighbors(seeds.map((s) => s.id));
+      seeds.forEach((seed, seedIdx) => {
+        const seedGraphRank = seedIdx + 1; // 1-indexed rank of the seed among the top seeds
+        const ns = (neighborsBySeed.get(seed.key) ?? []).slice(0, GRAPH_PER_SEED_CAP);
+        if (ns.length > 0) seedNeighbors.set(seed.key, ns);
+        for (const nid of ns) {
+          const nkey = String(nid);
+          if (!seen.has(nkey)) {
+            seen.add(nkey);
+            allIds.push(nid); // a graph-only neighbor joins the pool (abandoned ones already excluded)
+          }
+          const prev = graphRank.get(nkey);
+          if (prev === undefined || seedGraphRank < prev) graphRank.set(nkey, seedGraphRank);
+        }
+      });
+    }
+
     const rows = this.fetchSourceRows(type, allIds, statusFilter);
+    const textById = new Map<string, string>();
+    for (const row of rows) textById.set(String(row.id), row.text);
+
     const results: RankedResult[] = [];
     for (const row of rows) {
       const key = String(row.id);
       const bm = bm25Rank.get(key);
       const vk = vecRank.get(key);
+      const gr = graphRank.get(key);
       const rrf =
-        (bm !== undefined ? 1 / (rrfK + bm) : 0) + (vk !== undefined ? 1 / (rrfK + vk) : 0);
+        (bm !== undefined ? 1 / (rrfK + bm) : 0) +
+        (vk !== undefined ? 1 / (rrfK + vk) : 0) +
+        // Third, smaller-weighted graph-recall term (mission-only). graphWeight < 1 dampens the
+        // graph contribution; because the term is ADDED to a candidate's own direct term it can
+        // still re-rank a borderline mission neighbor into the top-3 (the intended recall lift) or,
+        // conversely, nudge a genuine mission hit down — an accepted MISSION-internal trade-off,
+        // measured net-positive by the m02 mission floor. It never touches decisions/learnings
+        // (guarded above), so their baselines are structurally protected.
+        (gr !== undefined ? graphWeight * (1 / (rrfK + gr)) : 0);
       const ageDays = computeAgeDays(row.createdAt);
       const recencyFactor = computeRecencyFactor(ageDays);
       const finalScore = rrf * (1 - recencyWeight + recencyWeight * recencyFactor);
+      // Payload context-append: surface this seed's fetched 1-hop neighbors (abandoned excluded).
+      const nIds = seedNeighbors.get(key);
+      const graphNeighbors = nIds
+        ? nIds
+            .map((nid) => ({ id: nid, text: textById.get(String(nid)) }))
+            .filter((n): n is { id: number | string; text: string } => n.text !== undefined)
+        : [];
       results.push({
         id: row.id,
         type,
@@ -405,14 +523,73 @@ export class HybridRetriever implements IAsyncRetriever {
         recencyFactor,
         ageDays,
         sprintId: row.sprintId,
+        projectId: row.projectId,
         category: row.category,
         evidence: row.evidence,
         createdAt: row.createdAt,
         vectorSimilarity: vecSim.get(key) ?? null,
         rrfScore: rrf,
+        graphNeighbors: graphNeighbors.length > 0 ? graphNeighbors : null,
       });
     }
     return results;
+  }
+
+  /**
+   * s82-m04: fetch 1-hop MISSION graph neighbors for a set of seed mission ids, grouped by seed.
+   * Edges (the real star topology, schema.ts): same `sprint_id` sibling + `mission_dependencies`
+   * (either direction). Abandoned neighbors (`Dropped`/`Deferred`/`Archived`) are excluded so the
+   * arm never surfaces parked/abandoned work as "relevant context" purely by sprint adjacency
+   * (adversarial review, s82-m04). Same-sprint fan-out is small (~3-8/sprint). Soft-degrades to no
+   * expansion on any query error (e.g. mission_dependencies absent on a pre-s10 store).
+   */
+  private missionGraphNeighbors(
+    seedIds: Array<number | string>
+  ): Map<string, Array<number | string>> {
+    const bySeed = new Map<string, Array<number | string>>();
+    if (seedIds.length === 0) return bySeed;
+    const add = (seed: string, neighbor: number | string): void => {
+      if (String(neighbor) === seed || neighbor === null || neighbor === undefined) return;
+      const list = bySeed.get(seed) ?? [];
+      if (!list.some((x) => String(x) === String(neighbor))) list.push(neighbor);
+      bySeed.set(seed, list);
+    };
+    try {
+      const ph = seedIds.map(() => '?').join(', ');
+      // The neighbor's status is filtered in every arm so abandoned missions are never injected.
+      const statusPh = MISSION_GRAPH_EXCLUDED_STATUSES.map(() => '?').join(', ');
+      const sprintRows = this.client.getMany<{ seed: string; neighbor: string }>(
+        `SELECT m1.id AS seed, m2.id AS neighbor
+         FROM missions m1 JOIN missions m2 ON m2.sprint_id = m1.sprint_id AND m2.id <> m1.id
+         WHERE m1.id IN (${ph}) AND m1.sprint_id IS NOT NULL
+           AND m2.status NOT IN (${statusPh})`,
+        [...seedIds, ...MISSION_GRAPH_EXCLUDED_STATUSES]
+      );
+      (sprintRows.data ?? []).forEach((r) => add(r.seed, r.neighbor));
+      const depRows = this.client.getMany<{ seed: string; neighbor: string }>(
+        `SELECT d.from_id AS seed, d.to_id AS neighbor
+         FROM mission_dependencies d JOIN missions m ON m.id = d.to_id
+         WHERE d.from_id IN (${ph}) AND m.status NOT IN (${statusPh})
+         UNION
+         SELECT d.to_id AS seed, d.from_id AS neighbor
+         FROM mission_dependencies d JOIN missions m ON m.id = d.from_id
+         WHERE d.to_id IN (${ph}) AND m.status NOT IN (${statusPh})`,
+        [
+          ...seedIds,
+          ...MISSION_GRAPH_EXCLUDED_STATUSES,
+          ...seedIds,
+          ...MISSION_GRAPH_EXCLUDED_STATUSES,
+        ]
+      );
+      (depRows.data ?? []).forEach((r) => add(r.seed, r.neighbor));
+    } catch (error) {
+      // Soft-degrade: any graph-query failure (e.g. mission_dependencies absent on an old store)
+      // falls back to no expansion — the direct BM25/vector arms are unaffected.
+      const message = error instanceof Error ? error.message : 'unknown error';
+      console.error(`[WARN] HybridRetriever: mission graph expansion failed — ${message}`);
+      return new Map();
+    }
+    return bySeed;
   }
 
   // ─── Private: BM25 candidates per type ─────────────────────────────────────
@@ -502,6 +679,24 @@ export class HybridRetriever implements IAsyncRetriever {
 
   // ─── Private: source row fetch per type ────────────────────────────────────
 
+  /**
+   * s83-m06: SQL expression for a row's project_id that degrades to NULL on
+   * ancient/un-migrated stores lacking the column (mirrors decision-memory.ts's
+   * column-presence guard) — so adding project_id to the fetch SELECTs never throws
+   * on a store that predates the s69-m03 genesis columns. Column sets are cached
+   * per table (the schema does not change within a retriever's lifetime).
+   */
+  private readonly columnCache = new Map<string, Set<string>>();
+  private projectIdExpr(table: string): string {
+    let cols = this.columnCache.get(table);
+    if (!cols) {
+      const res = this.client.getMany<{ name: string }>(`PRAGMA table_info('${table}')`, []);
+      cols = new Set(res.success && res.data ? res.data.map((c) => c.name) : []);
+      this.columnCache.set(table, cols);
+    }
+    return cols.has('project_id') ? 'project_id' : 'NULL';
+  }
+
   private fetchSourceRows(
     type: RetrievableType,
     ids: Array<number | string>,
@@ -526,8 +721,10 @@ export class HybridRetriever implements IAsyncRetriever {
       sprint_id: string | null;
       evidence: string | null;
       created_at: string | null;
+      project_id: string | null;
     }>(
-      `SELECT id, decision_text, category, sprint_id, evidence, created_at
+      `SELECT id, decision_text, category, sprint_id, evidence, created_at,
+              ${this.projectIdExpr('strategic_decisions')} AS project_id
        FROM strategic_decisions
        WHERE id IN (${idPlaceholders})${statusClause}`,
       applyStatus ? [...ids, ...statusFilter] : ids
@@ -540,6 +737,7 @@ export class HybridRetriever implements IAsyncRetriever {
       category: r.category,
       evidence: r.evidence,
       createdAt: r.created_at,
+      projectId: r.project_id,
     }));
   }
 
@@ -555,8 +753,10 @@ export class HybridRetriever implements IAsyncRetriever {
       category: string | null;
       sprint_id: string | null;
       created_at: string | null;
+      project_id: string | null;
     }>(
-      `SELECT id, content, category, sprint_id, created_at
+      `SELECT id, content, category, sprint_id, created_at,
+              ${this.projectIdExpr('learnings')} AS project_id
        FROM learnings
        WHERE id IN (${idPlaceholders})${statusClause}`,
       applyStatus ? [...ids, ...statusFilter] : ids
@@ -569,6 +769,7 @@ export class HybridRetriever implements IAsyncRetriever {
       category: r.category,
       evidence: null,
       createdAt: r.created_at,
+      projectId: r.project_id,
     }));
   }
 
@@ -584,8 +785,10 @@ export class HybridRetriever implements IAsyncRetriever {
       notes: string | null;
       sprint_id: string | null;
       created_at: string | null;
+      project_id: string | null;
     }>(
-      `SELECT id, name, objective, notes, sprint_id, created_at
+      `SELECT id, name, objective, notes, sprint_id, created_at,
+              ${this.projectIdExpr('missions')} AS project_id
        FROM missions
        WHERE id IN (${idPlaceholders})`,
       ids
@@ -598,6 +801,7 @@ export class HybridRetriever implements IAsyncRetriever {
       category: null,
       evidence: null,
       createdAt: r.created_at,
+      projectId: r.project_id,
     }));
   }
 }

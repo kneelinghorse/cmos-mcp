@@ -680,6 +680,36 @@ export function ensureConstraintsTable(client: CmosDatabaseClient): MigrationRes
   };
 }
 
+/**
+ * Ensure last_reviewed_at exists on the constraints table (Sprint 82 m01).
+ *
+ * Mirrors {@link ensureReviewTimestamps} (which owns learnings/strategic_decisions)
+ * for the constraints table, so a constraint can be reaffirmed — its staleness clock
+ * reset — the same way learnings are (`cmos_learnings(action="reaffirm")`). Staleness
+ * scoring anchors on `COALESCE(last_reviewed_at, created_at)`, so **no backfill is
+ * needed**: a NULL last_reviewed_at falls back to created_at (pre-migration behavior).
+ * Idempotent — safe to call on a DB where the column already exists or the table is absent.
+ */
+export function ensureConstraintReviewTimestamp(client: CmosDatabaseClient): MigrationResult {
+  const existing = getTableColumns(client, 'constraints');
+  if (existing.size === 0) {
+    // Table doesn't exist on this DB yet — nothing to alter.
+    return { columnsAdded: [], indexesCreated: [], rowsUpdated: 0, alreadyCurrent: true };
+  }
+  const added = ensureColumn(
+    client,
+    'constraints',
+    { name: 'last_reviewed_at', type: 'TEXT' },
+    existing
+  );
+  return {
+    columnsAdded: added ? ['constraints.last_reviewed_at'] : [],
+    indexesCreated: [],
+    rowsUpdated: 0,
+    alreadyCurrent: !added,
+  };
+}
+
 export function ensureDecisionsFts5(client: CmosDatabaseClient): MigrationResult {
   // Check if FTS5 table already exists
   const existing = client.getOne<{ name: string }>(

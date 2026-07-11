@@ -4,6 +4,30 @@ All notable changes to cmos-mcp are documented here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## 2.3.0 — 2026-07-11
+
+Arc E "Retrieval + Tiers" — the **last phase-2 arc; phase 2 is complete.** Two sprints: **E1 (s82) Retrieval Spine** — an honest recall gate plus the mission-recall lever — and **E2 (s83) Tiers + Framing** — tier config that works for npm strangers and read-time `project_id`-aware retrieval trust. No new tools — the **15-tool contract holds**; all new behavior rides on existing paths.
+
+### Added
+
+- **Retrieval recall gate (s82 m02).** The un-runnable recall reporter became a `dist/`-backed pass/fail gate: 24 golden fixtures (8/type) re-authored against the post-flush corpus, per-type floors, a baseline-delta regression assert, and an embedder-loaded check (an adversarial reviewer caught the original check was structurally always-true; fixed). Honest baseline recorded: mission top-3 **0.25** (not the stale 43% the plan carried).
+- **Mission-recall graph arm (s82 m04).** A **mission-only** 1-hop graph-neighbor arm (same `sprint_id` + `mission_dependencies`) fused as a depth-decayed third RRF term behind a default-**off** `expandGraph` (on only for `cmos_context` search). Lifts mission top-3 recall **0.25 → 0.50**; decisions/learnings unchanged (structural). A 12-agent adversarial review caught + fixed 5 real defects before close.
+- **`projectType` on `cmos_project(init)` (s83 m05).** `init` now writes a `project_type` metadata row (default `build`, no-clobber on idempotent re-init) so the first onboard emits the matching `tierSelectionPrompt` (`managed` → Sprint Zero, `general` → first-session) instead of always `build`.
+
+### Changed
+
+- **Tier config now resolves for npm consumers (s83 m05).** `loadTierConfig` resolves against the **resolved store root** (dirname³ of the connected DB path), and falls back to the bundled `cmos-seed/tiers` when a store has no copied `cmos/tiers` (two-pass: exact tier across all dirs, then `build.md`) — fixing the silent no-op that left every auto-discovery npm consumer with a `null` tierConfig. The `agents.md` and `platform-vision.md` tier tables were rewritten as onboarding **vocabulary** only: tiers are **advisory framing, not tool gating** — every tool is always callable in every tier (the `tools_use`/`tools_skip` lists filter only advisory `suggestedAction` hints).
+- **Stale-learnings flush (s82 m01).** 28 stale learnings triaged (evergreen / reaffirm / archive) so the onboard staleness banner stops being ~50% noise; the s73 leak-gap decisions were re-surfaced as active learnings; the constraint-reaffirm path folded under `cmos_context`.
+
+### Security
+
+- **Foreign decision/learning provenance framing at every local read surface (s83 m06).** After a `cmos_db pull`, the local `strategic_decisions` / `learnings` tables can hold rows authored in another project. `project_id` is now derived **read-time** (no migration; column-presence guarded so ancient stores degrade to `NULL` and render bare, never throw), and a **foreign** decision/learning row (its `project_id` ≠ the resolved local project) renders inside the untrusted provenance fence — while local rows stay bare — at every surface that renders such rows: mission-start "relevant decisions" (decision text **and** evidence), `cmos_context(action="search")`, `cmos_decisions(action="search")`, `cmos_learnings(action="search")`, `cmos_context(action="view")` (full + compact), `cmos_agent_onboard` "Recent Decisions", and the `cmos_review` digest's recent-decisions. Two adversarial review passes hardened this: the first caught four bare-text surfaces beyond the four originally planned (now framed); the second confirmed the decision/learning coverage is complete. Closes the SECURITY.md mission-start limitation for decision/learning content.
+- **Known limitation (honestly documented, deferred):** foreign **mission / sprint / session** text (name / objective / context / title / focus from pull-merged rows) is **not yet framed** at its read surfaces (`cmos_agent_onboard` pending/blocked, `cmos_mission` list/show/status, the `cmos_review` portfolio + sprint title/focus). That is a distinct row-type sweep tracked as a follow-up; the hostile-injection exposure is gated on the parked multi-party collaboration arc (today's pulled rows are the operator's own single-owner projects). See [SECURITY.md](SECURITY.md).
+
+### Internal
+
+- **Mission-embedding trim — negative result (s82 m03).** Trimming the mission embedding input to name+objective did **not** lift mission recall (the "notes dilute" premise was refuted — the cause is corpus density); reverted to the 4-field input per the recorded decision. The recall win came from the graph arm (m04). No user-facing change.
+
 ## 2.2.0 — 2026-07-10
 
 Arc D "One Portfolio Brain" — **Sprint 3, closing the arc.** T4 client-side sync convergence stops a same-owner second machine from minting duplicate dashboard project containers, the session-opener gains a machine-local "unsynced" drift signal, sprint closeout now reconciles the `next_steps` table automatically, and the master_context↔Layer-0 `project_identity` identity split-brain is fixed at the root (metadata is now the canonical identity source). No new tools — the **15-tool contract holds**; new behavior rides on existing paths.

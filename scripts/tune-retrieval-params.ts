@@ -4,10 +4,16 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { CmosDatabaseClient } from '../src/tools/cmos/client';
-import { HybridRetriever, type RankedResult } from '../src/tools/cmos/fts5-retriever';
-import { extractKeywords } from '../src/tools/cmos/supersession-detection';
-import { getEmbedder, type Embedder } from '../src/intelligence/embedding-pipeline';
+// s82-m02: import from BUILT dist/ so the sweep reflects shipped retriever code.
+import { CmosDatabaseClient } from '../dist/tools/cmos/client';
+import {
+  HybridRetriever,
+  type RankedResult,
+  DEFAULT_RRF_K,
+  DEFAULT_RECENCY_WEIGHT,
+} from '../dist/tools/cmos/fts5-retriever';
+import { extractKeywords } from '../dist/tools/cmos/supersession-detection';
+import { getEmbedder, type Embedder } from '../dist/intelligence/embedding-pipeline';
 
 const FIXTURE_PATH = path.resolve(
   __dirname,
@@ -21,9 +27,9 @@ const TOP_K = 10;
 const RRF_K_GRID = [30, 45, 60, 75, 90];
 const RECENCY_WEIGHT_GRID = [0.2, 0.35, 0.5, 0.65, 0.8];
 
-// Production defaults at the time of the sweep — match the constants at
-// src/tools/cmos/fts5-retriever.ts:129 (DEFAULT_RECENCY_WEIGHT) and :138 (DEFAULT_RRF_K).
-const CURRENT_DEFAULTS = { rrfK: 60, recencyWeight: 0.5 };
+// s82-m02 (FORK-E5): read the live shipped defaults (30 / 0.2) straight from the retriever
+// so this can never re-drift — the old hardcoded 60 / 0.5 was stale for ~15 sprints.
+const CURRENT_DEFAULTS = { rrfK: DEFAULT_RRF_K, recencyWeight: DEFAULT_RECENCY_WEIGHT };
 
 // Update rule (per mission spec).
 const MRR_LIFT_THRESHOLD = 0.05;

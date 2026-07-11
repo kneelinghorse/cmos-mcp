@@ -351,9 +351,11 @@ describe('cmos_review', () => {
       for (const d of digest.recentDecisions) {
         expect(d).toHaveProperty('text');
         expect(d).toHaveProperty('createdAt');
-        // Compact form must not carry full domain/category/etc fields.
+        // Compact form drops the heavy fields (domain/category/etc) but keeps the
+        // small `projectId` provenance tag (s83-m06) so the renderer can fence a
+        // pull-merged FOREIGN decision as untrusted.
         const keys = Object.keys(d).sort();
-        expect(keys).toEqual(['createdAt', 'text']);
+        expect(keys).toEqual(['createdAt', 'projectId', 'text']);
       }
     });
   });

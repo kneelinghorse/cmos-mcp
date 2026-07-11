@@ -1,21 +1,77 @@
-// ABOUTME: Sprint 67 m01 — production-corpus paraphrase measurement. Runs the
-// hand-authored fixtures at tests/fixtures/paraphrase-fixtures-production.json through
-// both BM25-only and HybridRetriever (real Xenova embedder) against the live
-// cmos/db/cmos.sqlite and emits a JSON report (per-fixture, aggregate, per-type).
+// ABOUTME: Sprint 67 m01 / Sprint 82 m02 — production-corpus paraphrase measurement + gate.
+// Runs the hand-authored fixtures at tests/fixtures/paraphrase-fixtures-production.json
+// through both BM25-only and HybridRetriever (real Xenova embedder) against the live
+// cmos/db/cmos.sqlite. As a REPORTER (no flag) it emits a JSON report. As a GATE
+// (--gate) it additionally enforces per-type floors + a decisions/learnings baseline-delta
+// regression assert + an embedder-loaded assert, and process.exit(1) on any miss.
+//
+// s82-m02: imports the retriever from BUILT dist/ (not src/ via ts-node) so the numbers
+// reflect shipped code; meta reads the live DEFAULT_RRF_K / DEFAULT_RECENCY_WEIGHT so the
+// old stale 60/0.5 can never re-drift.
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { CmosDatabaseClient } from '../src/tools/cmos/client';
-import { HybridRetriever, type RankedResult } from '../src/tools/cmos/fts5-retriever';
-import { extractKeywords } from '../src/tools/cmos/supersession-detection';
+import { CmosDatabaseClient } from '../dist/tools/cmos/client';
+import {
+  HybridRetriever,
+  type RankedResult,
+  DEFAULT_RRF_K,
+  DEFAULT_RECENCY_WEIGHT,
+} from '../dist/tools/cmos/fts5-retriever';
+import { extractKeywords } from '../dist/tools/cmos/supersession-detection';
 
 const FIXTURE_PATH = path.resolve(
   __dirname,
   '..',
   'tests/fixtures/paraphrase-fixtures-production.json'
 );
-const DB_PATH = path.resolve(__dirname, '..', 'cmos/db/cmos.sqlite');
+// s82-m03: allow gating a COPY of the store (backfill-against-a-copy discipline) by pointing
+// at an alternate DB. Defaults to the live git-tracked store.
+const DB_PATH = process.env.CMOS_RETRIEVAL_DB
+  ? path.resolve(process.env.CMOS_RETRIEVAL_DB)
+  : path.resolve(__dirname, '..', 'cmos/db/cmos.sqlite');
+const BASELINE_PATH = path.resolve(__dirname, '..', 'tests/fixtures/retrieval-baseline.json');
 const TOP_K = 10;
+
+// ─── Gate configuration (s82-m02) ─────────────────────────────────────────────
+
+const GATE = process.argv.includes('--gate');
+const WRITE_BASELINE = process.argv.includes('--write-baseline');
+
+// Mission top-3 recall floor. Env-overridable so the gate's bite can be demonstrated
+// (positive-fire) without editing this file. s82-m04: re-set to 0.50 — the honest achievable
+// value once the graph-neighbor arm is on (the m03 mission-embedding trim was a negative
+// result; the graph arm doubled mission top-3 recall 0.25→0.50 with zero decision/learning
+// regression). Measured on the production recall path (expandGraph=true), which is what
+// context-search / relevance-surfacing use.
+const MISSION_TOP3_FLOOR = envFloat('CMOS_MISSION_TOP3_FLOOR', 0.5);
+// Decisions/learnings may not drop more than this below the committed baseline (5 points).
+const REGRESSION_TOLERANCE = envFloat('CMOS_REGRESSION_TOLERANCE', 0.05);
+
+// s82-m03/FORK-E5: optional per-run tuning overrides for the post-re-embed sweep. Undefined
+// => the retriever's shipped DEFAULT_RRF_K / DEFAULT_RECENCY_WEIGHT are used.
+const RECENCY_OVERRIDE = envOptFloat('CMOS_RECENCY_OVERRIDE');
+const RRFK_OVERRIDE = envOptInt('CMOS_RRFK_OVERRIDE');
+
+function envOptFloat(name: string): number | undefined {
+  const v = process.env[name];
+  if (v === undefined || v === '') return undefined;
+  const n = Number.parseFloat(v);
+  return Number.isFinite(n) ? n : undefined;
+}
+function envOptInt(name: string): number | undefined {
+  const v = process.env[name];
+  if (v === undefined || v === '') return undefined;
+  const n = Number.parseInt(v, 10);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function envFloat(name: string, fallback: number): number {
+  const v = process.env[name];
+  if (v === undefined || v === '') return fallback;
+  const n = Number.parseFloat(v);
+  return Number.isFinite(n) ? n : fallback;
+}
 
 // ─── Fixture types ───────────────────────────────────────────────────────────
 
@@ -58,6 +114,12 @@ interface PerTypeMetrics {
   decision: AggregateMetrics;
   learning: AggregateMetrics;
   mission: AggregateMetrics;
+}
+
+interface BaselineFile {
+  measuredAt: string;
+  note: string;
+  hybrid: PerTypeMetrics;
 }
 
 // ─── BM25 baseline ───────────────────────────────────────────────────────────
@@ -200,6 +262,73 @@ function verifyFixturesExist(client: CmosDatabaseClient, fixtures: Fixture[]): M
   return missing;
 }
 
+// ─── Gate evaluation (s82-m02) ────────────────────────────────────────────────
+
+interface GateResult {
+  passed: boolean;
+  failures: string[];
+  checks: string[];
+}
+
+function evaluateGate(hybridPerType: PerTypeMetrics, embedderActive: boolean): GateResult {
+  const failures: string[] = [];
+  const checks: string[] = [];
+
+  // 1. Embedder-loaded assert: if NO hybrid result across any fixture carries a vector
+  // similarity, the vector arm never ran — getEmbedder negative-cached a no-op embedder (the
+  // silent BM25-quality trap) and the "hybrid" numbers are really BM25 quality.
+  if (embedderActive) {
+    checks.push(
+      'embedder-loaded: vector arm scored >=1 returned row (vectorSimilarity non-null) ✓'
+    );
+  } else {
+    failures.push(
+      'embedder NOT loaded: no hybrid result across any fixture carries a vector similarity ' +
+        '(getEmbedder negative-cache silent-BM25 trap) — retrieval numbers are meaningless'
+    );
+  }
+
+  // 2. Per-type floor: mission top-3 recall.
+  if (hybridPerType.mission.top3Recall >= MISSION_TOP3_FLOOR) {
+    checks.push(
+      `mission top3Recall ${fmt(hybridPerType.mission.top3Recall)} >= floor ${fmt(MISSION_TOP3_FLOOR)} ✓`
+    );
+  } else {
+    failures.push(
+      `mission top3Recall ${fmt(hybridPerType.mission.top3Recall)} < floor ${fmt(MISSION_TOP3_FLOOR)}`
+    );
+  }
+
+  // 3. Baseline-delta regression assert for decisions + learnings.
+  if (fs.existsSync(BASELINE_PATH)) {
+    const baseline = JSON.parse(fs.readFileSync(BASELINE_PATH, 'utf-8')) as BaselineFile;
+    for (const type of ['decision', 'learning'] as const) {
+      const cur = hybridPerType[type].top3Recall;
+      const base = baseline.hybrid[type].top3Recall;
+      if (cur >= base - REGRESSION_TOLERANCE) {
+        checks.push(
+          `${type} top3Recall ${fmt(cur)} within ${fmt(REGRESSION_TOLERANCE)} of baseline ${fmt(base)} ✓`
+        );
+      } else {
+        failures.push(
+          `${type} top3Recall ${fmt(cur)} regressed >${fmt(REGRESSION_TOLERANCE)} below baseline ${fmt(base)}`
+        );
+      }
+    }
+  } else {
+    failures.push(
+      `no baseline file at ${path.relative(process.cwd(), BASELINE_PATH)} — run with ` +
+        `--write-baseline first to establish the decisions/learnings regression anchor`
+    );
+  }
+
+  return { passed: failures.length === 0, failures, checks };
+}
+
+function fmt(n: number): string {
+  return n.toFixed(4);
+}
+
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -241,13 +370,15 @@ async function main(): Promise<void> {
 
     const bm25Outcomes: RunOutcome[] = [];
     const hybridOutcomes: RunOutcome[] = [];
+    // Tracks whether the vector arm actually scored any returned row (embedder-loaded proof).
+    let embedderActive = false;
     const perQuery: Array<{
       query: string;
       type: FixtureType;
       expectedId: number | string;
       paraphraseStrategy: string;
       bm25: { hits: number; expectedRank: number | null };
-      hybrid: { hits: number; expectedRank: number | null };
+      hybrid: { hits: number; expectedRank: number | null; vectorHits: number };
     }> = [];
 
     for (const f of fixtures) {
@@ -265,6 +396,15 @@ async function main(): Promise<void> {
       const hybridResults: RankedResult[] = await hybrid.search(f.query, {
         types: [f.type],
         limit: TOP_K,
+        ...(RECENCY_OVERRIDE !== undefined ? { recencyWeight: RECENCY_OVERRIDE } : {}),
+        ...(RRFK_OVERRIDE !== undefined ? { rrfK: RRFK_OVERRIDE } : {}),
+        // s82-m04: the gate measures the PRODUCTION recall path, where context-search /
+        // relevance-surfacing pass expandGraph=true — so the arm is ON by default here.
+        // CMOS_EXPAND_GRAPH=0 turns it off for the OFF-vs-ON comparison; CMOS_GRAPH_WEIGHT sweeps.
+        ...(process.env.CMOS_EXPAND_GRAPH !== '0' ? { expandGraph: true } : {}),
+        ...(envOptFloat('CMOS_GRAPH_WEIGHT') !== undefined
+          ? { graphWeight: envOptFloat('CMOS_GRAPH_WEIGHT') }
+          : {}),
       });
       const hybridOutcome: RunOutcome = {
         query: f.query,
@@ -276,13 +416,24 @@ async function main(): Promise<void> {
       };
       hybridOutcomes.push(hybridOutcome);
 
+      // Embedder-loaded signal (s82-m02): count hybrid results whose vectorSimilarity is
+      // non-null — i.e. the vector arm actually embedded the query and scored a returned row
+      // (fts5-retriever.ts sets vectorSimilarity = vecSim.get(key) ?? null in the fusion).
+      // When getEmbedder negative-caches a no-op embedder, embedQuery returns null, the vector
+      // arm is empty, and EVERY hybrid result has vectorSimilarity === null. This signal is
+      // intrinsic to the hybrid output — unlike comparing against the harness's own
+      // status-unfiltered bm25Only, which diverges from the active-only hybrid path regardless
+      // of embedder health and so could never actually catch the trap.
+      const vectorHits = hybridResults.filter((r) => r.vectorSimilarity != null).length;
+      if (vectorHits > 0) embedderActive = true;
+
       perQuery.push({
         query: f.query,
         type: f.type,
         expectedId: f.expected_id,
         paraphraseStrategy: f.paraphrase_strategy,
         bm25: { hits: bm25Outcome.hits, expectedRank: bm25Outcome.expectedRank },
-        hybrid: { hits: hybridOutcome.hits, expectedRank: hybridOutcome.expectedRank },
+        hybrid: { hits: hybridOutcome.hits, expectedRank: hybridOutcome.expectedRank, vectorHits },
       });
     }
 
@@ -292,10 +443,30 @@ async function main(): Promise<void> {
     const hybridPerType = aggregateByType(hybridOutcomes);
     const elapsedMs = Date.now() - startedAt;
 
+    // --write-baseline: persist the current hybrid per-type metrics as the regression anchor.
+    if (WRITE_BASELINE) {
+      const baseline: BaselineFile = {
+        measuredAt: new Date().toISOString(),
+        note:
+          'Decisions/learnings top3Recall regression anchor for the s82 recall gate ' +
+          '(measure-retrieval-production.ts --gate). Regenerate with --write-baseline after ' +
+          'an intentional corpus/fixture change; the gate fails if decision/learning top3Recall ' +
+          `drops more than ${REGRESSION_TOLERANCE} below these values.`,
+        hybrid: hybridPerType,
+      };
+      fs.writeFileSync(BASELINE_PATH, JSON.stringify(baseline, null, 2) + '\n');
+      process.stderr.write(
+        `[baseline] wrote ${path.relative(process.cwd(), BASELINE_PATH)} — ` +
+          `decision=${fmt(hybridPerType.decision.top3Recall)} ` +
+          `learning=${fmt(hybridPerType.learning.top3Recall)} ` +
+          `mission=${fmt(hybridPerType.mission.top3Recall)}\n`
+      );
+    }
+
     const report = {
       meta: {
-        sprint: 'sprint-67',
-        mission: 's67-m01',
+        sprint: 'sprint-82',
+        mission: 's82-m02',
         measuredAt: new Date().toISOString(),
         durationMs: elapsedMs,
         dbPath: path.relative(process.cwd(), DB_PATH),
@@ -304,16 +475,16 @@ async function main(): Promise<void> {
         corpusSnapshot: fixtureFile.corpusSnapshot,
         retrieverDefaults: {
           backend: 'hybrid',
-          rrfK: 60,
-          recencyWeight: 0.5,
+          // s82-m02 (FORK-E5): read the live constants so this can never re-drift from the
+          // running retriever (the old hardcoded 60/0.5 was stale for ~15 sprints).
+          rrfK: DEFAULT_RRF_K,
+          recencyWeight: DEFAULT_RECENCY_WEIGHT,
           statusFilter: ['active'],
         },
-        baselineReference: {
-          tracelabMissionId: '2de68a40-cc93-4785-b50f-5318cfbbb4a2',
-          tracelabBaselineZeroResultRate: 0.5,
-          syntheticBaselineZeroResultRate: 1.0,
-          note: 'TraceLab CMOS-CONTEXT-RETRIEVAL-01-02 documents 50% production zero-result rate on paraphrase queries. Synthetic s66-m07 fixtures produced 100% by construction. This measurement quantifies the real-world rate.',
-        },
+        embedderActive,
+        gate: GATE
+          ? { missionTop3Floor: MISSION_TOP3_FLOOR, regressionTolerance: REGRESSION_TOLERANCE }
+          : undefined,
       },
       aggregate: {
         bm25Only: bm25Aggregate,
@@ -332,6 +503,21 @@ async function main(): Promise<void> {
     };
 
     process.stdout.write(JSON.stringify(report, null, 2) + '\n');
+
+    // --gate: enforce floors + regression + embedder-loaded, exit(1) on any miss.
+    if (GATE) {
+      const gate = evaluateGate(hybridPerType, embedderActive);
+      process.stderr.write('\n─── RECALL GATE ───\n');
+      for (const c of gate.checks) process.stderr.write(`  PASS  ${c}\n`);
+      for (const fmsg of gate.failures) process.stderr.write(`  FAIL  ${fmsg}\n`);
+      if (gate.passed) {
+        process.stderr.write('GATE PASSED\n');
+      } else {
+        process.stderr.write(`GATE FAILED (${gate.failures.length} failure(s))\n`);
+        client.close();
+        process.exit(1);
+      }
+    }
   } finally {
     client.close();
   }

@@ -11,6 +11,8 @@ import { withClient } from './client';
 import type { CmosToolResult } from './types';
 import { createError, createSuccess, CmosErrors } from './errors';
 import { ensureLearningsTable } from './schema-migrations';
+import { getProjectId } from './genesis-columns';
+import { frameForeignText } from '../../intelligence/provenance-frame';
 
 /**
  * Learning search result.
@@ -42,6 +44,13 @@ export interface LearningSearchResult {
 
   /** Relevance score (higher = more keyword matches) */
   relevance: number;
+
+  /**
+   * s83-m06: the learning's genesis project_id (null on ancient stores). A
+   * pull-merged learning carries the FOREIGN origin's id; the renderer frames it
+   * as untrusted when it differs from the local project.
+   */
+  projectId: string | null;
 }
 
 /**
@@ -59,6 +68,12 @@ export interface CmosLearningsSearchResult {
 
   /** Whether results were limited */
   limited: boolean;
+
+  /**
+   * s83-m06: the local project_id, so the renderer can frame any result whose
+   * project_id differs (a pull-merged FOREIGN row) as untrusted data.
+   */
+  localProjectId: string | null;
 }
 
 /**
@@ -132,6 +147,13 @@ export async function cmosLearningsSearch(
         learningCols.success && learningCols.data?.some((c) => c.name === 'author_session_id')
           ? 'author_session_id'
           : 'session_id';
+      // s83-m06: project_id degrades to NULL on ancient stores that predate the
+      // s69-m03 genesis columns (same guard as sessCol), so this SELECT never throws
+      // on a legacy store — it just yields projectId=null and renders bare.
+      const projExpr =
+        learningCols.success && learningCols.data?.some((c) => c.name === 'project_id')
+          ? 'project_id'
+          : 'NULL';
 
       const allResult = client.getMany<{
         id: number;
@@ -142,8 +164,10 @@ export async function cmosLearningsSearch(
         session_id: string | null;
         mission_id: string | null;
         created_at: string;
+        project_id: string | null;
       }>(
-        `SELECT id, content, category, status, sprint_id, ${sessCol} AS session_id, mission_id, created_at
+        `SELECT id, content, category, status, sprint_id, ${sessCol} AS session_id, mission_id, created_at,
+                ${projExpr} AS project_id
          FROM learnings ${whereClause}
          ORDER BY created_at DESC, id DESC`,
         queryParams
@@ -155,6 +179,7 @@ export async function cmosLearningsSearch(
           results: [],
           totalMatches: 0,
           limited: false,
+          localProjectId: getProjectId(client),
         });
       }
 
@@ -185,6 +210,7 @@ export async function cmosLearningsSearch(
         missionId: row.mission_id,
         createdAt: row.created_at,
         relevance,
+        projectId: row.project_id,
       }));
 
       return createSuccess<CmosLearningsSearchResult>({
@@ -192,6 +218,7 @@ export async function cmosLearningsSearch(
         results,
         totalMatches,
         limited: totalMatches > limit,
+        localProjectId: getProjectId(client),
       });
     },
     { projectRoot: params.projectRoot }
@@ -237,12 +264,24 @@ export function formatLearningsSearchForLLM(
     return lines.join('\n');
   }
 
+  const localProjectId = data.localProjectId ?? null;
   for (const r of data.results) {
     const category = r.category ? ` <${r.category}>` : '';
     const sprint = r.sprintId ? ` (${r.sprintId})` : '';
     const mission = r.missionId ? ` {${r.missionId}}` : '';
     const status = r.status !== 'active' ? ` [${r.status}]` : '';
-    lines.push(`• ${r.content}${category}${sprint}${mission}${status}`);
+    const meta = `${category}${sprint}${mission}${status}`;
+    // s83-m06: a learning pull-merged from ANOTHER project is foreign, untrusted
+    // content — frame its text inside the provenance fence, not as a bare bullet.
+    // Mirrors the ratified LIST precedent; local rows stay bare.
+    const isForeign =
+      r.projectId != null && (localProjectId == null || r.projectId !== localProjectId);
+    if (isForeign) {
+      lines.push(`•${meta} [proj:${r.projectId}]`);
+      lines.push(frameForeignText(r.content, `proj:${r.projectId}`));
+    } else {
+      lines.push(`• ${r.content}${meta}`);
+    }
     lines.push(`  Created: ${r.createdAt} | Relevance: ${r.relevance}`);
     lines.push('');
   }

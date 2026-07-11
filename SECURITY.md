@@ -100,11 +100,33 @@ additive `{source, trust:"foreign"}` descriptor
 onboarding, directory, and cross-store/pull-merged decision & learning renders. The `cmos_message` and
 `cmos_agent_onboard` tool descriptions state this contract to the calling agent.
 
-- **Known limitation (stated plainly):** the mission-start "relevant decisions" surfacing
-  ([relevance-surfacing.ts](src/tools/cmos/relevance-surfacing.ts)) does **not** yet frame foreign
-  rows — it surfaces local-store decisions (which, after a `cmos_db pull`, can include rows authored
-  in another project) without the provenance fence. Framing there requires threading `project_id`
-  through the retriever and is a follow-up.
+- **Decision & learning read surfaces framed (s83-m06):** after a `cmos_db pull`, the local
+  `strategic_decisions` / `learnings` tables can hold rows authored in another project. `project_id` is
+  derived read-time (no migration; column-presence guarded so ancient stores degrade to `NULL` and
+  render bare, never throw) and a foreign **decision or learning** row — its `project_id` ≠ the resolved
+  local project — renders inside the untrusted fence, while local rows stay bare, at **every** surface
+  that renders such rows:
+  - the retrieval/search reads: mission-start "relevant decisions"
+    ([relevance-surfacing.ts](src/tools/cmos/relevance-surfacing.ts) →
+    [cmos-mission-start.ts](src/tools/cmos/cmos-mission-start.ts), decision text **and** evidence),
+    `cmos_context(action="search")`, `cmos_decisions(action="search")`, `cmos_learnings(action="search")`
+    (threaded through the retriever's `RankedResult` and the two direct-SELECT search paths);
+  - the aggregate/digest reads: `cmos_context(action="view")` (full + compact),
+    `cmos_agent_onboard` "Recent Decisions", and the `cmos_review` digest's recent-decisions.
+
+  This closes the former mission-start "relevant decisions" limitation for decision/learning content.
+
+- **Known limitation — foreign MISSION / SPRINT / SESSION text is not yet framed.** The same pull-merge
+  path stamps a foreign `project_id` onto pulled `missions` / `sprints` / `sessions` rows, and their
+  name / objective / context / title / focus fields still render **bare** at their read surfaces:
+  `cmos_agent_onboard` pending & blocked missions, `cmos_mission(action="list"|"show")`,
+  `cmos_mission(action="status", acrossProjects=true)`, the `cmos_review` portfolio mission names, and
+  the review digest's sprint title/focus. Framing these is a distinct row-type sweep (their own SELECTs
+  - result types) tracked as a follow-up. In practice the exposure is gated on multi-party
+    collaboration — the sync/pull collab arc is parked (no production cross-owner shares today), so a
+    pulled row is authored by the operator's own project, not a hostile third party — which is why the
+    decision/learning sweep landed first and the mission/sprint sweep is deferred rather than rushed.
+
 - The separate content sanitizer ([content-sanitizer.ts](src/intelligence/content-sanitizer.ts))
   guards CMOS's own **write** paths against a specific tool-call-marshalling corruption; it is not the
   inbound-rendering mechanism above.

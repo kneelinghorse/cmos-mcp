@@ -5,7 +5,14 @@
 import { withClientAsync } from './client';
 import type { CmosToolResult } from './types';
 import { createError, createSuccess, CMOS_ERROR_CODES } from './errors';
-import { HybridRetriever, type RankedResult, type RankedResultType } from './fts5-retriever';
+import { getProjectId } from './genesis-columns';
+import { frameForeignText } from '../../intelligence/provenance-frame';
+import {
+  HybridRetriever,
+  DEFAULT_RECENCY_WEIGHT,
+  type RankedResult,
+  type RankedResultType,
+} from './fts5-retriever';
 
 export type { RankedResultType } from './fts5-retriever';
 
@@ -31,6 +38,12 @@ export interface ContextSearchResult {
 
   /** Retriever backend used */
   backend: string;
+
+  /**
+   * s83-m06: the local project_id, so the renderer can frame any result whose
+   * project_id differs (a pull-merged FOREIGN row) as untrusted data.
+   */
+  localProjectId: string | null;
 }
 
 export interface ContextSearchParams {
@@ -75,7 +88,9 @@ export async function cmosContextSearch(
 
   const limit = params.limit ?? 5;
   const types: RankedResultType[] = params.types ?? ['decision'];
-  const recencyWeight = params.recencyWeight ?? 0.5;
+  // s82-m04 (FORK-E5): default to the retriever's tuned DEFAULT_RECENCY_WEIGHT (0.2), not the
+  // stale 0.5 — so this production recall path matches the measurement gate and the s67-m02 sweep.
+  const recencyWeight = params.recencyWeight ?? DEFAULT_RECENCY_WEIGHT;
   const statusFilter = params.statusFilter ?? ['active'];
 
   return withClientAsync(
@@ -88,6 +103,8 @@ export async function cmosContextSearch(
         types,
         recencyWeight,
         statusFilter,
+        // s82-m04: recall-oriented read — expand with same-type 1-hop graph neighbors.
+        expandGraph: true,
       });
 
       return createSuccess<ContextSearchResult>({
@@ -96,6 +113,7 @@ export async function cmosContextSearch(
         count: results.length,
         options: { limit, recencyWeight, types, statusFilter },
         backend: caps.backend,
+        localProjectId: getProjectId(client),
       });
     },
     { projectRoot: params.projectRoot }
@@ -109,7 +127,7 @@ export function formatContextSearchForLLM(result: CmosToolResult<ContextSearchRe
     return `❌ Search failed: ${result.error?.message ?? 'Unknown error'}`;
   }
 
-  const { query, results, count, options, backend } = result.data;
+  const { query, results, count, options, backend, localProjectId } = result.data;
   const lines: string[] = [];
 
   lines.push(`## Search Results — "${query}"`);
@@ -134,7 +152,18 @@ export function formatContextSearchForLLM(result: CmosToolResult<ContextSearchRe
     const sprintStr = r.sprintId ? ` [${r.sprintId}]` : '';
     const catStr = r.category ? ` (${r.category})` : '';
 
-    lines.push(`**${i + 1}.** ${r.text}${sprintStr}${catStr}`);
+    // s83-m06: a result pull-merged from ANOTHER project is foreign, untrusted
+    // content — render its text inside the provenance fence, not as a bare heading
+    // that could read as an instruction. Mirrors the ratified LIST precedent; local
+    // rows stay bare.
+    const isForeign =
+      r.projectId != null && (localProjectId == null || r.projectId !== localProjectId);
+    if (isForeign) {
+      lines.push(`**${i + 1}.**${sprintStr}${catStr} [proj:${r.projectId}]`);
+      lines.push(frameForeignText(r.text, `proj:${r.projectId}`));
+    } else {
+      lines.push(`**${i + 1}.** ${r.text}${sprintStr}${catStr}`);
+    }
     lines.push(
       `   *score: ${scoreStr} | age: ${ageDaysStr} | recency: ${r.recencyFactor.toFixed(2)}*`
     );

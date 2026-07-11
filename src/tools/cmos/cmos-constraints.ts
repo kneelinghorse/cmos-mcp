@@ -13,8 +13,12 @@
 
 import { withClient, type CmosDatabaseClient } from './client';
 import type { CmosToolResult } from './types';
-import { createError, createSuccess } from './errors';
-import { ensureConstraintsTable, type ConstraintStatus } from './schema-migrations';
+import { createError, createSuccess, CmosErrors, CMOS_ERROR_CODES } from './errors';
+import {
+  ensureConstraintsTable,
+  ensureConstraintReviewTimestamp,
+  type ConstraintStatus,
+} from './schema-migrations';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -27,6 +31,8 @@ export interface ConstraintRecord {
   createdAt: string;
   expiresAt: string | null;
   archivedAt: string | null;
+  /** ISO timestamp of the last reaffirm/review, null if never reviewed (Sprint 82 m01). */
+  lastReviewedAt: string | null;
 }
 
 export interface ConstraintReviewItem extends ConstraintRecord {
@@ -42,15 +48,21 @@ export interface ConstraintsResult {
   reviewItems?: ConstraintReviewItem[];
   affected: number;
   message: string;
+  /** Constraint acted on by reaffirm (Sprint 82 m01). */
+  constraintId?: number;
+  /** ISO timestamp the reaffirm bumped last_reviewed_at to (Sprint 82 m01). */
+  reaffirmedAt?: string;
 }
 
 export interface CmosConstraintsParams {
-  /** Sub-action: list | review | archive */
-  constraintAction: 'list' | 'review' | 'archive';
+  /** Sub-action: list | review | archive | reaffirm */
+  constraintAction: 'list' | 'review' | 'archive' | 'reaffirm';
   /** Filter by status (for list, default: active) */
   constraintStatus?: ConstraintStatus;
   /** Constraint IDs to archive */
   constraintIds?: number[];
+  /** Constraint ID to reaffirm (Sprint 82 m01) */
+  constraintId?: number;
   /** Staleness threshold in days (for review, default: 30) */
   stalenessThresholdDays?: number;
   /** Optional project root */
@@ -66,9 +78,19 @@ const DEFAULT_STALENESS_THRESHOLD_DAYS = 30;
  * - Expired constraints get 100
  * - Age-based scoring: linearly increases from 0 to 80 over threshold days
  * - No expiry adds 20 bonus points (incentivizes setting TTLs)
+ *
+ * Sprint 82 m01: age is measured from `COALESCE(last_reviewed_at, created_at)`, so a
+ * reaffirmed constraint (its `last_reviewed_at` bumped to now) resets to a low score —
+ * mirroring learnings staleness. A NULL last_reviewed_at falls back to created_at
+ * (pre-migration behavior), so no backfill is needed. Expiry is untouched by reaffirm.
  */
 function computeStalenessScore(
-  constraint: { created_at: string; expires_at: string | null; sprint_id: string | null },
+  constraint: {
+    created_at: string;
+    expires_at: string | null;
+    sprint_id: string | null;
+    last_reviewed_at?: string | null;
+  },
   now: Date,
   thresholdDays: number
 ): { score: number; reason: 'expired' | 'stale_no_expiry' | 'old_sprint' } {
@@ -80,8 +102,9 @@ function computeStalenessScore(
     }
   }
 
-  const createdAt = new Date(constraint.created_at);
-  const ageDays = (now.getTime() - createdAt.getTime()) / (1000 * 60 * 60 * 24);
+  const anchorIso = constraint.last_reviewed_at ?? constraint.created_at;
+  const anchoredAt = new Date(anchorIso);
+  const ageDays = (now.getTime() - anchoredAt.getTime()) / (1000 * 60 * 60 * 24);
 
   // Age-based score: 0 at 0 days, 80 at thresholdDays
   const ageScore = Math.min(80, Math.round((ageDays / thresholdDays) * 80));
@@ -102,18 +125,20 @@ export async function cmosConstraints(
 ): Promise<CmosToolResult<ConstraintsResult>> {
   const action = params.constraintAction;
 
-  if (!action || !['list', 'review', 'archive'].includes(action)) {
+  if (!action || !['list', 'review', 'archive', 'reaffirm'].includes(action)) {
     return createError<ConstraintsResult>({
       code: 'INVALID_ACTION',
       message: `Invalid constraint action: '${action}'`,
-      suggestion: 'Use constraintAction: list | review | archive',
-      validValues: ['list', 'review', 'archive'],
+      suggestion: 'Use constraintAction: list | review | archive | reaffirm',
+      validValues: ['list', 'review', 'archive', 'reaffirm'],
     });
   }
 
   return withClient(
     (client) => {
       ensureConstraintsTable(client);
+      // Sprint 82 m01: ensure last_reviewed_at exists so review/reaffirm can read+bump it.
+      ensureConstraintReviewTimestamp(client);
 
       switch (action) {
         case 'list':
@@ -125,6 +150,8 @@ export async function cmosConstraints(
           );
         case 'archive':
           return archiveConstraints(client, params.constraintIds);
+        case 'reaffirm':
+          return reaffirmConstraint(client, params.constraintId);
         default:
           return createError<ConstraintsResult>({
             code: 'INVALID_ACTION',
@@ -149,8 +176,9 @@ function listConstraints(
     created_at: string;
     expires_at: string | null;
     archived_at: string | null;
+    last_reviewed_at: string | null;
   }>(
-    `SELECT id, content, status, session_id, sprint_id, created_at, expires_at, archived_at
+    `SELECT id, content, status, session_id, sprint_id, created_at, expires_at, archived_at, last_reviewed_at
      FROM constraints WHERE status = ? ORDER BY created_at ASC`,
     [status]
   );
@@ -171,6 +199,7 @@ function listConstraints(
     createdAt: row.created_at,
     expiresAt: row.expires_at,
     archivedAt: row.archived_at,
+    lastReviewedAt: row.last_reviewed_at,
   }));
 
   return createSuccess<ConstraintsResult>({
@@ -195,8 +224,9 @@ function reviewConstraints(
     created_at: string;
     expires_at: string | null;
     archived_at: string | null;
+    last_reviewed_at: string | null;
   }>(
-    `SELECT id, content, status, session_id, sprint_id, created_at, expires_at, archived_at
+    `SELECT id, content, status, session_id, sprint_id, created_at, expires_at, archived_at, last_reviewed_at
      FROM constraints WHERE status = 'active' ORDER BY created_at ASC`,
     []
   );
@@ -225,6 +255,7 @@ function reviewConstraints(
         createdAt: row.created_at,
         expiresAt: row.expires_at,
         archivedAt: row.archived_at,
+        lastReviewedAt: row.last_reviewed_at,
         stalenessScore: score,
         reason,
       });
@@ -287,7 +318,66 @@ function archiveConstraints(
   });
 }
 
+/**
+ * Reaffirm an active constraint by bumping last_reviewed_at to now, without changing
+ * its status (Sprint 82 m01). Mirrors `cmos_learnings(action="reaffirm")`. Because
+ * staleness scoring anchors on COALESCE(last_reviewed_at, created_at), a reaffirmed
+ * constraint drops back below the surfacing floor until it ages out again — the review
+ * clock is reset without archiving a still-valid rule.
+ */
+function reaffirmConstraint(
+  client: CmosDatabaseClient,
+  id: number | undefined
+): CmosToolResult<ConstraintsResult> {
+  if (id === undefined || typeof id !== 'number') {
+    return createError<ConstraintsResult>(CmosErrors.missingParameter('constraintId'));
+  }
+
+  const existing = client.getOne<{ id: number; status: string }>(
+    'SELECT id, status FROM constraints WHERE id = ?',
+    [id]
+  );
+  if (!existing.success || !existing.data) {
+    return createError<ConstraintsResult>({
+      code: CMOS_ERROR_CODES.MISSION_NOT_FOUND,
+      message: `Constraint #${id} not found`,
+      suggestion: 'Use cmos_context(action="constraints", constraintAction="list") to find IDs',
+    });
+  }
+
+  const nowIso = new Date().toISOString();
+  const updateResult = client.execute('UPDATE constraints SET last_reviewed_at = ? WHERE id = ?', [
+    nowIso,
+    id,
+  ]);
+  if (!updateResult.success) {
+    return createError<ConstraintsResult>({
+      code: CMOS_ERROR_CODES.DB_QUERY_FAILED,
+      message: `Failed to reaffirm constraint: ${updateResult.error?.message ?? 'Unknown error'}`,
+    });
+  }
+
+  return createSuccess<ConstraintsResult>({
+    constraintAction: 'reaffirm',
+    constraintId: id,
+    reaffirmedAt: nowIso,
+    affected: 1,
+    message: `Constraint #${id} reaffirmed — last_reviewed_at bumped (status ${existing.data.status}, unchanged)`,
+  });
+}
+
 // ─── Staleness Helpers (for onboard integration) ─────────────────────────────
+
+/**
+ * Read-only check for whether the constraints table carries a given column.
+ * Used on the onboard read path so it can degrade to created_at anchoring on an
+ * un-migrated store WITHOUT triggering a schema write (Sprint 82 m01).
+ */
+function constraintsHasColumn(client: CmosDatabaseClient, column: string): boolean {
+  const cols = client.getMany<{ name: string }>(`PRAGMA table_info('constraints')`, []);
+  if (!cols.success || !cols.data) return false;
+  return cols.data.some((c) => c.name === column);
+}
 
 /**
  * Count stale + expired active constraints.
@@ -314,10 +404,17 @@ export function getStaleConstraintCount(
   );
   const expired = expiredResult.success && expiredResult.data ? expiredResult.data.count : 0;
 
-  // Count old without expiry
+  // Count old without expiry. Sprint 82 m01: age from COALESCE(last_reviewed_at, created_at)
+  // so a reaffirmed constraint drops out of the banner until it ages out again. This is a
+  // READ path (called by onboard, possibly under a read-only agent session), so it must
+  // never write — the column is detected rather than lazily added (mirrors countStale's
+  // `evergreen` guard in staleness-detection.ts). The write-capable cmosConstraints entry
+  // owns the ensureConstraintReviewTimestamp migration.
+  const hasReviewTs = constraintsHasColumn(client, 'last_reviewed_at');
+  const ageAnchor = hasReviewTs ? 'COALESCE(last_reviewed_at, created_at)' : 'created_at';
   const staleResult = client.getOne<{ count: number }>(
     `SELECT COUNT(*) AS count FROM constraints
-     WHERE status = 'active' AND expires_at IS NULL AND created_at <= ?`,
+     WHERE status = 'active' AND expires_at IS NULL AND ${ageAnchor} <= ?`,
     [thresholdDate]
   );
   const stale = staleResult.success && staleResult.data ? staleResult.data.count : 0;
@@ -362,8 +459,21 @@ export function formatConstraintsForLLM(result: CmosToolResult<ConstraintsResult
       );
     }
     lines.push('');
-    lines.push('Use constraintAction="archive" with constraintIds to archive stale constraints.');
+    lines.push(
+      'Use constraintAction="archive" with constraintIds to archive stale constraints, ' +
+        'or constraintAction="reaffirm" with constraintId to reset a still-valid one.'
+    );
     return lines.join('\n');
+  }
+
+  if (d.constraintAction === 'reaffirm') {
+    return [
+      '✓ **Constraint Reaffirmed**',
+      '',
+      `**Constraint**: #${d.constraintId}`,
+      `**Reaffirmed at**: ${d.reaffirmedAt}`,
+      d.message,
+    ].join('\n');
   }
 
   return d.message;

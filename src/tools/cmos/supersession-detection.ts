@@ -71,6 +71,8 @@ export async function detectSupersessionCandidates(
     types: ['decision'],
     limit: MAX_CANDIDATES * CANDIDATE_POOL_MULTIPLIER,
     statusFilter: ['active'],
+    // s82-m04: deliberately NO expandGraph — this is a precision, corpus-mutating path
+    // (drives supersession marking); graph-adjacent candidates would over-mark.
   });
 
   const candidates: SupersessionCandidate[] = results

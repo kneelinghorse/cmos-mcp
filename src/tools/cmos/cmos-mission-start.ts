@@ -18,6 +18,8 @@ import {
   VALID_STATE_TRANSITIONS,
 } from './errors';
 import { ensureMissionTimestamps } from './schema-migrations';
+import { getProjectId } from './genesis-columns';
+import { frameForeignText } from '../../intelligence/provenance-frame';
 import {
   findRelevantDecisions,
   buildMissionSearchText,
@@ -45,6 +47,12 @@ export interface MissionStartResult {
 
   /** Active decisions relevant to this mission's objective (0-5 items) */
   relevantDecisions?: RelevantDecision[];
+
+  /**
+   * s83-m06: the local project_id, so the renderer can frame any relevant decision
+   * whose project_id differs (a pull-merged FOREIGN row) as untrusted data.
+   */
+  localProjectId?: string | null;
 }
 
 /**
@@ -328,6 +336,7 @@ export async function cmosMissionStart(
         message: `Mission '${missionId}' is now In Progress`,
         startedAt: now,
         relevantDecisions,
+        localProjectId: getProjectId(client),
       });
     },
     { projectRoot: params.projectRoot }
@@ -473,14 +482,32 @@ export function formatMissionStartForLLM(result: CmosToolResult<MissionStartResu
   if (data.relevantDecisions && data.relevantDecisions.length > 0) {
     lines.push('');
     lines.push(`**Relevant Past Decisions** (${data.relevantDecisions.length}):`);
+    const localProjectId = data.localProjectId ?? null;
     for (const d of data.relevantDecisions) {
       const cat = d.category ? ` [${d.category}]` : '';
       const sprint = d.sprintId ? ` (${d.sprintId})` : '';
-      const preview =
-        d.decisionText.length > 100 ? d.decisionText.slice(0, 100) + '...' : d.decisionText;
-      lines.push(`  • #${d.id}${cat}${sprint}: ${preview}`);
-      if (d.evidence) {
-        lines.push(`    Evidence: ${d.evidence}`);
+      // s83-m06: a relevant decision pull-merged from ANOTHER project is foreign,
+      // untrusted content — render its text inside the provenance fence instead of
+      // as a bare bullet that could read as an instruction. Mirrors the ratified
+      // LIST precedent (cmos-decisions-list.ts). Local rows stay bare.
+      const isForeign =
+        d.projectId != null && (localProjectId == null || d.projectId !== localProjectId);
+      if (isForeign) {
+        lines.push(`  • #${d.id}${cat}${sprint} [proj:${d.projectId}]`);
+        lines.push(frameForeignText(d.decisionText, `proj:${d.projectId}`));
+        // s83-m06 (review): evidence is also foreign-author-controlled free text —
+        // it MUST stay inside the fence, not render bare after [END UNTRUSTED DATA].
+        if (d.evidence) {
+          lines.push('    Evidence:');
+          lines.push(frameForeignText(d.evidence, `proj:${d.projectId}`));
+        }
+      } else {
+        const preview =
+          d.decisionText.length > 100 ? d.decisionText.slice(0, 100) + '...' : d.decisionText;
+        lines.push(`  • #${d.id}${cat}${sprint}: ${preview}`);
+        if (d.evidence) {
+          lines.push(`    Evidence: ${d.evidence}`);
+        }
       }
     }
   }

@@ -109,14 +109,15 @@ Consolidated context tool with action parameter support. Actions: view, update, 
 | `nextStepStatus` | string | no | Filter status for next_steps list (default: pending) |
 | `nextStepIds` | array | no | Next-step IDs to act on for complete/carry/drop |
 | `carryToSprint` | string | no | Target sprint ID for carry action |
-| `constraintAction` | string | no | Sub-action for constraints: list \| review \| archive |
+| `constraintAction` | string | no | Sub-action for constraints: list \| review \| archive \| reaffirm |
 | `constraintStatus` | string | no | Filter status for constraints list (default: active) |
 | `constraintIds` | array | no | Constraint IDs to archive |
+| `constraintId` | number | no | Constraint ID to reaffirm (bumps last_reviewed_at without changing status; resets its staleness clock) |
 | `stalenessThresholdDays` | number | no | Staleness threshold in days for review (default: 30) |
 | `query` | string | no | Search query string for search action |
 | `searchLimit` | number | no | Max results for search action (default: 5) |
 | `searchTypes` | array | no | Content types to search (default: all) |
-| `recencyWeight` | number | no | Recency boost weight 0–1 for search action (default: 0.5) |
+| `recencyWeight` | number | no | Recency boost weight 0–1 for search action (default: 0.2) |
 | `projectRoot` | string | no | Project root directory to search for CMOS database (defaults to cwd) |
 
 ## cmos_session
@@ -217,7 +218,7 @@ Consolidated project tool with action parameter support. Actions: init, register
 | `setAsDefault` | boolean | no | Set as default project for register action |
 | `prune` | boolean | no | Prune invalid entries for validate action |
 | `validate` | boolean | no | Run validation on list action (routes to validate handler) |
-| `projectType` | string | no | Project type/tier for update action |
+| `projectType` | string | no | Project type/tier for the init and update actions (defaults to build for new projects) |
 | `instances` | array | no | Restrict sweep to these registry names only |
 | `statusFilter` | array | no | Restrict sweep to these mission/session statuses |
 | `itemType` | string | no | Restrict sweep to missions or sessions only |

@@ -13,6 +13,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { loadTierConfig, type TierConfig } from '../../../src/tools/cmos/tier-config';
 import { cmosAgentOnboard } from '../../../src/tools/cmos/cmos-agent-onboard';
+import * as projectInit from '../../../src/tools/cmos/cmos-project-init';
 import { CmosDetector } from '../../../src/intelligence/cmos-detector';
 
 jest.mock('../../../src/server-health', () => ({
@@ -82,9 +83,55 @@ describe('tier-config', () => {
       expect(config!.vocabulary.note).toBe('note');
     });
 
-    it('should return null when tiers directory does not exist', () => {
-      const config = loadTierConfig('build', '/nonexistent/path');
-      expect(config).toBeNull();
+    it('should fall back to bundled cmos-seed/tiers when the root has no cmos/tiers (s83-m05)', () => {
+      // A bare root (npm-install-mimic: a store dir with no copied cmos/tiers) must
+      // still resolve a tier config from the shipped seed bundle — the fix for the
+      // silent no-op that used to leave npm consumers with a null tierConfig.
+      const bareRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-bare-root-'));
+      try {
+        const config = loadTierConfig('managed', bareRoot);
+        expect(config).not.toBeNull();
+        // Resolved from cmos-seed/tiers/managed.md, not the (absent) store dir.
+        expect(config!.tier).toBe('managed');
+      } finally {
+        fs.rmSync(bareRoot, { recursive: true, force: true });
+      }
+    });
+
+    it('should return null only when the bundled seed is also unreachable (s83-m05)', () => {
+      // The ONLY remaining null path: the store has no cmos/tiers AND the bundled
+      // seed cannot be located (a broken package install). Simulate by stubbing
+      // resolveSeedPath to null.
+      const spy = jest.spyOn(projectInit, 'resolveSeedPath').mockReturnValue(null);
+      try {
+        const config = loadTierConfig('build', '/nonexistent/path');
+        expect(config).toBeNull();
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('should prefer the bundled seed exact tier over a store build.md fallback (s83-m05 review)', () => {
+      // A partially-seeded store: cmos/tiers/build.md exists but managed.md does NOT.
+      // Requesting 'managed' must resolve the bundled seed's managed.md, NOT the
+      // store's build.md — otherwise a managed project silently renders build
+      // vocabulary. This locks the two-pass precedence (exact tier across all dirs
+      // BEFORE any build.md fallback).
+      const storeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-partial-tiers-'));
+      const tiersDir = path.join(storeRoot, 'cmos', 'tiers');
+      fs.mkdirSync(tiersDir, { recursive: true });
+      fs.copyFileSync(
+        path.resolve(__dirname, '../../../cmos/tiers/build.md'),
+        path.join(tiersDir, 'build.md')
+      );
+      try {
+        const config = loadTierConfig('managed', storeRoot);
+        expect(config).not.toBeNull();
+        // The bundled seed's managed.md wins over the store's build.md.
+        expect(config!.tier).toBe('managed');
+      } finally {
+        fs.rmSync(storeRoot, { recursive: true, force: true });
+      }
     });
   });
 
@@ -210,15 +257,28 @@ describe('tier-config', () => {
       expect(hasMissionCmd).toBe(false);
     });
 
-    it('should gracefully handle missing tier config files', async () => {
+    it('should resolve tierConfig via the bundled cmos-seed fallback when the store has no cmos/tiers (s83-m05)', async () => {
       setupDb();
-      // Don't copy tier configs — directory won't exist
-
+      // Don't copy tier configs — the store has cmos/db but NO cmos/tiers, exactly
+      // like a bare npm-install-mimic. Before s83-m05 this returned tierConfig=null
+      // (silent no-op); now the bundled seed fallback fires.
       const result = await cmosAgentOnboard({ projectRoot: tempDir });
       expect(result.success).toBe(true);
-      expect(result.data?.tierConfig).toBeNull();
-      // Should still work with full payload (no suppression)
+      expect(result.data?.tierConfig).not.toBeNull();
+      // Default projectType is 'build', resolved from cmos-seed/tiers/build.md.
+      expect(result.data?.tierConfig?.tier).toBe('build');
+      // build tier hides nothing, so the full payload still renders.
       expect(result.data?.currentSprint).not.toBeNull();
     });
+
+    // NOTE: the auto-discovery path (params.projectRoot undefined → onboard resolves
+    // tiers from dirname^3(client.path)) is exercised over real MCP stdio in
+    // scripts/verify-dist.ts, which spawns the server with CMOS_PROJECT_ROOT deleted
+    // and cwd = a fresh project dir. That check stamps a unique label into the store's
+    // OWN build.md and asserts onboard echoes it, so it distinguishes store-root
+    // resolution from the always-present bundled-seed fallback (a bare non-null check
+    // would not). It cannot be unit-tested safely here: with no projectRoot the onboard
+    // client resolves from the jest CWD (the repo), which the real-store guard
+    // (correctly) refuses to open.
   });
 });

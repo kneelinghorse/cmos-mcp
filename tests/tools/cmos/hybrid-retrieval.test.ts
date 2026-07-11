@@ -95,7 +95,9 @@ function makeTempDb(): { tempDir: string; dbPath: string } {
       sprint_id TEXT,
       evidence TEXT,
       created_at TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'active'
+      status TEXT NOT NULL DEFAULT 'active',
+      mission_id TEXT,        -- s82-m04 graph edge
+      superseded_by INTEGER   -- s82-m04 graph edge
     );
 
     CREATE VIRTUAL TABLE decisions_fts USING fts5(
@@ -114,7 +116,8 @@ function makeTempDb(): { tempDir: string; dbPath: string } {
       category TEXT,
       sprint_id TEXT,
       status TEXT NOT NULL DEFAULT 'active',
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      mission_id TEXT         -- s82-m04 graph edge
     );
 
     CREATE TABLE missions (
@@ -125,6 +128,14 @@ function makeTempDb(): { tempDir: string; dbPath: string } {
       sprint_id TEXT,
       created_at TEXT,
       status TEXT NOT NULL DEFAULT 'Queued'
+    );
+
+    -- s82-m04 graph edge for missions
+    CREATE TABLE mission_dependencies (
+      from_id TEXT NOT NULL,
+      to_id TEXT NOT NULL,
+      type TEXT NOT NULL,
+      PRIMARY KEY (from_id, to_id)
     );
   `);
   db.close();
@@ -657,6 +668,270 @@ describe('HybridRetriever', () => {
     it('returns null for unsupported types (e.g. session)', () => {
       const retriever = new HybridRetriever(client, { embedder: mockEmbedder });
       expect(retriever.get(1, 'session')).toBeNull();
+    });
+  });
+
+  // ─── s82-m04 graph-neighbor expansion ──────────────────────────────────────
+
+  describe('graph-neighbor expansion (s82-m04)', () => {
+    // A dedicated embedder keyed off explicit markers so the controlled scenario is fully
+    // deterministic and independent of the shared seedFixtures concept space: the query
+    // matches only the "vecseed" row by vector; "vecneighbor" rows never match directly.
+    // Index 5 is free (CONCEPT_TO_INDEX starts at 10), so the query never collides with a
+    // shared seedFixtures vector. Only the query is embedded here; seed rows get their stored
+    // vector directly via seedMission, and neighbor rows carry no vector at all.
+    const SEED_VEC_INDEX = 5;
+    const graphEmbedder: Embedder = async (text: string) => {
+      const arr = new Float32Array(EMBEDDING_DIM);
+      if (text.toLowerCase().includes('vecseed')) arr[SEED_VEC_INDEX] = 1;
+      else arr[6] = 1;
+      return arr;
+    };
+
+    // vecIndex=null seeds a mission with NO stored vector (and no query-overlapping keywords) —
+    // a pure graph-only row with zero direct retrievability, so an absence-before / presence-after
+    // assertion is deterministic (no equidistant-one-hot tie-break flakiness).
+    function seedMission(
+      id: string,
+      sprint: string,
+      name: string,
+      objective: string,
+      vecIndex: number | null
+    ): void {
+      client.execute(
+        `INSERT INTO missions (id, name, objective, sprint_id, created_at, status)
+         VALUES (?, ?, ?, ?, ?, 'Queued')`,
+        [id, name, objective, sprint, daysAgoIso(1)]
+      );
+      if (vecIndex !== null) {
+        const arr = new Float32Array(EMBEDDING_DIM);
+        arr[vecIndex] = 1;
+        client.execute(`INSERT INTO missions_vec(mission_id, embedding) VALUES (?, ?)`, [
+          id,
+          packVector(arr),
+        ]);
+      }
+    }
+
+    const QUERY = 'vecseed target';
+
+    it('rescues a same-sprint graph-only neighbor only when expandGraph is on', async () => {
+      seedMission(
+        'gx-m01',
+        'sprint-graph',
+        'seed handler',
+        'vecseed the primary retrieval target',
+        SEED_VEC_INDEX
+      );
+      seedMission(
+        'gx-m02',
+        'sprint-graph',
+        'adjacent sibling',
+        'vecneighbor the adjacent mission with no query overlap',
+        null
+      );
+      seedMission(
+        'gz-m09',
+        'sprint-far',
+        'noise',
+        'vecneighbor an unrelated mission in another sprint',
+        null
+      );
+      const retriever = new HybridRetriever(client, { embedder: graphEmbedder });
+
+      const off = (await retriever.search(QUERY, { types: ['mission'], limit: 5 })).map((r) =>
+        String(r.id)
+      );
+      const on = (
+        await retriever.search(QUERY, { types: ['mission'], limit: 5, expandGraph: true })
+      ).map((r) => String(r.id));
+
+      expect(off).toContain('gx-m01'); // seed retrieved directly, both ways
+      expect(off).not.toContain('gx-m02'); // neighbor is NOT directly retrievable
+      expect(on).toContain('gx-m01');
+      expect(on).toContain('gx-m02'); // rescued via same-sprint adjacency to the seed
+      expect(on).not.toContain('gz-m09'); // a non-adjacent row (other sprint) is NOT pulled in
+    });
+
+    it('does not over-promote a graph-only neighbor above a genuine direct hit', async () => {
+      seedMission(
+        'gx-m01',
+        'sprint-graph',
+        'seed handler',
+        'vecseed the primary retrieval target',
+        SEED_VEC_INDEX
+      );
+      seedMission(
+        'gx-m02',
+        'sprint-graph',
+        'adjacent sibling',
+        'vecneighbor the adjacent mission',
+        null
+      );
+      const retriever = new HybridRetriever(client, { embedder: graphEmbedder });
+
+      const on = await retriever.search(QUERY, { types: ['mission'], limit: 5, expandGraph: true });
+      expect(String(on[0].id)).toBe('gx-m01'); // the direct hit is still #1
+      const seedIdx = on.findIndex((r) => String(r.id) === 'gx-m01');
+      const neighborIdx = on.findIndex((r) => String(r.id) === 'gx-m02');
+      expect(neighborIdx).toBeGreaterThan(seedIdx); // graph-only neighbor sits below the seed
+    });
+
+    it('rescues a mission_dependencies neighbor even across sprints', async () => {
+      seedMission(
+        'gd-m01',
+        'sprint-a',
+        'seed handler',
+        'vecseed the primary target',
+        SEED_VEC_INDEX
+      );
+      seedMission(
+        'gd-m02',
+        'sprint-b',
+        'linked mission',
+        'vecneighbor a mission in a different sprint',
+        null
+      );
+      client.execute(
+        `INSERT INTO mission_dependencies (from_id, to_id, type) VALUES ('gd-m02', 'gd-m01', 'Requires')`,
+        []
+      );
+      const retriever = new HybridRetriever(client, { embedder: graphEmbedder });
+
+      const off = (await retriever.search(QUERY, { types: ['mission'], limit: 5 })).map((r) =>
+        String(r.id)
+      );
+      const on = (
+        await retriever.search(QUERY, { types: ['mission'], limit: 5, expandGraph: true })
+      ).map((r) => String(r.id));
+      expect(off).not.toContain('gd-m02');
+      expect(on).toContain('gd-m02'); // dependency-linked neighbor rescued despite different sprint
+    });
+
+    it('appends graph-neighbor text to the seed payload (context expansion)', async () => {
+      seedMission(
+        'gp-m01',
+        'sprint-p',
+        'seed handler',
+        'vecseed the primary target',
+        SEED_VEC_INDEX
+      );
+      seedMission('gp-m02', 'sprint-p', 'adjacent', 'vecneighbor the adjacent mission text', null);
+      const retriever = new HybridRetriever(client, { embedder: graphEmbedder });
+
+      const on = await retriever.search(QUERY, { types: ['mission'], limit: 5, expandGraph: true });
+      const seed = on.find((r) => String(r.id) === 'gp-m01');
+      expect(seed?.graphNeighbors).toBeTruthy();
+      expect(
+        seed?.graphNeighbors?.some((n) => String(n.id) === 'gp-m02' && /vecneighbor/i.test(n.text))
+      ).toBe(true);
+    });
+
+    it('soft-degrades gracefully when mission_dependencies is absent (old store): no throw, dep arm empty, same-sprint arm intact', async () => {
+      (client as unknown as { db: Database.Database }).db.exec('DROP TABLE mission_dependencies');
+      seedMission(
+        'gs-m01',
+        'sprint-degrade',
+        'seed handler',
+        'vecseed the primary target',
+        SEED_VEC_INDEX
+      );
+      seedMission('gs-m02', 'sprint-degrade', 'adjacent', 'vecneighbor the adjacent mission', null);
+      const retriever = new HybridRetriever(client, { embedder: graphEmbedder });
+
+      // The dependency-edge query hits a missing table — the retriever must NOT throw. The
+      // same-sprint edge does not touch mission_dependencies, so it still rescues the neighbor;
+      // only the dependency arm degrades (getMany returns success:false, handled + the whole
+      // expansion is additionally wrapped in try/catch as a backstop for unexpected errors).
+      const on = (
+        await retriever.search(QUERY, { types: ['mission'], limit: 5, expandGraph: true })
+      ).map((r) => String(r.id));
+      expect(on).toContain('gs-m01'); // seed still returned, no crash
+      expect(on).toContain('gs-m02'); // same-sprint expansion survives the missing dep table
+    });
+
+    it('does not expand when expandGraph is off (default — the precision-path contract)', async () => {
+      seedMission(
+        'gf-m01',
+        'sprint-f',
+        'seed handler',
+        'vecseed the primary target',
+        SEED_VEC_INDEX
+      );
+      seedMission('gf-m02', 'sprint-f', 'adjacent', 'vecneighbor the adjacent mission', null);
+      const retriever = new HybridRetriever(client, { embedder: graphEmbedder });
+
+      const def = await retriever.search(QUERY, { types: ['mission'], limit: 5 });
+      const ids = def.map((r) => String(r.id));
+      expect(ids).not.toContain('gf-m02'); // no neighbor injected by default
+      expect(def.find((r) => String(r.id) === 'gf-m01')?.graphNeighbors ?? null).toBeNull();
+    });
+
+    it('excludes abandoned (Dropped/Archived) mission neighbors from injection + payload', async () => {
+      seedMission(
+        'gab-m01',
+        'sprint-ab',
+        'seed handler',
+        'vecseed the primary target',
+        SEED_VEC_INDEX
+      );
+      // Same-sprint sibling but Dropped — must NOT be surfaced by sprint adjacency.
+      client.execute(
+        `INSERT INTO missions (id, name, objective, sprint_id, created_at, status)
+         VALUES ('gab-m02', 'abandoned sibling', 'vecneighbor a dropped mission', 'sprint-ab', ?, 'Dropped')`,
+        [daysAgoIso(1)]
+      );
+      // A live (Queued) same-sprint sibling — the control that SHOULD be rescued.
+      seedMission(
+        'gab-m03',
+        'sprint-ab',
+        'live sibling',
+        'vecneighbor a live queued mission',
+        null
+      );
+      const retriever = new HybridRetriever(client, { embedder: graphEmbedder });
+
+      const on = await retriever.search(QUERY, { types: ['mission'], limit: 6, expandGraph: true });
+      const ids = on.map((r) => String(r.id));
+      expect(ids).toContain('gab-m01'); // seed
+      expect(ids).toContain('gab-m03'); // live neighbor rescued (proves the arm is firing)
+      expect(ids).not.toContain('gab-m02'); // Dropped neighbor excluded from results
+      const seed = on.find((r) => String(r.id) === 'gab-m01');
+      expect(seed?.graphNeighbors?.some((n) => String(n.id) === 'gab-m02')).toBeFalsy(); // and from payload
+    });
+
+    it('does not expand decisions — a same-mission decision sibling is never injected (mission-only)', async () => {
+      // A matches the query by vector+BM25; B is A's same-mission sibling with no query overlap and
+      // no vector — it would be a graph neighbor IF decisions expanded. They must not.
+      const a = client.execute(
+        `INSERT INTO strategic_decisions (decision_text, created_at, status, mission_id)
+         VALUES ('vecseed the primary decision target', ?, 'active', 'MDEC')`,
+        [daysAgoIso(1)]
+      );
+      const aid = Number(a.data?.lastInsertRowid);
+      const av = new Float32Array(EMBEDDING_DIM);
+      av[SEED_VEC_INDEX] = 1;
+      client.execute(`INSERT INTO decisions_vec(decision_id, embedding) VALUES (?, ?)`, [
+        BigInt(aid),
+        packVector(av),
+      ]);
+      const b = client.execute(
+        `INSERT INTO strategic_decisions (decision_text, created_at, status, mission_id)
+         VALUES ('vecneighbor a sibling decision with no query overlap', ?, 'active', 'MDEC')`,
+        [daysAgoIso(1)]
+      );
+      const bid = Number(b.data?.lastInsertRowid);
+      const retriever = new HybridRetriever(client, { embedder: graphEmbedder });
+
+      const on = await retriever.search(QUERY, {
+        types: ['decision'],
+        limit: 5,
+        expandGraph: true,
+      });
+      const ids = on.map((r) => String(r.id));
+      expect(ids).toContain(String(aid)); // A retrieved directly
+      expect(ids).not.toContain(String(bid)); // sibling NOT injected — decisions are never graph-expanded
+      expect(on.find((r) => String(r.id) === String(aid))?.graphNeighbors ?? null).toBeNull();
     });
   });
 });

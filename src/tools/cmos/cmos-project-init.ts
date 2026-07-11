@@ -199,6 +199,15 @@ export const cmosProjectInitSchema = z.object({
     )
     .optional()
     .describe('Optional initial missions to create'),
+
+  /** Project tier/type written to metadata at init (FORK-E6 default: build) */
+  projectType: z
+    .enum(['general', 'managed', 'build'])
+    .optional()
+    .describe(
+      'Project tier/type (general | managed | build). Written to metadata so onboarding ' +
+        'surfaces the matching tier prompt. Defaults to build for new projects.'
+    ),
 });
 
 /**
@@ -349,6 +358,7 @@ export async function cmosProjectInit(
     tracelabProjectId = '',
     initialSprint,
     initialMissions,
+    projectType,
   } = params;
 
   // Validate project root exists and is a directory
@@ -436,6 +446,18 @@ export async function cmosProjectInit(
       updateMetadata.run('project_name', projectName);
       updateMetadata.run('tracelab_project_id', tracelabProjectId);
       updateMetadata.run('schema_version', CMOS_SCHEMA_VERSION);
+
+      // s83-m05: persist the tier/type so onboard's tierSelectionPrompt and
+      // getProjectType read the operator's choice. An explicit projectType always
+      // wins; a brand-new project with no explicit choice gets the 'build' default
+      // (FORK-E6, kept in lockstep with getProjectType's fallback). An idempotent
+      // re-init WITHOUT projectType leaves any existing project_type row untouched
+      // so a later cmos_project(update) is not clobbered.
+      if (projectType) {
+        updateMetadata.run('project_type', projectType);
+      } else if (isNewProject) {
+        updateMetadata.run('project_type', 'build');
+      }
 
       if (isNewProject) {
         updateMetadata.run('created_at', now);

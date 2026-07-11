@@ -31,6 +31,7 @@ import {
   UNTRUSTED_CONTENT_CONTRACT,
   type ProvenanceDescriptor,
 } from '../../intelligence/provenance-frame';
+import { getProjectId } from './genesis-columns';
 import {
   calculateContextFreshness,
   buildContextStalenessWarning,
@@ -128,6 +129,10 @@ export interface RecentDecisionSummary {
 
   /** When the decision was made */
   createdAt: string;
+
+  /** s83-m06: genesis project_id (null on ancient stores); a pull-merged FOREIGN
+   *  decision carries the origin's id and is framed as untrusted in the render. */
+  projectId: string | null;
 }
 
 /**
@@ -210,6 +215,13 @@ export interface CmosAgentOnboardResult {
 
   /** Recent strategic decisions (last 5-10) */
   recentDecisions: RecentDecisionSummary[];
+
+  /**
+   * s83-m06: the local project_id, so the renderer (and the cmos_review digest that
+   * reuses recentDecisions) can frame any recent decision whose project_id differs
+   * (a pull-merged FOREIGN row) as untrusted data.
+   */
+  localProjectId: string | null;
 
   /** Aggregated next steps from project_context */
   nextSteps: string[];
@@ -484,8 +496,15 @@ export async function cmosAgentOnboard(
       // Get project identity from master_context + metadata
       const project = getProjectIdentity(client);
 
-      // Load tier config from cmos/tiers/{projectType}.md
-      const tierConfig = loadTierConfig(project.projectType, params.projectRoot);
+      // Load tier config for the project's tier. s83-m05: feed the RESOLVED store
+      // root (dirname^3 of the connected DB path — {root}/cmos/db/cmos.sqlite), not
+      // raw params.projectRoot. On auto-discovery params.projectRoot is undefined,
+      // which previously made loadTierConfig fall back to the server install dir
+      // (no cmos/ for npm consumers) and silently return null. An explicit
+      // projectRoot still wins; loadTierConfig's bundled cmos-seed/tiers fallback
+      // covers a store that has no copied cmos/tiers.
+      const tierRoot = params.projectRoot ?? path.resolve(client.path, '..', '..', '..');
+      const tierConfig = loadTierConfig(project.projectType, tierRoot);
       const hiddenFields = new Set(tierConfig?.onboardFieldsHide ?? []);
 
       // Conditionally fetch sprint/mission data based on tier
@@ -675,6 +694,7 @@ export async function cmosAgentOnboard(
         pendingMissions,
         blockedMissions,
         recentDecisions,
+        localProjectId: getProjectId(client),
         nextSteps,
         suggestedActions,
         sessionStats,
@@ -1022,14 +1042,19 @@ interface StrategicDecisionRow {
   decision_text: string;
   project_domain: string | null;
   created_at: string;
+  project_id: string | null;
 }
 
 /**
  * Get recent strategic decisions.
  */
 function getRecentDecisions(client: CmosDatabaseClient): RecentDecisionSummary[] {
+  // s83-m06: project_id guarded to NULL on ancient stores that predate genesis cols.
+  const projCols = client.getMany<{ name: string }>("PRAGMA table_info('strategic_decisions')", []);
+  const projExpr =
+    projCols.success && projCols.data?.some((c) => c.name === 'project_id') ? 'project_id' : 'NULL';
   const result = client.getMany<StrategicDecisionRow>(
-    `SELECT decision_text, project_domain, created_at
+    `SELECT decision_text, project_domain, created_at, ${projExpr} AS project_id
        FROM strategic_decisions
       ORDER BY created_at DESC
       LIMIT 10`,
@@ -1044,6 +1069,7 @@ function getRecentDecisions(client: CmosDatabaseClient): RecentDecisionSummary[]
     decision: d.decision_text,
     domain: d.project_domain,
     createdAt: d.created_at,
+    projectId: d.project_id,
   }));
 }
 
@@ -2143,13 +2169,22 @@ export function formatAgentOnboardForLLM(result: CmosToolResult<CmosAgentOnboard
     }
   }
 
-  // Recent decisions
+  // Recent decisions. s83-m06: a pull-merged FOREIGN decision (project_id != local)
+  // is untrusted content — render it inside the compact untrusted marker, not as a
+  // bare bullet that reads as an instruction (matches the message-list sibling above).
   if (data.recentDecisions.length > 0) {
     lines.push('');
     lines.push('📝 **Recent Decisions**');
+    const localProjectId = data.localProjectId ?? null;
     for (const d of data.recentDecisions.slice(0, 5)) {
       const domain = d.domain ? ` [${d.domain}]` : '';
-      lines.push(`  • ${d.decision}${domain}`);
+      const isForeign =
+        d.projectId != null && (localProjectId == null || d.projectId !== localProjectId);
+      if (isForeign) {
+        lines.push(`  • ${frameForeignInline(d.decision, `proj:${d.projectId}`)}${domain}`);
+      } else {
+        lines.push(`  • ${d.decision}${domain}`);
+      }
     }
   }
 

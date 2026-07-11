@@ -28,6 +28,13 @@ export interface RelevantDecision {
   /** Sprint where the decision was made */
   sprintId: string | null;
 
+  /**
+   * s83-m06: the decision's genesis project_id (null on ancient stores). A
+   * pull-merged decision carries the FOREIGN origin's id; the mission-start
+   * renderer frames it as untrusted when it differs from the local project.
+   */
+  projectId: string | null;
+
   /** Evidence references (JSON array of TraceLab refs) */
   evidence: string | null;
 
@@ -59,6 +66,9 @@ export async function findRelevantDecisions(
     types: ['decision'],
     limit: MAX_RELEVANT_DECISIONS,
     statusFilter: ['active'],
+    // s82-m04: no expandGraph — the graph arm is mission-only (decisions never expand), and this
+    // path additionally gates on a countOverlap>=2 keyword filter that would strip graph-only
+    // rescues anyway. Left off deliberately.
   });
 
   return results
@@ -67,6 +77,7 @@ export async function findRelevantDecisions(
       decisionText: r.text,
       category: r.category,
       sprintId: r.sprintId,
+      projectId: r.projectId,
       evidence: r.evidence,
       relevanceScore: countOverlap(r.text, keywords),
     }))

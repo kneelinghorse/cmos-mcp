@@ -256,4 +256,83 @@ describe('project_type metadata', () => {
       expect(result.data?.project.projectType).toBe('general');
     });
   });
+
+  describe('cmos_project init writes project_type (s83-m05)', () => {
+    const initDirs: string[] = [];
+
+    function freshDir(): string {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-init-ptype-'));
+      initDirs.push(d);
+      return d;
+    }
+
+    afterEach(() => {
+      for (const d of initDirs.splice(0)) {
+        fs.rmSync(d, { recursive: true, force: true });
+      }
+      CmosDetector.resetInstance();
+    });
+
+    it('writes project_type=managed and onboard surfaces the managed prompt + sprintZeroReady', async () => {
+      const dir = freshDir();
+      const res = await cmosProject({
+        action: 'init',
+        projectRoot: dir,
+        projectName: 'Managed Proj',
+        projectType: 'managed',
+      });
+      expect(res.success).toBe(true);
+
+      const db = new Database(path.join(dir, 'cmos', 'db', 'cmos.sqlite'));
+      const row = db.prepare('SELECT value FROM metadata WHERE key = ?').get('project_type') as
+        | { value: string }
+        | undefined;
+      db.close();
+      expect(row?.value).toBe('managed');
+
+      const ob = await cmosAgentOnboard({ projectRoot: dir });
+      expect(ob.success).toBe(true);
+      expect(ob.data?.project.projectType).toBe('managed');
+      expect(ob.data?.sprintZeroReady).toBe(true);
+      expect(ob.data?.tierSelectionPrompt).toContain('Managed workspace');
+    });
+
+    it('defaults project_type=build for a fresh init with no projectType (FORK-E6)', async () => {
+      const dir = freshDir();
+      const res = await cmosProject({
+        action: 'init',
+        projectRoot: dir,
+        projectName: 'Default Proj',
+      });
+      expect(res.success).toBe(true);
+
+      const db = new Database(path.join(dir, 'cmos', 'db', 'cmos.sqlite'));
+      const row = db.prepare('SELECT value FROM metadata WHERE key = ?').get('project_type') as
+        | { value: string }
+        | undefined;
+      db.close();
+      expect(row?.value).toBe('build');
+    });
+
+    it('does NOT clobber an existing project_type on idempotent re-init without projectType', async () => {
+      const dir = freshDir();
+      await cmosProject({
+        action: 'init',
+        projectRoot: dir,
+        projectName: 'P',
+        projectType: 'general',
+      });
+      // Re-init WITHOUT projectType — the existing 'general' row must survive so a
+      // later choice is not silently reset to the build default.
+      const res = await cmosProject({ action: 'init', projectRoot: dir, projectName: 'P' });
+      expect(res.success).toBe(true);
+
+      const db = new Database(path.join(dir, 'cmos', 'db', 'cmos.sqlite'));
+      const row = db.prepare('SELECT value FROM metadata WHERE key = ?').get('project_type') as
+        | { value: string }
+        | undefined;
+      db.close();
+      expect(row?.value).toBe('general');
+    });
+  });
 });

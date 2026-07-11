@@ -1,0 +1,24 @@
+{
+  "measuredAt": "2026-07-11T16:12:02.622Z",
+  "note": "Decisions/learnings top3Recall regression anchor for the s82 recall gate (measure-retrieval-production.ts --gate). Regenerate with --write-baseline after an intentional corpus/fixture change; the gate fails if decision/learning top3Recall drops more than 0.05 below these values.",
+  "hybrid": {
+    "decision": {
+      "total": 8,
+      "zeroResultRate": 0,
+      "mrrAtK": 0.4479166666666667,
+      "top3Recall": 0.625
+    },
+    "learning": {
+      "total": 8,
+      "zeroResultRate": 0,
+      "mrrAtK": 0.43541666666666673,
+      "top3Recall": 0.5
+    },
+    "mission": {
+      "total": 8,
+      "zeroResultRate": 0,
+      "mrrAtK": 0.48333333333333334,
+      "top3Recall": 0.5
+    }
+  }
+}

@@ -20,6 +20,8 @@ import {
 } from './context-retention';
 import { detectAndFlagStaleness } from './staleness-detection';
 import { applyPendingBlobMigrations } from './blob-migrations';
+import { getProjectId } from './genesis-columns';
+import { frameForeignText } from '../../intelligence/provenance-frame';
 import { isReadOnlyAgentSession } from './read-only-agent-guard';
 
 /**
@@ -427,6 +429,26 @@ function getContextById(client: CmosDatabaseClient, contextId: string): ParsedCo
  * - constraints: master_context JSON blob (low-volume, no dedicated table)
  * - activeMission, sessionCount, nextSteps: project_context JSON blob
  */
+/** True when `table` has `column` — s83-m06 guard so project_id SELECTs never throw
+ *  on ancient stores that predate the s69-m03 genesis columns. */
+function tableHasColumn(client: CmosDatabaseClient, table: string, column: string): boolean {
+  const res = client.getMany<{ name: string }>(`PRAGMA table_info('${table}')`, []);
+  return res.success && !!res.data?.some((c) => c.name === column);
+}
+
+/** Wrap `text` in the untrusted provenance fence when the row is FOREIGN (its
+ *  project_id differs from the local project, or the local id is unknown). Mirrors
+ *  the ratified LIST predicate; local rows pass through bare. */
+function frameIfForeign(
+  text: string,
+  rowProjectId: string | null,
+  localProjectId: string | null
+): string {
+  const isForeign =
+    rowProjectId != null && (localProjectId == null || rowProjectId !== localProjectId);
+  return isForeign ? frameForeignText(text, `proj:${rowProjectId}`) : text;
+}
+
 function buildAggregatedView(
   masterContext: ParsedContext | null,
   projectContext: ParsedContext | null,
@@ -443,15 +465,29 @@ function buildAggregatedView(
   const workingMemory = extractObject(projectContent, 'working_memory');
   const nextSteps = extractStringArray(workingMemory, 'next_steps');
 
+  // s83-m06 (review): after a cmos_db pull the active decisions/learnings can include
+  // pull-merged FOREIGN rows (project_id != local). Frame those inside the untrusted
+  // fence at build time so BOTH the full and compact renders (compact slices this same
+  // array) treat them as data, not instructions. Local rows pass through bare.
+  const localProjectId = client ? getProjectId(client) : null;
+
   // Pull decisions from structured table (decisions_made no longer stored in blob — Sprint 51)
   let decisions: string[] = [];
   if (client) {
-    const structuredDecisions = client.getMany<{ decision_text: string }>(
-      "SELECT decision_text FROM strategic_decisions WHERE status = 'active' ORDER BY created_at DESC",
+    const decProjExpr = tableHasColumn(client, 'strategic_decisions', 'project_id')
+      ? 'project_id'
+      : 'NULL';
+    const structuredDecisions = client.getMany<{
+      decision_text: string;
+      project_id: string | null;
+    }>(
+      `SELECT decision_text, ${decProjExpr} AS project_id FROM strategic_decisions WHERE status = 'active' ORDER BY created_at DESC`,
       []
     );
     if (structuredDecisions.success && structuredDecisions.data) {
-      decisions = structuredDecisions.data.map((row) => row.decision_text);
+      decisions = structuredDecisions.data.map((row) =>
+        frameIfForeign(row.decision_text, row.project_id, localProjectId)
+      );
     }
   }
 
@@ -464,12 +500,15 @@ function buildAggregatedView(
   // Pull learnings from structured table (learnings no longer stored in blob — Sprint 51)
   let learnings: string[] = [];
   if (client) {
-    const structuredLearnings = client.getMany<{ content: string }>(
-      "SELECT content FROM learnings WHERE status = 'active' ORDER BY created_at DESC",
+    const learnProjExpr = tableHasColumn(client, 'learnings', 'project_id') ? 'project_id' : 'NULL';
+    const structuredLearnings = client.getMany<{ content: string; project_id: string | null }>(
+      `SELECT content, ${learnProjExpr} AS project_id FROM learnings WHERE status = 'active' ORDER BY created_at DESC`,
       []
     );
     if (structuredLearnings.success && structuredLearnings.data) {
-      learnings = structuredLearnings.data.map((row) => row.content);
+      learnings = structuredLearnings.data.map((row) =>
+        frameIfForeign(row.content, row.project_id, localProjectId)
+      );
     }
   }
 

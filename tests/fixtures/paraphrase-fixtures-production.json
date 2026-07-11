@@ -1,34 +1,13 @@
 {
-  "description": "Production-corpus paraphrase fixtures for s67-m01. Each query shares <2 stemmed content tokens with its source row, simulating the failure mode TraceLab CMOS-CONTEXT-RETRIEVAL-01-02 documented as the 50% production zero-result rate. Source rows pulled directly from cmos/db/cmos.sqlite. Expected IDs are all in active status (decisions, learnings) or live missions table. Hand-authored from real rows — TraceLab mission 2de68a40-cc93-4785-b50f-5318cfbbb4a2 ships a research report, not reusable fixtures.",
-  "version": "1.0",
+  "description": "Production-corpus paraphrase fixtures for the s82 recall gate (measure-retrieval-production.ts). Each query is a genuine semantic paraphrase of its source row sharing <2 meaningful content-word stems with it — simulating the production paraphrase failure mode (TraceLab CMOS-CONTEXT-RETRIEVAL-01-02, ~50% zero-result on paraphrase queries) so BM25 mostly misses and the vector arm carries recall. Re-authored s82-m02 against the POST-FLUSH active corpus (m01 flush): every expected_id is active (decisions/learnings) or a live mission, and grown to 8 fixtures per type / 24 total. Source rows pulled directly from cmos/db/cmos.sqlite.",
+  "version": "2.0",
   "corpusSnapshot": {
-    "decisionsActive": 43,
-    "learningsActive": 31,
-    "missionsTotal": 259,
-    "sampledOn": "2026-05-26"
+    "decisionsActive": 62,
+    "learningsActive": 46,
+    "missionsTotal": 345,
+    "sampledOn": "2026-07-11"
   },
   "fixtures": [
-    {
-      "query": "where should we put the logic that picks who an outgoing message comes from",
-      "type": "decision",
-      "expected_id": 523,
-      "source_text_snippet": "Centralize outbound-message sender resolution in src/tools/cmos/sender-identity.ts. Every code path that calls DashboardClient.sendMessage MUST use resolveLocalSenderProjectId / getLocalSenderProjectId from this module.",
-      "paraphrase_strategy": "synonyms"
-    },
-    {
-      "query": "do our login tokens automatically time out",
-      "type": "decision",
-      "expected_id": 595,
-      "source_text_snippet": "Auth session lifetime is effectively forever (matches gh). Evidence: UserScopedKeyRecord has issuedAt + lastUsedAt but NO expiresAt field. Design target: login once per machine, lives until explicit rotate or revoke.",
-      "paraphrase_strategy": "reverse-direction"
-    },
-    {
-      "query": "why is the bundled package boilerplate database derived from typescript instead of edited directly",
-      "type": "decision",
-      "expected_id": 619,
-      "source_text_snippet": "cmos-seed/db/schema.sql is now a generated artifact, not hand-written. Single source of truth is the CMOS_SCHEMA constant in src/tools/cmos/schema.ts.",
-      "paraphrase_strategy": "abstract-to-concrete"
-    },
     {
       "query": "where do the rule manifests ride along when we publish to the registry",
       "type": "decision",
@@ -37,25 +16,53 @@
       "paraphrase_strategy": "synonyms"
     },
     {
-      "query": "central strategy doc the team consults at kickoff time",
-      "type": "decision",
-      "expected_id": 690,
-      "source_text_snippet": "cmos/planning/pro-expansion-roadmap.md created as the authoritative reference future planning sessions read at sprint open. At sprint close, update relevant sections to reflect actual scope vs original intent.",
-      "paraphrase_strategy": "abstract-to-concrete"
-    },
-    {
-      "query": "why does my login key sometimes disappear after running scripts",
-      "type": "decision",
-      "expected_id": 700,
-      "source_text_snippet": "BUG (architectural, unfixed): CredentialStore singleton caches credentials.json on first load() and never re-reads from disk. When two processes write to the same file, the second writer's data is lost.",
-      "paraphrase_strategy": "symptom-from-mechanism"
-    },
-    {
       "query": "switched live search lookups to use the fused ranking backend",
       "type": "decision",
       "expected_id": 712,
       "source_text_snippet": "Sprint-66 m05 hot-path migration. All 5 production retrieval call sites now route through HybridRetriever (BM25 + sqlite-vec via RRF k=60).",
       "paraphrase_strategy": "synonyms"
+    },
+    {
+      "query": "why refuse and error out rather than guessing which owner a request belongs to",
+      "type": "decision",
+      "expected_id": 524,
+      "source_text_snippet": "Sender resolution fails closed. When the local project cannot be authoritatively identified (no dashboard_project_id in metadata AND no directory-entry match by cmos_address), return undefined — never fall back to 'first project for user'. A 400 is strictly better than silent mis-attribution.",
+      "paraphrase_strategy": "concrete-to-abstract"
+    },
+    {
+      "query": "why did we decide against shipping a separate command line executable for signing in",
+      "type": "decision",
+      "expected_id": 598,
+      "source_text_snippet": "Sprint 58 scope rejection: cmos-mcp login bin NOT included. MCP tool covers every real use case (agent, human-via-agent, Claude Desktop) because tool response renders verificationUri/userCode in host UI. User confirmed no terminal-only audience.",
+      "paraphrase_strategy": "synonyms"
+    },
+    {
+      "query": "some lookups hand back gigantic dumps that blow past the response ceiling and need slimming",
+      "type": "decision",
+      "expected_id": 772,
+      "source_text_snippet": "s70 build-session UX-feedback pattern: cmos_mission(action=status) and cmos_message(action=list) both returned 80KB+ payloads that exceeded the tool-result token cap, forcing jq workarounds. Candidate fix: pin status to the resolved project and trim message bodies in the list view.",
+      "paraphrase_strategy": "concrete-to-abstract"
+    },
+    {
+      "query": "why do deployment focused work cycles keep leaving no activity records behind",
+      "type": "decision",
+      "expected_id": 826,
+      "source_text_snippet": "Open a CMOS session at the START of every sprint, including ops/distribution/release sprints — s73's 0-sessions/1-learning outlier proved release-shaped sprints are NOT exempt from capture. Pair with closing the planning session before build starts.",
+      "paraphrase_strategy": "symptom-from-mechanism"
+    },
+    {
+      "query": "why scan an outside repo's entire commit past for exposed secrets before wiring protections",
+      "type": "decision",
+      "expected_id": 828,
+      "source_text_snippet": "Any sprint that publishes or mirrors to a PRE-EXISTING external destination MUST include a destination pre-flight history leak-audit as mission 01 — clone the live target and leak-grep the FULL history, not just HEAD — before any guard or pipeline work is designed.",
+      "paraphrase_strategy": "synonyms"
+    },
+    {
+      "query": "records quietly stopped uploading after i changed a secret and skipped signing back in",
+      "type": "decision",
+      "expected_id": 831,
+      "source_text_snippet": "Treat a credential rotation as INCOMPLETE until live sync is green: after any rotation, immediately update/delete the stale local .env value, re-run cmos_auth login to re-mint the device-code key, and confirm cmos_status shows a fresh last_sync_at.",
+      "paraphrase_strategy": "symptom-from-mechanism"
     },
     {
       "query": "one toggle that disables multiple unrelated safety checks is a smell",
@@ -79,20 +86,6 @@
       "paraphrase_strategy": "synonyms"
     },
     {
-      "query": "lab fixtures using one project never expose selection-from-list failures",
-      "type": "learning",
-      "expected_id": 138,
-      "source_text_snippet": "Tests that mock a single-project directory and assert 'the returned id matches' cannot catch 'wrong project out of many' bugs. For multi-tenant resolution logic, tests MUST simulate realistic scale.",
-      "paraphrase_strategy": "abstract-to-concrete"
-    },
-    {
-      "query": "the broken self-healing onboarding was actually a logging defect",
-      "type": "learning",
-      "expected_id": 155,
-      "source_text_snippet": "m04 investigation mission paid off: Track E2 first-contact auto-heal gap flagged by Sprint 54 verification turned out to be a reporting bug (boolean field conflated 'heal not needed' with 'heal failed').",
-      "paraphrase_strategy": "abstract-to-concrete"
-    },
-    {
       "query": "incremental table-evolution approach handles growing column counts",
       "type": "learning",
       "expected_id": 189,
@@ -100,18 +93,32 @@
       "paraphrase_strategy": "synonyms"
     },
     {
-      "query": "the fused-backend code is its own type because the legacy one is synchronous",
+      "query": "search relevance scores come back as minus values so largest doesn't sort first before freshness weighting",
       "type": "learning",
-      "expected_id": 213,
-      "source_text_snippet": "Splitting HybridRetriever into a separate class (rather than adding async branches inside FTS5Retriever) was the right call. The forcing function was that query embedding via @xenova/transformers is necessarily async.",
+      "expected_id": 113,
+      "source_text_snippet": "FTS5 rank quirk: SQLite FTS5 returns rank as a negative float (more negative = better BM25 match). Using abs(rank) normalizes to higher-is-better semantics before applying the recency decay formula.",
       "paraphrase_strategy": "synonyms"
     },
     {
-      "query": "lab measurements over-estimated keyword-search failures vs real world",
+      "query": "why does my batch job keep redoing identical rows forever whenever it restarts",
       "type": "learning",
-      "expected_id": 214,
-      "source_text_snippet": "The synthetic paraphrase fixtures (5 queries with deliberately disjoint vocabularies from their source rows) produced a 100% BM25 zero-result rate vs the production 50% baseline documented in TraceLab.",
-      "paraphrase_strategy": "abstract-to-concrete"
+      "expected_id": 121,
+      "source_text_snippet": "Cursor-based resume strategies must be advance-only. Any write to a cursor position must check: new value > current value before committing. A cursor that can regress turns a recoverable timeout into an infinite loop replaying the same work.",
+      "paraphrase_strategy": "symptom-from-mechanism"
+    },
+    {
+      "query": "multiple groups flag one glitch separately is that a fluke or a genuine defect",
+      "type": "learning",
+      "expected_id": 123,
+      "source_text_snippet": "When two independent teams report the same bug with the same symptom ('backfill stuck, cursor not advancing'), treat it as a systemic fault, not a coincidence. Cross-project message patterns are a diagnostic surface — two identical complaints = confirmed bug.",
+      "paraphrase_strategy": "synonyms"
+    },
+    {
+      "query": "how do i confirm outbound notes get credited to the right author without another team's involvement",
+      "type": "learning",
+      "expected_id": 137,
+      "source_text_snippet": "Self-send to cmos://derek/<own-project> is the cheapest live attribution probe: if the dashboard rejects with HTTP 400 'Cannot send a message to the same project,' sender-side resolution is correct; if it accepts, the sender is being mis-attributed.",
+      "paraphrase_strategy": "concrete-to-abstract"
     },
     {
       "query": "keep unit suites from corrupting the shared workspace index",
@@ -161,6 +168,13 @@
       "expected_id": "s66-m03",
       "source_text_snippet": "Embedding pipeline + one-shot backfill. Implement the embedding pipeline that populates vector storage on every write to decisions/learnings/missions, plus a one-shot backfill script that embeds the 1,152 existing rows.",
       "paraphrase_strategy": "abstract-to-concrete"
+    },
+    {
+      "query": "why do simultaneous saves to my auth file silently clobber each other and vanish",
+      "type": "mission",
+      "expected_id": "s66-m06",
+      "source_text_snippet": "CredentialStore singleton cache invalidation. Fix the architectural bug where the CredentialStore singleton caches credentials.json on first load() and never re-reads from disk, causing the second of two concurrent writers to lose their data.",
+      "paraphrase_strategy": "symptom-from-mechanism"
     }
   ]
 }

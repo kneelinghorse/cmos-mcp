@@ -23,10 +23,12 @@ import {
   formatConstraintsForLLM,
   getStaleConstraintCount,
 } from '../../../src/tools/cmos/cmos-constraints';
+import { cmosContext } from '../../../src/tools/cmos/cmos-context';
 import { CmosDetector } from '../../../src/intelligence/cmos-detector';
 import { CmosDatabaseClient } from '../../../src/tools/cmos/client';
 import {
   ensureConstraintsTable,
+  ensureConstraintReviewTimestamp,
   computeContentHash,
 } from '../../../src/tools/cmos/schema-migrations';
 
@@ -611,6 +613,148 @@ describe('constraint staleness (s40-m03)', () => {
 
       client2.close();
     });
+
+    it('does not write on the read path — un-migrated store keeps no last_reviewed_at column (s82-m01)', async () => {
+      const clientResult = await CmosDatabaseClient.create({ dbPath: testDb.dbPath });
+      const client = clientResult.data!;
+      ensureConstraintsTable(client); // creates the table WITHOUT last_reviewed_at (base schema)
+
+      const before = (
+        testDb.db.prepare('PRAGMA table_info(constraints)').all() as Array<{ name: string }>
+      ).map((c) => c.name);
+      expect(before).not.toContain('last_reviewed_at');
+
+      // getStaleConstraintCount degrades to created_at anchoring and must NOT add the column.
+      getStaleConstraintCount(client);
+      client.close();
+
+      const after = (
+        testDb.db.prepare('PRAGMA table_info(constraints)').all() as Array<{ name: string }>
+      ).map((c) => c.name);
+      expect(after).not.toContain('last_reviewed_at');
+    });
+  });
+
+  // ─── Reaffirm (s82-m01) ────────────────────────────────────────────────
+
+  describe('reaffirm (s82-m01)', () => {
+    async function seedOne(db: Database.Database, ageDays: number): Promise<void> {
+      const clientResult = await CmosDatabaseClient.create({ dbPath: testDb.dbPath });
+      if (!clientResult.success || !clientResult.data) throw new Error('Failed to create client');
+      ensureConstraintsTable(clientResult.data);
+      clientResult.data.close();
+      const created = new Date(Date.now() - ageDays * 24 * 60 * 60 * 1000).toISOString();
+      db.exec(`
+        INSERT INTO constraints (content, status, sprint_id, created_at, expires_at, content_hash)
+        VALUES ('cmos_review payload <=4KB', 'active', 'sprint-40', '${created}', NULL,
+                '${computeContentHash('cmos_review payload <=4KB', 'constraint')}');
+      `);
+    }
+
+    it('drops a stale constraint below the surfacing floor (review score <50 + banner count)', async () => {
+      // A 90-day-old no-expiry constraint scores 100 (80 age + 20 no-expiry) — the
+      // constraint #2 (cmos_review <=4KB) situation the mission targets.
+      await seedOne(testDb.db, 90);
+
+      // Before: flagged in review + counted in the onboard banner.
+      const c1 = (await CmosDatabaseClient.create({ dbPath: testDb.dbPath })).data!;
+      expect(getStaleConstraintCount(c1)).toBe(1);
+      c1.close();
+
+      let review = await cmosConstraints({
+        constraintAction: 'review',
+        projectRoot: testDb.tempDir,
+      });
+      const flagged = review.data?.reviewItems?.find((i) => i.content.startsWith('cmos_review'));
+      expect(flagged).toBeDefined();
+      expect(flagged?.stalenessScore).toBeGreaterThanOrEqual(50);
+
+      // Reaffirm it.
+      const r = await cmosConstraints({
+        constraintAction: 'reaffirm',
+        constraintId: 1,
+        projectRoot: testDb.tempDir,
+      });
+      expect(r.success).toBe(true);
+      expect(r.data?.constraintAction).toBe('reaffirm');
+      expect(r.data?.constraintId).toBe(1);
+      expect(r.data?.reaffirmedAt).toBeTruthy();
+
+      // Positive-fire: last_reviewed_at actually bumped in the store.
+      const row = testDb.db
+        .prepare('SELECT last_reviewed_at FROM constraints WHERE id = 1')
+        .get() as { last_reviewed_at: string | null };
+      expect(row.last_reviewed_at).toBeTruthy();
+
+      // After: score anchored on last_reviewed_at (now) → below 50 → no longer flagged
+      // in review nor counted by the banner.
+      review = await cmosConstraints({ constraintAction: 'review', projectRoot: testDb.tempDir });
+      expect(
+        review.data?.reviewItems?.find((i) => i.content.startsWith('cmos_review'))
+      ).toBeUndefined();
+
+      const c2 = (await CmosDatabaseClient.create({ dbPath: testDb.dbPath })).data!;
+      expect(getStaleConstraintCount(c2)).toBe(0);
+      c2.close();
+    });
+
+    it('routes reaffirm through cmos_context(constraints) and passes constraintId', async () => {
+      await seedOne(testDb.db, 90);
+
+      const r = await cmosContext({
+        action: 'constraints',
+        constraintAction: 'reaffirm',
+        constraintId: 1,
+        projectRoot: testDb.tempDir,
+      });
+      expect(r.success).toBe(true);
+      expect((r.data as { constraintAction?: string }).constraintAction).toBe('reaffirm');
+      expect((r.data as { constraintId?: number }).constraintId).toBe(1);
+
+      const row = testDb.db
+        .prepare('SELECT last_reviewed_at FROM constraints WHERE id = 1')
+        .get() as { last_reviewed_at: string | null };
+      expect(row.last_reviewed_at).toBeTruthy();
+    });
+
+    it('requires constraintId', async () => {
+      const r = await cmosConstraints({
+        constraintAction: 'reaffirm',
+        projectRoot: testDb.tempDir,
+      });
+      expect(r.success).toBe(false);
+      expect(r.error?.code).toBe('MISSING_PARAMETER');
+    });
+
+    it('errors on a nonexistent constraint', async () => {
+      await seedOne(testDb.db, 90);
+      const r = await cmosConstraints({
+        constraintAction: 'reaffirm',
+        constraintId: 9999,
+        projectRoot: testDb.tempDir,
+      });
+      expect(r.success).toBe(false);
+      expect(r.error?.code).toBe('MISSION_NOT_FOUND');
+      expect(r.error?.message).toContain('not found');
+    });
+
+    it('adds last_reviewed_at idempotently (ensureConstraintReviewTimestamp)', async () => {
+      const client = (await CmosDatabaseClient.create({ dbPath: testDb.dbPath })).data!;
+      ensureConstraintsTable(client);
+
+      const first = ensureConstraintReviewTimestamp(client);
+      expect(first.columnsAdded).toContain('constraints.last_reviewed_at');
+
+      const second = ensureConstraintReviewTimestamp(client);
+      expect(second.alreadyCurrent).toBe(true);
+      expect(second.columnsAdded).toHaveLength(0);
+      client.close();
+
+      const cols = (
+        testDb.db.prepare('PRAGMA table_info(constraints)').all() as Array<{ name: string }>
+      ).map((c) => c.name);
+      expect(cols).toContain('last_reviewed_at');
+    });
   });
 
   // ─── LLM Formatter ────────────────────────────────────────────────────
@@ -631,6 +775,7 @@ describe('constraint staleness (s40-m03)', () => {
               createdAt: '2026-03-13T10:00:00Z',
               expiresAt: null,
               archivedAt: null,
+              lastReviewedAt: null,
             },
           ],
           affected: 1,
@@ -659,6 +804,7 @@ describe('constraint staleness (s40-m03)', () => {
               createdAt: '2026-03-13T10:00:00Z',
               expiresAt: '2026-03-10T00:00:00Z',
               archivedAt: null,
+              lastReviewedAt: null,
               stalenessScore: 100,
               reason: 'expired' as const,
             },

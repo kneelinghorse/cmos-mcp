@@ -169,7 +169,8 @@ describe('cmosContextSearch', () => {
   it('uses defaults when options not provided', async () => {
     const result = await cmosContextSearch({ query: 'test query', projectRoot: tempDir });
     expect(result.data?.options.limit).toBe(5);
-    expect(result.data?.options.recencyWeight).toBe(0.5);
+    // s82-m04 (FORK-E5): default recency is now the tuned DEFAULT_RECENCY_WEIGHT (0.2), not 0.5.
+    expect(result.data?.options.recencyWeight).toBe(0.2);
     expect(result.data?.options.types).toEqual(['decision']);
     expect(result.data?.options.statusFilter).toEqual(['active']);
   });
@@ -285,6 +286,7 @@ describe('formatContextSearchForLLM', () => {
           statusFilter: ['active'],
         },
         backend: 'fts5',
+        localProjectId: 'local-proj',
       },
     };
     const formatted = formatContextSearchForLLM(result);
@@ -308,6 +310,7 @@ describe('formatContextSearchForLLM', () => {
             recencyFactor: 0.85,
             ageDays: 7,
             sprintId: 'sprint-50',
+            projectId: null,
             category: 'architectural',
             evidence: null,
             createdAt: new Date().toISOString(),
@@ -321,6 +324,7 @@ describe('formatContextSearchForLLM', () => {
           statusFilter: ['active'],
         },
         backend: 'fts5',
+        localProjectId: 'local-proj',
       },
     };
     const formatted = formatContextSearchForLLM(result);

@@ -1091,6 +1091,7 @@ describe('cmos_agent_onboard', () => {
           pendingMissions: [],
           blockedMissions: [],
           recentDecisions: [],
+          localProjectId: null,
           nextSteps: [],
           suggestedActions: [],
           sessionStats: { totalSessions: 0, lastActivity: null },

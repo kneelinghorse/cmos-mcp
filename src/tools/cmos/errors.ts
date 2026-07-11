@@ -107,7 +107,7 @@ export const VALID_STATE_TRANSITIONS: Record<MissionStatus, MissionStatus[]> = {
 };
 
 /**
- * Valid session types matching cmos/docs/session-management-guide.md.
+ * Valid session types matching cmos/docs/archive/session-management-guide.md.
  */
 export const VALID_SESSION_TYPES = [
   'onboarding',

@@ -213,6 +213,121 @@ async function main(): Promise<void> {
       })}`
     );
 
+    // --- s83-m05: tiers that work for strangers ---
+    // (a) Auto-discovery (NO projectRoot): onboard must resolve tiers from the RESOLVED
+    //     store root (dirname^3 of the connected DB path), not the server install dir.
+    //     The server runs with cwd=projectDir and CMOS_PROJECT_ROOT deleted, so this is
+    //     the real npm-consumer path. Asserting tierConfig != null alone is NOT enough —
+    //     the always-present bundled cmos-seed/tiers fallback would satisfy that even if
+    //     the onboard fix were reverted. So stamp a unique label into projectDir's OWN
+    //     build.md and assert onboard echoes it: a regression to raw params.projectRoot
+    //     (undefined on auto-discovery) would fall back to the seed and miss the marker.
+    const storeBuildTier = path.join(projectDir, 'cmos', 'tiers', 'build.md');
+    const originalTier = fs.readFileSync(storeBuildTier, 'utf8');
+    const storeMarker = 'StoreRootMarker-s83m05';
+    fs.writeFileSync(storeBuildTier, originalTier.replace(/^label:.*$/m, `label: ${storeMarker}`));
+    let onboardNoRoot: { tierConfig?: { tier?: string; label?: string } | null };
+    try {
+      onboardNoRoot = h.dataOf(await h.callOk('cmos_agent_onboard', {})) as typeof onboardNoRoot;
+    } finally {
+      fs.writeFileSync(storeBuildTier, originalTier);
+    }
+    check(
+      's83-m05: auto-discovery onboard (no projectRoot) reads tiers from the resolved STORE root, not the seed',
+      onboardNoRoot?.tierConfig?.label === storeMarker,
+      `tierConfig=${JSON.stringify(onboardNoRoot?.tierConfig)}`
+    );
+
+    // (b) cmos_project(init, projectType=managed) writes the tier and onboard surfaces
+    //     the managed first-session flow (sprintZeroReady + a Managed prompt).
+    const managedDir = mkTmp('cmos-verify-managed-');
+    await h.callOk('cmos_project', {
+      action: 'init',
+      projectRoot: managedDir,
+      projectName: 'verify-managed',
+      projectType: 'managed',
+    });
+    const managedOnboard = h.dataOf(
+      await h.callOk('cmos_agent_onboard', { projectRoot: managedDir })
+    ) as {
+      project?: { projectType?: string };
+      sprintZeroReady?: boolean;
+      tierSelectionPrompt?: string;
+    };
+    check(
+      's83-m05: init(projectType=managed) is read back as the managed tier on onboard',
+      managedOnboard?.project?.projectType === 'managed',
+      `projectType=${managedOnboard?.project?.projectType}`
+    );
+    check(
+      's83-m05: managed fresh project surfaces sprintZeroReady + a Managed tier prompt',
+      managedOnboard?.sprintZeroReady === true &&
+        /Managed workspace/.test(managedOnboard?.tierSelectionPrompt ?? ''),
+      `sprintZeroReady=${managedOnboard?.sprintZeroReady}; prompt=${(
+        managedOnboard?.tierSelectionPrompt ?? ''
+      ).slice(0, 60)}`
+    );
+
+    // --- s83-m06: project_id-aware retrieval trust. Over stdio we can only prove the
+    //     framing PLUMBING shipped (result carries localProjectId) and that a LOCAL row
+    //     is NOT false-framed. The foreign-row positive-fire lives in the jest
+    //     provenance-surfaces suite — a foreign row can only enter a store via
+    //     sync-merge/pull, which isn't reachable over plain MCP stdio.
+    const m06Dir = mkTmp('cmos-verify-m06frame-');
+    await h.callOk('cmos_project', {
+      action: 'init',
+      projectRoot: m06Dir,
+      projectName: 'verify-m06frame',
+    });
+    await h.callOk('cmos_session', {
+      action: 'start',
+      type: 'planning',
+      title: 'plan',
+      projectRoot: m06Dir,
+    });
+    await h.callOk('cmos_session', {
+      action: 'capture',
+      category: 'decision',
+      content: 'Adopt widget-sqlite-retrieval as the local decision',
+      projectRoot: m06Dir,
+    });
+    const dsearchRes = await h.callOk('cmos_decisions', {
+      action: 'search',
+      query: 'widget sqlite retrieval',
+      projectRoot: m06Dir,
+    });
+    const dsearch = h.dataOf(dsearchRes) as { localProjectId?: string | null };
+    const dsearchText = h.textOf(dsearchRes);
+    check(
+      's83-m06: decisions(search) result carries localProjectId (framing plumbing shipped)',
+      typeof dsearch?.localProjectId === 'string' && (dsearch.localProjectId ?? '').length > 0,
+      `localProjectId=${dsearch?.localProjectId}`
+    );
+    check(
+      's83-m06: a LOCAL decision renders BARE (no untrusted fence — no false-framing)',
+      dsearchText.includes('widget-sqlite-retrieval') && !dsearchText.includes('[UNTRUSTED DATA'),
+      `text=${dsearchText.slice(0, 140)}`
+    );
+    // The review-closure surfaces (onboard recentDecisions, context-view) also ship the
+    // plumbing and must NOT false-frame the local decision.
+    const m06Onboard = h.dataOf(await h.callOk('cmos_agent_onboard', { projectRoot: m06Dir })) as {
+      localProjectId?: string | null;
+    };
+    check(
+      's83-m06: cmos_agent_onboard result carries localProjectId (recentDecisions framing plumbing)',
+      typeof m06Onboard?.localProjectId === 'string' &&
+        (m06Onboard.localProjectId ?? '').length > 0,
+      `localProjectId=${m06Onboard?.localProjectId}`
+    );
+    const m06ViewText = h.textOf(
+      await h.callOk('cmos_context', { action: 'view', projectRoot: m06Dir })
+    );
+    check(
+      's83-m06: cmos_context(view) renders the LOCAL decision BARE (no false-framing)',
+      m06ViewText.includes('widget-sqlite-retrieval') && !m06ViewText.includes('[UNTRUSTED DATA'),
+      `text=${m06ViewText.slice(0, 140)}`
+    );
+
     // Mode (i): from a REAL project cwd, a pin-only read (mission list, no projectRoot)
     // resolves to the sender and succeeds — scoped, not fanned out.
     const pinnedRead = await h.callTool('cmos_mission', { action: 'list' });

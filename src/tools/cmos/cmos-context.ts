@@ -175,9 +175,9 @@ export const cmosContextSchema = z
     carryToSprint: z.string().optional().describe('Target sprint ID for carry action'),
     // constraints params
     constraintAction: z
-      .enum(['list', 'review', 'archive'])
+      .enum(['list', 'review', 'archive', 'reaffirm'])
       .optional()
-      .describe('Sub-action for constraints: list | review | archive'),
+      .describe('Sub-action for constraints: list | review | archive | reaffirm'),
     constraintStatus: z
       .enum(CONSTRAINT_STATUSES)
       .optional()
@@ -186,6 +186,12 @@ export const cmosContextSchema = z
       .array(z.number().int().positive())
       .optional()
       .describe('Constraint IDs to archive'),
+    constraintId: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe('Constraint ID to reaffirm (bumps last_reviewed_at without changing status)'),
     stalenessThresholdDays: z
       .number()
       .int()
@@ -210,7 +216,7 @@ export const cmosContextSchema = z
       .min(0)
       .max(1)
       .optional()
-      .describe('Recency boost weight 0–1 for search action (default: 0.5)'),
+      .describe('Recency boost weight 0–1 for search action (default: 0.2)'),
     projectRoot: z
       .string()
       .optional()
@@ -312,8 +318,8 @@ export const cmosContextToolDefinition = {
       },
       constraintAction: {
         type: 'string',
-        enum: ['list', 'review', 'archive'],
-        description: 'Sub-action for constraints: list | review | archive',
+        enum: ['list', 'review', 'archive', 'reaffirm'],
+        description: 'Sub-action for constraints: list | review | archive | reaffirm',
       },
       constraintStatus: {
         type: 'string',
@@ -324,6 +330,12 @@ export const cmosContextToolDefinition = {
         type: 'array',
         items: { type: 'number' },
         description: 'Constraint IDs to archive',
+      },
+      constraintId: {
+        type: 'number',
+        minimum: 1,
+        description:
+          'Constraint ID to reaffirm (bumps last_reviewed_at without changing status; resets its staleness clock)',
       },
       stalenessThresholdDays: {
         type: 'number',
@@ -348,7 +360,7 @@ export const cmosContextToolDefinition = {
         type: 'number',
         minimum: 0,
         maximum: 1,
-        description: 'Recency boost weight 0–1 for search action (default: 0.5)',
+        description: 'Recency boost weight 0–1 for search action (default: 0.2)',
       },
       projectRoot: {
         type: 'string',
@@ -460,6 +472,7 @@ export async function cmosContext(
         constraintAction: params.constraintAction ?? 'list',
         constraintStatus: params.constraintStatus,
         constraintIds: params.constraintIds,
+        constraintId: params.constraintId,
         stalenessThresholdDays: params.stalenessThresholdDays,
         projectRoot: params.projectRoot,
       } as CmosConstraintsParams);

@@ -1,6 +1,6 @@
 {
   "name": "@aquex/cmos-mcp",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "MCP server for CMOS — typed, safe, SQLite-backed project management for AI agents",
   "repository": {
     "type": "git",
@@ -54,7 +54,9 @@
     "prune:registry": "npx ts-node scripts/prune-project-registry.ts",
     "detect:corrupted": "npx ts-node scripts/detect-corrupted-decisions.ts",
     "backfill:embeddings": "npx ts-node scripts/backfill-embeddings.ts",
-    "measure:retrieval:production": "npx ts-node scripts/measure-retrieval-production.ts",
+    "measure:retrieval:production": "npm run build && npx ts-node scripts/measure-retrieval-production.ts",
+    "measure:retrieval:gate": "npm run build && npx ts-node scripts/measure-retrieval-production.ts --gate",
+    "measure:retrieval:baseline": "npm run build && npx ts-node scripts/measure-retrieval-production.ts --write-baseline",
     "baseline:cross-store": "npx ts-node scripts/measure-cross-store-baseline.ts",
     "tune:retrieval:params": "npx ts-node scripts/tune-retrieval-params.ts",
     "cleanup:credkeys": "npx ts-node scripts/cleanup-stale-credkeys.ts",

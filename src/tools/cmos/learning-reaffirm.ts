@@ -144,6 +144,8 @@ export async function detectImplicitLearningCites(
     types: ['learning'],
     limit: IMPLICIT_REAFFIRM_CANDIDATE_POOL,
     statusFilter: ['active'],
+    // s82-m04: deliberately NO expandGraph — this is a precision, corpus-mutating path
+    // (drives implicit learning reaffirm); graph-adjacent candidates would over-reaffirm.
   });
   if (hits.length === 0) return [];
 
