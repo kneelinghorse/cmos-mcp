@@ -186,6 +186,13 @@ export const cmosContextSchema = z
       .array(z.number().int().positive())
       .optional()
       .describe('Constraint IDs to archive'),
+    missionId: z
+      .string()
+      .optional()
+      .describe(
+        's85-m04: filter next_steps to rows stamped with this mission (#487 mission -> row trail)'
+      ),
+
     constraintId: z
       .number()
       .int()
@@ -344,6 +351,11 @@ export const cmosContextToolDefinition = {
         items: { type: 'number' },
         description: 'Constraint IDs to archive',
       },
+      missionId: {
+        type: 'string',
+        description:
+          'Filter next_steps to rows stamped with this mission (#487 mission -> row trail)',
+      },
       constraintId: {
         type: 'number',
         minimum: 1,
@@ -481,6 +493,7 @@ export async function cmosContext(
       return cmosNextSteps({
         nextStepAction: params.nextStepAction ?? 'list',
         nextStepStatus: params.nextStepStatus,
+        missionId: params.missionId,
         nextStepIds: params.nextStepIds,
         carryToSprint: params.carryToSprint,
         projectRoot: params.projectRoot,

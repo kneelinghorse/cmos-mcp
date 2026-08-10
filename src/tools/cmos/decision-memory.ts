@@ -14,6 +14,8 @@ export type DecisionSource = 'strategic' | 'session_capture';
 export interface DecisionQueryFilters {
   domain?: string;
   sprintId?: string;
+  /** s85-m04 (#487): restrict to decisions stamped with this mission. */
+  missionId?: string;
   since?: string;
   until?: string;
 }
@@ -163,6 +165,13 @@ function loadStrategicDecisionRecords(
   if (filters.sprintId) {
     clauses.push(`${effectiveSprintExpr} = ?`);
     params.push(filters.sprintId);
+  }
+  // s85-m04 (#487). Column-presence guarded: on a store predating the v2.1 mission_id
+  // migration, missionExpr is the literal NULL, and `NULL = ?` is never true — so the filter
+  // correctly returns nothing rather than throwing "no such column".
+  if (filters.missionId) {
+    clauses.push(`${missionExpr} = ?`);
+    params.push(filters.missionId);
   }
   if (filters.since) {
     clauses.push('sd.created_at >= ?');

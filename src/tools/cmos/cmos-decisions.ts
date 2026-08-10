@@ -65,6 +65,10 @@ export const cmosDecisionsSchema = z
     // shared params
     domain: z.string().optional().describe('Filter by domain for list/search actions'),
     sprintId: z.string().optional().describe('Filter by sprint ID for list/search actions'),
+    missionId: z
+      .string()
+      .optional()
+      .describe('s85-m04: filter to rows stamped with this mission (#487 mission -> row trail)'),
     // list params
     since: z.string().optional().describe('ISO date lower bound for list action'),
     until: z.string().optional().describe('ISO date upper bound for list action'),
@@ -133,6 +137,10 @@ export const cmosDecisionsToolDefinition = {
       },
       domain: { type: 'string', description: 'Filter by domain' },
       sprintId: { type: 'string', description: 'Filter by sprint ID' },
+      missionId: {
+        type: 'string',
+        description: 'Filter to rows stamped with this mission (#487 mission -> row trail)',
+      },
       since: { type: 'string', description: 'ISO date lower bound for list action' },
       until: { type: 'string', description: 'ISO date upper bound for list action' },
       page: { type: 'number', minimum: 1, description: 'Page number for list action' },
@@ -209,6 +217,7 @@ export async function cmosDecisions(
       return cmosDecisionsList({
         domain: params.domain,
         sprintId: params.sprintId,
+        missionId: params.missionId,
         since: params.since,
         until: params.until,
         page: params.page,

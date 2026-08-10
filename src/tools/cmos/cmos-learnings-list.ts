@@ -100,6 +100,9 @@ export interface CmosLearningsListParams {
   /** Optional: filter by sprint ID */
   sprintId?: string;
 
+  /** s85-m04: filter to rows stamped with this mission (#487 read surface) */
+  missionId?: string;
+
   /** Optional: filter by status (default: all) */
   status?: string;
 
@@ -146,6 +149,12 @@ export async function cmosLearningsList(
       if (params.sprintId) {
         conditions.push('sprint_id = ?');
         queryParams.push(params.sprintId);
+      }
+
+      // s85-m04 (#487): mission -> row trail. Unstamped rows are excluded, not errored.
+      if (params.missionId) {
+        conditions.push('mission_id = ?');
+        queryParams.push(params.missionId);
       }
 
       if (params.status) {

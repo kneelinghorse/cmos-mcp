@@ -112,6 +112,7 @@ Consolidated context tool with action parameter support. Actions: view, update, 
 | `constraintAction` | string | no | Sub-action for constraints: list \| review \| archive \| reaffirm |
 | `constraintStatus` | string | no | Filter status for constraints list (default: active) |
 | `constraintIds` | array | no | Constraint IDs to archive |
+| `missionId` | string | no | Filter next_steps to rows stamped with this mission (#487 mission -> row trail) |
 | `constraintId` | number | no | Constraint ID to reaffirm (bumps last_reviewed_at without changing status; resets its staleness clock) |
 | `evergreen` | boolean | no | s84-m05: on reaffirm, set/clear the durable evergreen flag (true = never trip staleness review/count, for institutional rules). Omit to leave unchanged. |
 | `stalenessThresholdDays` | number | no | Staleness threshold in days for review (default: 30) |
@@ -146,7 +147,7 @@ Consolidated session tool with action parameter support. Actions: list, start, c
 | `category` | string | no | Capture category for capture action |
 | `content` | string | no | Capture content for capture action |
 | `context` | string | no | Additional context for capture action |
-| `missionId` | string | no | Associated mission ID for capture action |
+| `missionId` | string | no | Associated mission ID. On capture, stamps the decision/learning/next-step row; on complete, stamps the decisions[] and nextSteps[] rows this call materializes. |
 | `evidence` | array | no | Array of TraceLab evidence references [{type, id}] for decision captures |
 | `citesLearningIds` | array | no | Learning IDs this capture/decision cites. Bumps last_reviewed_at on each — applies to capture(category=decision\|learning) and complete(decisions[]). |
 | `summary` | string | no | Session summary for complete action |
@@ -165,6 +166,7 @@ Consolidated decisions tool with action parameter support. Actions: list, search
 | `action` | string | yes | Decisions action: list \| search \| update |
 | `domain` | string | no | Filter by domain |
 | `sprintId` | string | no | Filter by sprint ID |
+| `missionId` | string | no | Filter to rows stamped with this mission (#487 mission -> row trail) |
 | `since` | string | no | ISO date lower bound for list action |
 | `until` | string | no | ISO date upper bound for list action |
 | `page` | number | no | Page number for list action |
@@ -235,6 +237,7 @@ Consolidated learnings tool with action parameter support. Actions: list, search
 | `action` | string | yes | Learnings action: list \| search \| update \| reaffirm |
 | `category` | string | no | Filter by category |
 | `sprintId` | string | no | Filter by sprint ID |
+| `missionId` | string | no | Filter to rows stamped with this mission (#487 mission -> row trail) |
 | `status` | string | no | Filter by status (list) or new status (update) |
 | `since` | string | no | ISO date lower bound for list action |
 | `until` | string | no | ISO date upper bound for list action |

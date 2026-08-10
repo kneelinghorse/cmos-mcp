@@ -176,8 +176,18 @@ defineFeature(feature, (test) => {
       // Fresh db.
     });
 
-    given('no sprints with status "Active" exist', () => {
-      // Fresh db has no sprints.
+    given('a Completed sprint exists but no sprint is in an open status', () => {
+      // s85-m03: this fixture previously had NO sprints at all, which made the scenario
+      // pass on every implementation — a zero-sprint store already returned null. Seeding a
+      // Completed sprint is what gives the spec teeth: pre-m03 the display resolver's
+      // Completed-re-admitting fallback returned it and the session was stamped with a dead
+      // sprint. This scenario now fails against the pre-m03 write path.
+      const db = new Database(instance.dbPath);
+      db.prepare(
+        `INSERT INTO sprints (id, title, focus, status, start_date, end_date)
+         VALUES ('sprint-done-01', 'Closed sprint', 'closed', 'Completed', '2026-01-01', '2026-01-14')`
+      ).run();
+      db.close();
     });
 
     when('I call cmos_session_start without a sprintId', async () => {
@@ -195,6 +205,17 @@ defineFeature(feature, (test) => {
 
     and('sprintAutoTagged is false', () => {
       expect(result.data!.sprintAutoTagged).toBe(false);
+    });
+
+    and('advisorySprintId names the Completed sprint the display surfaces still show', () => {
+      // The read resolver still names it — display is deliberately unchanged. The hint rides
+      // a SEPARATE field because {sprintId, sprintAutoTagged: false} already means
+      // "the caller passed sprintId explicitly".
+      expect(result.data!.advisorySprintId).toBe('sprint-done-01');
+    });
+
+    and('a warning explains that the session is recorded untagged', () => {
+      expect((result.warnings ?? []).some((w) => /sprint_id NULL/.test(w))).toBe(true);
     });
   });
 

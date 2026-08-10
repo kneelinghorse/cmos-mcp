@@ -36,10 +36,12 @@ Feature: Start a session
 
   Scenario: Session starts without a sprint when none are active
     Given no session is currently active
-    And no sprints with status "Active" exist
+    And a Completed sprint exists but no sprint is in an open status
     When I call cmos_session_start without a sprintId
     Then the session is created with sprintId null
     And sprintAutoTagged is false
+    And advisorySprintId names the Completed sprint the display surfaces still show
+    And a warning explains that the session is recorded untagged
 
   Scenario: Master context is refreshed on session start by default
     Given no session is currently active

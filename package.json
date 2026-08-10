@@ -1,6 +1,6 @@
 {
   "name": "@aquex/cmos-mcp",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "description": "MCP server for CMOS — typed, safe, SQLite-backed project management for AI agents",
   "repository": {
     "type": "git",

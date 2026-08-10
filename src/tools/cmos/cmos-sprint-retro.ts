@@ -13,6 +13,7 @@
 import { withClient, type CmosDatabaseClient } from './client';
 import type { CmosToolResult } from './types';
 import { createError, createSuccess, CmosErrors } from './errors';
+import { buildUntaggedSessionAdvisory } from './untagged-advisory';
 
 /**
  * Mission summary in the retrospective.
@@ -220,23 +221,30 @@ export async function cmosSprintRetro(
         carryForwards
       );
 
-      return createSuccess<SprintRetroResult>({
-        sprint: {
-          id: sprint.id,
-          title: sprint.title,
-          focus: sprint.focus,
-          status: sprint.status,
-          startDate: sprint.start_date,
-          endDate: sprint.end_date,
+      // s85-m03: retro counts sessions/decisions/learnings strictly by sprint_id, so
+      // untagged rows are invisible here. Say so rather than under-report silently.
+      const untaggedAdvisory = buildUntaggedSessionAdvisory(client);
+
+      return createSuccess<SprintRetroResult>(
+        {
+          sprint: {
+            id: sprint.id,
+            title: sprint.title,
+            focus: sprint.focus,
+            status: sprint.status,
+            startDate: sprint.start_date,
+            endDate: sprint.end_date,
+          },
+          missions,
+          sessions,
+          decisions,
+          learnings,
+          kpis,
+          carryForwards,
+          commitSummary,
         },
-        missions,
-        sessions,
-        decisions,
-        learnings,
-        kpis,
-        carryForwards,
-        commitSummary,
-      });
+        untaggedAdvisory ? [untaggedAdvisory] : undefined
+      );
     },
     { projectRoot: params.projectRoot }
   );

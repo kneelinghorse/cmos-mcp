@@ -48,6 +48,8 @@ export interface CmosNextStepsParams {
   nextStepAction: 'list' | 'complete' | 'carry' | 'drop';
   /** Filter by status (for list, default: pending) */
   nextStepStatus?: NextStepStatus;
+  /** s85-m04: filter list to next-steps stamped with this mission (#487 read surface) */
+  missionId?: string;
   /** Next-step ID(s) to act on (for complete/carry/drop) */
   nextStepIds?: number[];
   /** Target sprint for carry action */
@@ -76,7 +78,7 @@ export async function cmosNextSteps(
 
       switch (action) {
         case 'list':
-          return listNextSteps(client, params.nextStepStatus ?? 'pending');
+          return listNextSteps(client, params.nextStepStatus ?? 'pending', params.missionId);
         case 'complete':
           return transitionNextSteps(client, params.nextStepIds ?? [], 'completed');
         case 'carry':
@@ -94,41 +96,42 @@ export async function cmosNextSteps(
   );
 }
 
+interface NextStepRow {
+  id: number;
+  content: string;
+  status: string;
+  session_id: string | null;
+  sprint_id: string | null;
+  mission_id: string | null;
+  created_at: string;
+  resolved_at: string | null;
+  carried_to_sprint: string | null;
+}
+
+/**
+ * s85-m04: restructured from two hardcoded, ternary-selected SQL literals into the
+ * conditions-builder shape used by cmos-decisions-list.ts. The old form had no `conditions[]`
+ * array at all, so adding the `missionId` filter to only one of the two branches would have
+ * been an easy and invisible mistake — the pending branch inlined its status while the other
+ * bound it. One query, one param list, both predicates applied uniformly.
+ */
 function listNextSteps(
   client: CmosDatabaseClient,
-  status: NextStepStatus
+  status: NextStepStatus,
+  missionId?: string
 ): CmosToolResult<NextStepsResult> {
-  const query =
-    status === 'pending'
-      ? `SELECT id, content, status, session_id, sprint_id, mission_id, created_at, resolved_at, carried_to_sprint
-         FROM next_steps WHERE status = 'pending' ORDER BY created_at ASC`
-      : `SELECT id, content, status, session_id, sprint_id, mission_id, created_at, resolved_at, carried_to_sprint
-         FROM next_steps WHERE status = ? ORDER BY created_at ASC`;
+  const conditions = ['status = ?'];
+  const queryParams: unknown[] = [status];
 
-  const result =
-    status === 'pending'
-      ? client.getMany<{
-          id: number;
-          content: string;
-          status: string;
-          session_id: string | null;
-          sprint_id: string | null;
-          mission_id: string | null;
-          created_at: string;
-          resolved_at: string | null;
-          carried_to_sprint: string | null;
-        }>(query)
-      : client.getMany<{
-          id: number;
-          content: string;
-          status: string;
-          session_id: string | null;
-          sprint_id: string | null;
-          mission_id: string | null;
-          created_at: string;
-          resolved_at: string | null;
-          carried_to_sprint: string | null;
-        }>(query, [status]);
+  if (missionId) {
+    conditions.push('mission_id = ?');
+    queryParams.push(missionId);
+  }
+
+  const query = `SELECT id, content, status, session_id, sprint_id, mission_id, created_at, resolved_at, carried_to_sprint
+     FROM next_steps WHERE ${conditions.join(' AND ')} ORDER BY created_at ASC`;
+
+  const result = client.getMany<NextStepRow>(query, queryParams);
 
   if (!result.success || !result.data) {
     return createError<NextStepsResult>({
@@ -153,7 +156,9 @@ function listNextSteps(
     nextStepAction: 'list',
     items,
     affected: items.length,
-    message: `Found ${items.length} next-step(s) with status '${status}'`,
+    message: `Found ${items.length} next-step(s) with status '${status}'${
+      missionId ? ` for mission '${missionId}'` : ''
+    }`,
   });
 }
 

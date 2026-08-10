@@ -60,6 +60,10 @@ export const cmosLearningsSchema = z
         'Filter by category for list/search actions (technical | process | agent-behavior | tooling)'
       ),
     sprintId: z.string().optional().describe('Filter by sprint ID for list/search actions'),
+    missionId: z
+      .string()
+      .optional()
+      .describe('s85-m04: filter to rows stamped with this mission (#487 mission -> row trail)'),
     status: z
       .string()
       .optional()
@@ -125,6 +129,10 @@ export const cmosLearningsToolDefinition = {
         description: 'Filter by category',
       },
       sprintId: { type: 'string', description: 'Filter by sprint ID' },
+      missionId: {
+        type: 'string',
+        description: 'Filter to rows stamped with this mission (#487 mission -> row trail)',
+      },
       status: {
         type: 'string',
         enum: ['active', 'archived', 'superseded'],
@@ -200,6 +208,7 @@ export async function cmosLearnings(
       return cmosLearningsList({
         category: params.category,
         sprintId: params.sprintId,
+        missionId: params.missionId,
         status: params.status,
         since: params.since,
         until: params.until,

@@ -296,6 +296,7 @@ CREATE INDEX IF NOT EXISTS idx_learnings_author_session ON learnings (author_ses
 CREATE INDEX IF NOT EXISTS idx_learnings_status ON learnings (status);
 CREATE INDEX IF NOT EXISTS idx_learnings_sprint ON learnings (sprint_id);
 CREATE INDEX IF NOT EXISTS idx_learnings_category ON learnings (category);
+CREATE INDEX IF NOT EXISTS idx_learnings_mission ON learnings (mission_id);
 CREATE INDEX IF NOT EXISTS idx_learnings_hash ON learnings (content_hash);
 
 -- FTS5 full-text search index for strategic decisions
@@ -373,6 +374,7 @@ CREATE TABLE IF NOT EXISTS next_steps (
 CREATE INDEX IF NOT EXISTS idx_next_steps_aggkey ON next_steps (project_id, event_type, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_next_steps_status ON next_steps (status);
 CREATE INDEX IF NOT EXISTS idx_next_steps_sprint ON next_steps (sprint_id);
+CREATE INDEX IF NOT EXISTS idx_next_steps_mission ON next_steps (mission_id);
 CREATE INDEX IF NOT EXISTS idx_next_steps_hash ON next_steps (content_hash);
 
 -- Structured constraints with lifecycle and expiry

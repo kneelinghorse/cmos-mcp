@@ -264,11 +264,22 @@ describe('Session Auto-Sprint Detection', () => {
     expect(result.data?.sprintAutoTagged).toBe(false);
   });
 
-  it('does not auto-tag when the store has no current sprint at all (s77-m02)', async () => {
-    // s77-m02: session-start now delegates to resolveCurrentSprintId, which returns
-    // a sprint whenever ANY live-or-recent one exists (matching onboard — e.g. on a
-    // fork-and-forget project the most-recent Completed sprint is still "current").
-    // So the only genuine no-tag case is a store with nothing to resolve.
+  it('does not auto-tag when the store has no OPEN sprint (s77-m02, rewritten s85-m03)', async () => {
+    // RATIONALE REWRITTEN (s85-m03). The assertions below are unchanged and still correct,
+    // but the reason they hold has inverted, and the old comment now describes a behavior
+    // that was itself the defect.
+    //
+    // s77-m02 said: "session-start delegates to resolveCurrentSprintId, which returns a sprint
+    // whenever ANY live-or-recent one exists … so the only genuine no-tag case is a store with
+    // nothing to resolve." That was accurate, and it is exactly what went wrong — on a store
+    // whose sprints are all Completed, every session inherited a dead sprint forever.
+    //
+    // s85-m03 split the resolvers: session-start now calls resolveOpenSprintIdForWrite, which
+    // returns null unless a sprint is in an OPEN status (or carries active work). So the
+    // no-tag case is no longer "nothing to resolve" — it is "nothing OPEN", which is the far
+    // more common state (11 of 18 registered stores had zero open sprints when this shipped).
+    // Emptying the tables still produces null; it is simply no longer the only way to.
+    // The all-Completed case is covered directly in write-sprint-tagging.test.ts.
     testDb.db.exec(`DELETE FROM missions; DELETE FROM sprints;`);
 
     const result = await cmosSessionStart({

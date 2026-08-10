@@ -107,6 +107,9 @@ export interface CmosDecisionsListParams {
   /** Optional: filter by sprint ID */
   sprintId?: string;
 
+  /** s85-m04: filter to rows stamped with this mission (#487 read surface) */
+  missionId?: string;
+
   /** Optional: filter by date range start (ISO format) */
   since?: string;
 
@@ -222,6 +225,10 @@ export async function cmosDecisionsList(
       const allDecisions = loadUnifiedDecisionRecords(client, {
         domain: params.domain,
         sprintId: params.sprintId,
+        // s85-m04: the LOCAL path filters here, not in the cross-store builder below. Adding
+        // the predicate to only one of the two branches is exactly the invisible half-fix the
+        // round-trip acceptance test exists to catch — and did catch, on the first run.
+        missionId: params.missionId,
         since: params.since,
         until: params.until,
       });
@@ -290,6 +297,13 @@ async function listAcrossProjects(
   if (params.sprintId) {
     conditions.push('sprint_id = ?');
     sqlParams.push(params.sprintId);
+  }
+  // s85-m04 (#487): make the mission -> row trail queryable. Rows with a NULL mission_id are
+  // EXCLUDED by this predicate rather than erroring — the ~342 historical unstamped decisions
+  // simply do not match, which is the correct answer to "what did mission X decide?".
+  if (params.missionId) {
+    conditions.push('mission_id = ?');
+    sqlParams.push(params.missionId);
   }
   if (params.since) {
     conditions.push('created_at >= ?');

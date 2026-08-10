@@ -189,6 +189,10 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           },
           "type": "array",
         },
+        "missionId": {
+          "description": "Filter next_steps to rows stamped with this mission (#487 mission -> row trail)",
+          "type": "string",
+        },
         "mode": {
           "description": "Update mode for update action",
           "enum": [
@@ -437,6 +441,10 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "minimum": 1,
           "type": "number",
         },
+        "missionId": {
+          "description": "Filter to rows stamped with this mission (#487 mission -> row trail)",
+          "type": "string",
+        },
         "page": {
           "description": "Page number for list action",
           "minimum": 1,
@@ -590,6 +598,10 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "maximum": 50,
           "minimum": 1,
           "type": "number",
+        },
+        "missionId": {
+          "description": "Filter to rows stamped with this mission (#487 mission -> row trail)",
+          "type": "string",
         },
         "page": {
           "description": "Page number for list action",
@@ -1225,7 +1237,7 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "type": "number",
         },
         "missionId": {
-          "description": "Associated mission ID for capture action",
+          "description": "Associated mission ID. On capture, stamps the decision/learning/next-step row; on complete, stamps the decisions[] and nextSteps[] rows this call materializes.",
           "type": "string",
         },
         "nextSteps": {

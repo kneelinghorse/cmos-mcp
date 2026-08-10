@@ -11,6 +11,7 @@
 import { withClientValidated } from './client';
 import type { CmosToolResult } from './types';
 import { reviewDecisionStaleness, type DecisionReviewResult } from './staleness-detection';
+import { buildUntaggedDecisionAdvisory } from './untagged-advisory';
 
 export type CmosDecisionsReviewResult = DecisionReviewResult;
 
@@ -30,9 +31,16 @@ export async function cmosDecisionsReview(
         includeApproaching: params.includeApproaching ?? true,
       });
 
+      // s85-m03: staleness-detection.ts filters `sprint_id IS NOT NULL` when choosing
+      // candidates, so an untagged active decision can NEVER be flagged stale. After m03
+      // that set grows with normal use on a store with no open sprint, so report it rather
+      // than let triage silently shrink.
+      const untagged = buildUntaggedDecisionAdvisory(client);
+
       return {
         success: true as const,
         data: result,
+        ...(untagged ? { warnings: [untagged] } : {}),
       };
     },
     { projectRoot: params.projectRoot }

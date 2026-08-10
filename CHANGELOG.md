@@ -4,6 +4,73 @@ All notable changes to cmos-mcp are documented here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## 2.5.0 — 2026-08-10
+
+Sprint 85 "Honest Provenance" — the write-behavior release. The **15-tool contract holds**.
+This release changes what the durable record says when nothing is open: the stamp is now
+honest, at the cost of some sprint-scoped reporting no longer counting untagged work.
+
+### Changed
+
+- **A session started when no sprint is in an open status now records
+  `sessions.sprint_id = NULL` (s85 m03).** Previously the session inherited the most recent
+  **Completed** sprint — a durable stamp naming a sprint that was already closed. Decisions,
+  learnings, constraints **and next-steps** captured in such a session likewise record
+  `sprint_id = NULL`. Display is deliberately unchanged: onboard, review and mission status
+  still _name_ the most recent sprint — "which sprint am I looking at" and "which sprint
+  should this row carry" are now answered by two different resolvers, on purpose.
+- **A `Planned` sprint with only Queued missions no longer receives the write-side tag
+  either**, though display still names it. A `Planned` sprint carrying an In Progress or
+  Current mission, or any sprint in an open status (Active / In Progress / Current), still
+  tags writes normally.
+- **Decisions captured with no open sprint are excluded from `cmos_decisions(action="review")`
+  staleness triage** — its scoring filters `sprint_id IS NOT NULL`. A new advisory on that
+  action reports the excluded count (`N active decisions have no sprint tag and are excluded
+from staleness scoring`) rather than hiding the gap.
+- **Sprint-scoped retro, analytics and close-summary counts drop for untagged work.**
+  `cmos_sprint(action="retro")` and `cmos_sprint(action="complete")` each now name the
+  untagged count explicitly instead of under-reporting silently. No `session_missions`
+  fallback attribution is performed — that would reinvent the guessing the write path
+  refuses to do.
+- **Context retention no longer prunes untagged sessions.** A session with NULL `sprint_id`
+  is retained by `removeArchivedDetail` rather than swept with its (former) sprint.
+- **`cmos_sprint(action="carry_forward")` no longer emits the `null_sprint_sessions` item.**
+  Its stated cause ("require dashboard event processor update") was never a dashboard bug,
+  and after this release a NULL `sprint_id` is the intended record, not a defect to escalate.
+- **No migration, no backfill — go-forward only.** Existing rows are untouched by design:
+  the dashboard mirror's session upsert is `COALESCE(existing, incoming)` and cannot clear a
+  value, so a local NULL-out of historical rows would diverge from the mirror permanently.
+- `cmos_session(action="start")` on a store with nothing open returns `sprintId: null`,
+  `sprintAutoTagged: false`, a new **`advisorySprintId`** field carrying the read-resolved
+  hint, and a warning telling the caller the session is recorded untagged. The hint rides a
+  separate field because `{sprintId, sprintAutoTagged: false}` already means "the caller
+  passed `sprintId` explicitly".
+
+### Added
+
+- **`missionId` on `cmos_session(action="complete")` (s85 m04, #487).** The consolidated
+  router now forwards the existing top-level param to the complete path, and the
+  `decisions[]` / `nextSteps[]` INSERT paths stamp `mission_id`. Per-capture `missionId`
+  still wins for next-steps; the call-level value applies uniformly to decisions.
+- **`missionId` filters on `cmos_decisions(action="list")`, `cmos_learnings(action="list")`
+  and `cmos_context(action="next_steps")` (s85 m04).** The mission → row trail is now
+  queryable end-to-end; rows with NULL `mission_id` are excluded by the filter, not errored.
+- **A non-blocking warning on decision/learning captures that omit `missionId`** while at
+  least one mission is In Progress/Current, naming the candidate mission ids and the exact
+  param. Next-step captures never warn (96.4% of next-steps are born at session-complete
+  with no mission in progress — it would be pure noise). Nothing is ever silently inferred.
+- **Two indexes**: `idx_learnings_mission` and `idx_next_steps_mission`, in the seed schema
+  and as marker-gated migrations, so the new filters don't table-scan.
+
+### Fixed
+
+- **`mission_id` was omitted from two `cmos_session(action="complete")` INSERT paths**
+  (the `nextSteps[]` and `decisions[]` column lists), so rows born there could never carry
+  provenance even when the caller knew the mission.
+- **The dedup-ordering shadow bug**: identical text passed in both `nextSteps[]` and a
+  next-step capture carrying `missionId` let the unstamped insert win and skip the stamped
+  twin. The mission-bearing capture loop now runs first.
+
 ## 2.4.0 — 2026-08-10
 
 Sprint 84 "Messaging-Cutover Adoption + Trust-Hardening" plus sprint 85's published-surface

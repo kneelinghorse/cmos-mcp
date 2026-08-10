@@ -14,7 +14,7 @@ import { createError, createSuccess, CmosErrors, CMOS_ERROR_CODES } from './erro
 import { sanitizeContentField, type SanitizedField } from '../../intelligence/content-sanitizer';
 import { ensureMissionIdColumn } from './cmos-mission-complete';
 import { genesisColumns, getProjectId } from './genesis-columns';
-import { resolveCurrentSprintId } from './current-sprint';
+import { resolveOpenSprintIdForWrite } from './current-sprint';
 import {
   ensureLearningsTable,
   ensureSessionMissionsTable,
@@ -692,7 +692,44 @@ export async function cmosSessionCapture(
         }
       }
 
-      return createSuccess<CmosSessionCaptureResult>(resultData, undefined, sanitizedFields);
+      // s85-m04 — THE SUPPLY LEVER. The two SQL omissions explain only 26 of 342 unstamped
+      // decisions; the dominant cause is agents simply not passing the OPTIONAL missionId
+      // (176/981 captures = 17.9%, and learnings-stamped exactly equals
+      // learning-captures-with-missionId). So the lever is asking, not inferring.
+      //
+      // NEVER silently pick a mission: a wrong mission_id is an unrecoverable false provenance
+      // claim with no FK to catch it (verified — pragma_foreign_key_list('learnings') returns
+      // zero rows on the migrated store even though the seed declares the FK). Warn instead.
+      //
+      // Deliberately NOT on the next-step path: 96.4% of next_steps are born at session
+      // complete when zero mission is in progress, so it would be pure noise.
+      const warnings: string[] = [];
+      if (!missionId && (category === 'decision' || category === 'learning')) {
+        const candidates = client.getMany<{ id: string; status: string }>(
+          `SELECT id, status FROM missions
+            WHERE status IN ('In Progress', 'Current')
+            ORDER BY CASE status WHEN 'In Progress' THEN 0 ELSE 1 END, id ASC
+            LIMIT 5`,
+          []
+        );
+        const rows = candidates.success ? (candidates.data ?? []) : [];
+        if (rows.length > 0) {
+          const names = rows.map((r) => `${r.id} (${r.status})`).join(', ');
+          warnings.push(
+            `This ${category} was captured without a missionId while ${rows.length} mission(s) ` +
+              `are open: ${names}. The row is stored UNSTAMPED, so it will not appear in ` +
+              `cmos_${category === 'decision' ? 'decisions' : 'learnings'}(action="list", missionId=…). ` +
+              `Pass missionId on the capture to record which mission this belongs to — it is not ` +
+              `inferred, because a wrong mission_id is an unrecoverable false provenance claim.`
+          );
+        }
+      }
+
+      return createSuccess<CmosSessionCaptureResult>(
+        resultData,
+        warnings.length > 0 ? warnings : undefined,
+        sanitizedFields
+      );
     },
     { projectRoot: params.projectRoot }
   );
@@ -719,12 +756,16 @@ function inferSprintIdForDecisionCapture(
     return activeMission.data.sprint_id;
   }
 
-  // s77-m02 Fork 2a: keep the mission-first leg above (a decision captured mid-work
-  // belongs to the active mission's sprint), but route the no-active-mission
-  // FALLBACK through the canonical resolver so a captured decision lands on the
-  // SAME current sprint the other surfaces name (and inherits the dead-status
-  // exclusions the old bare recent-activity query lacked).
-  return resolveCurrentSprintId(client);
+  // s85-m03: the fallback now resolves through resolveOpenSprintIdForWrite, NOT the display
+  // resolver. This MUST ship together with the cmos-session-start.ts swap: fixing only
+  // session-start does not shrink the blast radius, it RELOCATES it. Once sessions.sprint_id
+  // is NULL, the `session.sprint_id ?? inferSprintIdForDecisionCapture(...)` fallthrough at
+  // the decision/learning/constraint call sites fires MORE often, so the dead sprint id would
+  // simply land on those three tables instead of on the session.
+  //
+  // The mission-first leg above is unchanged and still wins: a decision captured mid-work
+  // belongs to the active mission's sprint whatever the sprint's own status says.
+  return resolveOpenSprintIdForWrite(client);
 }
 
 /**

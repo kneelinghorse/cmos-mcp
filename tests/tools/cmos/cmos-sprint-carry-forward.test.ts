@@ -271,7 +271,23 @@ describe('cmos_sprint carry_forward action', () => {
     expect(blockedItems[0].description).toContain('Carry-Forward Routing');
   });
 
-  it('detects sessions with null sprint_id', async () => {
+  it('no longer reports sessions with null sprint_id as a carry-forward item', async () => {
+    // WHY THIS FLIPPED (s85-m03): the `null_sprint_sessions` item type was REMOVED, not
+    // merely re-scoped. It ran a global `SELECT COUNT(*) FROM sessions WHERE sprint_id IS
+    // NULL` and described the result as "N session(s) with null sprint_id require dashboard
+    // event processor update" — and with send=true it emitted a cross-project
+    // backlog_request asking a sibling team to fix a dashboard bug that does not exist.
+    //
+    // After m03 a NULL sprint_id is the CORRECT record for a session started when no sprint
+    // was in an open status, so the item's stated cause became factually false and its count
+    // would climb with ordinary use. It was deliberately NOT replaced with a sprint-scoped
+    // variant (e.g. inferring the sprint via session_missions): that would reintroduce
+    // exactly the guessing m03 removed. The untagged count is surfaced instead as a
+    // non-blocking advisory on cmos_sprint(retro), cmos_sprint(complete) and
+    // cmos_decisions(review).
+    //
+    // The two null-sprint_id sessions this fixture seeds are still present — they are simply
+    // no longer reported as a defect.
     const result = await cmosSprint({
       action: 'carry_forward',
       sprintId: 'sprint-36',
@@ -283,10 +299,7 @@ describe('cmos_sprint carry_forward action', () => {
     expect(result.success).toBe(true);
     const data = result.data as SprintCarryForwardResult;
 
-    const sessionItems = data.items.filter((i) => i.type === 'null_sprint_sessions');
-    expect(sessionItems).toHaveLength(1);
-    expect(sessionItems[0].count).toBe(2);
-    expect(sessionItems[0].description).toContain('2 session(s)');
+    expect(data.items.filter((i) => i.type === 'null_sprint_sessions')).toHaveLength(0);
   });
 
   it('detects decisions with null session_id', async () => {
@@ -346,7 +359,8 @@ describe('cmos_sprint carry_forward action', () => {
     expect(result.success).toBe(true);
     const data = result.data as SprintCarryForwardResult;
 
-    expect(data.totalDetected).toBe(3);
+    // s85-m03: 3 -> 2, the null_sprint_sessions detector was removed (see above).
+    expect(data.totalDetected).toBe(2);
     expect(data.totalSent).toBe(0);
     expect(__mockSendMessage).not.toHaveBeenCalled();
   });
@@ -372,9 +386,11 @@ describe('cmos_sprint carry_forward action', () => {
     expect(result.success).toBe(true);
     const data = result.data as SprintCarryForwardResult;
 
-    expect(data.totalSent).toBe(3);
+    // s85-m03: 3 -> 2, the null_sprint_sessions detector was removed.
+    expect(data.totalSent).toBe(2);
     expect(data.totalFailed).toBe(0);
-    expect(__mockSendMessage).toHaveBeenCalledTimes(3);
+    // s85-m03: one fewer message, because the null_sprint_sessions item no longer exists.
+    expect(__mockSendMessage).toHaveBeenCalledTimes(2);
 
     // Verify message params
     const firstCall = __mockSendMessage.mock.calls[0][0];
@@ -400,7 +416,8 @@ describe('cmos_sprint carry_forward action', () => {
     const data = result.data as SprintCarryForwardResult;
 
     expect(data.totalSent).toBe(0);
-    expect(data.totalFailed).toBe(3);
+    // s85-m03: 3 -> 2, the null_sprint_sessions detector was removed.
+    expect(data.totalFailed).toBe(2);
     expect(data.sendResults.every((r) => !r.sent)).toBe(true);
     expect(data.sendResults[0].error).toContain('Server error');
   });

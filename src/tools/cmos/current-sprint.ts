@@ -130,6 +130,104 @@ export function resolveCurrentSprintId(client: CmosDatabaseClient): string | nul
 }
 
 /**
+ * Resolve the sprint ID for a DURABLE WRITE — or `null` when nothing is open (s85-m03).
+ *
+ * **Read and write semantics diverge ON PURPOSE. Do not converge them.**
+ *
+ * {@link resolveCurrentSprintId} must ALWAYS be able to name a sprint, because a display
+ * surface asking "which sprint am I looking at?" has no useful answer otherwise. That is why
+ * its Steps 5–6 re-admit Completed sprints. Those same fallbacks are wrong for a durable
+ * stamp: on a store whose sprints are all Completed they hand a dead sprint to the write
+ * path, and the row keeps that label forever. Live evidence: this store has 76 sprints and
+ * ZERO open; six planning sessions were stamped to sprints completed weeks earlier. An
+ * external report (parts-town, 2026-07-30) independently found three months of engagement
+ * work absorbed by a sprint closed in April — and on a Managed-tier project, which has no
+ * sprints by design, there is never an open sprint to catch a session, so the mislabel is
+ * guaranteed rather than incidental.
+ *
+ * The s77-m02 comment at cmos-session-start.ts:293-296 is exactly how the two got merged in
+ * the first place: routing the write path through the display resolver looked like removing a
+ * divergence. It removed the wrong one.
+ *
+ * Two legs, then null:
+ *  1. **Active work** — the Step 1 query verbatim. Excludes only DEAD_SPRINT_STATUSES, so it
+ *     correctly catches a `'Planned'` sprint that carries an In Progress mission.
+ *  2. **Open status** — {@link getOpenStatusSprintId}, which is NOT
+ *     `getExplicitOpenSprintId`. See that function's note for why reusing it would be a bug.
+ *
+ * Everything Steps 3–6 would have added is deliberately dropped. Note the real behavior delta
+ * that follows: a `'Planned'` sprint whose missions are all Queued no longer receives the
+ * write tag, though display still names it.
+ */
+export function resolveOpenSprintIdForWrite(client: CmosDatabaseClient): string | null {
+  // Leg 1: a sprint with active work is unambiguously the one being worked in, whatever its
+  // own status field says.
+  const activeWorkResult = client.getOne<{ sprint_id: string }>(
+    `SELECT m.sprint_id FROM missions m
+       JOIN sprints s ON s.id = m.sprint_id
+      WHERE m.status IN ('In Progress', 'Current')
+        AND m.sprint_id IS NOT NULL
+        AND ${statusNotIn("COALESCE(s.status, 'Planned')", DEAD_SPRINT_STATUSES)}
+      LIMIT 1`,
+    []
+  );
+  if (activeWorkResult.success && activeWorkResult.data?.sprint_id) {
+    return activeWorkResult.data.sprint_id;
+  }
+
+  // Leg 2: an open-status sprint, whether or not it currently holds open work.
+  return getOpenStatusSprintId(client);
+}
+
+/**
+ * Leg 2 of {@link resolveOpenSprintIdForWrite}: the highest-priority sprint in an OPEN status,
+ * with no open-work requirement.
+ *
+ * > **Why this is not `getExplicitOpenSprintId`.** That function additionally requires
+ * > `NOT EXISTS(missions for this sprint) OR EXISTS(mission with status != 'Completed')`
+ * > (see its `:162-170` clause). That predicate excludes an open-status sprint whose missions
+ * > are ALL Completed — the wrap-up window between the last mission closing and
+ * > `cmos_sprint(action="complete")` running, which is precisely when an agent is most likely
+ * > to open a session. Reusing it would return NULL for a genuinely open sprint: a NEW
+ * > mis-tagging defect traded for the old one. A live case exists in the portfolio
+ * > (forge-data-viz-demos sprint S6: Active, 6 missions, all Completed).
+ *
+ * The status tiering and most-recent-real-activity tie-break mirror `getExplicitOpenSprintId`
+ * so that when both do answer, they agree.
+ */
+function getOpenStatusSprintId(client: CmosDatabaseClient): string | null {
+  const result = client.getOne<{ id: string }>(
+    `SELECT s.id
+       FROM sprints s
+       LEFT JOIN (
+         SELECT sprint_id, MAX(activity_at) AS last_activity
+           FROM (
+             SELECT m.sprint_id AS sprint_id, m.completed_at AS activity_at
+               FROM missions m
+              WHERE m.sprint_id IS NOT NULL AND m.completed_at IS NOT NULL
+             UNION ALL
+             SELECT sess.sprint_id AS sprint_id,
+                    COALESCE(sess.completed_at, sess.started_at) AS activity_at
+               FROM sessions sess
+              WHERE sess.sprint_id IS NOT NULL
+           )
+          GROUP BY sprint_id
+       ) act ON act.sprint_id = s.id
+      WHERE ${statusInSql("COALESCE(s.status, 'Planned')", SPRINT_OPEN_STATUSES)}
+      ORDER BY CASE COALESCE(s.status, 'Planned')
+        WHEN 'In Progress' THEN 0
+        WHEN 'Current' THEN 1
+        WHEN 'Active' THEN 2
+        ELSE 3
+      END, COALESCE(act.last_activity, '') DESC, s.rowid DESC
+      LIMIT 1`,
+    []
+  );
+
+  return result.success ? (result.data?.id ?? null) : null;
+}
+
+/**
  * Step 2: the highest-priority explicitly-open sprint that still has open work (or
  * no missions yet).
  *

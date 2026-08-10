@@ -453,6 +453,156 @@ async function main(): Promise<void> {
       `snapshots=${JSON.stringify(snaps.map((s) => s.contentPruned))}`
     );
 
+    // --- s85-m03: write-side sprint tagging. On a store whose only sprint is Completed, a
+    //     session start must persist sprint_id NULL, report advisorySprintId, and warn —
+    //     while DISPLAY still names the Completed sprint. Fully drivable over stdio.
+    const m03Dir = mkTmp('cmos-verify-m03-');
+    await h.callOk('cmos_project', {
+      action: 'init',
+      projectRoot: m03Dir,
+      projectName: 'verify-m03',
+    });
+    await h.callOk('cmos_sprint', {
+      action: 'add',
+      projectRoot: m03Dir,
+      sprintId: 'sp-closed',
+      title: 'Closed sprint',
+      focus: 'verify',
+    });
+    await h.callOk('cmos_sprint', {
+      action: 'complete',
+      projectRoot: m03Dir,
+      sprintId: 'sp-closed',
+      summary: 'closed so nothing is open',
+    });
+
+    const m03Start = await h.callOk('cmos_session', {
+      action: 'start',
+      type: 'planning',
+      title: 'verify m03',
+      projectRoot: m03Dir,
+    });
+    const m03Data = h.dataOf(m03Start) as {
+      sprintId?: string | null;
+      sprintAutoTagged?: boolean;
+      advisorySprintId?: string | null;
+    };
+    check(
+      's85-m03: session start on an all-Completed store persists sprintId NULL',
+      m03Data?.sprintId === null && m03Data?.sprintAutoTagged === false,
+      `sprintId=${JSON.stringify(m03Data?.sprintId)} autoTagged=${m03Data?.sprintAutoTagged}`
+    );
+    check(
+      's85-m03: the read-resolved sprint rides advisorySprintId, NOT sprintId',
+      m03Data?.advisorySprintId === 'sp-closed',
+      `advisorySprintId=${JSON.stringify(m03Data?.advisorySprintId)}`
+    );
+    // warnings ride the CmosToolResult envelope in structuredContent (dataOf returns only
+    // `.data`), while the text part is the LLM-formatted view.
+    const m03Warnings = ((m03Start as { structuredContent?: { warnings?: string[] } })
+      .structuredContent?.warnings ?? []) as string[];
+    check(
+      's85-m03: session start warns that the session is recorded untagged',
+      m03Warnings.some((w) => /sprint_id NULL/.test(w)),
+      `warnings=${JSON.stringify(m03Warnings)}`
+    );
+    check(
+      's85-m03: the LLM view says "none open — recorded untagged" rather than omitting the sprint line',
+      /none open — recorded untagged/.test(h.textOf(m03Start)),
+      h.textOf(m03Start).slice(0, 160)
+    );
+
+    // Display is deliberately unchanged — onboard still NAMES the Completed sprint.
+    const m03Onboard = h.dataOf(await h.callOk('cmos_agent_onboard', { projectRoot: m03Dir })) as {
+      currentSprint?: { id?: string } | null;
+    };
+    check(
+      's85-m03: DISPLAY unchanged — onboard still names the Completed sprint',
+      m03Onboard?.currentSprint?.id === 'sp-closed',
+      `currentSprint=${JSON.stringify(m03Onboard?.currentSprint?.id)}`
+    );
+
+    // --- s85-m04 (#487): the WHOLE mission_id path over stdio, not the handler. The router
+    //     at cmos-session.ts forwards `missionId` to complete; if that one line regresses,
+    //     every handler test still passes and this check is the one that fails.
+    const m04Dir = mkTmp('cmos-verify-m04-');
+    await h.callOk('cmos_project', {
+      action: 'init',
+      projectRoot: m04Dir,
+      projectName: 'verify-m04',
+    });
+    await h.callOk('cmos_sprint', {
+      action: 'add',
+      projectRoot: m04Dir,
+      sprintId: 'sp-m04',
+      title: 'm04',
+      focus: 'verify',
+    });
+    await h.callOk('cmos_mission', {
+      action: 'add',
+      projectRoot: m04Dir,
+      missionId: 'mv-1',
+      name: 'Verify mission',
+      sprintId: 'sp-m04',
+    });
+    await h.callOk('cmos_session', {
+      action: 'start',
+      type: 'planning',
+      title: 'verify m04',
+      projectRoot: m04Dir,
+    });
+    await h.callOk('cmos_session', {
+      action: 'complete',
+      summary: 'verify m04 close',
+      missionId: 'mv-1',
+      decisions: ['verify-dist decision stamped to mv-1'],
+      nextSteps: ['verify-dist next step stamped to mv-1'],
+      projectRoot: m04Dir,
+    });
+
+    const m04Decisions = h.dataOf(
+      await h.callOk('cmos_decisions', {
+        action: 'list',
+        missionId: 'mv-1',
+        projectRoot: m04Dir,
+      })
+    ) as { decisions?: Array<{ decision?: string; missionId?: string | null }> };
+    check(
+      's85-m04: complete(missionId) -> decisions(list, missionId) round-trips the stamped row',
+      (m04Decisions?.decisions ?? []).length === 1 &&
+        m04Decisions.decisions?.[0]?.missionId === 'mv-1',
+      `decisions=${JSON.stringify(m04Decisions?.decisions)}`
+    );
+
+    const m04Steps = h.dataOf(
+      await h.callOk('cmos_context', {
+        action: 'next_steps',
+        nextStepAction: 'list',
+        missionId: 'mv-1',
+        projectRoot: m04Dir,
+      })
+    ) as { items?: Array<{ missionId?: string | null }> };
+    check(
+      's85-m04: complete(missionId) also stamps next_steps, and the filter finds it',
+      (m04Steps?.items ?? []).length === 1 && m04Steps.items?.[0]?.missionId === 'mv-1',
+      `items=${JSON.stringify(m04Steps?.items)}`
+    );
+
+    // A mission with nothing stamped returns none rather than everything — proves the
+    // predicate is applied rather than ignored.
+    const m04Empty = h.dataOf(
+      await h.callOk('cmos_decisions', {
+        action: 'list',
+        missionId: 'mv-absent',
+        projectRoot: m04Dir,
+      })
+    ) as { decisions?: unknown[] };
+    check(
+      's85-m04: the missionId filter EXCLUDES rather than being ignored',
+      (m04Empty?.decisions ?? []).length === 0,
+      `decisions=${JSON.stringify(m04Empty?.decisions)}`
+    );
+
     // Mode (i): from a REAL project cwd, a pin-only read (mission list, no projectRoot)
     // resolves to the sender and succeeds — scoped, not fanned out.
     const pinnedRead = await h.callTool('cmos_mission', { action: 'list' });

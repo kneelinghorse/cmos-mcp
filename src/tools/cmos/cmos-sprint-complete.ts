@@ -21,6 +21,7 @@ import {
 } from './context-retention';
 import { cmosContextCondense } from './cmos-context-condense';
 import { cmosDbSnapshot } from './cmos-db-snapshot';
+import { buildUntaggedSessionAdvisory } from './untagged-advisory';
 import { getProjectType } from './cmos-agent-onboard';
 import {
   ensureArchivalColumns,
@@ -663,6 +664,17 @@ export async function cmosSprintComplete(
         } catch {
           // Advisory only — never block sprint close on a probe failure.
         }
+      }
+
+      // s85-m03: the close summary's decisionCount / learningCount count strictly by sprint
+      // scope (sprint_id, or a mission/session belonging to the sprint), so work done in a
+      // session that carries no sprint tag is omitted entirely. Unconditional and NOT
+      // build-tier gated — a general/managed project is exactly where untagged sessions are
+      // the norm, so suppressing it there would hide the signal from the projects that need
+      // it most.
+      const untaggedSessionAdvisory = buildUntaggedSessionAdvisory(client);
+      if (untaggedSessionAdvisory) {
+        warnings.push(untaggedSessionAdvisory);
       }
 
       return createSuccess(result, warnings);

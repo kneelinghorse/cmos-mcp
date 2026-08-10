@@ -98,17 +98,22 @@ function detectCarryForwards(client: CmosDatabaseClient, sprintId: string): Carr
     }
   }
 
-  // 2. Sessions with null sprint_id (dashboard sync gap)
-  const nullSprintSessions = client.getOne<{ count: number }>(
-    `SELECT COUNT(*) AS count FROM sessions WHERE sprint_id IS NULL`
-  );
-  if (nullSprintSessions.success && nullSprintSessions.data && nullSprintSessions.data.count > 0) {
-    items.push({
-      type: 'null_sprint_sessions',
-      description: `${nullSprintSessions.data.count} session(s) with null sprint_id require dashboard event processor update`,
-      count: nullSprintSessions.data.count,
-    });
-  }
+  // 2. (REMOVED in s85-m03) The `null_sprint_sessions` item type.
+  //
+  //    It ran a GLOBAL `SELECT COUNT(*) FROM sessions WHERE sprint_id IS NULL` and pushed an
+  //    item reading "N session(s) with null sprint_id require dashboard event processor
+  //    update". With send=true that emitted a cross-project backlog_request asking a sibling
+  //    team to fix a dashboard bug that does not exist.
+  //
+  //    Its stated cause is now factually false: after s85-m03 a NULL sprint_id is the CORRECT,
+  //    intended record for a session started when no sprint is open — not a sync gap. Leaving
+  //    it would turn every honest NULL into a false defect report, and the count would climb
+  //    with normal use.
+  //
+  //    Deliberately NOT replaced with a sprint-scoped variant (e.g. inferring the sprint via
+  //    session_missions): that would reintroduce exactly the guessing this mission removed.
+  //    The untagged count is surfaced instead as a non-blocking advisory on cmos_sprint(retro),
+  //    cmos_sprint(complete) and cmos_decisions(review).
 
   // 3. Decisions with null author session (dashboard sync gap). s69-m04 renamed
   //    session_id → author_session_id; resolve the live column name so the

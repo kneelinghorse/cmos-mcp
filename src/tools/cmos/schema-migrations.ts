@@ -297,6 +297,11 @@ export function ensureLearningsTable(client: CmosDatabaseClient): MigrationResul
       sql: 'CREATE INDEX IF NOT EXISTS idx_learnings_evergreen ON learnings (evergreen)',
     },
     {
+      // s85-m04 (#487): verified MISSING on the live store; backs cmos_learnings(list, missionId).
+      name: 'idx_learnings_mission',
+      sql: 'CREATE INDEX IF NOT EXISTS idx_learnings_mission ON learnings (mission_id)',
+    },
+    {
       // s69-m04 — parity with schema.ts greenfield (author_session_id drill-down).
       name: 'idx_learnings_author_session',
       sql: 'CREATE INDEX IF NOT EXISTS idx_learnings_author_session ON learnings (author_session_id)',
@@ -600,6 +605,13 @@ export function ensureNextStepsTable(client: CmosDatabaseClient): MigrationResul
     {
       name: 'idx_next_steps_hash',
       sql: 'CREATE INDEX IF NOT EXISTS idx_next_steps_hash ON next_steps (content_hash)',
+    },
+    {
+      // s85-m04 (#487): verified MISSING on the live store — the only mission_id indexes were
+      // idx_strategic_decisions_mission and idx_session_missions_mission — so the new
+      // cmos_context(next_steps, missionId) filter would have table-scanned.
+      name: 'idx_next_steps_mission',
+      sql: 'CREATE INDEX IF NOT EXISTS idx_next_steps_mission ON next_steps (mission_id)',
     },
   ];
 

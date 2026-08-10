@@ -107,7 +107,12 @@ export const cmosSessionSchema = z
       .optional()
       .describe('Capture content for capture action (required for capture)'),
     context: z.string().optional().describe('Additional context for capture action'),
-    missionId: z.string().optional().describe('Associated mission ID for capture action'),
+    missionId: z
+      .string()
+      .optional()
+      .describe(
+        'Associated mission ID. On capture, stamps the decision/learning/next-step row; on complete, stamps the decisions[] and nextSteps[] rows this call materializes.'
+      ),
     evidence: z
       .array(z.object({ type: z.string(), id: z.string() }))
       .optional()
@@ -203,7 +208,11 @@ export const cmosSessionToolDefinition = {
       },
       content: { type: 'string', description: 'Capture content for capture action' },
       context: { type: 'string', description: 'Additional context for capture action' },
-      missionId: { type: 'string', description: 'Associated mission ID for capture action' },
+      missionId: {
+        type: 'string',
+        description:
+          'Associated mission ID. On capture, stamps the decision/learning/next-step row; on complete, stamps the decisions[] and nextSteps[] rows this call materializes.',
+      },
       evidence: {
         type: 'array',
         items: {
@@ -297,6 +306,12 @@ export async function cmosSession(
         summary: params.summary ?? '',
         nextSteps: params.nextSteps,
         decisions: params.decisions,
+        // s85-m04: `missionId` is declared on this router (zod + JSON inputSchema) and was
+        // forwarded to `capture` but NOT here — so wiring it into cmosSessionComplete alone
+        // would pass every handler test and ship DEAD over the real MCP surface, silently
+        // returning null. That is the s80-m07 shape. The real-store positive fire drives this
+        // router, not the handler, and fails if this line is removed.
+        missionId: params.missionId,
         agent: params.agent,
         citesLearningIds: params.citesLearningIds,
         projectRoot: params.projectRoot,

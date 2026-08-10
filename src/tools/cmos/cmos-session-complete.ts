@@ -33,6 +33,7 @@ import {
   snapshotDedupPrunedFilter,
 } from './schema-migrations';
 import { applyLearningReaffirm, sanitizeLearningIds } from './learning-reaffirm';
+import { ensureMissionIdColumn } from './cmos-mission-complete';
 import { recordEmbedding, decisionEmbeddingInput } from '../../intelligence/embedding-pipeline';
 
 /**
@@ -148,6 +149,18 @@ export const cmosSessionCompleteSchema = z.object({
     .optional()
     .describe('Optional list of strategic decisions to materialize into strategic_decisions rows'),
 
+  /**
+   * s85-m04: optional mission this session's work belongs to. Stamps `mission_id` on the
+   * `decisions[]` and `nextSteps[]` rows this call materializes, so the mission -> row trail
+   * is queryable (#487). Per-capture `missionId` still wins for capture-sourced next-steps.
+   */
+  missionId: z
+    .string()
+    .optional()
+    .describe(
+      'Associate the rows this call materializes (decisions[], nextSteps[]) with a mission. A per-capture missionId still wins for capture-sourced next-steps.'
+    ),
+
   /** Optional agent name */
   agent: z
     .string()
@@ -209,6 +222,11 @@ export const cmosSessionCompleteToolDefinition = {
         type: 'array',
         items: { type: 'string' },
         description: 'Optional list of next steps or action items',
+      },
+      missionId: {
+        type: 'string',
+        description:
+          'Associate the rows this call materializes (decisions[], nextSteps[]) with a mission. A per-capture missionId still wins for capture-sourced next-steps.',
       },
       decisions: {
         type: 'array',
@@ -283,6 +301,11 @@ export async function cmosSessionComplete(
   const citesLearningIds = citesLearningIdsSan.cleaned;
 
   const agent = params.agent ?? 'assistant';
+
+  // s85-m04 — the call-level mission for the rows THIS call materializes (decisions[] and
+  // nextSteps[]). Named `callMissionId` to keep it visibly distinct from the per-capture
+  // `missionId` read off each capture, which wins where it exists.
+  const callMissionId = params.missionId?.trim() || null;
 
   return withClientAsync(
     async (client) => {
@@ -409,7 +432,60 @@ export async function cmosSessionComplete(
       // ============================================================
       // Extract next-steps to structured next_steps table
       // ============================================================
+      //
+      // s85-m04 ORDERING (deliberate, do not swap back). Both loops below dedup on
+      // (content_hash, session_id). The capture-sourced loop carries a per-capture
+      // `missionId`; the nextSteps[] param loop carries only the call-level one. When the same
+      // text arrives through BOTH inputs, whichever loop runs FIRST wins and the other hits
+      // `continue`. Previously the unstamped param loop ran first, so identical text let an
+      // unstamped row shadow its stamped twin. The mission-bearing loop now runs first.
+      //
+      // Verified in code; NOT verified as an observed live defect — next_steps has exactly one
+      // stamped row in the whole table, so there is nothing to observe it against.
+      //
+      // Accepted side effect: genesisColumns assigns origin_seq as per-table MAX+1, so
+      // reordering changes which row gets which origin_seq within a single call. origin_seq is
+      // only a tiebreaker in the cross-store merge key and both orderings are equally valid
+      // within one call — noted so a reviewer does not read it as a regression.
       let nextStepsExtracted = 0;
+
+      // (a) capture-sourced next-steps FIRST — these can carry a per-capture missionId.
+      for (const capture of captures) {
+        if (capture.category === 'next-step' && capture.content) {
+          const trimmed = capture.content.trim();
+          if (!trimmed) continue;
+          ensureNextStepsTable(client);
+          const hash = computeContentHash(trimmed, 'next-step');
+          const existing = client.getOne<{ id: number }>(
+            `SELECT id FROM next_steps WHERE content_hash = ? AND session_id = ?`,
+            [hash, sessionId]
+          );
+          if (existing.success && existing.data) continue;
+          // Per-capture missionId WINS over the call-level default: the capture stated which
+          // mission it belongs to, which is strictly better information.
+          const captureMissionId =
+            (capture as { missionId?: string }).missionId ?? callMissionId ?? null;
+          const g = genesisColumns(client, 'next_steps', getProjectId(client));
+          const insertResult = client.execute(
+            `INSERT INTO next_steps (content, status, session_id, sprint_id, mission_id, created_at, content_hash, ${g.columns.join(', ')})
+             VALUES (?, 'pending', ?, ?, ?, ?, ?, ${g.placeholders})`,
+            [
+              trimmed,
+              sessionId,
+              session.sprint_id ?? null,
+              captureMissionId,
+              now,
+              hash,
+              ...g.values,
+            ]
+          );
+          if (insertResult.success) nextStepsExtracted++;
+        }
+      }
+
+      // (b) the nextSteps[] param. s85-m04: this INSERT omitted mission_id from its column
+      // list ENTIRELY — one of the two literal SQL omissions behind #487. It now stamps the
+      // call-level missionId, matching the shape of the capture-sourced insert above.
       if (nextSteps && nextSteps.length > 0) {
         ensureNextStepsTable(client);
         for (const step of nextSteps) {
@@ -424,31 +500,17 @@ export async function cmosSessionComplete(
           if (existing.success && existing.data) continue;
           const g = genesisColumns(client, 'next_steps', getProjectId(client));
           const insertResult = client.execute(
-            `INSERT INTO next_steps (content, status, session_id, sprint_id, created_at, content_hash, ${g.columns.join(', ')})
-             VALUES (?, 'pending', ?, ?, ?, ?, ${g.placeholders})`,
-            [trimmed, sessionId, session.sprint_id ?? null, now, hash, ...g.values]
-          );
-          if (insertResult.success) nextStepsExtracted++;
-        }
-      }
-      // Also extract next-step captures from session captures
-      for (const capture of captures) {
-        if (capture.category === 'next-step' && capture.content) {
-          const trimmed = capture.content.trim();
-          if (!trimmed) continue;
-          ensureNextStepsTable(client);
-          const hash = computeContentHash(trimmed, 'next-step');
-          const existing = client.getOne<{ id: number }>(
-            `SELECT id FROM next_steps WHERE content_hash = ? AND session_id = ?`,
-            [hash, sessionId]
-          );
-          if (existing.success && existing.data) continue;
-          const missionId = (capture as { missionId?: string }).missionId ?? null;
-          const g = genesisColumns(client, 'next_steps', getProjectId(client));
-          const insertResult = client.execute(
             `INSERT INTO next_steps (content, status, session_id, sprint_id, mission_id, created_at, content_hash, ${g.columns.join(', ')})
              VALUES (?, 'pending', ?, ?, ?, ?, ?, ${g.placeholders})`,
-            [trimmed, sessionId, session.sprint_id ?? null, missionId, now, hash, ...g.values]
+            [
+              trimmed,
+              sessionId,
+              session.sprint_id ?? null,
+              callMissionId ?? null,
+              now,
+              hash,
+              ...g.values,
+            ]
           );
           if (insertResult.success) nextStepsExtracted++;
         }
@@ -515,6 +577,15 @@ export async function cmosSessionComplete(
         const projectDomain = domainResult.success ? (domainResult.data?.value ?? null) : null;
         // s69-m04 — settle the author_* rename before the dedup SELECT/INSERT below.
         ensureAuthorNamespaceColumns(client);
+        // s85-m04 — DECISIONS-ONLY column guard. strategic_decisions.mission_id rides the v2.1
+        // migration, so an un-migrated store lacks it and the INSERT below would throw
+        // "no such column". learnings.mission_id and next_steps.mission_id are in the SEED BASE
+        // schema, so they need no guard. Deliberately NOT a tableHasColumn conditional-omit:
+        // that would silently drop the provenance this mission exists to add (decision #926 #3
+        // bans silent fail-open). ensureStrategicDecisionsSchema is plain ALTER ADD COLUMN +
+        // CREATE INDEX IF NOT EXISTS (no 12-step rebuild) and this handler opens no
+        // transaction, so point-of-use is correct and needs no pre-BEGIN dance.
+        ensureMissionIdColumn(client);
         for (const decisionText of decisionSources) {
           const existing = client.getOne<{ id: number }>(
             'SELECT id FROM strategic_decisions WHERE decision_text = ? AND author_session_id = ?',
@@ -522,11 +593,26 @@ export async function cmosSessionComplete(
           );
           if (existing.success && existing.data) continue;
           const g = genesisColumns(client, 'strategic_decisions', getProjectId(client));
+          // s85-m04: mission_id was omitted from this column list entirely — the second of the
+          // two SQL omissions behind #487. The call-level missionId applies UNIFORMLY here and
+          // that is correct: decisionSources flattens the decisions[] param and
+          // decision-category captures into a plain string[] before this loop, discarding any
+          // per-capture missionId. Do NOT restructure decisionSources to recover it — the
+          // capture path already promoted and stamped those rows, so they are normally skipped
+          // by the dedup SELECT above; this is a defensive second pass.
           const insertResult = client.execute(
             `INSERT INTO strategic_decisions
-               (decision_text, created_at, sprint_id, project_domain, author_session_id, ${g.columns.join(', ')})
-             VALUES (?, ?, ?, ?, ?, ${g.placeholders})`,
-            [decisionText, now, session.sprint_id ?? null, projectDomain, sessionId, ...g.values]
+               (decision_text, created_at, sprint_id, project_domain, author_session_id, mission_id, ${g.columns.join(', ')})
+             VALUES (?, ?, ?, ?, ?, ?, ${g.placeholders})`,
+            [
+              decisionText,
+              now,
+              session.sprint_id ?? null,
+              projectDomain,
+              sessionId,
+              callMissionId ?? null,
+              ...g.values,
+            ]
           );
           if (insertResult.success) {
             decisionsExtracted++;

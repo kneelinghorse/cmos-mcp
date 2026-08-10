@@ -9,7 +9,7 @@
 
 import { z } from 'zod';
 import { withClientValidated } from './client';
-import { resolveCurrentSprintId } from './current-sprint';
+import { resolveCurrentSprintId, resolveOpenSprintIdForWrite } from './current-sprint';
 import { genesisColumns, getProjectId } from './genesis-columns';
 import type { CmosToolResult, Session } from './types';
 import {
@@ -55,6 +55,14 @@ export interface CmosSessionStartResult {
 
   /** Whether the sprintId was auto-detected from the active sprint */
   sprintAutoTagged: boolean;
+
+  /**
+   * s85-m03: the sprint the DISPLAY surfaces name, populated ONLY when nothing is open and
+   * `sprintId` was therefore persisted as NULL. It is a hint, not a stamp — no row carries it.
+   * A separate field because `{sprintId, sprintAutoTagged: false}` already means "the caller
+   * passed sprintId explicitly", so the two states would otherwise be indistinguishable.
+   */
+  advisorySprintId?: string | null;
 
   /** Master context auto-refresh status for this start operation */
   contextAutoRefresh: {
@@ -289,18 +297,37 @@ export async function cmosSessionStart(
         warnings.push(`${staleWarning} ${suffix}`);
       }
 
-      // Auto-detect the current sprint if sprintId not explicitly provided.
-      // s77-m02: delegate to the canonical resolveCurrentSprintId instead of an
-      // inline `status='Active' ORDER BY start_date DESC` SELECT (the surface that
-      // mis-tagged PS-2026-07-08-002) so a new session tags to the SAME sprint
-      // onboard/review name.
+      // Auto-detect the sprint if sprintId was not explicitly provided.
+      //
+      // s85-m03: this is a DURABLE WRITE, so it resolves through
+      // resolveOpenSprintIdForWrite, NOT resolveCurrentSprintId. The s77-m02 change that
+      // routed it through the display resolver removed the wrong divergence: the display
+      // resolver re-admits Completed sprints (correct for "which sprint am I looking at?",
+      // wrong for a stamp that lives forever), so on an all-Completed store every new
+      // session inherited a dead sprint. When nothing is open we now persist NULL and
+      // surface the read-resolved sprint separately as advisorySprintId — see below.
       let sprintId = params.sprintId ?? null;
       let sprintAutoTagged = false;
+      let advisorySprintId: string | null = null;
       if (!sprintId) {
-        const resolvedSprintId = resolveCurrentSprintId(client);
+        const resolvedSprintId = resolveOpenSprintIdForWrite(client);
         if (resolvedSprintId) {
           sprintId = resolvedSprintId;
           sprintAutoTagged = true;
+        } else {
+          // Nothing open. Persist NULL, but still tell the caller which sprint the DISPLAY
+          // surfaces will name, so the answer is actionable rather than merely empty.
+          //
+          // This goes in a NEW field rather than in sprintId, because
+          // {sprintId: 'sprint-84', sprintAutoTagged: false} is ALREADY the signature for
+          // "the caller passed sprintId explicitly". Overloading it would make the two
+          // states indistinguishable on the wire.
+          advisorySprintId = resolveCurrentSprintId(client);
+          warnings.push(
+            advisorySprintId
+              ? `No sprint is in an open status (Active / In Progress / Current), so this session is recorded with sprint_id NULL — decisions, learnings, constraints and next-steps captured in it will be untagged too. Display surfaces still name '${advisorySprintId}' (the most recent non-dead sprint). Run cmos_sprint(action="add") to open a sprint before starting mission work.`
+              : 'No sprint is in an open status (Active / In Progress / Current), so this session is recorded with sprint_id NULL — decisions, learnings, constraints and next-steps captured in it will be untagged too. Run cmos_sprint(action="add") to open a sprint before starting mission work.'
+          );
         }
       }
 
@@ -371,6 +398,7 @@ export async function cmosSessionStart(
           agent,
           sprintId,
           sprintAutoTagged,
+          ...(advisorySprintId !== null ? { advisorySprintId } : {}),
           contextAutoRefresh: refreshSummary,
           contextFreshness: freshnessResult.freshness,
           message: sprintAutoTagged
@@ -413,6 +441,14 @@ export function formatSessionStartForLLM(result: CmosToolResult<CmosSessionStart
 
   if (data.sprintId) {
     lines.push(`**Sprint**: ${data.sprintId}${data.sprintAutoTagged ? ' (auto-tagged)' : ''}`);
+  } else if (data.advisorySprintId) {
+    // s85-m03: nothing open, so nothing was stamped. Name the display sprint explicitly as
+    // an advisory so the reader does not mistake the absent stamp for a missing sprint.
+    lines.push(
+      `**Sprint**: none open — recorded untagged (display names ${data.advisorySprintId})`
+    );
+  } else {
+    lines.push('**Sprint**: none open — recorded untagged');
   }
 
   lines.push(`**Auto-refresh**: ${data.contextAutoRefresh.enabled ? 'enabled' : 'disabled'}`);
