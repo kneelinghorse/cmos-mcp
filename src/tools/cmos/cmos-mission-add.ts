@@ -273,7 +273,8 @@ export async function cmosMissionAdd(
         return createError<MissionAddResult>({
           code: 'MISSION_ID_EXISTS',
           message: `Mission '${missionId}' already exists`,
-          suggestion: 'Choose a different mission ID or use cmos_mission_update to modify it',
+          suggestion:
+            'Choose a different mission ID or use cmos_mission(action="update") to modify it',
         });
       }
 

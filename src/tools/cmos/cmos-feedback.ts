@@ -86,7 +86,7 @@ export const cmosFeedbackSchema = z
     toolName: z
       .string()
       .optional()
-      .describe('Filter by originating tool name on list (e.g. "cmos_session_complete")'),
+      .describe('Filter by originating tool name on list (e.g. "cmos_mission_transition")'),
     limit: z
       .number()
       .int()

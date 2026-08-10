@@ -20,7 +20,11 @@ import {
   CMOS_ERROR_CODES,
   VALID_STATE_TRANSITIONS,
 } from './errors';
-import { ensureStrategicDecisionsSchema, ensureMissionTimestamps } from './schema-migrations';
+import {
+  ensureStrategicDecisionsSchema,
+  ensureMissionTimestamps,
+  snapshotDedupPrunedFilter,
+} from './schema-migrations';
 import { sanitizeContentField, sanitizeStringArray } from '../../intelligence/content-sanitizer';
 import { recordEmbedding, decisionEmbeddingInput } from '../../intelligence/embedding-pipeline';
 import { patchProjectIdentity, type ProjectIdentityData } from './project-identity';
@@ -698,7 +702,8 @@ function createContextSnapshot(
   const now = new Date().toISOString();
 
   const existingSnapshot = client.getOne<{ id: number }>(
-    'SELECT id FROM context_snapshots WHERE context_id = ? AND content_hash = ?',
+    // s84-m04: exclude a content-tombstoned row so identical content re-persists fresh.
+    `SELECT id FROM context_snapshots WHERE context_id = ? AND content_hash = ?${snapshotDedupPrunedFilter(client)}`,
     [contextId, contentHash]
   );
 

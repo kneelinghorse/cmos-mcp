@@ -24,6 +24,24 @@ export function foreignDescriptor(source: string | null | undefined): Provenance
   return { source: normalizeSource(source), trust: 'foreign' };
 }
 
+/**
+ * s84-m03 — the foreign-row predicate shared across the read-time framing surfaces
+ * (onboard, mission list/show/status, review portfolio+digest, session list/search).
+ * A row is FOREIGN (untrusted, non-locally-authored) when it carries a `project_id`
+ * that differs from the querying store's own. `localProjectId == null` (a portfolio /
+ * acrossProjects view with no single "local" store, or an unresolvable local id) treats
+ * every project-tagged row as foreign — fence-more, never fence-less. A NULL row
+ * project_id (ancient/un-migrated store, or an un-stamped local row) is LOCAL → bare.
+ * Mirrors the s78-m05/s83-m06 inline predicate verbatim; DRY'd because m03 reuses it
+ * at ~10 new security-load-bearing sites.
+ */
+export function isForeignProject(
+  rowProjectId: string | null | undefined,
+  localProjectId: string | null | undefined
+): boolean {
+  return rowProjectId != null && (localProjectId == null || rowProjectId !== localProjectId);
+}
+
 function normalizeSource(source: string | null | undefined): string {
   const s = (source ?? '').trim();
   return s.length > 0 ? s : 'unknown source';
@@ -84,6 +102,34 @@ export function frameForeignInline(
   const label = normalizeSource(source);
   const safe = escapeFence((content ?? '').replace(/\r?\n/g, ' ⏎ ')).trim();
   return `⟪untrusted, from ${label}⟫ ${safe} ⟪/untrusted⟫`;
+}
+
+/**
+ * s84-m03 — convenience wrappers over {@link isForeignProject} + the two fence
+ * renderers, sourced with the `proj:<id>` label the s83-m06 sites use. A LOCAL or
+ * NULL-project_id row passes through BARE (byte-identical to the pre-framing render);
+ * only a foreign row is fenced. `frameInlineIfForeign` for compact one-liners
+ * (onboard rows, list rows, portfolio, digest, session list/search); `frameTextIfForeign`
+ * for mission-show long prose (objective/context/success_criteria/deliverables).
+ */
+export function frameInlineIfForeign(
+  text: string,
+  rowProjectId: string | null | undefined,
+  localProjectId: string | null | undefined
+): string {
+  return isForeignProject(rowProjectId, localProjectId)
+    ? frameForeignInline(text, `proj:${rowProjectId}`)
+    : text;
+}
+
+export function frameTextIfForeign(
+  text: string,
+  rowProjectId: string | null | undefined,
+  localProjectId: string | null | undefined
+): string {
+  return isForeignProject(rowProjectId, localProjectId)
+    ? frameForeignText(text, `proj:${rowProjectId}`)
+    : text;
 }
 
 /** The always-on tool-description contract sentence (FORK-3 C). Appended to the

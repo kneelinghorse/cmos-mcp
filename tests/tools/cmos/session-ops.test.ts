@@ -412,7 +412,8 @@ describe('cmos_session_start', () => {
 
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe(CMOS_ERROR_CODES.SESSION_ALREADY_ACTIVE);
-      expect(result.error?.suggestion).toContain('cmos_session_complete');
+      // s85-m01: suggestions now name the CONSOLIDATED tool — the pre-s85 name was removed in the 38→15 consolidation.
+      expect(result.error?.suggestion).toContain('cmos_session(action="complete")');
     });
 
     it('should return MISSING_PARAMETER for empty title', async () => {

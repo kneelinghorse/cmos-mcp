@@ -12,6 +12,8 @@ import { withClient } from './client';
 import type { CmosToolResult, Session } from './types';
 import { createError, createSuccess } from './errors';
 import { VALID_SESSION_TYPES, type SessionType } from './cmos-session-start';
+import { getProjectId, tableHasColumn } from './genesis-columns';
+import { frameInlineIfForeign } from '../../intelligence/provenance-frame';
 
 /**
  * Valid session statuses.
@@ -53,6 +55,9 @@ export interface SessionListItem {
 
   /** Associated sprint ID (if any) */
   sprintId: string | null;
+
+  /** s84-m03: the session's own project_id (guarded read). Foreign → title/summary framed. */
+  projectId?: string | null;
 }
 
 /**
@@ -80,6 +85,10 @@ export interface CmosSessionListResult {
     type?: SessionType;
     sprintId?: string;
   };
+
+  /** s84-m03: the querying store's own project_id. Sessions whose projectId differs are
+   *  foreign (pull-merged) and framed as untrusted in the render. */
+  localProjectId?: string | null;
 }
 
 /**
@@ -228,9 +237,14 @@ export async function cmosSessionList(
 
       const totalCount = countResult.data?.count ?? 0;
 
+      // s84-m03: guarded project_id read (NULL AS on an ancient store lacking the column).
+      const projectIdExpr = tableHasColumn(client, 'sessions', 'project_id')
+        ? 'project_id'
+        : 'NULL AS project_id';
+
       // Get sessions
       const sessionsResult = client.getMany<Session>(
-        `SELECT id, type, title, status, started_at, completed_at, agent, summary, captures, sprint_id
+        `SELECT id, type, title, status, started_at, completed_at, agent, summary, captures, sprint_id, ${projectIdExpr}
          FROM sessions
          ${whereClause}
          ORDER BY started_at DESC
@@ -265,6 +279,7 @@ export async function cmosSessionList(
           summary: s.summary,
           captureCount,
           sprintId: s.sprint_id,
+          projectId: (s as unknown as Record<string, string | null>).project_id ?? null,
         };
       });
 
@@ -281,6 +296,7 @@ export async function cmosSessionList(
           ...(params.type && { type: params.type }),
           ...(params.sprintId && { sprintId: params.sprintId }),
         },
+        localProjectId: getProjectId(client),
       });
     },
     { projectRoot: params.projectRoot }
@@ -331,12 +347,17 @@ export function formatSessionListForLLM(result: CmosToolResult<CmosSessionListRe
   for (const session of data.sessions) {
     const icon = statusIcon[session.status] ?? '📄';
     const captureInfo = session.captureCount > 0 ? ` (${session.captureCount} captures)` : '';
-    lines.push(`${icon} **${session.id}** - ${session.title}${captureInfo}`);
+    // s84-m03: a foreign (pull-merged) session's title/summary is untrusted DATA — frame
+    // inline; a local/NULL-project session renders byte-identical to 2.3.0.
+    const title = frameInlineIfForeign(session.title, session.projectId, data.localProjectId);
+    lines.push(`${icon} **${session.id}** - ${title}${captureInfo}`);
     lines.push(`   Type: ${session.type} | Status: ${session.status} | Agent: ${session.agent}`);
     if (session.summary) {
       const shortSummary =
         session.summary.length > 80 ? session.summary.slice(0, 80) + '...' : session.summary;
-      lines.push(`   Summary: ${shortSummary}`);
+      lines.push(
+        `   Summary: ${frameInlineIfForeign(shortSummary, session.projectId, data.localProjectId)}`
+      );
     }
     lines.push('');
   }

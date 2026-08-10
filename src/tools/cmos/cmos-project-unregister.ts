@@ -86,7 +86,7 @@ export async function cmosProjectUnregister(
       return createError({
         code: 'MISSION_NOT_FOUND',
         message: `Project not found in registry: ${resolvedPath}`,
-        suggestion: 'Use cmos_project_list to see registered projects',
+        suggestion: 'Use cmos_project(action="list") to see registered projects',
       });
     }
 

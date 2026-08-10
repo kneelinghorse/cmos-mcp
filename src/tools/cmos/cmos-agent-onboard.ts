@@ -28,10 +28,12 @@ import { attributionSource } from './cmos-message';
 import {
   foreignDescriptor,
   frameForeignInline,
+  frameInlineIfForeign,
+  isForeignProject,
   UNTRUSTED_CONTENT_CONTRACT,
   type ProvenanceDescriptor,
 } from '../../intelligence/provenance-frame';
-import { getProjectId } from './genesis-columns';
+import { getProjectId, tableHasColumn } from './genesis-columns';
 import {
   calculateContextFreshness,
   buildContextStalenessWarning,
@@ -98,6 +100,9 @@ export interface ActiveSessionSummary {
 
   /** Capture count so far */
   captureCount: number;
+
+  /** s84-m03: the session's own project_id (guarded read). Foreign → title framed. */
+  projectId?: string | null;
 }
 
 /**
@@ -115,6 +120,9 @@ export interface PendingMissionSummary {
 
   /** Sprint ID if assigned */
   sprintId: string | null;
+
+  /** s84-m03: the mission's own project_id (guarded read). Foreign → name framed untrusted. */
+  projectId?: string | null;
 }
 
 /**
@@ -177,6 +185,9 @@ export interface SprintContext {
 
   /** Sprint focus area */
   focus: string | null;
+
+  /** s84-m03: the sprint's own project_id (guarded read). Foreign → title/focus framed. */
+  projectId?: string | null;
 }
 
 /**
@@ -671,6 +682,7 @@ export async function cmosAgentOnboard(
         authState,
         projectRootSupplied: !!params.projectRoot,
         serverCodeStaleActionable,
+        localProjectId: getProjectId(client),
       });
 
       // s80-m07 — surface the self-capture gap as a priority-2 action when it fires,
@@ -911,12 +923,17 @@ function getCurrentSprint(client: CmosDatabaseClient): SprintContext | null {
  * Get sprint context by ID.
  */
 function getSprintContextById(client: CmosDatabaseClient, sprintId: string): SprintContext | null {
+  // s84-m03: guarded project_id read (NULL AS on an ancient store lacking the column).
+  const projExpr = tableHasColumn(client, 'sprints', 'project_id')
+    ? 'project_id'
+    : 'NULL AS project_id';
   const result = client.getOne<{
     id: string;
     title: string;
     status: string | null;
     focus: string | null;
-  }>(`SELECT id, title, status, focus FROM sprints WHERE id = ?`, [sprintId]);
+    project_id: string | null;
+  }>(`SELECT id, title, status, focus, ${projExpr} FROM sprints WHERE id = ?`, [sprintId]);
 
   if (!result.success || !result.data) {
     return null;
@@ -927,6 +944,7 @@ function getSprintContextById(client: CmosDatabaseClient, sprintId: string): Spr
     title: result.data.title,
     status: result.data.status,
     focus: result.data.focus,
+    projectId: result.data.project_id ?? null,
   };
 }
 
@@ -934,8 +952,12 @@ function getSprintContextById(client: CmosDatabaseClient, sprintId: string): Spr
  * Get active session if any.
  */
 function getActiveSession(client: CmosDatabaseClient): ActiveSessionSummary | null {
-  const result = client.getOne<Session>(
-    `SELECT id, type, title, started_at, captures
+  // s84-m03: guarded project_id read (NULL AS on an ancient store lacking the column).
+  const projExpr = tableHasColumn(client, 'sessions', 'project_id')
+    ? 'project_id'
+    : 'NULL AS project_id';
+  const result = client.getOne<Session & { project_id?: string | null }>(
+    `SELECT id, type, title, started_at, captures, ${projExpr}
        FROM sessions
       WHERE status = 'active'
       ORDER BY started_at DESC
@@ -962,6 +984,7 @@ function getActiveSession(client: CmosDatabaseClient): ActiveSessionSummary | nu
     title: session.title,
     startedAt: session.started_at,
     captureCount,
+    projectId: session.project_id ?? null,
   };
 }
 
@@ -973,9 +996,13 @@ function getPendingMissions(
   client: CmosDatabaseClient,
   activeSprintId: string | null
 ): PendingMissionSummary[] {
+  // s84-m03: guarded project_id read (NULL AS on an ancient store lacking the column).
+  const projExpr = tableHasColumn(client, 'missions', 'project_id')
+    ? 'project_id'
+    : 'NULL AS project_id';
   // Show In Progress/Current from any sprint, but scope Queued to active sprint
   const query = activeSprintId
-    ? `SELECT id, name, status, sprint_id
+    ? `SELECT id, name, status, sprint_id, ${projExpr}
          FROM missions
         WHERE status IN ('In Progress', 'Current')
            OR (status = 'Queued' AND sprint_id = ?)
@@ -985,7 +1012,7 @@ function getPendingMissions(
           ELSE 2
         END, rowid
         LIMIT 5`
-    : `SELECT id, name, status, sprint_id
+    : `SELECT id, name, status, sprint_id, ${projExpr}
          FROM missions
         WHERE status IN ('In Progress', 'Current', 'Queued')
         ORDER BY CASE status
@@ -996,17 +1023,18 @@ function getPendingMissions(
         LIMIT 5`;
   const params = activeSprintId ? [activeSprintId] : [];
 
-  const result = client.getMany<Mission>(query, params);
+  const result = client.getMany<Mission & { project_id?: string | null }>(query, params);
 
   if (!result.success || !result.data) {
     return [];
   }
 
-  return result.data.map((m: Mission) => ({
+  return result.data.map((m) => ({
     id: m.id,
     name: m.name,
     status: m.status,
     sprintId: m.sprint_id,
+    projectId: m.project_id ?? null,
   }));
 }
 
@@ -1014,8 +1042,12 @@ function getPendingMissions(
  * Get blocked missions.
  */
 function getBlockedMissions(client: CmosDatabaseClient): PendingMissionSummary[] {
-  const result = client.getMany<Mission>(
-    `SELECT id, name, status, sprint_id
+  // s84-m03: guarded project_id read (NULL AS on an ancient store lacking the column).
+  const projExpr = tableHasColumn(client, 'missions', 'project_id')
+    ? 'project_id'
+    : 'NULL AS project_id';
+  const result = client.getMany<Mission & { project_id?: string | null }>(
+    `SELECT id, name, status, sprint_id, ${projExpr}
        FROM missions
       WHERE status = 'Blocked'
       ORDER BY rowid
@@ -1027,11 +1059,12 @@ function getBlockedMissions(client: CmosDatabaseClient): PendingMissionSummary[]
     return [];
   }
 
-  return result.data.map((m: Mission) => ({
+  return result.data.map((m) => ({
     id: m.id,
     name: m.name,
     status: m.status,
     sprintId: m.sprint_id,
+    projectId: m.project_id ?? null,
   }));
 }
 
@@ -1670,8 +1703,8 @@ function buildFirstSessionPrompt(): string {
     'Example: "What are you working on? I\'ll hold onto the things worth remembering as we go."\n\n' +
     'During the session:\n' +
     '- Start a session silently: cmos_session(action="start", type="custom", title="<topic>")\n' +
-    '- Capture decisions as they surface: cmos_decisions(action="capture", ...)\n' +
-    '- Write key context to master_context: cmos_context(action="write", contextType="master_context")\n' +
+    '- Capture decisions as they surface: cmos_session(action="capture", category="decision", content="<what was decided>")\n' +
+    '- Write key context to master_context: cmos_context(action="update", contextType="master_context")\n' +
     '- Do not interrupt to announce what you are saving\n\n' +
     'End state: user has project context written, key decisions and open threads captured, ' +
     'agent ready to resume naturally next session.'
@@ -1745,6 +1778,10 @@ function generateSuggestedActions(state: {
    * drift (scoped + startup-manifest-gated). Siblings get false so the digest
    * does not promote a "restart required" action they cannot act on. */
   serverCodeStaleActionable: boolean;
+  /** s84-m03: the querying store's own project_id, so a foreign (pull-merged) mission's
+   *  name is dropped from the action text (id-only) rather than embedded unfenced. These
+   *  actions also feed the byte-capped cmos_review digest, so id-only (not a fence). */
+  localProjectId: string | null;
 }): SuggestedAction[] {
   const skippedTools = new Set(state.toolsSkip);
   const actions: SuggestedAction[] = [];
@@ -1898,10 +1935,15 @@ function generateSuggestedActions(state: {
     });
   }
 
-  // Surface each stale session as an individual high-priority action
+  // Surface each stale session as an individual high-priority action. s84-m03: a foreign
+  // (pull-merged) stale session's title is untrusted DATA — drop it (id-only) when foreign
+  // so it never embeds unfenced here or in the promoted review digest. Local is byte-identical.
   for (const session of state.orphans.staleSessions) {
+    const label = isForeignProject(session.projectId, state.localProjectId)
+      ? `Stale session ${session.id} active for ${Math.round(session.hoursActive)}h — complete or discard`
+      : `Stale session ${session.id} ("${session.title}") active for ${Math.round(session.hoursActive)}h — complete or discard`;
     actions.push({
-      action: `Stale session ${session.id} ("${session.title}") active for ${Math.round(session.hoursActive)}h — complete or discard`,
+      action: label,
       command: `cmos_session(action="complete", sessionId="${session.id}", summary="Auto-closed: abandoned session")`,
       priority: 1,
     });
@@ -1922,7 +1964,7 @@ function generateSuggestedActions(state: {
   if (state.contextFreshness.isStale) {
     actions.push({
       action: `Refresh stale master context (lag ~${state.contextFreshness.lagDays?.toFixed(1) ?? 'unknown'} days)`,
-      command: 'cmos_context_update()',
+      command: 'cmos_context(action="update")',
       priority: 1,
     });
   }
@@ -1936,12 +1978,21 @@ function generateSuggestedActions(state: {
     });
   }
 
+  // s84-m03: a foreign (pull-merged) mission's name is untrusted DATA. These actions feed
+  // the byte-capped cmos_review digest (promoted next_actions), so drop the name — render
+  // id-only — for a foreign mission rather than fencing (which would cost digest bytes).
+  // The command already uses only the id. A local/NULL-project mission is byte-identical.
+  const missionActionText = (label: string, m: PendingMissionSummary): string =>
+    isForeignProject(m.projectId, state.localProjectId)
+      ? `${label}: ${m.id}`
+      : `${label}: ${m.id} (${m.name})`;
+
   // If there are blocked missions, suggest unblocking (skip if missions hidden)
   if (state.blockedMissions.length > 0 && !skippedTools.has('cmos_mission')) {
     const blocked = state.blockedMissions[0];
     actions.push({
-      action: `Resolve blocked mission: ${blocked.id} (${blocked.name})`,
-      command: `cmos_mission_show(missionId="${blocked.id}")`,
+      action: missionActionText('Resolve blocked mission', blocked),
+      command: `cmos_mission(action="show", missionId="${blocked.id}")`,
       priority: 3,
     });
   }
@@ -1950,8 +2001,8 @@ function generateSuggestedActions(state: {
   const inProgress = state.pendingMissions.find((m) => m.status === 'In Progress');
   if (inProgress && !skippedTools.has('cmos_mission')) {
     actions.push({
-      action: `Continue in-progress mission: ${inProgress.id} (${inProgress.name})`,
-      command: `cmos_mission_show(missionId="${inProgress.id}")`,
+      action: missionActionText('Continue in-progress mission', inProgress),
+      command: `cmos_mission(action="show", missionId="${inProgress.id}")`,
       priority: 4,
     });
   }
@@ -1960,8 +2011,8 @@ function generateSuggestedActions(state: {
   const current = state.pendingMissions.find((m) => m.status === 'Current');
   if (current && !inProgress && !skippedTools.has('cmos_mission_transition')) {
     actions.push({
-      action: `Start current mission: ${current.id} (${current.name})`,
-      command: `cmos_mission_start(missionId="${current.id}")`,
+      action: missionActionText('Start current mission', current),
+      command: `cmos_mission_transition(action="start", missionId="${current.id}")`,
       priority: 5,
     });
   }
@@ -1970,16 +2021,21 @@ function generateSuggestedActions(state: {
   if (!state.activeSession) {
     actions.push({
       action: 'Start a planning or review session',
-      command: 'cmos_session_start(type="planning", title="Session title")',
+      command: 'cmos_session(action="start", type="planning", title="Session title")',
       priority: 6,
     });
   }
 
-  // If there's an active session, remind to complete it
+  // If there's an active session, remind to complete it. s84-m03: a foreign (pull-merged)
+  // active session's title is untrusted DATA — drop it (id-only) rather than embed it
+  // unfenced (this action also feeds the byte-capped review digest). Local is byte-identical.
   if (state.activeSession) {
+    const s = state.activeSession;
     actions.push({
-      action: `Complete active session: ${state.activeSession.title}`,
-      command: `cmos_session_complete(summary="Session summary")`,
+      action: isForeignProject(s.projectId, state.localProjectId)
+        ? `Complete active session: ${s.id}`
+        : `Complete active session: ${s.title}`,
+      command: `cmos_session(action="complete", summary="Session summary")`,
       priority: 7,
     });
   }
@@ -1997,7 +2053,7 @@ function generateSuggestedActions(state: {
   if (actions.length === 0 && !skippedTools.has('cmos_mission')) {
     actions.push({
       action: 'View mission queue',
-      command: 'cmos_mission_status()',
+      command: 'cmos_mission(action="status")',
       priority: 1,
     });
   }
@@ -2043,12 +2099,16 @@ export function formatAgentOnboardForLLM(result: CmosToolResult<CmosAgentOnboard
     lines.push(`  Tier: ${data.tierConfig.label} (${data.tierConfig.tier})`);
   }
 
-  // Sprint context
+  // Sprint context. s84-m03: a foreign (pull-merged) sprint's title/focus is untrusted
+  // DATA — frame inline against its own project_id; a local/NULL sprint renders bare.
   if (data.currentSprint) {
+    const sp = data.currentSprint;
     lines.push('');
-    lines.push(`**Sprint**: ${data.currentSprint.id} - ${data.currentSprint.title}`);
-    if (data.currentSprint.focus) {
-      lines.push(`  Focus: ${data.currentSprint.focus}`);
+    lines.push(
+      `**Sprint**: ${sp.id} - ${frameInlineIfForeign(sp.title, sp.projectId, data.localProjectId)}`
+    );
+    if (sp.focus) {
+      lines.push(`  Focus: ${frameInlineIfForeign(sp.focus, sp.projectId, data.localProjectId)}`);
     }
   }
 
@@ -2143,20 +2203,22 @@ export function formatAgentOnboardForLLM(result: CmosToolResult<CmosAgentOnboard
     }
   }
 
-  // Active session
+  // Active session. s84-m03: a foreign session's title is untrusted DATA — frame inline.
   if (data.activeSession) {
+    const s = data.activeSession;
     lines.push('');
     lines.push('⚡ **Active Session**');
-    lines.push(`  ${data.activeSession.type}: ${data.activeSession.title}`);
-    lines.push(`  Captures: ${data.activeSession.captureCount}`);
+    lines.push(`  ${s.type}: ${frameInlineIfForeign(s.title, s.projectId, data.localProjectId)}`);
+    lines.push(`  Captures: ${s.captureCount}`);
   }
 
-  // Pending missions
+  // Pending missions. s84-m03: a foreign (pull-merged) mission's name is untrusted DATA.
   if (data.pendingMissions.length > 0) {
     lines.push('');
     lines.push('📋 **Pending Work**');
     for (const m of data.pendingMissions) {
-      lines.push(`  • ${m.id} (${m.status}): ${m.name}`);
+      const name = frameInlineIfForeign(m.name, m.projectId, data.localProjectId);
+      lines.push(`  • ${m.id} (${m.status}): ${name}`);
     }
   }
 
@@ -2165,7 +2227,8 @@ export function formatAgentOnboardForLLM(result: CmosToolResult<CmosAgentOnboard
     lines.push('');
     lines.push('🚫 **Blocked**');
     for (const m of data.blockedMissions) {
-      lines.push(`  • ${m.id}: ${m.name}`);
+      const name = frameInlineIfForeign(m.name, m.projectId, data.localProjectId);
+      lines.push(`  • ${m.id}: ${name}`);
     }
   }
 

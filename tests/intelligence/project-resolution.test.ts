@@ -166,7 +166,8 @@ describe('resolveProjectRootEnhanced (graph-native)', () => {
       // env is no longer a resolution option. Callers should pass projectRoot
       // explicitly or register a default project.
       expect(resolutionError.suggestion).toContain('projectRoot');
-      expect(resolutionError.suggestion).toContain('cmos_project_register');
+      // s85-m01: suggestions now name the CONSOLIDATED tool — the pre-s85 name was removed in the 38→15 consolidation.
+      expect(resolutionError.suggestion).toContain('cmos_project(action="register"');
       expect(resolutionError.suggestion).not.toContain('CMOS_PROJECT_ROOT');
     }
   });

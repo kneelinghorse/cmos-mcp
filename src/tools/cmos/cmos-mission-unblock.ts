@@ -162,7 +162,7 @@ export async function cmosMissionUnblock(
           suggestion:
             currentStatus === 'Completed'
               ? 'Cannot unblock a completed mission'
-              : 'Use cmos_mission_start to begin work on this mission',
+              : 'Use cmos_mission_transition(action="start") to begin work on this mission',
         });
       }
 

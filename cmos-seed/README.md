@@ -28,12 +28,13 @@ cmos-seed/
 
 ## Quick Start
 
-### Option 1: Use cmos_project_init (Recommended)
+### Option 1: Use cmos_project(action="init") (Recommended)
 
-The `cmos_project_init` MCP tool creates CMOS structure directly:
+The `cmos_project(action="init")` MCP tool creates CMOS structure directly:
 
 ```
-cmos_project_init({
+cmos_project({
+  action: "init",
   projectRoot: "/path/to/your/project",
   projectName: "My Project",
   projectId: "my-project-id",  // optional, auto-generated if omitted
@@ -80,28 +81,33 @@ All operations are performed via MCP tools. No Python CLI required.
 cmos_agent_onboard()
 
 # 2. Check work queue
-cmos_mission_status()
+cmos_mission(action="status")
 
 # 3. Start mission
-cmos_mission_start(missionId="s01-m01")
+cmos_mission_transition(action="start", missionId="s01-m01")
 
 # 4. Execute work
 # (actually implement the mission)
 
 # 5. Complete mission
-cmos_mission_complete(missionId="s01-m01", notes="What was done")
+cmos_mission_transition(action="complete", missionId="s01-m01", notes="What was done")
 ```
 
 ### Available MCP Tools
 
-| Category      | Tools                                                                                                                                                                                                                           |
-| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Setup**     | `cmos_project_init`, `cmos_db_health`, `cmos_agent_onboard`                                                                                                                                                                     |
-| **Missions**  | `cmos_mission_status`, `cmos_mission_list`, `cmos_mission_show`, `cmos_mission_start`, `cmos_mission_complete`, `cmos_mission_block`, `cmos_mission_unblock`, `cmos_mission_update`, `cmos_mission_add`, `cmos_mission_depends` |
-| **Sprints**   | `cmos_sprint_list`, `cmos_sprint_show`, `cmos_sprint_add`, `cmos_sprint_update`                                                                                                                                                 |
-| **Sessions**  | `cmos_session_start`, `cmos_session_capture`, `cmos_session_complete`, `cmos_session_list`                                                                                                                                      |
-| **Context**   | `cmos_context_view`, `cmos_context_snapshot`, `cmos_context_history`                                                                                                                                                            |
-| **Decisions** | `cmos_decisions_list`, `cmos_decisions_search`                                                                                                                                                                                  |
+| Tool                      | Actions                                                                    |
+| ------------------------- | -------------------------------------------------------------------------- |
+| `cmos_review`             | _(no action — the session-opener digest)_                                  |
+| `cmos_agent_onboard`      | _(no action — cold-start project state)_                                   |
+| `cmos_project`            | init, register, list, unregister, validate, prune, update, sweep           |
+| `cmos_db`                 | health, snapshot, restore, backfill, reconcile, purge, pull, clone         |
+| `cmos_mission`            | list, show, status, add, update, depends, undepends                        |
+| `cmos_mission_transition` | start, complete, block, unblock, drop, defer                               |
+| `cmos_sprint`             | list, show, add, update, complete, retro, carry_forward, analytics         |
+| `cmos_session`            | list, start, capture, complete, search                                     |
+| `cmos_context`            | view, update, condense, snapshot, history, next_steps, constraints, search |
+| `cmos_decisions`          | list, search, update, review, batch_update                                 |
+| `cmos_learnings`          | list, search, update, reaffirm                                             |
 
 ---
 

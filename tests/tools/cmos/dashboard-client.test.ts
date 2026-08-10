@@ -505,6 +505,57 @@ describe('DashboardClient.listMessages', () => {
     const [url] = mockFetch.mock.calls[1];
     expect(url).toContain('tab=sent');
   });
+
+  // s84-m02: SQL-side pagination (dashboard m05).
+  it('sends offset when provided and echoes returnedCount', async () => {
+    mockLoginThenResponse({ messages: [], unreadCount: 0, totalCount: 42, returnedCount: 0 });
+
+    const client = createClient();
+    const result = await client.listMessages({ tab: 'inbox', limit: 10, offset: 20 });
+
+    const [url] = mockFetch.mock.calls[1];
+    expect(url).toContain('offset=20');
+    expect(result.data?.totalCount).toBe(42);
+    expect(result.data?.returnedCount).toBe(0);
+  });
+
+  it('omits offset from the query when not provided (reproduces 2.3.0 call args)', async () => {
+    mockLoginThenResponse({ messages: [], unreadCount: 0, totalCount: 0 });
+
+    const client = createClient();
+    await client.listMessages({ tab: 'inbox', limit: 10 });
+
+    const [url] = mockFetch.mock.calls[1];
+    expect(url).not.toContain('offset');
+  });
+});
+
+// ─── getMessageById Tests (s84-m02) ──────────────────────────────────────────
+
+describe('DashboardClient.getMessageById', () => {
+  it('sends GET to /api/messages/:id and returns the single row', async () => {
+    const msgId = '11111111-2222-3333-4444-555555555555';
+    mockLoginThenResponse({ id: msgId, type: 'question', summary: 'q', status: 'pending' });
+
+    const client = createClient();
+    const result = await client.getMessageById(msgId);
+
+    expect(result.success).toBe(true);
+    expect(result.data?.id).toBe(msgId);
+    const [url, options] = mockFetch.mock.calls[1];
+    expect(url).toBe(`http://localhost:3100/api/messages/${msgId}`);
+    expect(options?.method).toBe('GET');
+  });
+
+  it('maps a 404 (route absent or genuine miss) to DASHBOARD_NOT_FOUND', async () => {
+    mockLoginThenError(404, JSON.stringify({ error: 'not found' }));
+
+    const client = createClient();
+    const result = await client.getMessageById('11111111-2222-3333-4444-555555555555');
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('DASHBOARD_NOT_FOUND');
+  });
 });
 
 // ─── respondToMessage Tests ──────────────────────────────────────────────────
@@ -694,14 +745,70 @@ describe('Error handling', () => {
     expect(result.error?.code).toBe('DASHBOARD_AUTH_FAILED');
   });
 
-  it('returns DASHBOARD_AUTH_FAILED for 403 response', async () => {
-    mockLoginThenError(403, 'Forbidden');
+  // s84-m02: a 403 is now DASHBOARD_FORBIDDEN (authz denial), split out of the 401 arm.
+  it('returns DASHBOARD_FORBIDDEN for 403 response (s84-m02 split)', async () => {
+    mockLoginThenError(403, JSON.stringify({ error: 'You are not the recipient' }));
 
     const client = createClient();
     const result = await client.listMessages();
 
     expect(result.success).toBe(false);
-    expect(result.error?.code).toBe('DASHBOARD_AUTH_FAILED');
+    expect(result.error?.code).toBe('DASHBOARD_FORBIDDEN');
+    // Unified {error,hint} envelope surfaces in the message.
+    expect(result.error?.message).toContain('You are not the recipient');
+  });
+
+  // s84-m02 SC4: a 403 must NOT clear the cached token — clearing poisoned apiKey auth
+  // (an apiKey client has no re-login path, so the very next call sent `Bearer null`).
+  it('403 does NOT clear the cached apiKey — a subsequent same-process call still authenticates', async () => {
+    mockFetch
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'forbidden' }), { status: 403 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ messages: [], unreadCount: 0, totalCount: 0 }), {
+          status: 200,
+        })
+      );
+
+    const client = new DashboardClient({
+      baseUrl: 'http://localhost:3100',
+      apiKey: 'cmk_live-key',
+    });
+    const first = await client.listMessages();
+    expect(first.error?.code).toBe('DASHBOARD_FORBIDDEN');
+
+    const second = await client.listMessages();
+    expect(second.success).toBe(true);
+    // The KEY assertion: the second call still carries the real apiKey, not `Bearer null`.
+    const [, secondOpts] = mockFetch.mock.calls[1];
+    expect((secondOpts?.headers as Record<string, string>)['Authorization']).toBe(
+      'Bearer cmk_live-key'
+    );
+  });
+
+  // s84-m02 SC4: a 401 STILL clears the cached token (unchanged behavior) — an apiKey
+  // client with no re-login path then sends `Bearer null` on the next call, proving the clear.
+  it('401 STILL clears the cached token', async () => {
+    mockFetch
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401 })
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ messages: [], unreadCount: 0, totalCount: 0 }), {
+          status: 200,
+        })
+      );
+
+    const client = new DashboardClient({
+      baseUrl: 'http://localhost:3100',
+      apiKey: 'cmk_live-key',
+    });
+    const first = await client.listMessages();
+    expect(first.error?.code).toBe('DASHBOARD_AUTH_FAILED');
+
+    await client.listMessages();
+    const [, secondOpts] = mockFetch.mock.calls[1];
+    // Token was cleared by the 401 → the next call carries `Bearer null`.
+    expect((secondOpts?.headers as Record<string, string>)['Authorization']).toBe('Bearer null');
   });
 
   it('returns DASHBOARD_NOT_FOUND for 404 response', async () => {

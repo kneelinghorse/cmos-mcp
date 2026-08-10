@@ -12,6 +12,8 @@ import { z } from 'zod';
 import { withClient } from './client';
 import type { CmosToolResult, Mission, MissionStatus } from './types';
 import { createError, createSuccess, CmosErrors, VALID_MISSION_STATUSES } from './errors';
+import { getProjectId, tableHasColumn } from './genesis-columns';
+import { frameInlineIfForeign } from '../../intelligence/provenance-frame';
 
 /**
  * Mission with parsed JSON fields for return to caller.
@@ -43,6 +45,10 @@ export interface MissionListItem {
 
   /** Deliverables (parsed from JSON) */
   deliverables: string[] | null;
+
+  /** s84-m03: source project_id (guarded read). A row whose projectId differs from the
+   *  querying store's own is foreign (pull-merged) — its name/objective is framed untrusted. */
+  projectId?: string | null;
 }
 
 /**
@@ -61,6 +67,10 @@ export interface CmosMissionListResult {
     sprintId: string | null;
     limit: number;
   };
+
+  /** s84-m03: the querying store's own project_id. Rows whose projectId differs are
+   *  foreign (pull-merged) and framed as untrusted in the render. */
+  localProjectId?: string | null;
 }
 
 /**
@@ -158,8 +168,16 @@ export async function cmosMissionList(
 
   return withClient(
     (client) => {
+      // s84-m03: guard the project_id read so an ancient store (no column) degrades to
+      // a NULL row projectId (→ rendered bare), never a "no such column" throw.
+      const hasProjectId = tableHasColumn(client, 'missions', 'project_id');
       // Build query dynamically based on filters
-      const { sql, countSql, queryParams } = buildQuery(params.status, params.sprintId, limit);
+      const { sql, countSql, queryParams } = buildQuery(
+        params.status,
+        params.sprintId,
+        limit,
+        hasProjectId
+      );
 
       // Get total count first
       const countResult = client.getOne<{ count: number }>(countSql, queryParams.slice(0, -1));
@@ -189,6 +207,7 @@ export async function cmosMissionList(
           sprintId: params.sprintId ?? null,
           limit,
         },
+        localProjectId: getProjectId(client),
       });
     },
     { projectRoot: params.projectRoot }
@@ -201,7 +220,8 @@ export async function cmosMissionList(
 function buildQuery(
   status: MissionStatus | undefined,
   sprintId: string | undefined,
-  limit: number
+  limit: number,
+  hasProjectId: boolean
 ): { sql: string; countSql: string; queryParams: unknown[] } {
   const conditions: string[] = [];
   const queryParams: unknown[] = [];
@@ -221,13 +241,16 @@ function buildQuery(
   // Count query (without limit)
   const countSql = `SELECT COUNT(*) as count FROM missions ${whereClause}`;
 
+  // s84-m03: guarded project_id read (NULL AS on ancient stores lacking the column).
+  const projectIdExpr = hasProjectId ? 'project_id' : 'NULL AS project_id';
+
   // Main query with ordering and limit
   // Order by sprint (nulls last), then by id for consistent ordering
   const sql = `
     SELECT
       id, sprint_id, name, status, completed_at, notes,
       objective, context, success_criteria, deliverables,
-      reference_docs, domain_fields, metadata
+      reference_docs, domain_fields, metadata, ${projectIdExpr}
     FROM missions
     ${whereClause}
     ORDER BY
@@ -257,6 +280,7 @@ function parseMission(mission: Mission): MissionListItem {
     objective: mission.objective,
     successCriteria: parseJsonArray(mission.success_criteria),
     deliverables: parseJsonArray(mission.deliverables),
+    projectId: (mission as unknown as Record<string, string | null>).project_id ?? null,
   };
 }
 
@@ -331,9 +355,17 @@ export function formatMissionListForLLM(result: CmosToolResult<CmosMissionListRe
     lines.push(`**${sprintKey}**`);
     for (const m of missions) {
       const statusIcon = getStatusIcon(m.status);
-      lines.push(`  ${statusIcon} ${m.id}: ${m.name} [${m.status}]`);
+      // s84-m03: a foreign (pull-merged) mission's name/objective is untrusted DATA —
+      // frame it inline; a local/NULL-project row renders byte-identical to 2.3.0.
+      const name = frameInlineIfForeign(m.name, m.projectId, data.localProjectId);
+      lines.push(`  ${statusIcon} ${m.id}: ${name} [${m.status}]`);
       if (m.objective) {
-        lines.push(`     └─ ${truncate(m.objective, 60)}`);
+        const objective = frameInlineIfForeign(
+          truncate(m.objective, 60),
+          m.projectId,
+          data.localProjectId
+        );
+        lines.push(`     └─ ${objective}`);
       }
     }
     lines.push('');

@@ -12,6 +12,7 @@ import { z } from 'zod';
 import { withClient } from './client';
 import type { CmosToolResult } from './types';
 import { createError, createSuccess } from './errors';
+import { tableHasColumn } from './genesis-columns';
 
 /**
  * A single snapshot entry in the history.
@@ -37,6 +38,10 @@ export interface ContextSnapshotEntry {
 
   /** Size of content in characters (approximate) */
   contentSize: number;
+
+  /** s84-m04: true when this row's content was reclaimed by the bounded-retention prune
+   *  (content-tombstoned). The row + metadata + FK link are intact; `contentSize` is 0. */
+  contentPruned: boolean;
 }
 
 /**
@@ -215,6 +220,12 @@ export async function cmosContextHistory(
 
       const totalCount = countResult.data?.count ?? 0;
 
+      // s84-m04: guarded content_pruned_at read (NULL AS on an ancient store) so the
+      // timeline honestly flags content-tombstoned rows without throwing.
+      const prunedExpr = tableHasColumn(client, 'context_snapshots', 'content_pruned_at')
+        ? 'content_pruned_at'
+        : 'NULL AS content_pruned_at';
+
       // Get snapshots with pagination
       const snapshotsResult = client.getMany<{
         id: number;
@@ -224,8 +235,9 @@ export async function cmosContextHistory(
         content_hash: string;
         content: string;
         created_at: string;
+        content_pruned_at: string | null;
       }>(
-        `SELECT id, context_id, session_id, source, content_hash, content, created_at
+        `SELECT id, context_id, session_id, source, content_hash, content, created_at, ${prunedExpr}
          FROM context_snapshots
          ${whereClause}
          ORDER BY created_at DESC
@@ -247,6 +259,7 @@ export async function cmosContextHistory(
         contentHash: row.content_hash,
         createdAt: row.created_at,
         contentSize: row.content.length,
+        contentPruned: row.content_pruned_at != null,
       }));
 
       const hasMore = offset + snapshots.length < totalCount;
@@ -304,7 +317,7 @@ export function formatContextHistoryForLLM(
   if (data.snapshots.length === 0) {
     lines.push('_No snapshots found matching criteria._');
     lines.push('');
-    lines.push('Use cmos_context_snapshot to create your first snapshot.');
+    lines.push('Use cmos_context(action="snapshot") to create your first snapshot.');
     return lines.join('\n');
   }
 
@@ -319,7 +332,8 @@ export function formatContextHistoryForLLM(
       hour: '2-digit',
       minute: '2-digit',
     });
-    const sizeStr = formatBytes(snap.contentSize);
+    // s84-m04: a content-tombstoned row shows its content reclaimed, not a real 0-byte snapshot.
+    const sizeStr = snap.contentPruned ? 'pruned' : formatBytes(snap.contentSize);
     const sourceShort =
       snap.source.length > 40 ? snap.source.substring(0, 37) + '...' : snap.source;
 

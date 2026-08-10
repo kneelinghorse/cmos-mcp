@@ -23,7 +23,7 @@ Consolidated mission tool with action parameter support. Actions: list, show, st
 | `queuedLimit` | number | no | Maximum queued missions for status action |
 | `name` | string | no | Mission name for add action |
 | `objective` | string | no | Mission objective for add action |
-| `context` | object | no | Mission context for add action (string or object) |
+| `context` | string \| object | no | Mission context for add action (string or object) |
 | `successCriteria` | array | no | Success criteria for add action |
 | `deliverables` | array | no | Deliverables for add action |
 | `referenceDocs` | array | no | Reference docs for add action |
@@ -113,6 +113,7 @@ Consolidated context tool with action parameter support. Actions: view, update, 
 | `constraintStatus` | string | no | Filter status for constraints list (default: active) |
 | `constraintIds` | array | no | Constraint IDs to archive |
 | `constraintId` | number | no | Constraint ID to reaffirm (bumps last_reviewed_at without changing status; resets its staleness clock) |
+| `evergreen` | boolean | no | s84-m05: on reaffirm, set/clear the durable evergreen flag (true = never trip staleness review/count, for institutional rules). Omit to leave unchanged. |
 | `stalenessThresholdDays` | number | no | Staleness threshold in days for review (default: 30) |
 | `query` | string | no | Search query string for search action |
 | `searchLimit` | number | no | Max results for search action (default: 5) |
@@ -297,6 +298,7 @@ Agent messaging tool for cross-project communication via cmos-dashboard. Actions
 | `tab` | string | no | inbox (default) or sent |
 | `status` | string | no | Filter by message status for list action |
 | `limit` | number | no | Max messages to return (default 20) |
+| `offset` | number | no | Pagination offset for list (SQL-side, dashboard m05). Omit for page 0. |
 | `messageId` | string | no | UUID of the message to respond to (respond) or acknowledge (ack) |
 | `respondStatus` | string | no | Response status: accepted \| declined \| replied |
 | `notes` | string | no | Response notes |
@@ -321,7 +323,7 @@ Return a structured status payload for the current project: cmos_address, dashbo
 
 ## cmos_review
 
-Bundled session-opener digest (≤4KB). Replaces the cmos_agent_onboard + cmos_context_view + cmos_mission_status opener with one payload. Top-3 next_actions are promoted to a flat top-level field. Includes an always-on cross-store `portfolio` rollup (active missions across your registered projects) built on the graph-backed queryAcrossStores; it degrades to null for a single-project setup.
+Bundled session-opener digest (≤4KB). Replaces the older three-step opener (cmos_agent_onboard + cmos_context(action="view") + cmos_mission(action="status")) with one payload. Top-3 next_actions are promoted to a flat top-level field. Includes an always-on cross-store `portfolio` rollup (active missions across your registered projects) built on the graph-backed queryAcrossStores; it degrades to null for a single-project setup.
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |

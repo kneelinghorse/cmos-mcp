@@ -180,7 +180,8 @@ export async function cmosMissionBlock(
           code: CMOS_ERROR_CODES.MISSION_ALREADY_BLOCKED,
           message: `Mission '${missionId}' is already Blocked`,
           currentState: currentStatus,
-          suggestion: 'Use cmos_mission_unblock to unblock it first, or update the block reason',
+          suggestion:
+            'Use cmos_mission_transition(action="unblock") to unblock it first, or update the block reason',
         });
       }
 

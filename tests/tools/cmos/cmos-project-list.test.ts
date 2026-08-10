@@ -133,7 +133,8 @@ describe('cmos_project_list', () => {
       const formatted = formatProjectListForLLM(result);
 
       expect(formatted).toContain('No projects registered');
-      expect(formatted).toContain('cmos_project_register');
+      // s85-m01: suggestions now name the CONSOLIDATED tool — the pre-s85 name was removed in the 38→15 consolidation.
+      expect(formatted).toContain('cmos_project(action="register")');
     });
 
     it('should format project list', async () => {

@@ -20,6 +20,8 @@ import { withClient, type CmosDatabaseClient } from './client';
 import type { CmosToolResult, Mission, MissionStatus, Sprint } from './types';
 import { createError, createSuccess } from './errors';
 import { resolveCurrentSprintId } from './current-sprint';
+import { getProjectId } from './genesis-columns';
+import { frameInlineIfForeign } from '../../intelligence/provenance-frame';
 import { activeMissionsAcrossProjects } from '../../intelligence/cross-store-queries';
 import type { CrossStoreError, CrossStoreQueryResult } from '../../intelligence/cross-store-query';
 import type { ProjectGraphRegistry } from '../../intelligence/project-graph-registry';
@@ -51,6 +53,9 @@ export interface StatusMissionItem {
 
   /** Sprint context */
   sprint: SprintContext | null;
+
+  /** s84-m03: the mission's own project_id (guarded read). Foreign → name/objective framed. */
+  projectId?: string | null;
 }
 
 /**
@@ -74,6 +79,9 @@ export interface SprintContext {
 
   /** Completed missions in sprint */
   completedMissions: number | null;
+
+  /** s84-m03: the sprint's own project_id (guarded read). Foreign → title/focus framed. */
+  projectId?: string | null;
 }
 
 /**
@@ -109,6 +117,10 @@ export interface CmosMissionStatusResult {
     /** Recommendation for what to do next */
     nextAction: string;
   };
+
+  /** s84-m03: the querying store's own project_id. Work-queue rows whose projectId differs
+   *  are foreign (pull-merged) and framed as untrusted in the render. */
+  localProjectId?: string | null;
 }
 
 /**
@@ -322,6 +334,7 @@ export async function cmosMissionStatus(
           blockedCount,
           nextAction,
         },
+        localProjectId: getProjectId(client),
       });
     },
     { projectRoot: params.projectRoot }
@@ -345,6 +358,9 @@ function parseMissionWithContext(
     successCriteria: parseJsonArray(mission.success_criteria),
     deliverables: parseJsonArray(mission.deliverables),
     notes: mission.notes,
+    // s84-m03: guarded project_id read (SELECT * → present when the column exists, null on
+    // an ancient store). Sprint carries its OWN project_id (a mission can link a foreign sprint).
+    projectId: (mission as unknown as Record<string, string | null>).project_id ?? null,
     sprint: sprint
       ? {
           id: sprint.id,
@@ -353,6 +369,7 @@ function parseMissionWithContext(
           status: sprint.status,
           totalMissions: sprint.total_missions,
           completedMissions: sprint.completed_missions,
+          projectId: (sprint as unknown as Record<string, string | null>).project_id ?? null,
         }
       : null,
   };
@@ -385,6 +402,7 @@ function sprintToContext(sprint: Sprint): SprintContext {
     status: sprint.status,
     totalMissions: sprint.total_missions,
     completedMissions: sprint.completed_missions,
+    projectId: (sprint as unknown as Record<string, string | null>).project_id ?? null,
   };
 }
 
@@ -514,6 +532,27 @@ export interface CmosMissionPortfolioResult {
   acrossProjects: true;
   errors: CrossStoreError[];
   crossStoreMetadata: CrossStoreQueryResult['metadata'];
+
+  /** s84-m03 (FORK-1=B): the ambient local store's project_id. A portfolio row whose
+   *  projectId differs is FOREIGN and its name is framed untrusted; the local project's own
+   *  rows stay bare. Null when the ambient store can't be resolved → every row is foreign
+   *  (fence-more, never fence-less). The `[proj:X]` tag is metadata, not a trust boundary. */
+  localProjectId?: string | null;
+}
+
+/**
+ * s84-m03 (§4-minor) — resolve the ambient local store's project_id for the portfolio
+ * foreign-check. Opens the ambient store (cwd/registry default) via the synchronous
+ * withClient and reads getProjectId; returns null on ANY failure so the render fences
+ * every row rather than mis-labeling a foreign row as local. Never throws.
+ */
+async function resolveAmbientLocalProjectId(): Promise<string | null> {
+  try {
+    const res = await withClient((client) => createSuccess(getProjectId(client)), {});
+    return res.success ? (res.data ?? null) : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -545,6 +584,7 @@ export async function missionStatusAcrossProjects(
     acrossProjects: true,
     errors: fanout.errors,
     crossStoreMetadata: fanout.metadata,
+    localProjectId: await resolveAmbientLocalProjectId(),
   });
 }
 
@@ -578,7 +618,10 @@ export function formatMissionPortfolioForLLM(
     lines.push('No active missions across the portfolio.');
   } else {
     for (const m of data.missions) {
-      lines.push(`  📋 [${m.status}] ${m.id} — ${m.name}  [proj:${m.projectId}]`);
+      // s84-m03: fence a FOREIGN portfolio mission's name; the local project's own rows
+      // stay bare. The [proj:X] tag is metadata (always shown), not a trust boundary.
+      const name = frameInlineIfForeign(m.name, m.projectId, data.localProjectId);
+      lines.push(`  📋 [${m.status}] ${m.id} — ${name}  [proj:${m.projectId}]`);
     }
   }
   if (data.errors.length > 0) {
@@ -614,14 +657,25 @@ export function formatMissionStatusForLLM(result: CmosToolResult<CmosMissionStat
 
   const data = result.data;
   const lines: string[] = [];
+  // s84-m03: a foreign (pull-merged) work-queue row is untrusted DATA — frame its
+  // name/objective, and the sprint title/focus against the SPRINT's own project_id.
+  // A local/NULL-project row renders byte-identical to 2.3.0.
+  const local = data.localProjectId;
 
   // Header with summary
   lines.push('**Work Queue Status**');
   lines.push('');
   if (data.activeSprint) {
-    lines.push(`**Sprint**: ${data.activeSprint.id} - ${data.activeSprint.title}`);
+    const asTitle = frameInlineIfForeign(
+      data.activeSprint.title,
+      data.activeSprint.projectId,
+      local
+    );
+    lines.push(`**Sprint**: ${data.activeSprint.id} - ${asTitle}`);
     if (data.activeSprint.focus) {
-      lines.push(`  Focus: ${data.activeSprint.focus}`);
+      lines.push(
+        `  Focus: ${frameInlineIfForeign(data.activeSprint.focus, data.activeSprint.projectId, local)}`
+      );
     }
     lines.push('');
   }
@@ -634,12 +688,14 @@ export function formatMissionStatusForLLM(result: CmosToolResult<CmosMissionStat
   if (data.inProgress.length > 0) {
     lines.push('**In Progress:**');
     for (const m of data.inProgress) {
-      lines.push(`  ${m.id}: ${m.name}`);
+      lines.push(`  ${m.id}: ${frameInlineIfForeign(m.name, m.projectId, local)}`);
       if (m.objective) {
-        lines.push(`    -> ${truncate(m.objective, 70)}`);
+        lines.push(`    -> ${frameInlineIfForeign(truncate(m.objective, 70), m.projectId, local)}`);
       }
       if (m.sprint) {
-        lines.push(`    [${m.sprint.id}: ${m.sprint.title}]`);
+        lines.push(
+          `    [${m.sprint.id}: ${frameInlineIfForeign(m.sprint.title, m.sprint.projectId, local)}]`
+        );
       }
     }
     lines.push('');
@@ -649,12 +705,14 @@ export function formatMissionStatusForLLM(result: CmosToolResult<CmosMissionStat
   if (data.current.length > 0) {
     lines.push('**Current (Ready to Start):**');
     for (const m of data.current) {
-      lines.push(`  ${m.id}: ${m.name}`);
+      lines.push(`  ${m.id}: ${frameInlineIfForeign(m.name, m.projectId, local)}`);
       if (m.objective) {
-        lines.push(`    -> ${truncate(m.objective, 70)}`);
+        lines.push(`    -> ${frameInlineIfForeign(truncate(m.objective, 70), m.projectId, local)}`);
       }
       if (m.sprint) {
-        lines.push(`    [${m.sprint.id}: ${m.sprint.title}]`);
+        lines.push(
+          `    [${m.sprint.id}: ${frameInlineIfForeign(m.sprint.title, m.sprint.projectId, local)}]`
+        );
       }
     }
     lines.push('');
@@ -664,7 +722,7 @@ export function formatMissionStatusForLLM(result: CmosToolResult<CmosMissionStat
   if (data.queued.length > 0) {
     lines.push('**Queued (Upcoming):**');
     for (const m of data.queued) {
-      lines.push(`  ${m.id}: ${m.name}`);
+      lines.push(`  ${m.id}: ${frameInlineIfForeign(m.name, m.projectId, local)}`);
       if (m.sprint) {
         lines.push(`    [${m.sprint.id}]`);
       }
@@ -676,7 +734,7 @@ export function formatMissionStatusForLLM(result: CmosToolResult<CmosMissionStat
   if (data.blocked && data.blocked.length > 0) {
     lines.push('**Blocked:**');
     for (const m of data.blocked) {
-      lines.push(`  ${m.id}: ${m.name}`);
+      lines.push(`  ${m.id}: ${frameInlineIfForeign(m.name, m.projectId, local)}`);
       if (m.notes) {
         lines.push(`    Reason: ${truncate(m.notes, 60)}`);
       }

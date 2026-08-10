@@ -21,10 +21,12 @@ import {
 } from './context-retention';
 import { cmosContextCondense } from './cmos-context-condense';
 import { cmosDbSnapshot } from './cmos-db-snapshot';
+import { getProjectType } from './cmos-agent-onboard';
 import {
   ensureArchivalColumns,
   ensureAuthorNamespaceColumns,
   ensureFirehoseEventColumns,
+  snapshotDedupPrunedFilter,
 } from './schema-migrations';
 import {
   checkBuildFreshness,
@@ -145,6 +147,14 @@ export interface CmosSprintCompleteResult {
   buildFreshness?: BuildFreshnessReport;
   message: string;
 }
+
+/**
+ * s84-m04 — context_snapshots growth thresholds for the non-blocking sprint-close advisory.
+ * Either the row count OR the total content bytes crossing its threshold fires the nudge toward
+ * `npm run prune:snapshots`. Advisory-only — never gates the close.
+ */
+const SNAPSHOT_GROWTH_ROW_THRESHOLD = 500;
+const SNAPSHOT_GROWTH_BYTE_THRESHOLD = 20 * 1024 * 1024; // 20 MB
 
 /**
  * Input parameters schema for cmos_sprint_complete.
@@ -521,6 +531,32 @@ export async function cmosSprintComplete(
         warnings.push('Sprint closeout event logging failed.');
       }
 
+      // s84-m04 (FORK-3=b): NON-BLOCKING context_snapshots growth advisory. Computed here,
+      // AFTER the closeout COMMIT (transactionOpen=false) — NEVER inside the BEGIN IMMEDIATE
+      // and NEVER an auto-prune (the firehose migration is txn-order-sensitive; a prune is a
+      // deliberate operator action). When the write-only snapshot content has grown large,
+      // nudge toward `npm run prune:snapshots`; a hiccup here never affects the committed close.
+      try {
+        const growth = client.getOne<{ rows: number; bytes: number }>(
+          `SELECT COUNT(*) AS rows, COALESCE(SUM(LENGTH(content)), 0) AS bytes FROM context_snapshots`,
+          []
+        );
+        if (
+          growth.success &&
+          growth.data &&
+          (growth.data.rows > SNAPSHOT_GROWTH_ROW_THRESHOLD ||
+            growth.data.bytes > SNAPSHOT_GROWTH_BYTE_THRESHOLD)
+        ) {
+          warnings.push(
+            `context_snapshots has grown to ${growth.data.rows} rows / ` +
+              `${(growth.data.bytes / (1024 * 1024)).toFixed(1)} MB of write-only content. ` +
+              `Run 'npm run prune:snapshots' (dry-run) to preview reclaimable content; --apply to reclaim.`
+          );
+        }
+      } catch {
+        // Advisory only — never let a growth-check hiccup affect the already-committed close.
+      }
+
       // --- Lifecycle Trigger: Auto-snapshot the full database (non-critical) ---
       let dbSnapshotId: string | null = null;
       try {
@@ -598,30 +634,35 @@ export async function cmosSprintComplete(
       //   (B) the running server is on stale code — SCOPED to this server's OWN
       //       project, because getServerHealth() tracks cmos-mcp-pro's build, not
       //       the caller's; surfacing it to a sibling blames them for our rebuild.
-      try {
-        const freshnessRoot = await resolveFreshnessProjectRoot(params.projectRoot);
-        if (freshnessRoot) {
-          const freshness = await checkBuildFreshness(freshnessRoot);
-          if (freshness.stale) {
-            result.buildFreshness = freshness;
-            if (isBlockingStaleness(freshness)) {
-              warnings.push(buildStaleAdvisory(freshness));
+      // s84-m05: build-freshness is a build-tier concern — skip it entirely for a general/
+      // managed project (no `dist/` to keep fresh). Gate on getProjectType (local store defaults
+      // 'build', so it keeps the signal). Both signals (A source-newer, B server-stale) are gated.
+      if (getProjectType(client) === 'build') {
+        try {
+          const freshnessRoot = await resolveFreshnessProjectRoot(params.projectRoot);
+          if (freshnessRoot) {
+            const freshness = await checkBuildFreshness(freshnessRoot);
+            if (freshness.stale) {
+              result.buildFreshness = freshness;
+              if (isBlockingStaleness(freshness)) {
+                warnings.push(buildStaleAdvisory(freshness));
+              }
+            }
+            const serverRoot = getServerProjectRoot();
+            if (serverRoot && path.resolve(serverRoot) === path.resolve(freshnessRoot)) {
+              const health = getServerHealth();
+              if (
+                health.startupBuild != null &&
+                health.codeIsCurrent === false &&
+                health.stalenessMessage
+              ) {
+                warnings.push(health.stalenessMessage);
+              }
             }
           }
-          const serverRoot = getServerProjectRoot();
-          if (serverRoot && path.resolve(serverRoot) === path.resolve(freshnessRoot)) {
-            const health = getServerHealth();
-            if (
-              health.startupBuild != null &&
-              health.codeIsCurrent === false &&
-              health.stalenessMessage
-            ) {
-              warnings.push(health.stalenessMessage);
-            }
-          }
+        } catch {
+          // Advisory only — never block sprint close on a probe failure.
         }
-      } catch {
-        // Advisory only — never block sprint close on a probe failure.
       }
 
       return createSuccess(result, warnings);
@@ -767,7 +808,8 @@ function createSnapshot(
 ): { success: boolean; snapshotId?: number } {
   const contentHash = crypto.createHash('sha256').update(content).digest('hex').substring(0, 16);
   const existing = client.getOne<{ id: number }>(
-    'SELECT id FROM context_snapshots WHERE context_id = ? AND content_hash = ?',
+    // s84-m04: exclude a content-tombstoned row so identical content re-persists fresh.
+    `SELECT id FROM context_snapshots WHERE context_id = ? AND content_hash = ?${snapshotDedupPrunedFilter(client)}`,
     [contextType, contentHash]
   );
   if (existing.success && existing.data) {

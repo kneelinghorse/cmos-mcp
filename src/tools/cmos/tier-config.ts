@@ -16,7 +16,9 @@ export interface TierConfig {
   tier: string;
   label: string;
   description: string;
-  toolsUse: string[];
+  // s84-m05: `toolsUse` deleted — it was parsed from the tier YAML `tools_use:` but consumed
+  // by NO code path (onboard reads only `toolsSkip`). The YAML `tools_use:` keys stay (the parser
+  // ignores unknown keys) as human-readable tier docs; only the dead parsed field is removed.
   toolsSkip: string[];
   vocabulary: Record<string, string | null>;
   sessionTypes: string[];
@@ -108,7 +110,6 @@ function parseTierFile(content: string): TierConfig {
       tier: 'build',
       label: 'Build',
       description: '',
-      toolsUse: [],
       toolsSkip: [],
       vocabulary: {},
       sessionTypes: [],
@@ -133,7 +134,6 @@ function parseTierFile(content: string): TierConfig {
     tier: String(fm.tier ?? 'build'),
     label: String(fm.label ?? 'Build'),
     description: String(fm.description ?? ''),
-    toolsUse: toStringArray(fm.tools_use),
     toolsSkip: toStringArray(fm.tools_skip),
     vocabulary,
     sessionTypes: toStringArray(fm.session_types),

@@ -17,6 +17,7 @@ import { createError, createSuccess, CmosErrors, CMOS_ERROR_CODES } from './erro
 import {
   ensureConstraintsTable,
   ensureConstraintReviewTimestamp,
+  ensureConstraintEvergreen,
   type ConstraintStatus,
 } from './schema-migrations';
 
@@ -33,6 +34,9 @@ export interface ConstraintRecord {
   archivedAt: string | null;
   /** ISO timestamp of the last reaffirm/review, null if never reviewed (Sprint 82 m01). */
   lastReviewedAt: string | null;
+  /** s84-m05: durable "never trip staleness" flag. An evergreen constraint is excluded from
+   *  review/count so an institutional rule never ages past the surfacing floor. */
+  evergreen: boolean;
 }
 
 export interface ConstraintReviewItem extends ConstraintRecord {
@@ -63,6 +67,9 @@ export interface CmosConstraintsParams {
   constraintIds?: number[];
   /** Constraint ID to reaffirm (Sprint 82 m01) */
   constraintId?: number;
+  /** s84-m05: on reaffirm, optionally set/clear the durable evergreen flag (true = never
+   *  trip staleness). Omitted → the reaffirm only bumps last_reviewed_at (unchanged behavior). */
+  evergreen?: boolean;
   /** Staleness threshold in days (for review, default: 30) */
   stalenessThresholdDays?: number;
   /** Optional project root */
@@ -139,6 +146,8 @@ export async function cmosConstraints(
       ensureConstraintsTable(client);
       // Sprint 82 m01: ensure last_reviewed_at exists so review/reaffirm can read+bump it.
       ensureConstraintReviewTimestamp(client);
+      // s84-m05: ensure the durable `evergreen` flag column exists (excluded from staleness).
+      ensureConstraintEvergreen(client);
 
       switch (action) {
         case 'list':
@@ -151,7 +160,7 @@ export async function cmosConstraints(
         case 'archive':
           return archiveConstraints(client, params.constraintIds);
         case 'reaffirm':
-          return reaffirmConstraint(client, params.constraintId);
+          return reaffirmConstraint(client, params.constraintId, params.evergreen);
         default:
           return createError<ConstraintsResult>({
             code: 'INVALID_ACTION',
@@ -177,8 +186,9 @@ function listConstraints(
     expires_at: string | null;
     archived_at: string | null;
     last_reviewed_at: string | null;
+    evergreen: number | null;
   }>(
-    `SELECT id, content, status, session_id, sprint_id, created_at, expires_at, archived_at, last_reviewed_at
+    `SELECT id, content, status, session_id, sprint_id, created_at, expires_at, archived_at, last_reviewed_at, evergreen
      FROM constraints WHERE status = ? ORDER BY created_at ASC`,
     [status]
   );
@@ -200,6 +210,7 @@ function listConstraints(
     expiresAt: row.expires_at,
     archivedAt: row.archived_at,
     lastReviewedAt: row.last_reviewed_at,
+    evergreen: !!row.evergreen,
   }));
 
   return createSuccess<ConstraintsResult>({
@@ -214,7 +225,9 @@ function reviewConstraints(
   client: CmosDatabaseClient,
   thresholdDays: number
 ): CmosToolResult<ConstraintsResult> {
-  // Get all active constraints
+  // Get all active constraints. s84-m05: EXCLUDE evergreen constraints — an institutional rule
+  // (e.g. the ≤4KB review digest, constraint #2) must never surface as stale. The write-path
+  // migration (cmosConstraints) guarantees the column exists here, so a bare reference is safe.
   const result = client.getMany<{
     id: number;
     content: string;
@@ -225,9 +238,10 @@ function reviewConstraints(
     expires_at: string | null;
     archived_at: string | null;
     last_reviewed_at: string | null;
+    evergreen: number | null;
   }>(
-    `SELECT id, content, status, session_id, sprint_id, created_at, expires_at, archived_at, last_reviewed_at
-     FROM constraints WHERE status = 'active' ORDER BY created_at ASC`,
+    `SELECT id, content, status, session_id, sprint_id, created_at, expires_at, archived_at, last_reviewed_at, evergreen
+     FROM constraints WHERE status = 'active' AND evergreen = 0 ORDER BY created_at ASC`,
     []
   );
 
@@ -256,6 +270,7 @@ function reviewConstraints(
         expiresAt: row.expires_at,
         archivedAt: row.archived_at,
         lastReviewedAt: row.last_reviewed_at,
+        evergreen: !!row.evergreen,
         stalenessScore: score,
         reason,
       });
@@ -327,7 +342,8 @@ function archiveConstraints(
  */
 function reaffirmConstraint(
   client: CmosDatabaseClient,
-  id: number | undefined
+  id: number | undefined,
+  evergreen?: boolean
 ): CmosToolResult<ConstraintsResult> {
   if (id === undefined || typeof id !== 'number') {
     return createError<ConstraintsResult>(CmosErrors.missingParameter('constraintId'));
@@ -346,10 +362,16 @@ function reaffirmConstraint(
   }
 
   const nowIso = new Date().toISOString();
-  const updateResult = client.execute('UPDATE constraints SET last_reviewed_at = ? WHERE id = ?', [
-    nowIso,
-    id,
-  ]);
+  // s84-m05: when `evergreen` is supplied, set/clear the durable flag alongside the review-clock
+  // bump; when omitted, this is the unchanged Sprint-82 reaffirm (last_reviewed_at only).
+  const updateResult =
+    evergreen === undefined
+      ? client.execute('UPDATE constraints SET last_reviewed_at = ? WHERE id = ?', [nowIso, id])
+      : client.execute('UPDATE constraints SET last_reviewed_at = ?, evergreen = ? WHERE id = ?', [
+          nowIso,
+          evergreen ? 1 : 0,
+          id,
+        ]);
   if (!updateResult.success) {
     return createError<ConstraintsResult>({
       code: CMOS_ERROR_CODES.DB_QUERY_FAILED,
@@ -357,12 +379,13 @@ function reaffirmConstraint(
     });
   }
 
+  const evergreenNote = evergreen === undefined ? '' : `, evergreen=${evergreen ? 1 : 0}`;
   return createSuccess<ConstraintsResult>({
     constraintAction: 'reaffirm',
     constraintId: id,
     reaffirmedAt: nowIso,
     affected: 1,
-    message: `Constraint #${id} reaffirmed — last_reviewed_at bumped (status ${existing.data.status}, unchanged)`,
+    message: `Constraint #${id} reaffirmed — last_reviewed_at bumped${evergreenNote} (status ${existing.data.status}, unchanged)`,
   });
 }
 
@@ -396,10 +419,16 @@ export function getStaleConstraintCount(
   const now = new Date();
   const thresholdDate = new Date(now.getTime() - thresholdDays * 24 * 60 * 60 * 1000).toISOString();
 
+  // s84-m05: exclude evergreen constraints from the onboard/cmos_review staleness count so an
+  // institutional rule (constraint #2) never inflates the banner. READ path — column-guarded
+  // (never a schema write), mirroring the last_reviewed_at guard below.
+  const hasEvergreen = constraintsHasColumn(client, 'evergreen');
+  const evergreenFilter = hasEvergreen ? ' AND evergreen = 0' : '';
+
   // Count expired
   const expiredResult = client.getOne<{ count: number }>(
     `SELECT COUNT(*) AS count FROM constraints
-     WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at <= ?`,
+     WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at <= ?${evergreenFilter}`,
     [now.toISOString()]
   );
   const expired = expiredResult.success && expiredResult.data ? expiredResult.data.count : 0;
@@ -414,7 +443,7 @@ export function getStaleConstraintCount(
   const ageAnchor = hasReviewTs ? 'COALESCE(last_reviewed_at, created_at)' : 'created_at';
   const staleResult = client.getOne<{ count: number }>(
     `SELECT COUNT(*) AS count FROM constraints
-     WHERE status = 'active' AND expires_at IS NULL AND ${ageAnchor} <= ?`,
+     WHERE status = 'active' AND expires_at IS NULL AND ${ageAnchor} <= ?${evergreenFilter}`,
     [thresholdDate]
   );
   const stale = staleResult.success && staleResult.data ? staleResult.data.count : 0;

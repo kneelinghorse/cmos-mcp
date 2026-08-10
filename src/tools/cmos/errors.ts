@@ -63,6 +63,10 @@ export const CMOS_ERROR_CODES = {
   // Dashboard errors (Sprint 28)
   DASHBOARD_UNREACHABLE: 'DASHBOARD_UNREACHABLE',
   DASHBOARD_AUTH_FAILED: 'DASHBOARD_AUTH_FAILED',
+  // s84-m02: a 403 is an AUTHZ denial (e.g. "not the recipient"), distinct from a 401
+  // token-expiry (DASHBOARD_AUTH_FAILED). Split out so the shared request() no longer
+  // clears the cached token on a forbidden — clearing poisoned apiKey auth (Bearer null).
+  DASHBOARD_FORBIDDEN: 'DASHBOARD_FORBIDDEN',
   DASHBOARD_NOT_FOUND: 'DASHBOARD_NOT_FOUND',
   DASHBOARD_ERROR: 'DASHBOARD_ERROR',
   DASHBOARD_NOT_CONFIGURED: 'DASHBOARD_NOT_CONFIGURED',
@@ -199,7 +203,7 @@ export const CmosErrors = {
     return {
       code: CMOS_ERROR_CODES.MISSION_NOT_FOUND,
       message: `Mission '${missionId}' not found`,
-      suggestion: 'Use cmos_mission_list to see available missions',
+      suggestion: 'Use cmos_mission(action="list") to see available missions',
     };
   },
 
@@ -225,7 +229,7 @@ export const CmosErrors = {
     return {
       code: CMOS_ERROR_CODES.CONTEXT_NOT_FOUND,
       message: `Context '${contextType}' not found`,
-      suggestion: 'Use cmos_context_view to list available contexts',
+      suggestion: 'Use cmos_context(action="view") to list available contexts',
       validValues: VALID_CONTEXT_TYPES as unknown as string[],
     };
   },
@@ -278,7 +282,7 @@ export const CmosErrors = {
     return {
       code: CMOS_ERROR_CODES.SESSION_NOT_FOUND,
       message: `Session '${sessionId}' not found`,
-      suggestion: 'Use cmos_session_list to see available sessions',
+      suggestion: 'Use cmos_session(action="list") to see available sessions',
     };
   },
 
@@ -303,7 +307,7 @@ export const CmosErrors = {
     return {
       code: CMOS_ERROR_CODES.SNAPSHOT_NOT_FOUND,
       message: `Snapshot '${snapshotId}' not found`,
-      suggestion: 'Use cmos_db_snapshot to create a new snapshot',
+      suggestion: 'Use cmos_db(action="snapshot") to create a new snapshot',
     };
   },
 
@@ -368,6 +372,26 @@ export const CmosErrors = {
       code: CMOS_ERROR_CODES.DASHBOARD_AUTH_FAILED,
       message: `Authentication failed for dashboard at '${url}'`,
       suggestion: 'Verify CMOS_DASHBOARD_USER and CMOS_DASHBOARD_PASSWORD are correct',
+    };
+  },
+
+  /**
+   * s84-m02 — a 403 Forbidden: the caller authenticated but is not authorized for
+   * this resource (e.g. respond/ack on a message where they are not the recipient,
+   * or an owner-gated route hit by a non-owner member after the dashboard m04
+   * cutover returns 403 not 404). Distinct from DASHBOARD_AUTH_FAILED (401 token
+   * expiry) so the client does NOT clear its cached token on a forbidden.
+   */
+  dashboardForbidden(resource: string, detail?: string, hint?: string): CmosToolError {
+    const message = detail
+      ? `Dashboard 403 on ${resource}: ${detail}`
+      : `Dashboard access forbidden: ${resource}`;
+    return {
+      code: CMOS_ERROR_CODES.DASHBOARD_FORBIDDEN,
+      message,
+      suggestion:
+        hint ??
+        'You are authenticated but not authorized for this resource — verify you own or are the recipient of the target, or that the target id/address is correct.',
     };
   },
 

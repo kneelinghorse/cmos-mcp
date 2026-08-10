@@ -157,7 +157,7 @@ export async function resolveProjectRootEnhanced(
     `Options:
   1. Run from a directory containing cmos/db/cmos.sqlite
   2. Provide projectRoot parameter explicitly
-  3. Register a default project: cmos_project_register(path, setAsDefault=true)`
+  3. Register a default project: cmos_project(action="register", projectRoot="<path>", setAsDefault=true)`
   );
 }
 

@@ -328,6 +328,131 @@ async function main(): Promise<void> {
       `text=${m06ViewText.slice(0, 140)}`
     );
 
+    // --- s84 answer shapes (this release's deltas). Only what is provable over PLAIN stdio:
+    //     the verify:dist env has no dashboard auth, so anything requiring a live dashboard
+    //     round-trip stays owned by the jest suites and is asserted here at the SCHEMA level.
+    const s84Dir = mkTmp('cmos-verify-s84-');
+    await h.callOk('cmos_project', {
+      action: 'init',
+      projectRoot: s84Dir,
+      projectName: 'verify-s84',
+    });
+
+    // (a) s84-m02: SQL-side pagination reached the built schema. The behavior (offset echo +
+    //     returnedCount) needs a dashboard; the INPUT contract is provable here.
+    const messageProps = (messageTool?.inputSchema?.properties ?? {}) as Record<string, unknown>;
+    check(
+      's84-m02: cmos_message advertises the offset pagination param',
+      Object.prototype.hasOwnProperty.call(messageProps, 'offset'),
+      `props=${Object.keys(messageProps).join(',')}`
+    );
+
+    // (b) s84-m05: an EVERGREEN constraint is excluded from staleness review end-to-end.
+    //     Drivable on a fresh store: capture two constraints, flag one evergreen, and assert
+    //     review returns the other and not it. This is the positive fire for the flag.
+    await h.callOk('cmos_session', {
+      action: 'start',
+      type: 'planning',
+      title: 's84 constraints',
+      projectRoot: s84Dir,
+    });
+    await h.callOk('cmos_session', {
+      action: 'capture',
+      category: 'constraint',
+      content: 'Institutional rule: the review digest stays under 4KB',
+      projectRoot: s84Dir,
+    });
+    await h.callOk('cmos_session', {
+      action: 'capture',
+      category: 'constraint',
+      content: 'Temporary rule: deploy freeze until the release lands',
+      projectRoot: s84Dir,
+    });
+    const listedConstraints = h.dataOf(
+      await h.callOk('cmos_context', {
+        action: 'constraints',
+        constraintAction: 'list',
+        projectRoot: s84Dir,
+      })
+    ) as { items?: Array<{ id: number; content: string; evergreen?: boolean }> };
+    const constraintItems = listedConstraints?.items ?? [];
+    const institutional = constraintItems.find((c) => /Institutional rule/.test(c.content));
+    const temporary = constraintItems.find((c) => /Temporary rule/.test(c.content));
+    check(
+      's84-m05: constraints(list) returns both captured constraints, evergreen false by default',
+      constraintItems.length === 2 &&
+        institutional != null &&
+        constraintItems.every((c) => c.evergreen === false),
+      `items=${JSON.stringify(constraintItems)}`
+    );
+
+    if (institutional && temporary) {
+      await h.callOk('cmos_context', {
+        action: 'constraints',
+        constraintAction: 'reaffirm',
+        constraintId: institutional.id,
+        evergreen: true,
+        projectRoot: s84Dir,
+      });
+      const relisted = h.dataOf(
+        await h.callOk('cmos_context', {
+          action: 'constraints',
+          constraintAction: 'list',
+          projectRoot: s84Dir,
+        })
+      ) as { items?: Array<{ id: number; evergreen?: boolean }> };
+      const flagById = new Map((relisted?.items ?? []).map((c) => [c.id, c.evergreen]));
+      check(
+        's84-m05: reaffirm(evergreen=true) durably flags ONLY the targeted constraint',
+        flagById.get(institutional.id) === true && flagById.get(temporary.id) === false,
+        `flags=${JSON.stringify([...flagById])}`
+      );
+
+      // The EXCLUSION leg is deliberately NOT asserted here, and the reason matters: it is
+      // not provable over plain stdio on a fresh store. A seconds-old no-expiry constraint
+      // scores 20 (the no-expiry bonus alone) and never reaches the 50 review floor, so a
+      // review here returns nothing for BOTH rows and absence would prove nothing. Driving
+      // the threshold below the elapsed age would fix that, but `stalenessThresholdDays` is
+      // `.int().positive()` in zod, and the smallest legal value (1 day) still scores a
+      // seconds-old row at 20. Backdating `created_at` is the only way, which needs direct
+      // DB access — so the exclusion leg is owned by
+      // tests/tools/cmos/constraint-staleness.test.ts ("evergreen=true durably drops the
+      // constraint off review + banner"), which seeds a 90-day-old constraint and asserts
+      // flagged-before / absent-after plus a PRAGMA positive-fire on the column.
+      // What stdio CAN prove — and does, above — is that the flag reaches the built dist,
+      // persists, and targets exactly one row.
+      const reviewed = h.dataOf(
+        await h.callOk('cmos_context', {
+          action: 'constraints',
+          constraintAction: 'review',
+          projectRoot: s84Dir,
+        })
+      ) as { reviewItems?: Array<{ id: number }> };
+      check(
+        's84-m05: review runs clean on a fresh store (neither young constraint is stale)',
+        Array.isArray(reviewed?.reviewItems) && reviewed.reviewItems.length === 0,
+        `reviewItems=${JSON.stringify(reviewed?.reviewItems)}`
+      );
+    }
+
+    // (c) s84-m04: cmos_context(history) surfaces contentPruned per row. On a fresh store
+    //     nothing is tombstoned, so the assertion is that the FIELD ships and reads false —
+    //     a regression that dropped the column mapping would surface as undefined.
+    await h.callOk('cmos_context', {
+      action: 'snapshot',
+      projectRoot: s84Dir,
+      source: 'verify-dist',
+    });
+    const history = h.dataOf(
+      await h.callOk('cmos_context', { action: 'history', projectRoot: s84Dir })
+    ) as { snapshots?: Array<{ contentPruned?: boolean }> };
+    const snaps = history?.snapshots ?? [];
+    check(
+      's84-m04: cmos_context(history) surfaces contentPruned per row (false on a fresh store)',
+      snaps.length > 0 && snaps.every((s) => s.contentPruned === false),
+      `snapshots=${JSON.stringify(snaps.map((s) => s.contentPruned))}`
+    );
+
     // Mode (i): from a REAL project cwd, a pin-only read (mission list, no projectRoot)
     // resolves to the sender and succeeds — scoped, not fanned out.
     const pinnedRead = await h.callTool('cmos_mission', { action: 'list' });

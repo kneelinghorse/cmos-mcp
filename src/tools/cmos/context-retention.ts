@@ -12,6 +12,7 @@
 import * as crypto from 'crypto';
 import type { CmosDatabaseClient } from './client';
 import { genesisColumns, getProjectId } from './genesis-columns';
+import { snapshotDedupPrunedFilter } from './schema-migrations';
 
 const DEFAULT_SIZE_LIMIT_KB = 100;
 const DEFAULT_WARNING_THRESHOLD_PERCENT = 75;
@@ -112,7 +113,7 @@ export function buildContextSizeWarning(
     return null;
   }
 
-  return `${contextLabel} is using ${metrics.usagePercent.toFixed(1)}% of configured limit (${metrics.sizeKb.toFixed(2)}KB / ${metrics.limitKb.toFixed(2)}KB). Consider running cmos_context_update() to condense context detail.`;
+  return `${contextLabel} is using ${metrics.usagePercent.toFixed(1)}% of configured limit (${metrics.sizeKb.toFixed(2)}KB / ${metrics.limitKb.toFixed(2)}KB). Consider running cmos_context(action="update") to condense context detail.`;
 }
 
 export function resolveContextSizeSettings(
@@ -618,7 +619,8 @@ function createSnapshot(
   const now = new Date().toISOString();
 
   const existing = client.getOne<{ id: number }>(
-    'SELECT id FROM context_snapshots WHERE context_id = ? AND content_hash = ?',
+    // s84-m04: exclude a content-tombstoned row so identical content re-persists fresh.
+    `SELECT id FROM context_snapshots WHERE context_id = ? AND content_hash = ?${snapshotDedupPrunedFilter(client)}`,
     [contextId, contentHash]
   );
   if (existing.success && existing.data) {

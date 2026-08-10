@@ -13,7 +13,13 @@ function renderType(prop) {
   return 'object';
 }
 
-/** Collapse newlines and escape pipes so a description is safe inside a markdown table cell. */
+/**
+ * The markdown table-cell escaper: collapses whitespace/newlines and escapes pipes so the
+ * text cannot split its row into extra columns. Safe only for single-line cell content —
+ * every value interpolated into a table row must pass through here, including `renderType`'s
+ * output (a JSON-Schema type union renders as `string | object`, whose bare pipe would
+ * otherwise add a column; s85-m01).
+ */
 function cell(text) {
   return String(text || '')
     .replace(/\s+/g, ' ')
@@ -33,7 +39,7 @@ function renderParamsTable(inputSchema) {
   for (const name of names) {
     const prop = props[name] || {};
     rows.push(
-      `| \`${name}\` | ${renderType(prop)} | ${required.has(name) ? 'yes' : 'no'} | ${cell(prop.description)} |`
+      `| \`${name}\` | ${cell(renderType(prop))} | ${required.has(name) ? 'yes' : 'no'} | ${cell(prop.description)} |`
     );
   }
   return rows.join('\n');

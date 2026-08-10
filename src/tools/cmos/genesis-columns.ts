@@ -65,6 +65,19 @@ export function getProjectId(client: CmosDatabaseClient): string {
 }
 
 /**
+ * s84-m03 — PRAGMA column-presence guard. True when `table` has `column`. Used by the
+ * foreign-row read-time framing surfaces to read a row's `project_id` ONLY when the
+ * column exists, so an ancient/un-migrated store (no `project_id` column) degrades to a
+ * NULL row project_id (→ rendered bare) instead of throwing on `SELECT project_id`.
+ * Never throws — a failed PRAGMA returns false. Mirrors the existing local copies in
+ * decision-memory.ts / cmos-context-view.ts, DRY'd for the ~6 m03 SELECT surfaces.
+ */
+export function tableHasColumn(client: CmosDatabaseClient, table: string, column: string): boolean {
+  const res = client.getMany<{ name: string }>(`PRAGMA table_info('${table}')`, []);
+  return res.success && !!res.data?.some((c) => c.name === column);
+}
+
+/**
  * Produce the 6 genesis-stamp columns for a row INSERT into a firehose table
  * (s68 ADR §1 + §2, as amended s69-m03). Splice `columns` into the INSERT column
  * list, `placeholders` into VALUES, and append `values` to the params array:

@@ -77,7 +77,7 @@ export const cmosProjectListToolDefinition = {
   description:
     'List all registered CMOS projects. ' +
     'Returns project paths, names, and default status. ' +
-    'Use cmos_project_validate to check project health.',
+    'Use cmos_project(action="validate") to check project health.',
   inputSchema: {
     type: 'object',
     properties: {},
@@ -154,7 +154,7 @@ export function formatProjectListForLLM(result: CmosToolResult<ProjectListResult
   if (data.projects.length === 0) {
     lines.push('📋 No projects registered');
     lines.push('');
-    lines.push('Use cmos_project_register to add a project.');
+    lines.push('Use cmos_project(action="register") to add a project.');
   } else {
     const header =
       data.missingCount > 0

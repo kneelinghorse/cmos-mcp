@@ -161,7 +161,7 @@ export async function cmosDbSnapshot(
       statsResult.error ?? {
         code: 'DB_QUERY_FAILED',
         message: 'Failed to gather database statistics for snapshot.',
-        suggestion: 'Check database connectivity with cmos_db_health and retry.',
+        suggestion: 'Check database connectivity with cmos_db(action="health") and retry.',
       }
     );
   }

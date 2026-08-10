@@ -24,7 +24,8 @@ All types share the same lifecycle: **start → capture → complete**.
 ### 1. Start a Session
 
 ```
-cmos_session_start({
+cmos_session({
+  action: "start",
   type: "planning",
   title: "Sprint 17 Planning",
   sprintId: "sprint-17"  // optional
@@ -34,17 +35,20 @@ cmos_session_start({
 ### 2. Capture Insights (repeat as needed)
 
 ```
-cmos_session_capture({
+cmos_session({
+  action: "capture",
   category: "decision",
   content: "Focus on API performance"
 })
 
-cmos_session_capture({
+cmos_session({
+  action: "capture",
   category: "constraint",
   content: "Must maintain backward compatibility"
 })
 
-cmos_session_capture({
+cmos_session({
+  action: "capture",
   category: "next-step",
   content: "Profile current latency"
 })
@@ -55,7 +59,8 @@ cmos_session_capture({
 ### 3. Complete the Session
 
 ```
-cmos_session_complete({
+cmos_session({
+  action: "complete",
   summary: "Sprint 17 scoped and prioritized",
   nextSteps: ["Finalize API metrics", "Update backlog"]
 })
@@ -68,24 +73,24 @@ cmos_session_complete({
 ### Sprint Planning
 
 ```
-cmos_session_start(type="planning", title="Sprint 17 Planning")
+cmos_session(action="start", type="planning", title="Sprint 17 Planning")
 
-cmos_session_capture(category="decision", content="Focus on API performance")
-cmos_session_capture(category="constraint", content="Backward compatibility required")
-cmos_session_capture(category="next-step", content="Profile API endpoints")
+cmos_session(action="capture", category="decision", content="Focus on API performance")
+cmos_session(action="capture", category="constraint", content="Backward compatibility required")
+cmos_session(action="capture", category="next-step", content="Profile API endpoints")
 
-cmos_session_complete(summary="Sprint 17 planned: 6 missions for API optimization")
+cmos_session(action="complete", summary="Sprint 17 planned: 6 missions for API optimization")
 ```
 
 ### Agent Onboarding
 
 ```
-cmos_session_start(type="onboarding", title="Onboarding for Feature X")
+cmos_session(action="start", type="onboarding", title="Onboarding for Feature X")
 
-cmos_session_capture(category="context", content="Feature X requires real-time updates")
-cmos_session_capture(category="decision", content="Use WebSockets for real-time")
+cmos_session(action="capture", category="context", content="Feature X requires real-time updates")
+cmos_session(action="capture", category="decision", content="Use WebSockets for real-time")
 
-cmos_session_complete(
+cmos_session(action="complete",
   summary="Onboarded to Feature X implementation",
   nextSteps=["Review WebSocket libraries", "Design message protocol"]
 )
@@ -94,12 +99,12 @@ cmos_session_complete(
 ### Weekly Review
 
 ```
-cmos_session_start(type="review", title="Week 47 Review")
+cmos_session(action="start", type="review", title="Week 47 Review")
 
-cmos_session_capture(category="learning", content="CI/CD pipeline needs optimization")
-cmos_session_capture(category="learning", content="Velocity improved with pair programming")
+cmos_session(action="capture", category="learning", content="CI/CD pipeline needs optimization")
+cmos_session(action="capture", category="learning", content="Velocity improved with pair programming")
 
-cmos_session_complete(summary="Week 47: Good progress, CI/CD needs work")
+cmos_session(action="complete", summary="Week 47: Good progress, CI/CD needs work")
 ```
 
 ---
@@ -107,9 +112,9 @@ cmos_session_complete(summary="Week 47: Good progress, CI/CD needs work")
 ## Viewing Sessions
 
 ```
-cmos_session_list()                    // List all sessions
-cmos_session_list(status="completed")  // Filter by status
-cmos_session_list(type="planning")     // Filter by type
+cmos_session(action="list")                    // List all sessions
+cmos_session(action="list", status="completed")  // Filter by status
+cmos_session(action="list", type="planning")     // Filter by type
 ```
 
 ---
@@ -128,7 +133,7 @@ cmos_session_list(type="planning")     // Filter by type
 After completing sessions, decisions and learnings are stored in the database. To aggregate recent session captures into `master_context` for strategic memory:
 
 ```
-cmos_context_update()
+cmos_context(action="update")
 ```
 
 This tool:
@@ -149,13 +154,13 @@ This tool:
 
 ```
 # Complete several planning sessions
-cmos_session_complete(summary="Sprint planning complete")
+cmos_session(action="complete", summary="Sprint planning complete")
 
 # Later, aggregate insights into master_context
-cmos_context_update()
+cmos_context(action="update")
 
 # View updated context
-cmos_context_view(contextType="master_context")
+cmos_context(action="view", contextType="master_context")
 ```
 
 ---

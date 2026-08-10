@@ -18,6 +18,8 @@ import {
   type SessionType,
 } from './errors';
 import { VALID_CAPTURE_CATEGORIES, type CaptureCategory } from './cmos-session-capture';
+import { getProjectId, tableHasColumn } from './genesis-columns';
+import { frameInlineIfForeign } from '../../intelligence/provenance-frame';
 
 // Re-export for convenience
 export { VALID_SESSION_TYPES };
@@ -79,6 +81,9 @@ export interface SessionSearchResult {
 
   /** Relevance score (higher = more matches) */
   relevance: number;
+
+  /** s84-m03: the session's own project_id (guarded read). Foreign → title/captures framed. */
+  projectId?: string | null;
 }
 
 /**
@@ -104,6 +109,10 @@ export interface CmosSessionSearchResult {
     since?: string;
     until?: string;
   };
+
+  /** s84-m03: the querying store's own project_id. Sessions whose projectId differs are
+   *  foreign (pull-merged) and framed as untrusted in the render. */
+  localProjectId?: string | null;
 }
 
 /**
@@ -173,6 +182,8 @@ interface SessionRow {
   completed_at: string | null;
   summary: string | null;
   captures: string | null;
+  /** s84-m03: guarded project_id read (NULL on an ancient store). */
+  project_id?: string | null;
 }
 
 /**
@@ -250,15 +261,22 @@ export async function cmosSessionSearch(
 
       const whereClause = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
 
+      // s84-m03: guarded project_id read (NULL AS on an ancient store lacking the column).
+      const projectIdExpr = tableHasColumn(client, 'sessions', 'project_id')
+        ? 'project_id'
+        : 'NULL AS project_id';
+
       // Get matching sessions
       const result = client.getMany<SessionRow>(
-        `SELECT id, type, title, status, sprint_id, started_at, completed_at, summary, captures
+        `SELECT id, type, title, status, sprint_id, started_at, completed_at, summary, captures, ${projectIdExpr}
            FROM sessions
            ${whereClause}
           ORDER BY started_at DESC
           LIMIT ?`,
         [...queryParams, limit + 10] // Fetch extra for filtering
       );
+
+      const localProjectId = getProjectId(client);
 
       if (!result.success || !result.data) {
         return createSuccess<CmosSessionSearchResult>({
@@ -272,6 +290,7 @@ export async function cmosSessionSearch(
             since: params.since,
             until: params.until,
           },
+          localProjectId,
         });
       }
 
@@ -368,6 +387,7 @@ export async function cmosSessionSearch(
           matchedCaptures,
           matchedIn,
           relevance,
+          projectId: row.project_id ?? null,
         });
       }
 
@@ -389,6 +409,7 @@ export async function cmosSessionSearch(
           since: params.since,
           until: params.until,
         },
+        localProjectId,
       });
     },
     { projectRoot: params.projectRoot }
@@ -473,14 +494,17 @@ export function formatSessionSearchForLLM(result: CmosToolResult<CmosSessionSear
     lines.push('**Suggestions**:');
     lines.push('  - Try different keywords');
     lines.push('  - Remove filters to broaden search');
-    lines.push('  - Use cmos_session_list to browse all sessions');
+    lines.push('  - Use cmos_session(action="list") to browse all sessions');
     return lines.join('\n');
   }
 
   // List results
   for (const r of data.results) {
     const statusIcon = r.status === 'active' ? '?' : '?';
-    lines.push(`${statusIcon} **${r.title}** (${r.type})`);
+    // s84-m03: a foreign (pull-merged) session's title + matched-capture snippets are
+    // untrusted DATA — frame inline; a local/NULL-project session renders byte-identical.
+    const title = frameInlineIfForeign(r.title, r.projectId, data.localProjectId);
+    lines.push(`${statusIcon} **${title}** (${r.type})`);
     lines.push(`   ID: ${r.id} | Status: ${r.status}`);
     lines.push(
       `   Started: ${r.startedAt}${r.completedAt ? ` | Completed: ${r.completedAt}` : ''}`
@@ -490,7 +514,8 @@ export function formatSessionSearchForLLM(result: CmosToolResult<CmosSessionSear
     if (r.matchedCaptures.length > 0) {
       lines.push(`   Matching captures (${r.matchedCaptures.length}):`);
       for (const mc of r.matchedCaptures.slice(0, 3)) {
-        lines.push(`     - [${mc.category}] ${mc.highlight}`);
+        const highlight = frameInlineIfForeign(mc.highlight, r.projectId, data.localProjectId);
+        lines.push(`     - [${mc.category}] ${highlight}`);
       }
       if (r.matchedCaptures.length > 3) {
         lines.push(`     ... and ${r.matchedCaptures.length - 3} more`);

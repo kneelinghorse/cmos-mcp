@@ -20,6 +20,7 @@
 import * as crypto from 'crypto';
 import type { CmosDatabaseClient } from './client';
 import { genesisColumns, getProjectId } from './genesis-columns';
+import { snapshotDedupPrunedFilter } from './schema-migrations';
 
 // ---------------------------------------------------------------------------
 // Public constants
@@ -146,9 +147,10 @@ function takePreMigrationSnapshot(
 ): void {
   const contentHash = crypto.createHash('sha256').update(rawContent).digest('hex').substring(0, 16);
 
-  // Skip if identical snapshot already exists
+  // Skip if identical snapshot already exists. s84-m04: exclude a content-tombstoned row
+  // so identical content re-persists fresh instead of deduping onto the emptied row.
   const existing = client.getOne<{ id: number }>(
-    'SELECT id FROM context_snapshots WHERE context_id = ? AND content_hash = ?',
+    `SELECT id FROM context_snapshots WHERE context_id = ? AND content_hash = ?${snapshotDedupPrunedFilter(client)}`,
     [contextId, contentHash]
   );
   if (existing.success && existing.data) return;

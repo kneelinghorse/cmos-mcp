@@ -154,6 +154,9 @@ CREATE TABLE IF NOT EXISTS context_snapshots (
   schema_version INTEGER NOT NULL DEFAULT 1,
   -- s69-m04 author identity (nullable; bound when the multi-user layer lands).
   author_user_id TEXT,
+  -- s84-m04 content-tombstone marker (#478): NULL = content intact; a timestamp = the
+  -- bounded-retention prune reclaimed this row's content (row/metadata/FK/event preserved).
+  content_pruned_at TEXT,
   FOREIGN KEY (context_id) REFERENCES contexts(id) ON DELETE CASCADE
 );
 
@@ -476,31 +479,38 @@ CMOS operations are performed via MCP tools. No Python CLI required.
 
 ### Available Tools
 
+Every tool below selects its operation with an \`action\` parameter, except
+\`cmos_review\`, \`cmos_agent_onboard\` and \`cmos_status\`, which take only \`projectRoot\`.
+The full per-action reference is TOOL_REFERENCE.md in the cmos-mcp package.
+
+**Start here**
+- \`cmos_review\` - Bundled session-opener digest: identity, sprint, work queue, next actions
+
 **Database & Health**
-- \`cmos_db_health\` - Check database connectivity and stats
-- \`cmos_db_snapshot\` - Create/list database snapshots for backup safety
-- \`cmos_db_restore\` - Restore database from a named snapshot (destructive)
+- \`cmos_db(action="health")\` - Check database connectivity and stats
+- \`cmos_db(action="snapshot")\` - Create/list database snapshots for backup safety
+- \`cmos_db(action="restore")\` - Restore database from a named snapshot (destructive)
 - \`cmos_agent_onboard\` - Get project context for cold-start
 
 **Mission Management**
-- \`cmos_mission_status\` - View work queue (In Progress → Current → Queued)
-- \`cmos_mission_show\` - Get full mission details
-- \`cmos_mission_start\` - Begin work on a mission
-- \`cmos_mission_complete\` - Mark mission done
-- \`cmos_mission_block\` / \`cmos_mission_unblock\` - Handle blockers
+- \`cmos_mission(action="status")\` - View work queue (In Progress → Current → Queued)
+- \`cmos_mission(action="show")\` - Get full mission details
+- \`cmos_mission_transition(action="start")\` - Begin work on a mission
+- \`cmos_mission_transition(action="complete")\` - Mark mission done
+- \`cmos_mission_transition(action="block"|"unblock")\` - Handle blockers
 
 **Sprint Management**
-- \`cmos_sprint\` - Consolidated sprint tool with actions: list, show, add, update, complete
+- \`cmos_sprint\` - Actions: list, show, add, update, complete, retro, carry_forward, analytics
 
 **Session Management**
-- \`cmos_session_start\` - Start planning/review/research session
-- \`cmos_session_capture\` - Capture decisions, learnings, constraints
-- \`cmos_session_complete\` - Complete session with summary
+- \`cmos_session(action="start")\` - Start planning/review/research session
+- \`cmos_session(action="capture")\` - Capture decisions, learnings, constraints
+- \`cmos_session(action="complete")\` - Complete session with summary
 
 **Context Operations**
-- \`cmos_context_view\` - View project/master context
-- \`cmos_context_snapshot\` - Take strategic snapshot
-- \`cmos_context_history\` - View snapshot timeline
+- \`cmos_context(action="view")\` - View project/master context
+- \`cmos_context(action="snapshot")\` - Take strategic snapshot
+- \`cmos_context(action="history")\` - View snapshot timeline
 
 ## Mission Lifecycle
 

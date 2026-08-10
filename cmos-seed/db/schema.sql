@@ -113,6 +113,9 @@ CREATE TABLE IF NOT EXISTS context_snapshots (
   schema_version INTEGER NOT NULL DEFAULT 1,
   -- s69-m04 author identity (nullable; bound when the multi-user layer lands).
   author_user_id TEXT,
+  -- s84-m04 content-tombstone marker (#478): NULL = content intact; a timestamp = the
+  -- bounded-retention prune reclaimed this row's content (row/metadata/FK/event preserved).
+  content_pruned_at TEXT,
   FOREIGN KEY (context_id) REFERENCES contexts(id) ON DELETE CASCADE
 );
 

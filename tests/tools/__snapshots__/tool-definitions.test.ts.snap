@@ -157,6 +157,10 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "description": "Preview condensation for condense action",
           "type": "boolean",
         },
+        "evergreen": {
+          "description": "s84-m05: on reaffirm, set/clear the durable evergreen flag (true = never trip staleness review/count, for institutional rules). Omit to leave unchanged.",
+          "type": "boolean",
+        },
         "fieldUpdates": {
           "description": "Field-level updates for update action. Each entry must have "path" (dot-notation field name) and "value". Example: [{path: "project_name", value: "My Project"}, {path: "type_fields.stack", value: "Node.js"}]",
           "items": {
@@ -167,6 +171,14 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
               },
               "value": {
                 "description": "New field value",
+                "type": [
+                  "string",
+                  "number",
+                  "boolean",
+                  "object",
+                  "array",
+                  "null",
+                ],
               },
             },
             "required": [
@@ -684,6 +696,11 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "description": "Response notes",
           "type": "string",
         },
+        "offset": {
+          "description": "Pagination offset for list (SQL-side, dashboard m05). Omit for page 0.",
+          "minimum": 0,
+          "type": "number",
+        },
         "projectRoot": {
           "description": "Project root directory to search for CMOS database (defaults to cwd)",
           "type": "string",
@@ -772,6 +789,10 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
         },
         "context": {
           "description": "Mission context for add action (string or object)",
+          "type": [
+            "string",
+            "object",
+          ],
         },
         "deliverables": {
           "description": "Deliverables for add action",
@@ -790,6 +811,10 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "properties": {
             "context": {
               "description": "Background context",
+              "type": [
+                "string",
+                "object",
+              ],
             },
             "deliverables": {
               "description": "Deliverables",
@@ -1101,7 +1126,7 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
     "name": "cmos_project",
   },
   {
-    "description": "Bundled session-opener digest (≤4KB). Replaces the cmos_agent_onboard + cmos_context_view + cmos_mission_status opener with one payload. Top-3 next_actions are promoted to a flat top-level field. Includes an always-on cross-store \`portfolio\` rollup (active missions across your registered projects) built on the graph-backed queryAcrossStores; it degrades to null for a single-project setup.",
+    "description": "Bundled session-opener digest (≤4KB). Replaces the older three-step opener (cmos_agent_onboard + cmos_context(action="view") + cmos_mission(action="status")) with one payload. Top-3 next_actions are promoted to a flat top-level field. Includes an always-on cross-store \`portfolio\` rollup (active missions across your registered projects) built on the graph-backed queryAcrossStores; it degrades to null for a single-project setup.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {

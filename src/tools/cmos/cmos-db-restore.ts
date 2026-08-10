@@ -71,7 +71,7 @@ export const cmosDbRestoreSchema = z.object({
     .string()
     .min(1)
     .describe(
-      'Snapshot ID to restore from. Use cmos_db_snapshot(listOnly=true) to list snapshots.'
+      'Snapshot ID to restore from. Use cmos_db(action="snapshot", listOnly=true) to list snapshots.'
     ),
 
   /** Explicit confirmation required for destructive restore */
@@ -104,7 +104,7 @@ export const cmosDbRestoreToolDefinition = {
       snapshotId: {
         type: 'string',
         description:
-          'Snapshot ID to restore from. Use cmos_db_snapshot(listOnly=true) to view available snapshots.',
+          'Snapshot ID to restore from. Use cmos_db(action="snapshot", listOnly=true) to view available snapshots.',
         minLength: 1,
       },
       confirm: {
@@ -152,7 +152,8 @@ export async function cmosDbRestore(
       message: 'snapshotId must be a filename or snapshot ID, not a path.',
       field: 'snapshotId',
       providedValue: params.snapshotId,
-      suggestion: 'Use cmos_db_snapshot(listOnly=true) and pass one of the listed snapshot IDs.',
+      suggestion:
+        'Use cmos_db(action="snapshot", listOnly=true) and pass one of the listed snapshot IDs.',
     });
   }
 
@@ -162,7 +163,7 @@ export async function cmosDbRestore(
       dbPathResult.error ?? {
         code: 'DB_CONNECTION_FAILED',
         message: 'Failed to resolve active CMOS database path.',
-        suggestion: 'Check projectRoot or run cmos_db_health for diagnostics.',
+        suggestion: 'Check projectRoot or run cmos_db(action="health") for diagnostics.',
       }
     );
   }
@@ -317,7 +318,8 @@ function validateSnapshotDatabase(snapshotPath: string) {
       return {
         code: CMOS_ERROR_CODES.DB_SCHEMA_MISMATCH,
         message: `Snapshot is not a valid CMOS database. Missing tables: ${missingTables.join(', ')}`,
-        suggestion: 'Use cmos_db_snapshot to create a valid snapshot from a CMOS database.',
+        suggestion:
+          'Use cmos_db(action="snapshot") to create a valid snapshot from a CMOS database.',
       };
     }
 

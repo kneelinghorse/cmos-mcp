@@ -150,7 +150,8 @@ export async function cmosMissionStart(
           code: CMOS_ERROR_CODES.MISSION_INVALID_STATE,
           message: `Mission '${missionId}' is already In Progress`,
           currentState: currentStatus,
-          suggestion: 'Use cmos_mission_complete to mark it done or cmos_mission_block if blocked',
+          suggestion:
+            'Use cmos_mission_transition(action="complete") to mark it done or cmos_mission_transition(action="block") if blocked',
         });
       }
 
@@ -162,7 +163,7 @@ export async function cmosMissionStart(
           currentState: currentStatus,
           validTransitions: ['In Progress', 'Current'],
           suggestion:
-            'Use cmos_mission_unblock to unblock this mission first. ' +
+            'Use cmos_mission_transition(action="unblock") to unblock this mission first. ' +
             'Provide a resolution explaining how the blocker was resolved.',
         });
       }

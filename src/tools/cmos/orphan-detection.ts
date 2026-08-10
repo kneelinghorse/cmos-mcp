@@ -16,6 +16,7 @@ import {
   MISSION_TERMINAL_STATUSES,
   statusNotInSql,
 } from './terminal-status';
+import { tableHasColumn } from './genesis-columns';
 
 /** Default threshold: sessions active for >24 hours are stale */
 const STALE_SESSION_HOURS = 24;
@@ -45,6 +46,9 @@ export interface StaleSession {
   title: string;
   startedAt: string;
   hoursActive: number;
+  /** s84-m03: the session's own project_id (guarded read). Foreign → the onboard
+   *  "complete stale session" action renders id-only instead of embedding the title. */
+  projectId?: string | null;
 }
 
 export interface OrphanDetectionResult {
@@ -75,6 +79,8 @@ interface SessionRow {
   title: string;
   started_at: string;
   hours_active: number;
+  /** s84-m03: guarded project_id read (NULL on an ancient store). */
+  project_id?: string | null;
 }
 
 // ─── Implementation ──────────────────────────────────────────────────────────
@@ -216,8 +222,12 @@ function findOrphanedMissions(client: CmosDatabaseClient, staleDays: number): Or
 }
 
 function findStaleSessions(client: CmosDatabaseClient, staleHours: number): StaleSession[] {
+  // s84-m03: guarded project_id read (NULL AS on an ancient store lacking the column).
+  const projExpr = tableHasColumn(client, 'sessions', 'project_id')
+    ? 'project_id'
+    : 'NULL AS project_id';
   const result = client.getMany<SessionRow>(
-    `SELECT id, type, title, started_at,
+    `SELECT id, type, title, started_at, ${projExpr},
             CAST((julianday('now') - julianday(started_at)) * 24 AS REAL) AS hours_active
      FROM sessions
      WHERE status = 'active'
@@ -234,5 +244,6 @@ function findStaleSessions(client: CmosDatabaseClient, staleHours: number): Stal
     title: row.title,
     startedAt: row.started_at,
     hoursActive: row.hours_active,
+    projectId: row.project_id ?? null,
   }));
 }

@@ -136,12 +136,21 @@ export interface MessageSummary {
   summary: string;
   createdAt: string;
   respondedAt?: string | null;
-  /** Inbox attribution. */
+  /** Inbox attribution. `senderProject` is the RAW slug post-cutover (addressable key, non-lossy);
+   *  `senderProjectName` is the display NAME twin. Both kept — slug addresses, name labels. */
   senderProject?: string | null;
+  senderProjectName?: string | null;
   senderDisplayName?: string | null;
-  /** Sent attribution. */
+  /** Sent attribution. `targetProject` is the RAW slug post-cutover; `targetProjectName` the NAME twin. */
   targetProject?: string | null;
+  targetProjectName?: string | null;
   targetMissionId?: string | null;
+  // s84-m01: additive identity UUIDs, conditionally included when the row carries them
+  // (lean pre-cutover rows omit them — no null-wall). Distinct from the slug/name fields above.
+  senderUserId?: string | null;
+  senderProjectId?: string | null;
+  targetUserId?: string | null;
+  targetProjectId?: string | null;
   /** Additive foreign-content descriptor; `source` is the labeled sender (not "unknown"). */
   provenance?: ProvenanceDescriptor;
 }
@@ -152,6 +161,11 @@ export interface MessageListResult {
   totalCount: number;
   tab: string;
   statusFilter: string | null;
+  /** s84-m02: SQL-side pagination (dashboard m05). `offset` echoes the requested page
+   *  start (absent when not paginating); `returnedCount` is the page size the dashboard
+   *  reported (absent on a pre-cutover dashboard that does not echo it). */
+  offset?: number;
+  returnedCount?: number;
   /** s80-m05: non-fatal advisories (e.g. sent-tab is user-scoped across all projects). */
   warnings?: string[];
 }
@@ -266,6 +280,12 @@ export const cmosMessageSchema = z
       .max(100)
       .optional()
       .describe('Max messages to return (default 20)'),
+    offset: z
+      .number()
+      .int()
+      .nonnegative()
+      .optional()
+      .describe('s84-m02: pagination offset for list (SQL-side, dashboard m05). Omit for page 0.'),
     // respond params
     messageId: z
       .string()
@@ -359,6 +379,11 @@ export const cmosMessageToolDefinition = {
         minimum: 1,
         maximum: 100,
         description: 'Max messages to return (default 20)',
+      },
+      offset: {
+        type: 'number',
+        minimum: 0,
+        description: 'Pagination offset for list (SQL-side, dashboard m05). Omit for page 0.',
       },
       messageId: {
         type: 'string',
@@ -774,15 +799,21 @@ async function handleSend(
  * `senderDisplayName` on inbox, `targetProject` on sent. The legacy `from` / `senderAddress`
  * / `from_project_id` are empty on live rows, which is why the old provenance read
  * "unknown source" — reading them last is a harmless fallback for older payloads.
+ *
+ * s84-m01 — the sprint-47 cutover REPURPOSES `senderProject`/`targetProject` to the SLUG and
+ * moves the display NAME to the new `*Name` twins. Prefer `*Name ?? *Project` (name ?? slug):
+ * pre-cutover only `*Project`=NAME is populated → yields NAME; post-cutover `*Name`=NAME is
+ * populated → yields NAME. Correct label ("CMOS-MCP Pro", not "cmos-mcp-pro") in BOTH eras.
  */
 export function attributionSource(msg: DashboardMessage, tab: string): string | undefined {
   if (tab === 'sent') {
     // s80-m05 review: keep the `to_project_id` fallback symmetric with the inbox
     // `from_project_id` rung below, so an intel/sent row that populated only the
     // recipient id still labels a source instead of "unknown".
-    return msg.targetProject ?? msg.to ?? msg.to_project_id ?? undefined;
+    return msg.targetProjectName ?? msg.targetProject ?? msg.to ?? msg.to_project_id ?? undefined;
   }
   return (
+    msg.senderProjectName ??
     msg.senderProject ??
     msg.senderDisplayName ??
     msg.from ??
@@ -809,13 +840,23 @@ export function mapToMessageSummary(msg: DashboardMessage, tab: string): Message
     createdAt: msg.createdAt,
     respondedAt: msg.respondedAt ?? null,
     provenance: foreignDescriptor(attributionSource(msg, tab)),
+    // s84-m01: pass through the 4 additive identity UUIDs when the row carries them.
+    // Conditional-include (not `?? null`) so a lean pre-cutover row stays byte-identical
+    // to 2.3.0 — no null-wall of absent keys. All 4 ride every post-cutover row (both tabs).
+    ...(msg.senderUserId != null ? { senderUserId: msg.senderUserId } : {}),
+    ...(msg.senderProjectId != null ? { senderProjectId: msg.senderProjectId } : {}),
+    ...(msg.targetUserId != null ? { targetUserId: msg.targetUserId } : {}),
+    ...(msg.targetProjectId != null ? { targetProjectId: msg.targetProjectId } : {}),
   };
   if (tab === 'sent') {
-    summary.targetProject = msg.targetProject ?? null;
+    summary.targetProject = msg.targetProject ?? null; // RAW slug post-cutover (addressable key)
     summary.targetMissionId = msg.targetMissionId ?? null;
+    // s84-m01: display NAME twin, conditional so a pre-cutover row (no *Name) stays byte-identical.
+    if (msg.targetProjectName != null) summary.targetProjectName = msg.targetProjectName;
   } else {
-    summary.senderProject = msg.senderProject ?? null;
+    summary.senderProject = msg.senderProject ?? null; // RAW slug post-cutover
     summary.senderDisplayName = msg.senderDisplayName ?? null;
+    if (msg.senderProjectName != null) summary.senderProjectName = msg.senderProjectName;
   }
   return summary;
 }
@@ -831,6 +872,10 @@ async function handleList(
     tab,
     status: params.status,
     limit,
+    // s84-m02: only forward offset when the caller paginated, so omitting it reproduces
+    // 2.3.0's exact call args (the client always sends an explicit limit; leave its
+    // documented default at 20 — do NOT silently retune to the dashboard's 50).
+    ...(params.offset !== undefined ? { offset: params.offset } : {}),
   });
 
   if (!result.success) {
@@ -857,8 +902,38 @@ async function handleList(
     totalCount: result.data!.totalCount,
     tab,
     statusFilter: params.status ?? null,
+    // s84-m02: echo the requested offset + the dashboard-reported page size when present.
+    // Both conditional so a non-paginated pre-cutover call reproduces 2.3.0's result shape.
+    ...(params.offset !== undefined ? { offset: params.offset } : {}),
+    ...(result.data!.returnedCount !== undefined
+      ? { returnedCount: result.data!.returnedCount }
+      : {}),
     ...(warnings ? { warnings } : {}),
   });
+}
+
+/**
+ * s84-m02 — error codes where the read-one attempt surfaces DIRECTLY instead of falling
+ * back to the paging scan. These are auth/authz/config walls that paging would only
+ * re-hit (masking them as a misleading MESSAGE_NOT_FOUND); a 403 in particular is the
+ * recipient-authorization signal, not token expiry. Everything else — a route-absent 404,
+ * transport/5xx failure, or a non-message 2xx body — falls through to paging.
+ */
+const GET_SURFACE_DIRECTLY_CODES = new Set<string>([
+  'DASHBOARD_AUTH_FAILED',
+  'DASHBOARD_FORBIDDEN',
+  'DASHBOARD_UPGRADE_REQUIRED',
+  'DASHBOARD_NOT_CONFIGURED',
+]);
+
+/**
+ * s84-m02 (critic Rev3 hardening) — is `data` the clean single message row we asked for?
+ * Guards the read-one fast path against framing a `{data:null}` / empty / HTML-SPA-shell
+ * body: requires a non-null object whose `id` exactly matches the requested id. Anything
+ * else falls through to the paging scan rather than framing `undefined`/garbage.
+ */
+function isCleanSingleMessage(data: unknown, expectedId: string): data is DashboardMessage {
+  return typeof data === 'object' && data !== null && (data as { id?: unknown }).id === expectedId;
 }
 
 async function handleGet(
@@ -876,12 +951,35 @@ async function handleGet(
     );
   }
 
-  // s80-m05 (F4=A): there is no dashboard GET /api/messages/:id yet (notify-not-block
-  // ask). Serve body-on-get client-side by paging the most recent messages per tab and
-  // selecting by id. Best-effort: bounded to the newest `FETCH_LIMIT` per tab, UNFILTERED
-  // (get is NOT project-pinned — see index.ts — so a message from any of the operator's
-  // projects is visible). s80-m05 review: a transient failure on ONE tab must not hide a
-  // message in the OTHER, so remember the error and keep looking.
+  // s84-m02: try the dashboard read-one endpoint first (GET /api/messages/:id, dashboard
+  // m01) — it is exact + side-effect-free (safe to poll). Fall back to the s80-m05 paging
+  // scan below when the endpoint is absent or degraded, so a PRE-deploy dashboard still
+  // resolves get:
+  //   • a clean single message      → frame + return (the fast path);
+  //   • DASHBOARD_NOT_FOUND         → page (route absent, OR a genuine miss);
+  //   • a non-clean 2xx body        → page ({data:null}/empty/HTML shell/405 → parse or
+  //                                    route error; never frame undefined/garbage — Rev3);
+  //   • an auth/authz/config error  → surface DIRECTLY (paging would re-hit the wall and
+  //                                    mask it; a 403 is the recipient-authz signal).
+  const one = await client.getMessageById(params.messageId);
+  if (one.success && isCleanSingleMessage(one.data, params.messageId)) {
+    const found = one.data;
+    // A read-one row isn't tagged inbox/sent; resolve attribution from whichever side the
+    // row populated (sender first — for a received message the foreign author is the sender).
+    const source = attributionSource(found, 'inbox') ?? attributionSource(found, 'sent');
+    const message: FramedMessage = { ...found, provenance: foreignDescriptor(source) };
+    return createSuccess<MessageGetResult>({ message });
+  }
+  if (!one.success && GET_SURFACE_DIRECTLY_CODES.has(one.error?.code ?? '')) {
+    return createError<MessageGetResult>(one.error!);
+  }
+
+  // s80-m05 (F4=A) FALLBACK: no/degraded read-one endpoint — serve body-on-get client-side
+  // by paging the most recent messages per tab and selecting by id. Best-effort: bounded to
+  // the newest `FETCH_LIMIT` per tab, UNFILTERED (get is NOT project-pinned — see index.ts —
+  // so a message from any of the operator's projects is visible). s80-m05 review: a transient
+  // failure on ONE tab must not hide a message in the OTHER, so remember the error and keep
+  // looking.
   const FETCH_LIMIT = 100;
   let lastError: NonNullable<CmosToolResult<MessageGetResult>['error']> | undefined;
   for (const tab of ['inbox', 'sent'] as const) {
@@ -1107,8 +1205,10 @@ function formatListForLLM(result: CmosToolResult<MessageListResult>): string {
       // the label comes from the populated senderProject/targetProject (was "unknown sender").
       const src =
         msg.provenance?.source ??
+        msg.senderProjectName ??
         msg.senderProject ??
         msg.senderDisplayName ??
+        msg.targetProjectName ??
         msg.targetProject ??
         'unknown sender';
       lines.push(`  [${msg.status}] (${msg.id}) ${frameForeignInline(msg.summary, src)}`);
@@ -1124,7 +1224,12 @@ function formatGetForLLM(result: CmosToolResult<MessageGetResult>): string {
     return `Failed to get message: ${result.error?.message ?? 'Unknown error'}\n${result.error?.suggestion ?? ''}`;
   }
   const m = result.data!.message;
-  const src = m.provenance?.source ?? m.senderProject ?? m.senderDisplayName ?? 'unknown sender';
+  const src =
+    m.provenance?.source ??
+    m.senderProjectName ??
+    m.senderProject ??
+    m.senderDisplayName ??
+    'unknown sender';
   const body = m.payload?.body ?? m.body ?? '(no body)';
   const lines = [
     `Message ${m.id} [${m.status}]`,

@@ -710,6 +710,75 @@ export function ensureConstraintReviewTimestamp(client: CmosDatabaseClient): Mig
   };
 }
 
+/**
+ * s84-m04 (#478) — add `context_snapshots.content_pruned_at` (the content-tombstone marker).
+ * Mirrors {@link ensureConstraintReviewTimestamp}: a plain `ALTER ADD COLUMN` (NOT the 12-step
+ * firehose rebuild), idempotent, no backfill (NULL = not-pruned = the pre-migration meaning).
+ * The prune script runs this before tombstoning; the seed schema carries the column for fresh
+ * stores. Safe on a DB where the column already exists or the table is absent.
+ */
+export function ensureContentPrunedColumn(client: CmosDatabaseClient): MigrationResult {
+  const existing = getTableColumns(client, 'context_snapshots');
+  if (existing.size === 0) {
+    // Table doesn't exist on this DB yet — nothing to alter.
+    return { columnsAdded: [], indexesCreated: [], rowsUpdated: 0, alreadyCurrent: true };
+  }
+  const added = ensureColumn(
+    client,
+    'context_snapshots',
+    { name: 'content_pruned_at', type: 'TEXT' },
+    existing
+  );
+  return {
+    columnsAdded: added ? ['context_snapshots.content_pruned_at'] : [],
+    indexesCreated: [],
+    rowsUpdated: 0,
+    alreadyCurrent: !added,
+  };
+}
+
+/**
+ * s84-m05 — add `constraints.evergreen` (a durable "never trip staleness" flag), mirroring
+ * `learnings.evergreen` (s61-m03) and {@link ensureConstraintReviewTimestamp}. Plain
+ * `ALTER ADD COLUMN evergreen INTEGER NOT NULL DEFAULT 0`, idempotent, no backfill (0 = the
+ * pre-migration meaning). An evergreen constraint (an institutional rule like the ≤4KB review
+ * digest) is excluded from staleness review/count so it never ages past the surfacing floor —
+ * expiry alone could not achieve this (a set expiry still accrues the age score). Safe on a DB
+ * where the column already exists or the table is absent.
+ */
+export function ensureConstraintEvergreen(client: CmosDatabaseClient): MigrationResult {
+  const existing = getTableColumns(client, 'constraints');
+  if (existing.size === 0) {
+    return { columnsAdded: [], indexesCreated: [], rowsUpdated: 0, alreadyCurrent: true };
+  }
+  const added = ensureColumn(
+    client,
+    'constraints',
+    { name: 'evergreen', type: 'INTEGER NOT NULL DEFAULT 0' },
+    existing
+  );
+  return {
+    columnsAdded: added ? ['constraints.evergreen'] : [],
+    indexesCreated: [],
+    rowsUpdated: 0,
+    alreadyCurrent: !added,
+  };
+}
+
+/**
+ * s84-m04 (critic Rev4 — the dedup black-hole fix) — the WHERE-clause fragment every
+ * `context_snapshots` content_hash dedup SELECT appends so a content-TOMBSTONED row (its content
+ * emptied by the prune) is never a dedup hit. Without it, a future identical-content write would
+ * "dedup" onto the emptied row and silently lose the content. Column-presence guarded: a
+ * tombstoned row can only exist once `content_pruned_at` exists, so on a store predating the
+ * column the fragment is empty (no filter, no `no such column` throw) — exact and never-throw.
+ */
+export function snapshotDedupPrunedFilter(client: CmosDatabaseClient): string {
+  return getTableColumns(client, 'context_snapshots').has('content_pruned_at')
+    ? ' AND content_pruned_at IS NULL'
+    : '';
+}
+
 export function ensureDecisionsFts5(client: CmosDatabaseClient): MigrationResult {
   // Check if FTS5 table already exists
   const existing = client.getOne<{ name: string }>(

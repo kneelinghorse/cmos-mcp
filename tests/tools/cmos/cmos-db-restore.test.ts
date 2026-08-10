@@ -148,7 +148,8 @@ describe('cmos_db_restore', () => {
 
     expect(result.success).toBe(false);
     expect(result.error?.code).toBe(CMOS_ERROR_CODES.SNAPSHOT_NOT_FOUND);
-    expect(result.error?.suggestion).toContain('cmos_db_snapshot');
+    // s85-m01: the suggestion must name the consolidated tool — cmos_db_snapshot no longer exists.
+    expect(result.error?.suggestion).toContain('cmos_db(action="snapshot"');
   });
 
   it('rejects restore without explicit destructive confirmation', async () => {

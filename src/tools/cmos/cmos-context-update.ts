@@ -12,6 +12,7 @@ import { z } from 'zod';
 import * as crypto from 'crypto';
 import { withClientValidated, type CmosDatabaseClient } from './client';
 import { genesisColumns, getProjectId } from './genesis-columns';
+import { snapshotDedupPrunedFilter } from './schema-migrations';
 import type { CmosToolResult, Context } from './types';
 import { createError, createSuccess, CMOS_ERROR_CODES } from './errors';
 import {
@@ -890,9 +891,10 @@ function createSnapshot(
   const contentHash = crypto.createHash('sha256').update(content).digest('hex').substring(0, 16);
   const now = new Date().toISOString();
 
-  // Check for duplicate
+  // Check for duplicate. s84-m04: exclude a content-tombstoned row so identical content
+  // re-persists fresh instead of deduping onto the emptied row.
   const existingResult = client.getOne<{ id: number }>(
-    'SELECT id FROM context_snapshots WHERE context_id = ? AND content_hash = ?',
+    `SELECT id FROM context_snapshots WHERE context_id = ? AND content_hash = ?${snapshotDedupPrunedFilter(client)}`,
     [contextId, contentHash]
   );
 

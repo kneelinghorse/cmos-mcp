@@ -717,6 +717,56 @@ describe('constraint staleness (s40-m03)', () => {
       expect(row.last_reviewed_at).toBeTruthy();
     });
 
+    // ─── s84-m05: evergreen flag (constraint #2 durable exclusion) ──────────
+    it('evergreen=true durably drops the constraint off review + banner (constraint #2 case)', async () => {
+      // A 90-day-old no-expiry constraint scores 100 — the constraint #2 (cmos_review ≤4KB) case.
+      await seedOne(testDb.db, 90);
+
+      // Before: flagged in review + counted.
+      let review = await cmosConstraints({
+        constraintAction: 'review',
+        projectRoot: testDb.tempDir,
+      });
+      expect(
+        review.data?.reviewItems?.find((i) => i.content.startsWith('cmos_review'))
+      ).toBeDefined();
+
+      // Reaffirm WITH evergreen=true via the cmos_context surface (exercises the plumbing).
+      const r = await cmosContext({
+        action: 'constraints',
+        constraintAction: 'reaffirm',
+        constraintId: 1,
+        evergreen: true,
+        projectRoot: testDb.tempDir,
+      });
+      expect(r.success).toBe(true);
+
+      // Positive-fire: the evergreen column landed AND is set to 1 in the store.
+      const cols = (
+        testDb.db.prepare(`PRAGMA table_info('constraints')`).all() as { name: string }[]
+      ).map((c) => c.name);
+      expect(cols).toContain('evergreen');
+      const row = testDb.db.prepare('SELECT evergreen FROM constraints WHERE id = 1').get() as {
+        evergreen: number;
+      };
+      expect(row.evergreen).toBe(1);
+
+      // After: excluded from review AND the onboard/cmos_review banner count — DURABLY (evergreen
+      // does not age out like a reaffirm-only reset would). list still shows it, flagged evergreen.
+      review = await cmosConstraints({ constraintAction: 'review', projectRoot: testDb.tempDir });
+      expect(
+        review.data?.reviewItems?.find((i) => i.content.startsWith('cmos_review'))
+      ).toBeUndefined();
+
+      const c = (await CmosDatabaseClient.create({ dbPath: testDb.dbPath })).data!;
+      expect(getStaleConstraintCount(c)).toBe(0);
+      c.close();
+
+      const list = await cmosConstraints({ constraintAction: 'list', projectRoot: testDb.tempDir });
+      const listed = list.data?.items?.find((i) => i.content.startsWith('cmos_review'));
+      expect(listed?.evergreen).toBe(true);
+    });
+
     it('requires constraintId', async () => {
       const r = await cmosConstraints({
         constraintAction: 'reaffirm',
@@ -776,6 +826,7 @@ describe('constraint staleness (s40-m03)', () => {
               expiresAt: null,
               archivedAt: null,
               lastReviewedAt: null,
+              evergreen: false,
             },
           ],
           affected: 1,
@@ -805,6 +856,7 @@ describe('constraint staleness (s40-m03)', () => {
               expiresAt: '2026-03-10T00:00:00Z',
               archivedAt: null,
               lastReviewedAt: null,
+              evergreen: false,
               stalenessScore: 100,
               reason: 'expired' as const,
             },

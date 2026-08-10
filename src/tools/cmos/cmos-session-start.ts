@@ -243,7 +243,7 @@ export async function cmosSessionStart(
         return createError<CmosSessionStartResult>({
           code: CMOS_ERROR_CODES.SESSION_ALREADY_ACTIVE,
           message: `Session '${active.id}' is already active`,
-          suggestion: `Complete the active session first with cmos_session_complete, or use cmos_session_capture to add to it`,
+          suggestion: `Complete the active session first with cmos_session(action="complete"), or use cmos_session(action="capture") to add to it`,
           currentState: active.id,
         });
       }
@@ -440,7 +440,7 @@ export function formatSessionStartForLLM(result: CmosToolResult<CmosSessionStart
 
   lines.push('');
   lines.push(
-    'Next: Use `cmos_session_capture` to record insights, then `cmos_session_complete` when done.'
+    'Next: Use `cmos_session(action="capture")` to record insights, then `cmos_session(action="complete")` when done.'
   );
 
   return lines.join('\n');

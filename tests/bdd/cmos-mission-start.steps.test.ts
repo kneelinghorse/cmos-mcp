@@ -377,10 +377,12 @@ defineFeature(feature, (test) => {
       expect(result.error?.message).toContain('In Progress');
     });
 
-    and('the error suggests using cmos_mission_complete or cmos_mission_block', () => {
+    and('the error suggests using cmos_mission_transition action complete or block', () => {
       const suggestion = result.error?.suggestion ?? '';
-      const hasMissionComplete = suggestion.includes('cmos_mission_complete');
-      const hasMissionBlock = suggestion.includes('cmos_mission_block');
+      // s85-m01: the suggestion now names the consolidated transition tool — cmos_mission_complete
+      // and cmos_mission_block were removed in the 38→15 consolidation.
+      const hasMissionComplete = suggestion.includes('cmos_mission_transition(action="complete")');
+      const hasMissionBlock = suggestion.includes('cmos_mission_transition(action="block")');
       expect(hasMissionComplete || hasMissionBlock).toBe(true);
     });
   });
@@ -413,7 +415,8 @@ defineFeature(feature, (test) => {
     });
 
     and('the error instructs to use cmos_mission_unblock first with a resolution', () => {
-      expect(result.error?.suggestion).toContain('cmos_mission_unblock');
+      // s85-m01: suggestions now name the CONSOLIDATED tool — the pre-s85 name was removed in the 38→15 consolidation.
+      expect(result.error?.suggestion).toContain('cmos_mission_transition(action="unblock")');
     });
   });
 

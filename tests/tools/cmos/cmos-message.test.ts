@@ -204,6 +204,7 @@ function mockClient() {
   const client = {
     sendMessage: jest.fn() as AnyMock,
     listMessages: jest.fn() as AnyMock,
+    getMessageById: jest.fn() as AnyMock,
     respondToMessage: jest.fn() as AnyMock,
     ackMessage: jest.fn() as AnyMock,
     resolveAddress: jest.fn() as AnyMock,
@@ -214,6 +215,13 @@ function mockClient() {
   // Default: resolveAddress succeeds (pre-send validation passes)
   client.resolveAddress.mockResolvedValue(
     createSuccess({ resolved: true, projectName: 'test-project' })
+  );
+
+  // s84-m02 default: the read-one endpoint is "absent" (404) so handleGet falls back to
+  // the paging scan — this preserves the pre-m02 behavior for every existing get test.
+  // Tests exercising the read-one fast path override this per-case.
+  client.getMessageById.mockResolvedValue(
+    createError(CmosErrors.dashboardNotFound('/api/messages/:id'))
   );
 
   // Default: getMyProjects returns empty (senderProjectId stays undefined unless overridden)
@@ -496,6 +504,272 @@ describe('s78-m05 foreign-content provenance framing', () => {
   it('tool description carries the untrusted-content contract sentence', () => {
     expect(cmosMessageToolDefinition.description).toContain('untrusted');
     expect(cmosMessageToolDefinition.description).toMatch(/never instructions|not.*instructions/i);
+  });
+});
+
+// ─── s84-m01 sprint-47 cutover: version-tolerant NAME reads + identity UUIDs ──
+
+describe('s84-m01 version-tolerant NAME reads + identity UUIDs', () => {
+  it('list(inbox) PRE-cutover: senderProject=NAME (no *Name) still labels the NAME; no *Name/UUID keys added', async () => {
+    const client = mockClient();
+    client.listMessages.mockResolvedValueOnce(
+      createSuccess({
+        messages: [
+          {
+            id: 'pre-1',
+            type: 'question',
+            summary: 'hello',
+            // pre-cutover: senderProject carries the display NAME, no *Name twin, no UUIDs.
+            senderProject: 'CMOS-MCP Pro',
+            status: 'pending',
+            createdAt: '2026-01-01T00:00:00Z',
+          },
+        ],
+        totalCount: 1,
+        unreadCount: 1,
+      })
+    );
+
+    const result = await cmosMessage({ action: 'list' });
+    expect(result.success).toBe(true);
+    const msg = (result.data as unknown as { messages: Array<Record<string, unknown>> })
+      .messages[0];
+    // Attribution reads the NAME from the pre-cutover senderProject (name ?? slug).
+    expect(msg.provenance).toEqual({ source: 'CMOS-MCP Pro', trust: 'foreign' });
+    expect(msg.senderProject).toBe('CMOS-MCP Pro');
+    // Byte-identical to 2.3.0: no null-wall of absent additive keys on a lean row.
+    expect('senderProjectName' in msg).toBe(false);
+    expect('senderUserId' in msg).toBe(false);
+    expect('senderProjectId' in msg).toBe(false);
+    expect('targetUserId' in msg).toBe(false);
+    expect('targetProjectId' in msg).toBe(false);
+
+    const text = formatMessageForLLM('list', result as never);
+    expect(text).toContain('⟪untrusted, from CMOS-MCP Pro⟫');
+  });
+
+  it('list(inbox) POST-cutover: senderProject=slug + senderProjectName=NAME + UUIDs → NAME label, BOTH slug and name carried', async () => {
+    const client = mockClient();
+    client.listMessages.mockResolvedValueOnce(
+      createSuccess({
+        messages: [
+          {
+            id: 'post-1',
+            type: 'question',
+            summary: 'hello',
+            // post-cutover: senderProject REPURPOSED to the slug; NAME moves to senderProjectName.
+            senderProject: 'cmos-mcp-pro',
+            senderProjectName: 'CMOS-MCP Pro',
+            senderUserId: 'user-uuid-1',
+            senderProjectId: 'sproj-uuid-1',
+            targetUserId: 'user-uuid-2',
+            targetProjectId: 'tproj-uuid-2',
+            status: 'pending',
+            createdAt: '2026-01-01T00:00:00Z',
+          },
+        ],
+        totalCount: 1,
+        unreadCount: 1,
+      })
+    );
+
+    const result = await cmosMessage({ action: 'list' });
+    expect(result.success).toBe(true);
+    const msg = (result.data as unknown as { messages: Array<Record<string, unknown>> })
+      .messages[0];
+    // Label renders the NAME (senderProjectName preferred over the now-slug senderProject).
+    expect(msg.provenance).toEqual({ source: 'CMOS-MCP Pro', trust: 'foreign' });
+    // MessageSummary carries BOTH the raw slug (addressable key) and the display name.
+    expect(msg.senderProject).toBe('cmos-mcp-pro');
+    expect(msg.senderProjectName).toBe('CMOS-MCP Pro');
+    // All 4 identity UUIDs pass through.
+    expect(msg.senderUserId).toBe('user-uuid-1');
+    expect(msg.senderProjectId).toBe('sproj-uuid-1');
+    expect(msg.targetUserId).toBe('user-uuid-2');
+    expect(msg.targetProjectId).toBe('tproj-uuid-2');
+
+    const text = formatMessageForLLM('list', result as never);
+    // The LLM fence labels the NAME, never the slug.
+    expect(text).toContain('⟪untrusted, from CMOS-MCP Pro⟫');
+    expect(text).not.toContain('from cmos-mcp-pro⟫');
+  });
+
+  it('list(sent) POST-cutover: targetProject=slug + targetProjectName=NAME → NAME label, both carried', async () => {
+    const client = mockClient();
+    client.listMessages.mockResolvedValueOnce(
+      createSuccess({
+        messages: [
+          {
+            id: 'post-sent-1',
+            type: 'status_update',
+            summary: 'sent one',
+            targetProject: 'forge',
+            targetProjectName: 'Forge',
+            senderProjectId: 'sproj-uuid-1',
+            targetProjectId: 'tproj-uuid-2',
+            status: 'accepted',
+            createdAt: '2026-01-01T00:00:00Z',
+          },
+        ],
+        totalCount: 1,
+        unreadCount: 0,
+      })
+    );
+
+    const result = await cmosMessage({ action: 'list', tab: 'sent' });
+    expect(result.success).toBe(true);
+    const msg = (result.data as unknown as { messages: Array<Record<string, unknown>> })
+      .messages[0];
+    expect(msg.provenance).toEqual({ source: 'Forge', trust: 'foreign' });
+    expect(msg.targetProject).toBe('forge');
+    expect(msg.targetProjectName).toBe('Forge');
+    expect(msg.senderProjectId).toBe('sproj-uuid-1');
+    expect(msg.targetProjectId).toBe('tproj-uuid-2');
+  });
+
+  it('get POST-cutover: FramedMessage frames the NAME and carries the identity UUIDs', async () => {
+    const client = mockClient();
+    const msgId = '33333333-4444-5555-6666-777777777777';
+    client.listMessages.mockResolvedValue(
+      createSuccess({
+        messages: [
+          {
+            id: msgId,
+            type: 'question',
+            summary: 'q',
+            payload: { body: 'BODY' },
+            senderProject: 'cmos-mcp-pro',
+            senderProjectName: 'CMOS-MCP Pro',
+            senderUserId: 'user-uuid-1',
+            senderProjectId: 'sproj-uuid-1',
+            status: 'pending',
+            createdAt: '2026-01-01T00:00:00Z',
+          },
+        ],
+        totalCount: 1,
+        unreadCount: 1,
+      })
+    );
+
+    const result = await cmosMessage({ action: 'get', messageId: msgId });
+    expect(result.success).toBe(true);
+    const m = (result.data as unknown as { message: Record<string, unknown> }).message;
+    // FramedMessage = raw row + provenance: the identity UUIDs ride the raw row unchanged.
+    expect(m.provenance).toEqual({ source: 'CMOS-MCP Pro', trust: 'foreign' });
+    expect(m.senderUserId).toBe('user-uuid-1');
+    expect(m.senderProjectId).toBe('sproj-uuid-1');
+
+    const text = formatMessageForLLM('get', result as never);
+    expect(text).toContain('⟪untrusted, from CMOS-MCP Pro⟫');
+  });
+});
+
+// ─── s84-m02 read-one endpoint + hardened fallback ───────────────────────────
+
+describe('s84-m02 get: read-one endpoint + hardened fallback', () => {
+  const MSG_ID = '44444444-5555-6666-7777-888888888888';
+
+  it('endpoint present: uses a single getMessageById, frames the body, and does NOT page', async () => {
+    const client = mockClient();
+    client.getMessageById.mockResolvedValueOnce(
+      createSuccess({
+        id: MSG_ID,
+        type: 'question',
+        summary: 'hi',
+        payload: { body: 'BODY' },
+        senderProjectName: 'CMOS-MCP Pro',
+        status: 'pending',
+        createdAt: 't',
+      })
+    );
+
+    const result = await cmosMessage({ action: 'get', messageId: MSG_ID });
+    expect(result.success).toBe(true);
+    const m = (result.data as unknown as { message: Record<string, unknown> }).message;
+    expect(m.id).toBe(MSG_ID);
+    expect(m.provenance).toEqual({ source: 'CMOS-MCP Pro', trust: 'foreign' });
+    // The fast path must not fall back to the paging scan.
+    expect(client.getMessageById).toHaveBeenCalledTimes(1);
+    expect(client.listMessages).not.toHaveBeenCalled();
+  });
+
+  it('endpoint absent (404): falls back to the paging scan and frames the same body', async () => {
+    const client = mockClient();
+    // default getMessageById → DASHBOARD_NOT_FOUND; paging finds it in the inbox.
+    client.listMessages.mockResolvedValue(
+      createSuccess({
+        messages: [
+          {
+            id: MSG_ID,
+            type: 'question',
+            summary: 'hi',
+            payload: { body: 'BODY' },
+            status: 'pending',
+            createdAt: 't',
+          },
+        ],
+        totalCount: 1,
+        unreadCount: 1,
+      })
+    );
+
+    const result = await cmosMessage({ action: 'get', messageId: MSG_ID });
+    expect(result.success).toBe(true);
+    const m = (result.data as unknown as { message: Record<string, unknown> }).message;
+    expect(m.id).toBe(MSG_ID);
+    expect(client.getMessageById).toHaveBeenCalledTimes(1);
+    expect(client.listMessages).toHaveBeenCalled(); // paged
+  });
+
+  it('403 on read-one: surfaces DASHBOARD_FORBIDDEN and does NOT page', async () => {
+    const client = mockClient();
+    client.getMessageById.mockResolvedValueOnce(
+      createError({ code: 'DASHBOARD_FORBIDDEN', message: 'not the recipient' })
+    );
+
+    const result = await cmosMessage({ action: 'get', messageId: MSG_ID });
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('DASHBOARD_FORBIDDEN');
+    expect(client.listMessages).not.toHaveBeenCalled();
+  });
+
+  it('hardened (Rev3): a non-clean {data:null} read-one body falls through to paging, never frames garbage', async () => {
+    const client = mockClient();
+    // read-one "succeeds" but returns a null/garbage body (e.g. {data:null} unwrapped to null).
+    client.getMessageById.mockResolvedValueOnce(createSuccess(null));
+    client.listMessages.mockResolvedValue(
+      createSuccess({
+        messages: [
+          {
+            id: MSG_ID,
+            type: 'question',
+            summary: 'hi',
+            payload: { body: 'BODY' },
+            status: 'pending',
+            createdAt: 't',
+          },
+        ],
+        totalCount: 1,
+        unreadCount: 1,
+      })
+    );
+
+    const result = await cmosMessage({ action: 'get', messageId: MSG_ID });
+    expect(result.success).toBe(true);
+    const m = (result.data as unknown as { message: Record<string, unknown> }).message;
+    expect(m.id).toBe(MSG_ID); // framed the real paged message, not the null body
+    expect(client.listMessages).toHaveBeenCalled();
+  });
+
+  it('genuine not-found: read-one 404 + empty paging → MESSAGE_NOT_FOUND', async () => {
+    const client = mockClient();
+    client.listMessages.mockResolvedValue(
+      createSuccess({ messages: [], totalCount: 0, unreadCount: 0 })
+    );
+
+    const result = await cmosMessage({ action: 'get', messageId: MSG_ID });
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('MESSAGE_NOT_FOUND');
   });
 });
 

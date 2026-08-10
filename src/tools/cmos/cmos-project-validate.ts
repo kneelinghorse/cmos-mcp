@@ -184,7 +184,7 @@ export function formatProjectValidateForLLM(result: CmosToolResult<ProjectValida
   if (summary.total === 0) {
     lines.push('📋 No projects to validate');
     lines.push('');
-    lines.push('Use cmos_project_register to add a project.');
+    lines.push('Use cmos_project(action="register") to add a project.');
     return lines.join('\n');
   }
 
@@ -230,7 +230,7 @@ export function formatProjectValidateForLLM(result: CmosToolResult<ProjectValida
   }
 
   if (stale.length > 0 || missing.length > 0) {
-    lines.push('Tip: Use cmos_project_validate(prune=true) to remove invalid entries.');
+    lines.push('Tip: Use cmos_project(action="validate", prune=true) to remove invalid entries.');
   }
 
   return lines.join('\n');

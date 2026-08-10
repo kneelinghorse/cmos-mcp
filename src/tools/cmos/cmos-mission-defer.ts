@@ -110,8 +110,12 @@ export async function cmosMissionDefer(
           code: CMOS_ERROR_CODES.MISSION_INVALID_STATE,
           message: `Mission '${missionId}' is already Deferred`,
           currentState: currentStatus,
+          // s85-m01: the pre-s85 text named cmos_mission_transition action="requeue" (no such
+          // action) and cmos_mission_update (no such tool). Deferred transitions to Queued /
+          // Current / Dropped (errors.ts VALID_STATE_TRANSITIONS), and unblock is valid only
+          // from Blocked — so an update to status is the actual re-queue path.
           suggestion:
-            'Use cmos_mission_transition with action="requeue" or cmos_mission_update to re-queue it',
+            'Use cmos_mission(action="update", fields={"status":"Queued"}) to re-queue it',
         });
       }
 

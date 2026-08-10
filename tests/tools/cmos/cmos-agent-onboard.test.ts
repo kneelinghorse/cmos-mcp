@@ -862,9 +862,15 @@ describe('cmos_agent_onboard', () => {
       expect(result.data?.contextFreshness.isStale).toBe(true);
       expect(result.data?.contextFreshness.lagDays).toBeGreaterThan(7);
       const warnings = result.warnings ?? [];
-      expect(warnings.some((warning) => warning.includes('cmos_context_update()'))).toBe(true);
+      // s85-m01: these warnings ship to every stale-context session start, so they must name
+      // the CONSOLIDATED tools. The pre-s85 strings (cmos_context_update / cmos_session_start)
+      // named tools that were removed in the 38→15 consolidation and would return an
+      // unknown-tool error if an agent followed them verbatim.
+      expect(warnings.some((warning) => warning.includes('cmos_context(action="update")'))).toBe(
+        true
+      );
       const hasReviewSuggestion = warnings.some((warning) =>
-        warning.includes('cmos_session_start(type="review"')
+        warning.includes('cmos_session(action="start", type="review"')
       );
       expect(hasReviewSuggestion).toBe(true);
     });

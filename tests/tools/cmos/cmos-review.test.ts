@@ -426,6 +426,39 @@ describe('cmos_review', () => {
       expect(digest.next_actions.length).toBeLessThanOrEqual(3);
     });
 
+    // s84-m05: build-freshness is gated on projectType==='build'. The store above defaults to
+    // 'build' (no metadata.project_type) — the positive case is covered by the test above.
+    function setProjectType(value: string): void {
+      const db = new Database(dbPath);
+      db.exec(`CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
+      db.prepare(`INSERT OR REPLACE INTO metadata (key, value) VALUES ('project_type', ?)`).run(
+        value
+      );
+      db.close();
+    }
+
+    it('SKIPS buildFreshness for a general-tier project even when src is stale (m05 gate)', async () => {
+      setProjectType('general');
+      writeDistManifest(new Date(Date.now() - 60_000));
+      writeSrcFile('src/foo.ts', new Date()); // src newer → would be stale for a build project
+
+      const result = await cmosReview({ projectRoot: tempDir });
+      const digest = result.data as CmosReviewResult;
+      // Gated off: no freshness report and no priority-1 "npm run build" next_action.
+      expect(digest.buildFreshness).toBeUndefined();
+      expect(digest.next_actions.find((a) => a.command === 'npm run build')).toBeUndefined();
+    });
+
+    it('KEEPS buildFreshness for an explicit build-tier project when stale (m05 gate positive)', async () => {
+      setProjectType('build');
+      writeDistManifest(new Date(Date.now() - 60_000));
+      writeSrcFile('src/foo.ts', new Date());
+
+      const result = await cmosReview({ projectRoot: tempDir });
+      const digest = result.data as CmosReviewResult;
+      expect(digest.buildFreshness?.stale).toBe(true);
+    });
+
     it('attaches buildFreshness with dist-missing reason when dist/ is absent entirely', async () => {
       writeSrcFile('src/foo.ts');
 

@@ -179,6 +179,27 @@ export interface DashboardMessage {
   targetProject?: string | null;
   /** Sent: the target mission id, when the message was addressed to one. */
   targetMissionId?: string | null;
+  // ── s84-m01: sprint-47 dashboard messaging cutover (msg 3d59132e) ──────────
+  // The cutover REPURPOSES `senderProject`/`targetProject` to carry the SLUG
+  // (they previously carried the display NAME) and adds these `*Name` twins to
+  // carry the display NAME, plus four additive identity UUIDs on every row.
+  // Version-tolerant reads use `*Name ?? *Project` (name ?? slug) so they yield
+  // the NAME pre-cutover (only slug-less `*Project`=NAME populated) AND
+  // post-cutover (`*Name`=NAME populated). All optional so a pre-cutover row parses.
+  /** Inbox: the sender project's display name post-cutover (twin of the now-slug `senderProject`). */
+  senderProjectName?: string | null;
+  /** Sent: the recipient project's display name post-cutover (twin of the now-slug `targetProject`). */
+  targetProjectName?: string | null;
+  /** Additive identity UUID: sender operator's user id. Distinct from the snake_case
+   *  `from_project_id` (a PROJECT id) and from the outbound `SendMessageParams.senderProjectId`. */
+  senderUserId?: string | null;
+  /** Additive identity UUID: sender PROJECT id. Distinct from the snake_case `from_project_id`
+   *  (legacy intel field) and the outbound `SendMessageParams.senderProjectId`. */
+  senderProjectId?: string | null;
+  /** Additive identity UUID: recipient operator's user id. */
+  targetUserId?: string | null;
+  /** Additive identity UUID: recipient PROJECT id. Distinct from the snake_case `to_project_id`. */
+  targetProjectId?: string | null;
 }
 
 export interface SendMessageParams {
@@ -223,12 +244,17 @@ export interface ListMessagesParams {
   tab?: 'inbox' | 'sent';
   status?: string;
   limit?: number;
+  /** s84-m02: SQL-side pagination offset (dashboard m05). Omitted → dashboard defaults to 0. */
+  offset?: number;
 }
 
 export interface ListMessagesResult {
   messages: DashboardMessage[];
   unreadCount: number;
   totalCount: number;
+  /** s84-m02: page size the dashboard actually returned (dashboard m05). Absent on a
+   *  pre-cutover dashboard that does not echo it — callers treat absence as unknown. */
+  returnedCount?: number;
 }
 
 export interface RespondToMessageParams {
@@ -914,6 +940,22 @@ export class DashboardClient {
   }
 
   /**
+   * s84-m02 — parse the dashboard's unified error envelope `{ error, hint }`
+   * (dashboard m04) from a 4xx JSON body, best-effort. Returns `{}` when the body
+   * is not JSON or carries neither field, so callers fall back to a generic message.
+   * Reads the response body via `.json()`; pass a `.clone()` if the caller also
+   * needs to read the body as text afterward.
+   */
+  private static async parseErrorEnvelope(
+    response: Response
+  ): Promise<{ detail?: string; hint?: string }> {
+    const errorBody = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+    const detail = errorBody?.error ? String(errorBody.error) : undefined;
+    const hint = errorBody?.hint ? String(errorBody.hint) : undefined;
+    return { ...(detail ? { detail } : {}), ...(hint ? { hint } : {}) };
+  }
+
+  /**
    * Make an authenticated HTTP request to the dashboard.
    */
   private async request<T>(
@@ -948,11 +990,23 @@ export class DashboardClient {
 
       clearTimeout(timeout);
 
-      if (response.status === 401 || response.status === 403) {
-        // Token may have expired server-side — clear cache and retry once
+      if (response.status === 401) {
+        // 401 = token expired/invalid server-side — clear the cache so the next call
+        // re-authenticates (jwt clients re-login; apiKey clients surface the failure).
         this.cachedToken = null;
         this.tokenExpiresAt = 0;
         return createError(CmosErrors.dashboardAuthFailed(this.baseUrl));
+      }
+
+      if (response.status === 403) {
+        // s84-m02: a 403 is an AUTHZ denial, NOT token expiry — do NOT clear the cached
+        // token. Clearing poisoned apiKey auth (an apiKey client has no re-login path, so
+        // the very next call sent `Bearer null`) and mislabeled a genuine forbidden — e.g.
+        // ack/respond "not the recipient", or an owner-gated route that returns 403 (not
+        // 404) after the dashboard m04 cutover — as an authentication failure. Parse the
+        // unified {error,hint} envelope the same way the 404 branch does.
+        const { detail, hint } = await DashboardClient.parseErrorEnvelope(response);
+        return createError(CmosErrors.dashboardForbidden(path, detail, hint));
       }
 
       if (response.status === 402) {
@@ -961,12 +1015,7 @@ export class DashboardClient {
       }
 
       if (response.status === 404) {
-        const errorBody = (await response.json().catch(() => null)) as Record<
-          string,
-          unknown
-        > | null;
-        const detail = errorBody?.error ? String(errorBody.error) : undefined;
-        const hint = errorBody?.hint ? String(errorBody.hint) : undefined;
+        const { detail, hint } = await DashboardClient.parseErrorEnvelope(response);
         return createError(CmosErrors.dashboardNotFound(path, detail, hint));
       }
 
@@ -976,6 +1025,13 @@ export class DashboardClient {
       }
 
       if (!response.ok) {
+        // Unified error envelope (dashboard m04): prefer the {error,hint} fields when the
+        // body carries them, else fall back to the raw text. Clone so a non-JSON body can
+        // still be read as text after the JSON parse attempt.
+        const { detail, hint } = await DashboardClient.parseErrorEnvelope(response.clone());
+        if (detail) {
+          return createError(CmosErrors.dashboardError(hint ? `${detail} (${hint})` : detail));
+        }
         const text = await response.text().catch(() => 'Unknown error');
         return createError(CmosErrors.dashboardError(`HTTP ${response.status}: ${text}`));
       }
@@ -1088,11 +1144,25 @@ export class DashboardClient {
     if (params?.tab) query.set('tab', params.tab);
     if (params?.status) query.set('status', params.status);
     if (params?.limit !== undefined) query.set('limit', String(params.limit));
+    // s84-m02: only send offset when provided so omitting it reproduces the exact
+    // pre-cutover call args (dashboard defaults offset to 0 server-side).
+    if (params?.offset !== undefined) query.set('offset', String(params.offset));
 
     const queryString = query.toString();
     const path = `/api/messages${queryString ? `?${queryString}` : ''}`;
 
     return this.request<ListMessagesResult>('GET', path);
+  }
+
+  /**
+   * s84-m02 — fetch a single message by id (dashboard m01: GET /api/messages/:id).
+   * Authorized read-one returning the same slug/name fields as the list rows, with no
+   * read/ack side-effect (safe to poll). The dashboard 404s a non-UUID id or a message
+   * the caller cannot see; the shared request() maps that to DASHBOARD_NOT_FOUND, which
+   * cmos_message.handleGet() catches to fall back to the pre-deploy paging scan.
+   */
+  async getMessageById(id: string): Promise<CmosToolResult<DashboardMessage>> {
+    return this.request<DashboardMessage>('GET', `/api/messages/${encodeURIComponent(id)}`);
   }
 
   /**

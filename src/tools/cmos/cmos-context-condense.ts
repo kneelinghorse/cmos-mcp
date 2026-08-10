@@ -17,6 +17,7 @@ import { z } from 'zod';
 import * as crypto from 'crypto';
 import { withClientValidated, type CmosDatabaseClient } from './client';
 import { genesisColumns, getProjectId } from './genesis-columns';
+import { snapshotDedupPrunedFilter } from './schema-migrations';
 import type { CmosToolResult, Context } from './types';
 import { createError, createSuccess, CMOS_ERROR_CODES } from './errors';
 import {
@@ -177,7 +178,7 @@ export async function cmosContextCondense(
         return createError<CmosContextCondenseResult>({
           code: CMOS_ERROR_CODES.CONTEXT_NOT_FOUND,
           message: `Context '${contextType}' not found`,
-          suggestion: 'Use cmos_context_view to check available contexts',
+          suggestion: 'Use cmos_context(action="view") to check available contexts',
         });
       }
 
@@ -602,9 +603,10 @@ function createAutoSnapshot(
   const contentHash = crypto.createHash('sha256').update(content).digest('hex').substring(0, 16);
   const now = new Date().toISOString();
 
-  // Check for duplicate
+  // Check for duplicate. s84-m04: exclude a content-tombstoned row so identical content
+  // re-persists fresh instead of deduping onto the emptied row.
   const existing = client.getOne<{ id: number }>(
-    'SELECT id FROM context_snapshots WHERE context_id = ? AND content_hash = ?',
+    `SELECT id FROM context_snapshots WHERE context_id = ? AND content_hash = ?${snapshotDedupPrunedFilter(client)}`,
     [contextId, contentHash]
   );
   if (existing.success && existing.data) {

@@ -319,8 +319,8 @@ defineFeature(feature, (test) => {
       expect(result.error?.code).toBe(code);
     });
 
-    and('the error suggests choosing a different ID or using cmos_mission_update', () => {
-      expect(result.error?.suggestion).toMatch(/cmos_mission_update/i);
+    and('the error suggests choosing a different ID or using cmos_mission action update', () => {
+      expect(result.error?.suggestion).toMatch(/cmos_mission\(action="update"\)/i);
     });
   });
 

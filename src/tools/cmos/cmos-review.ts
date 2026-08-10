@@ -40,7 +40,11 @@ import { checkBuildFreshness, type BuildFreshnessReport } from './build-freshnes
 import { resolveProjectRootEnhanced } from '../../intelligence/project-resolution';
 import { ProjectGraphRegistry } from '../../intelligence/project-graph-registry';
 import { activeMissionsAcrossProjects } from '../../intelligence/cross-store-queries';
-import { frameForeignInline } from '../../intelligence/provenance-frame';
+import {
+  frameForeignInline,
+  frameInlineIfForeign,
+  isForeignProject,
+} from '../../intelligence/provenance-frame';
 import { isReadOnlyAgentSession } from './read-only-agent-guard';
 
 /**
@@ -58,6 +62,8 @@ export interface NextAction {
 export interface WorkItem {
   id: string;
   name: string;
+  /** s84-m03: the mission's own project_id — foreign name is framed / dropped from nextAction. */
+  projectId?: string | null;
 }
 
 /**
@@ -145,6 +151,8 @@ export interface CmosReviewResult {
     title: string;
     status: string | null;
     focus: string | null;
+    /** s84-m03: the sprint's own project_id — a foreign sprint's title/focus is framed. */
+    projectId?: string | null;
   } | null;
 
   /** Project-only work queue. Cross-project status is explicitly excluded. */
@@ -207,7 +215,7 @@ export type CmosReviewParams = z.infer<typeof cmosReviewSchema>;
 export const cmosReviewToolDefinition = {
   name: 'cmos_review',
   description:
-    'Bundled session-opener digest (≤4KB). Replaces the cmos_agent_onboard + cmos_context_view + cmos_mission_status opener with one payload. Top-3 next_actions are promoted to a flat top-level field. Includes an always-on cross-store `portfolio` rollup (active missions across your registered projects) built on the graph-backed queryAcrossStores; it degrades to null for a single-project setup.',
+    'Bundled session-opener digest (≤4KB). Replaces the older three-step opener (cmos_agent_onboard + cmos_context(action="view") + cmos_mission(action="status")) with one payload. Top-3 next_actions are promoted to a flat top-level field. Includes an always-on cross-store `portfolio` rollup (active missions across your registered projects) built on the graph-backed queryAcrossStores; it degrades to null for a single-project setup.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -318,7 +326,14 @@ export async function cmosReview(
   const missionStatus =
     missionStatusResult.success && missionStatusResult.data ? missionStatusResult.data : null;
 
-  const digest = buildDigest(onboard, missionStatus, buildFreshness, portfolio);
+  // s84-m05: build-freshness is a build-tier concern — a general/managed project has no `dist/`
+  // to keep fresh, so the "rebuild before working" nudge is noise there. Gate on the
+  // already-fetched projectType (no extra query); the probe already ran in the parallel batch
+  // above — we simply suppress its result for non-build tiers. The local store defaults to
+  // 'build', so it keeps the signal.
+  const gatedBuildFreshness = onboard.project.projectType === 'build' ? buildFreshness : null;
+
+  const digest = buildDigest(onboard, missionStatus, gatedBuildFreshness, portfolio);
 
   // Filter to auth + sync warnings only. Drop staleness/orphan/context-size
   // warnings — those live on the long-form cmos_agent_onboard payload.
@@ -347,6 +362,7 @@ function buildDigest(
         title: onboard.currentSprint.title,
         status: onboard.currentSprint.status,
         focus: sprintFocus,
+        projectId: onboard.currentSprint.projectId ?? null,
       }
     : null;
 
@@ -865,11 +881,23 @@ function bucketFromOnboardFallback(onboard: CmosAgentOnboardResult): CmosReviewR
 }
 
 function toWorkItem(m: StatusMissionItem): WorkItem {
-  return { id: m.id, name: truncate(m.name, WORK_ITEM_NAME_CAP_CHARS) };
+  return {
+    id: m.id,
+    name: truncate(m.name, WORK_ITEM_NAME_CAP_CHARS),
+    projectId: m.projectId ?? null,
+  };
 }
 
-function toWorkItemFromOnboard(m: { id: string; name: string }): WorkItem {
-  return { id: m.id, name: truncate(m.name, WORK_ITEM_NAME_CAP_CHARS) };
+function toWorkItemFromOnboard(m: {
+  id: string;
+  name: string;
+  projectId?: string | null;
+}): WorkItem {
+  return {
+    id: m.id,
+    name: truncate(m.name, WORK_ITEM_NAME_CAP_CHARS),
+    projectId: m.projectId ?? null,
+  };
 }
 
 function truncate(value: string, maxLen: number): string {
@@ -926,16 +954,41 @@ export function formatReviewForLLM(result: CmosToolResult<CmosReviewResult>): st
 
   const d = result.data;
   const lines: string[] = [];
+  // s84-m03: fence foreign (pull-merged) sprint/mission text INLINE — the digest is
+  // budget-capped (≤4096 bytes), so only compact inline framing is used here. A
+  // local/NULL-project row renders byte-identical to 2.3.0.
+  const local = d.localProjectId;
   lines.push(`**${d.project.name}** (${d.project.tier}) — ${d.project.cmos_address}`);
   if (d.sprint) {
-    lines.push(`Sprint ${d.sprint.id}: ${d.sprint.title} [${d.sprint.status ?? '—'}]`);
-    if (d.sprint.focus) lines.push(`  ${d.sprint.focus}`);
+    const title = frameInlineIfForeign(d.sprint.title, d.sprint.projectId, local);
+    lines.push(`Sprint ${d.sprint.id}: ${title} [${d.sprint.status ?? '—'}]`);
+    if (d.sprint.focus)
+      lines.push(`  ${frameInlineIfForeign(d.sprint.focus, d.sprint.projectId, local)}`);
   }
   lines.push('');
   lines.push(
     `Work queue — InProgress:${d.workQueue.inProgress.count} Current:${d.workQueue.current.count} Queued:${d.workQueue.queued.count} Blocked:${d.workQueue.blocked.count}`
   );
-  lines.push(`Next: ${d.workQueue.nextAction}`);
+  // s84-m03 (FORK-5): the mission-status nextAction embeds `<id>: <FULL name>` of the
+  // referenced work-queue mission (determineNextAction; the name is the UNTRUNCATED source,
+  // not the byte-capped WorkItem.name). When that mission is FOREIGN, render id-only — cut
+  // the `: <name>` tail at the `<id>: ` marker so the foreign name never lands unfenced in
+  // the ≤4KB digest. Matching the marker (not the name) is truncation-independent — a name
+  // longer than the WorkItem cap would otherwise slip past a name-based match and leak.
+  // Local rows leave nextAction byte-identical (no marker cut).
+  const refItem =
+    d.workQueue.inProgress.top[0] ?? d.workQueue.current.top[0] ?? d.workQueue.queued.top[0];
+  let nextAction = d.workQueue.nextAction;
+  if (refItem && isForeignProject(refItem.projectId, local)) {
+    const marker = `${refItem.id}: `;
+    const idx = nextAction.indexOf(marker);
+    // The name always sits at the END of the recommendation (see determineNextAction), so
+    // slicing from the marker and re-appending the bare id yields the id-only form. Formats
+    // with no `<id>: <name>` segment (e.g. the multi-in-progress "Continue with <id> …",
+    // which carries no name) simply don't match → left unchanged.
+    if (idx !== -1) nextAction = nextAction.slice(0, idx) + refItem.id;
+  }
+  lines.push(`Next: ${nextAction}`);
 
   if (d.next_actions.length > 0) {
     lines.push('');
@@ -973,13 +1026,12 @@ export function formatReviewForLLM(result: CmosToolResult<CmosReviewResult>): st
       `🌐 Portfolio — ${p.activeMissions.count} active mission(s) across ${p.projects} store(s): ` +
         `${parts.join(', ')} · fan-in p95 ${p.fanInP95Ms}ms`
     );
-    // NOTE (s83-m06 scope): foreign MISSION-name framing (portfolio here, plus
-    // cmos_mission status/list/show and onboard pending/blocked) is a distinct
-    // row-type sweep deferred to a follow-up — see SECURITY.md "Known limitation —
-    // foreign MISSION / SPRINT / SESSION text is not yet framed". s83-m06 covers
-    // foreign DECISION/LEARNING rows only.
+    // s84-m03 (#485): a portfolio mission from another project is FOREIGN — frame its
+    // name inline (the [proj:X] tag is metadata, not a trust boundary). The local
+    // project's own rows stay bare. Closes the s83-m06 deferral (SECURITY.md updated).
     for (const m of p.activeMissions.top) {
-      lines.push(`  📋 ${m.id} — ${m.name} [proj:${m.projectId}]`);
+      const name = frameInlineIfForeign(m.name, m.projectId, local);
+      lines.push(`  📋 ${m.id} — ${name} [proj:${m.projectId}]`);
     }
     if (p.drift && p.drift.stale.length > 0) {
       lines.push(`  ⚠ drift (>${p.drift.staleThresholdDays}d): ${p.drift.stale.length} project(s)`);

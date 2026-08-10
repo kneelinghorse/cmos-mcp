@@ -612,7 +612,8 @@ describe('cmos_mission_update', () => {
 
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe(CMOS_ERROR_CODES.MISSION_NOT_FOUND);
-      expect(result.error?.suggestion).toContain('cmos_mission_list');
+      // s85-m01: suggestions now name the CONSOLIDATED tool — the pre-s85 name was removed in the 38→15 consolidation.
+      expect(result.error?.suggestion).toContain('cmos_mission(action="list")');
     });
 
     it('should return MISSING_PARAMETER for empty mission ID', async () => {

@@ -30,6 +30,7 @@ import {
   ensureConstraintsTable,
   ensureAuthorNamespaceColumns,
   computeContentHash,
+  snapshotDedupPrunedFilter,
 } from './schema-migrations';
 import { applyLearningReaffirm, sanitizeLearningIds } from './learning-reaffirm';
 import { recordEmbedding, decisionEmbeddingInput } from '../../intelligence/embedding-pipeline';
@@ -307,7 +308,8 @@ export async function cmosSessionComplete(
           return createError<CmosSessionCompleteResult>({
             code: CMOS_ERROR_CODES.SESSION_NOT_ACTIVE,
             message: 'No active session found',
-            suggestion: 'Start a session first with cmos_session_start, or provide a sessionId',
+            suggestion:
+              'Start a session first with cmos_session(action="start"), or provide a sessionId',
           });
         }
 
@@ -1123,7 +1125,8 @@ function persistContext(
   // Create snapshot with dedup
   const contentHash = crypto.createHash('sha256').update(contentStr).digest('hex').substring(0, 16);
   const existingSnapshot = client.getOne<{ id: number }>(
-    'SELECT id FROM context_snapshots WHERE context_id = ? AND content_hash = ?',
+    // s84-m04: exclude a content-tombstoned row so identical content re-persists fresh.
+    `SELECT id FROM context_snapshots WHERE context_id = ? AND content_hash = ?${snapshotDedupPrunedFilter(client)}`,
     [contextId, contentHash]
   );
 

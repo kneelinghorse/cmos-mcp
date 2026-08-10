@@ -188,7 +188,8 @@ async function callMissionStart(
           code: CMOS_ERROR_CODES.MISSION_INVALID_STATE,
           message: `Mission '${missionId}' is already In Progress`,
           currentState: currentStatus,
-          suggestion: 'Use cmos_mission_complete to mark it done or cmos_mission_block if blocked',
+          suggestion:
+            'Use cmos_mission_transition(action="complete") to mark it done or cmos_mission_transition(action="block") if blocked',
         });
       }
 
@@ -200,7 +201,7 @@ async function callMissionStart(
           currentState: currentStatus,
           validTransitions: ['In Progress', 'Current'],
           suggestion:
-            'Use cmos_mission_unblock to unblock this mission first. ' +
+            'Use cmos_mission_transition(action="unblock") to unblock this mission first. ' +
             'Provide a resolution explaining how the blocker was resolved.',
         });
       }
@@ -458,7 +459,8 @@ async function callMissionBlock(
           code: CMOS_ERROR_CODES.MISSION_ALREADY_BLOCKED,
           message: `Mission '${missionId}' is already Blocked`,
           currentState: currentStatus,
-          suggestion: 'Use cmos_mission_unblock to unblock it first, or update the block reason',
+          suggestion:
+            'Use cmos_mission_transition(action="unblock") to unblock it first, or update the block reason',
         });
       }
 
@@ -767,7 +769,8 @@ describe('cmos_mission_start', () => {
 
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe(CMOS_ERROR_CODES.MISSION_NOT_FOUND);
-      expect(result.error?.suggestion).toContain('cmos_mission_list');
+      // s85-m01: suggestions now name the CONSOLIDATED tool — the pre-s85 name was removed in the 38→15 consolidation.
+      expect(result.error?.suggestion).toContain('cmos_mission(action="list")');
     });
 
     it('should return MISSION_INVALID_STATE for already In Progress mission', async () => {
@@ -794,7 +797,8 @@ describe('cmos_mission_start', () => {
       expect(result.error?.code).toBe(CMOS_ERROR_CODES.MISSION_INVALID_TRANSITION);
       expect(result.error?.currentState).toBe('Blocked');
       expect(result.error?.validTransitions).toContain('In Progress');
-      expect(result.error?.suggestion).toContain('cmos_mission_unblock');
+      // s85-m01: suggestions now name the CONSOLIDATED tool — the pre-s85 name was removed in the 38→15 consolidation.
+      expect(result.error?.suggestion).toContain('cmos_mission_transition(action="unblock")');
     });
 
     it('should return MISSING_PARAMETER for empty mission ID', async () => {

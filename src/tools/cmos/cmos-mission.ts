@@ -205,6 +205,7 @@ export const cmosMissionToolDefinition = {
         description: 'Mission objective for add action',
       },
       context: {
+        type: ['string', 'object'],
         description: 'Mission context for add action (string or object)',
       },
       successCriteria: {
@@ -237,7 +238,7 @@ export const cmosMissionToolDefinition = {
           name: { type: 'string', description: 'Mission name/title' },
           status: { type: 'string', description: 'Mission status' },
           objective: { type: 'string', description: 'Mission objective' },
-          context: { description: 'Background context' },
+          context: { type: ['string', 'object'], description: 'Background context' },
           successCriteria: {
             type: 'array',
             items: { type: 'string' },

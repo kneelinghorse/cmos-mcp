@@ -116,16 +116,33 @@ onboarding, directory, and cross-store/pull-merged decision & learning renders. 
 
   This closes the former mission-start "relevant decisions" limitation for decision/learning content.
 
-- **Known limitation — foreign MISSION / SPRINT / SESSION text is not yet framed.** The same pull-merge
-  path stamps a foreign `project_id` onto pulled `missions` / `sprints` / `sessions` rows, and their
-  name / objective / context / title / focus fields still render **bare** at their read surfaces:
-  `cmos_agent_onboard` pending & blocked missions, `cmos_mission(action="list"|"show")`,
-  `cmos_mission(action="status", acrossProjects=true)`, the `cmos_review` portfolio mission names, and
-  the review digest's sprint title/focus. Framing these is a distinct row-type sweep (their own SELECTs
-  - result types) tracked as a follow-up. In practice the exposure is gated on multi-party
-    collaboration — the sync/pull collab arc is parked (no production cross-owner shares today), so a
-    pulled row is authored by the operator's own project, not a hostile third party — which is why the
-    decision/learning sweep landed first and the mission/sprint sweep is deferred rather than rushed.
+- **MISSION / SPRINT / SESSION read surfaces framed (s84-m03, closes #485):** the same pull-merge path
+  stamps a foreign `project_id` onto pulled `missions` / `sprints` / `sessions` rows. Their
+  name / objective / context / title / focus / summary fields are now derived read-time (same
+  column-presence PRAGMA guard, so ancient stores degrade to `NULL` and render bare, never throw) and a
+  foreign row — its `project_id` ≠ the resolved local project — renders inside the untrusted fence while
+  local rows stay bare, at **every** surface that renders such rows:
+  - `cmos_agent_onboard` current-sprint header, active-session, and pending & blocked missions;
+  - `cmos_mission(action="list")` name/objective, `cmos_mission(action="show")` name/title/focus
+    (inline) + objective/context/success_criteria/deliverables (block);
+  - `cmos_mission(action="status")` local work-queue (In Progress/Current/Queued/Blocked names +
+    objectives + sprint title/focus) and `acrossProjects=true` portfolio mission names (foreign fenced,
+    the local project's own rows bare — the `[proj:X]` tag is metadata, not a trust boundary);
+  - the `cmos_review` digest sprint title/focus, portfolio mission names, and the `Next:` recommendation
+    (a foreign referenced mission renders **id-only** so its name never lands unfenced in the ≤4KB digest);
+  - the `cmos_agent_onboard` **suggested actions** and the `cmos_review` promoted **next_actions** they
+    feed — a foreign mission/session referenced by a "continue/start/resolve/complete" action renders
+    **id-only** (name/title dropped) rather than fenced, keeping the byte-capped digest clean;
+  - `cmos_session(action="list")` title/summary and `cmos_session(action="search")` title + matched
+    snippets.
+
+  This closes the former foreign MISSION/SPRINT/SESSION limitation; the decision/learning sweep (s83-m06)
+  and this row-type sweep together frame every local-store read surface that can carry a pull-merged row.
+  Scope boundary (ratified): the framed field set is name / objective / context / title / focus / summary
+  (+ success_criteria / deliverables on `mission show`). Mission `notes` and `reference_docs` are **not**
+  framed — they are operator-authored operational metadata (a blocker reason, a doc URI), rendered on a
+  narrow set of surfaces, and were deliberately left out of the sweep; revisit if a real cross-owner share
+  makes them an injection vector.
 
 - The separate content sanitizer ([content-sanitizer.ts](src/intelligence/content-sanitizer.ts))
   guards CMOS's own **write** paths against a specific tool-call-marshalling corruption; it is not the

@@ -60,7 +60,7 @@ Feature: Start a mission
     When I call cmos_mission_start with missionId "work-m08"
     Then the call fails with error code "MISSION_INVALID_STATE"
     And the error describes the current status
-    And the error suggests using cmos_mission_complete or cmos_mission_block
+    And the error suggests using cmos_mission_transition action complete or block
 
   Scenario: Reject starting a Blocked mission
     Given a mission "work-m09" exists with status "Blocked"

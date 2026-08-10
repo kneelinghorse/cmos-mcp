@@ -39,8 +39,7 @@ describe('tier-config', () => {
       expect(config).not.toBeNull();
       expect(config!.tier).toBe('build');
       expect(config!.label).toBe('Build');
-      expect(config!.toolsUse).toContain('cmos_mission');
-      expect(config!.toolsUse).toContain('cmos_sprint');
+      // s84-m05: toolsUse deleted (dead field); toolsSkip remains.
       expect(config!.toolsSkip).toEqual([]);
       expect(config!.guide).toContain('structured engineering');
     });
@@ -64,7 +63,6 @@ describe('tier-config', () => {
       expect(config).not.toBeNull();
       expect(config!.tier).toBe('managed');
       expect(config!.label).toBe('Managed');
-      expect(config!.toolsUse).toContain('cmos_mission');
       expect(config!.toolsSkip).toContain('cmos_sprint');
       expect(config!.onboardFieldsHide).toContain('currentSprint');
       expect(config!.onboardFieldsShow).toContain('pendingMissions');

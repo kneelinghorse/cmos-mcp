@@ -4,6 +4,90 @@ All notable changes to cmos-mcp are documented here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## 2.4.0 — 2026-08-10
+
+Sprint 84 "Messaging-Cutover Adoption + Trust-Hardening" plus sprint 85's published-surface
+hygiene. The **15-tool contract holds**. One consumer-visible break — see **Changed**.
+
+### Changed
+
+- **A dashboard 403 now surfaces as `DASHBOARD_FORBIDDEN`, not `DASHBOARD_AUTH_FAILED` (s84 m02).**
+  **This is the one break in this release.** 401 and 403 previously shared an arm in the
+  `DashboardClient` request path, so an authorization failure was reported as an authentication
+  failure. Any consumer branching on the error-code string must update. Beyond the naming, the
+  split fixes a latent bug the sprint-47 dashboard cutover triggers: an `apiKey` client that read
+  a 403 as "auth failed" cleared its cached token and sent `Bearer null` on the next call.
+- **Foreign mission / sprint / session text is framed at read time (s84 m03).** After a
+  `cmos_db(action="pull")`, local tables can hold rows authored in another project. Mission
+  name/objective/context, sprint title/focus and session title now render inside the untrusted
+  provenance fence when the row's `project_id` differs from the resolved local project, across
+  ~10 read surfaces (`cmos_agent_onboard` pending/blocked, `cmos_mission` list/show/status, the
+  `cmos_review` portfolio and sprint fields). Local rows still render bare. Column-presence is
+  PRAGMA-guarded, so ancient stores degrade to `NULL` rather than throwing. This closes the
+  known limitation documented in 2.3.0 and the SECURITY.md mission-start gap.
+- **Build-freshness advisories are gated to `projectType === 'build'` (s84 m05).** A `general` or
+  `managed` project no longer receives build-tier staleness advice it has no use for.
+
+### Added
+
+- **`offset` + `returnedCount` on `cmos_message(action="list")` (s84 m02).** SQL-side pagination
+  against the dashboard's own paging, so large inboxes page without re-fetching. Omitting
+  `offset` reproduces the previous request byte-for-byte.
+- **`cmos_message(action="get")` (s84 m02).** Read one message by id with its full body, notes and
+  evidence — the byte-capped `list` summaries stay small and the body is fetched on demand.
+  Shipped as an **action**, not a 16th tool.
+- **`evergreen` on the constraint reaffirm path (s84 m05).** `cmos_context(action="constraints",
+constraintAction="reaffirm", evergreen=true)` sets a durable flag that permanently excludes an
+  institutional rule from staleness review and the stale-constraint banner. Unlike a plain
+  reaffirm — which only resets the clock and ages out again — this does not decay.
+- **`npm run prune:snapshots` (s84 m04).** Reclaims the write-only `context_snapshots.content`
+  blob (~99% of that table) by **content-tombstone**: the row, all metadata, `content_hash`, the
+  `strategic_decisions.snapshot_id` foreign key and the `snapshot_taken` event are all kept; only
+  the content bytes are released. **Dry-run by default**; `--apply` is required and is
+  irreversible. `cmos_context(action="history")` now surfaces `contentPruned` per row, and
+  `cmos_sprint(action="complete")` emits a non-blocking growth advisory — never an auto-prune.
+- **Additive identity UUIDs on message rows (s84 m01).** `senderUserId` / `senderProjectId` /
+  `targetUserId` / `targetProjectId` alongside the existing fields.
+
+### Fixed
+
+- **`TOOL_REFERENCE.md` shipped a malformed table row (s85 m01).** The renderer interpolated a
+  JSON-Schema type union (`string | object`) raw into a markdown table cell, and the bare pipe
+  split that row into an extra column. The type cell now passes through the table-cell escaper.
+  A new render-validity gate asserts a column-count invariant over the real definitions plus an
+  adversarial synthetic — the existing freshness gate compares rendered against committed output
+  and is structurally unable to catch a formatting defect.
+- **181 agent-facing references named tools or actions that do not exist (s85 m01).** Strings that
+  teach an agent how to call CMOS were left behind by the 38→15 tool consolidation, in error
+  `suggestion` fields, `warnings[]`, tool descriptions and rendered output — including two invalid
+  actions in the general-tier first-session prompt and two non-existent tools emitted on every
+  stale-context session start. All corrected to their consolidated forms, now guarded by a
+  mechanical AST-based gate over `src/` with no allowlist.
+- **The bundled seed docs taught a tool surface that no longer exists (s85 m01).** `cmos-seed/`
+  ships in the package and is copied into every project by `cmos_project(action="init")`; its five
+  docs — including `build-session-prompt.md`, the recipe a fresh project's build agent follows —
+  carried 118 stale references, advertised "27+ tools", and listed a `cmos_backlog_export()` that
+  has never existed. Rewritten to the 15-tool action-dispatched surface and covered by the same
+  gate.
+- **Version-tolerant message NAME reads (s84 m01).** The sprint-47 dashboard cutover repurposes
+  `targetProject` / `senderProject` to slugs and adds `*Name` twins; reads now prefer the name
+  field and fall back, so they are correct in both eras. Byte-identical to 2.3.0 on pre-cutover
+  rows.
+- **Schema fidelity on two dual-surface params (s85 m01).** `cmos_mission`'s `context` (top-level
+  and nested in `fields`) declared no type while zod already accepted a string-or-object union, so
+  the reference published a bare `object` for a param where a string is legal;
+  `cmos_context`'s `fieldUpdates[].value` now declares the complete JSON Schema type set, matching
+  its deliberately unconstrained zod side.
+
+### Internal
+
+- `TierConfig.toolsUse` removed — unreachable, since the exports map allows only `.` and
+  `./package.json` (s84 m05).
+- `npm run snapshots:update` added; the bare `snapshots` script omits `-u` and fails rather than
+  rewriting, which every re-baseline hit (s85 m01).
+- `verify:dist` extended with the s84 answer shapes: the pagination param on the built schema, the
+  evergreen flag's durable round-trip, and `contentPruned` on `cmos_context(action="history")`.
+
 ## 2.3.0 — 2026-07-11
 
 Arc E "Retrieval + Tiers" — the **last phase-2 arc; phase 2 is complete.** Two sprints: **E1 (s82) Retrieval Spine** — an honest recall gate plus the mission-recall lever — and **E2 (s83) Tiers + Framing** — tier config that works for npm strangers and read-time `project_id`-aware retrieval trust. No new tools — the **15-tool contract holds**; all new behavior rides on existing paths.

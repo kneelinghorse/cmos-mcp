@@ -66,7 +66,7 @@ Feature: Create a mission
     Given a mission with id "test-m06" already exists
     When I call cmos_mission_add with missionId "test-m06"
     Then the call fails with error code "MISSION_ID_EXISTS"
-    And the error suggests choosing a different ID or using cmos_mission_update
+    And the error suggests choosing a different ID or using cmos_mission action update
 
   # --- Side effects ---
 

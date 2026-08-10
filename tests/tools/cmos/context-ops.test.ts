@@ -378,6 +378,7 @@ async function callContextHistory(
         contentHash: row.content_hash,
         createdAt: row.created_at,
         contentSize: row.content.length,
+        contentPruned: false, // s84-m04: this test-local re-impl predates content-tombstones
       }));
 
       return createSuccess<CmosContextHistoryResult>({

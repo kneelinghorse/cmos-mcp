@@ -335,7 +335,8 @@ export async function cmosSessionCapture(
           return createError<CmosSessionCaptureResult>({
             code: CMOS_ERROR_CODES.SESSION_NOT_ACTIVE,
             message: 'No active session found',
-            suggestion: 'Start a session first with cmos_session_start, or provide a sessionId',
+            suggestion:
+              'Start a session first with cmos_session(action="start"), or provide a sessionId',
           });
         }
 

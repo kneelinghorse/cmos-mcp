@@ -12,6 +12,7 @@ import { z } from 'zod';
 import * as crypto from 'crypto';
 import { withClientValidated } from './client';
 import { genesisColumns, getProjectId } from './genesis-columns';
+import { snapshotDedupPrunedFilter } from './schema-migrations';
 import type { CmosToolResult, Context } from './types';
 import { CmosErrors, createError, createSuccess, CMOS_ERROR_CODES } from './errors';
 
@@ -158,9 +159,11 @@ export async function cmosContextSnapshot(
         .digest('hex')
         .substring(0, 16);
 
-      // Check if we already have a snapshot with the same hash
+      // Check if we already have a snapshot with the same hash. s84-m04: exclude a
+      // content-tombstoned row (content emptied by the prune) so a re-appearing identical
+      // content forces a fresh content-bearing insert instead of deduping onto the empty row.
       const existingResult = client.getOne<{ id: number; created_at: string }>(
-        'SELECT id, created_at FROM context_snapshots WHERE context_id = ? AND content_hash = ?',
+        `SELECT id, created_at FROM context_snapshots WHERE context_id = ? AND content_hash = ?${snapshotDedupPrunedFilter(client)}`,
         [contextType, contentHash]
       );
 

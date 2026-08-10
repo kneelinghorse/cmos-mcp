@@ -12,6 +12,7 @@
 import * as crypto from 'crypto';
 import type { CmosDatabaseClient } from './client';
 import { genesisColumns, getProjectId } from './genesis-columns';
+import { snapshotDedupPrunedFilter } from './schema-migrations';
 
 const MILLIS_PER_DAY = 24 * 60 * 60 * 1000;
 
@@ -161,8 +162,8 @@ export function buildContextStalenessWarning(freshness: ContextFreshness): strin
     `${freshness.contextId} appears stale: updated_at=${updatedAt}, ` +
     `latest completed mission/session activity=${latestAt}, lag=${lagDays} days ` +
     `(threshold=${freshness.staleThresholdDays} days). ` +
-    'Recommended action: run cmos_context_update(), or start a review session with ' +
-    'cmos_session_start(type="review", title="Context refresh") and complete it.'
+    'Recommended action: run cmos_context(action="update"), or start a review session with ' +
+    'cmos_session(action="start", type="review", title="Context refresh") and complete it.'
   );
 }
 
@@ -431,7 +432,8 @@ function createContextSnapshotWithDedup(
   const hash = crypto.createHash('sha256').update(content).digest('hex').substring(0, 16);
 
   const existingResult = client.getOne<{ id: number }>(
-    'SELECT id FROM context_snapshots WHERE context_id = ? AND content_hash = ?',
+    // s84-m04: exclude a content-tombstoned row so identical content re-persists fresh.
+    `SELECT id FROM context_snapshots WHERE context_id = ? AND content_hash = ?${snapshotDedupPrunedFilter(client)}`,
     [contextId, hash]
   );
 

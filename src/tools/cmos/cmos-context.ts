@@ -192,6 +192,13 @@ export const cmosContextSchema = z
       .positive()
       .optional()
       .describe('Constraint ID to reaffirm (bumps last_reviewed_at without changing status)'),
+    evergreen: z
+      .boolean()
+      .optional()
+      .describe(
+        's84-m05: on reaffirm, set/clear the durable evergreen flag (true = never trip staleness ' +
+          'review/count — for institutional rules). Omit to leave it unchanged.'
+      ),
     stalenessThresholdDays: z
       .number()
       .int()
@@ -269,7 +276,13 @@ export const cmosContextToolDefinition = {
               type: 'string',
               description: 'Field path in dot-notation (e.g. "project_name", "type_fields.stack")',
             },
-            value: { description: 'New field value' },
+            // The 6 members are the COMPLETE JSON Schema type set — documentary, matching
+            // the deliberately unconstrained `z.unknown()` on the zod side. This is not a
+            // narrowing to be "tightened" later (s85-m01).
+            value: {
+              type: ['string', 'number', 'boolean', 'object', 'array', 'null'],
+              description: 'New field value',
+            },
           },
           required: ['path', 'value'],
         },
@@ -336,6 +349,11 @@ export const cmosContextToolDefinition = {
         minimum: 1,
         description:
           'Constraint ID to reaffirm (bumps last_reviewed_at without changing status; resets its staleness clock)',
+      },
+      evergreen: {
+        type: 'boolean',
+        description:
+          's84-m05: on reaffirm, set/clear the durable evergreen flag (true = never trip staleness review/count, for institutional rules). Omit to leave unchanged.',
       },
       stalenessThresholdDays: {
         type: 'number',
@@ -470,6 +488,7 @@ export async function cmosContext(
     case 'constraints':
       return cmosConstraints({
         constraintAction: params.constraintAction ?? 'list',
+        evergreen: params.evergreen,
         constraintStatus: params.constraintStatus,
         constraintIds: params.constraintIds,
         constraintId: params.constraintId,

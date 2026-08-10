@@ -16,15 +16,15 @@ CMOS uses MCP tools for database operations. Start by getting context:
 1. ONBOARD: Call cmos_agent_onboard() to get project state
    - Verify project identity (project_id, project_name)
    - Check you're working on the correct project database
-2. HEALTH CHECK: Call cmos_db_health() to verify database
+2. HEALTH CHECK: Call cmos_db(action="health") to verify database
 3. LOAD RULES: Read cmos/tiers/build.md for project rules
 
 Then run missions in a loop:
 
-1. SELECT NEXT: Call cmos_mission_status() to see work queue
+1. SELECT NEXT: Call cmos_mission(action="status") to see work queue
    - Priority: In Progress → Current → Queued
 
-2. START: Call cmos_mission_start(missionId="<id>")
+2. START: Call cmos_mission_transition(action="start", missionId="<id>")
    - Logs start event to database
    - Transitions to In Progress
 
@@ -34,13 +34,13 @@ Then run missions in a loop:
    - Verify all success criteria met
    - CRITICAL: Don't mark complete unless work is actually done
 
-4. COMPLETE: Call cmos_mission_complete(missionId="<id>", notes="<what was done>")
+4. COMPLETE: Call cmos_mission_transition(action="complete", missionId="<id>", notes="<what was done>")
    - Marks completed in database
    - Logs completion event
 
-5. VERIFY: Call cmos_mission_status() to confirm state
+5. VERIFY: Call cmos_mission(action="status") to confirm state
 
-If blocked: Call cmos_mission_block(missionId="<id>", reason="<why>", blockers=["<what's needed>"])
+If blocked: Call cmos_mission_transition(action="block", missionId="<id>", reason="<why>", blockers=["<what's needed>"])
 
 Loop until all missions complete or you need to pause.
 ```
@@ -52,10 +52,10 @@ Loop until all missions complete or you need to pause.
 ```
 CMOS build loop:
 
-1. Status: cmos_mission_status()
-2. Start: cmos_mission_start(missionId="...")
+1. Status: cmos_mission(action="status")
+2. Start: cmos_mission_transition(action="start", missionId="...")
 3. Execute: Implement fully, test thoroughly
-4. Complete: cmos_mission_complete(missionId="...", notes="...")
+4. Complete: cmos_mission_transition(action="complete", missionId="...", notes="...")
 5. Repeat
 ```
 

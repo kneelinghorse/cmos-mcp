@@ -12,6 +12,8 @@ import { z } from 'zod';
 import { withClient } from './client';
 import type { CmosToolResult, Mission, MissionStatus, Sprint } from './types';
 import { createError, createSuccess, CmosErrors } from './errors';
+import { getProjectId, tableHasColumn } from './genesis-columns';
+import { frameInlineIfForeign, frameTextIfForeign } from '../../intelligence/provenance-frame';
 
 /**
  * Full mission details with parsed JSON fields.
@@ -64,6 +66,13 @@ export interface MissionShowResult {
 
   /** Sprint information (if mission belongs to a sprint) */
   sprint: SprintInfo | null;
+
+  /** s84-m03: the mission's own project_id (guarded read). Foreign when it differs from
+   *  localProjectId — name/objective/context/success_criteria/deliverables framed untrusted. */
+  projectId?: string | null;
+
+  /** s84-m03: the querying store's own project_id. */
+  localProjectId?: string | null;
 }
 
 /**
@@ -74,6 +83,10 @@ export interface SprintInfo {
   title: string;
   focus: string | null;
   status: string | null;
+
+  /** s84-m03: the sprint's own project_id (guarded read). A foreign sprint's title/focus
+   *  is framed untrusted independently of the mission (a mission can link a foreign sprint). */
+  projectId?: string | null;
 }
 
 /**
@@ -147,6 +160,8 @@ export async function cmosMissionShow(
       const createdAtExpr = missionColumns.has('created_at') ? 'created_at' : 'NULL AS created_at';
       const startedAtExpr = missionColumns.has('started_at') ? 'started_at' : 'NULL AS started_at';
       const updatedAtExpr = missionColumns.has('updated_at') ? 'updated_at' : 'NULL AS updated_at';
+      // s84-m03: guarded project_id read (NULL AS on an ancient store lacking the column).
+      const projectIdExpr = missionColumns.has('project_id') ? 'project_id' : 'NULL AS project_id';
 
       const missionResult = client.getOne<Mission>(
         `
@@ -154,7 +169,7 @@ export async function cmosMissionShow(
           id, sprint_id, name, status, completed_at, notes,
           objective, context, success_criteria, deliverables,
           reference_docs, domain_fields, metadata,
-          ${createdAtExpr}, ${startedAtExpr}, ${updatedAtExpr}
+          ${createdAtExpr}, ${startedAtExpr}, ${updatedAtExpr}, ${projectIdExpr}
         FROM missions
         WHERE id = ?
       `,
@@ -176,9 +191,13 @@ export async function cmosMissionShow(
       // Get sprint info if mission has a sprint_id
       let sprintInfo: SprintInfo | null = null;
       if (mission.sprint_id) {
+        // s84-m03: guarded project_id read on sprints too (independent foreign check).
+        const sprintProjectIdExpr = tableHasColumn(client, 'sprints', 'project_id')
+          ? 'project_id'
+          : 'NULL AS project_id';
         const sprintResult = client.getOne<Sprint>(
           `
-          SELECT id, title, focus, status
+          SELECT id, title, focus, status, ${sprintProjectIdExpr}
           FROM sprints
           WHERE id = ?
         `,
@@ -191,6 +210,8 @@ export async function cmosMissionShow(
             title: sprintResult.data.title,
             focus: sprintResult.data.focus,
             status: sprintResult.data.status,
+            projectId:
+              (sprintResult.data as unknown as Record<string, string | null>).project_id ?? null,
           };
         }
       }
@@ -213,6 +234,8 @@ export async function cmosMissionShow(
         updatedAt: (mission as unknown as Record<string, string | null>).updated_at ?? null,
         metadata: parseJsonObject(mission.metadata),
         sprint: sprintInfo,
+        projectId: (mission as unknown as Record<string, string | null>).project_id ?? null,
+        localProjectId: getProjectId(client),
       };
 
       return createSuccess(result);
@@ -290,16 +313,25 @@ export function formatMissionShowForLLM(result: CmosToolResult<MissionShowResult
   const m = result.data;
   const lines: string[] = [];
 
+  // s84-m03: a foreign (pull-merged) mission is untrusted DATA. Short fields (name, sprint
+  // title/focus) frame inline; long prose (objective/context/success_criteria/deliverables)
+  // frames as a block. A LOCAL/NULL-project mission renders byte-identical to 2.3.0. The
+  // sprint is checked against its OWN project_id — a mission can link a foreign sprint.
+  const local = m.localProjectId;
+
   // Header with ID and status
   const statusIcon = getStatusIcon(m.status);
-  lines.push(`# ${m.id}: ${m.name}`);
+  lines.push(`# ${m.id}: ${frameInlineIfForeign(m.name, m.projectId, local)}`);
   lines.push(`**Status**: ${statusIcon} ${m.status}`);
 
   // Sprint context
   if (m.sprint) {
-    lines.push(`**Sprint**: ${m.sprint.id} - ${m.sprint.title}`);
+    const sprintProjectId = m.sprint.projectId;
+    lines.push(
+      `**Sprint**: ${m.sprint.id} - ${frameInlineIfForeign(m.sprint.title, sprintProjectId, local)}`
+    );
     if (m.sprint.focus) {
-      lines.push(`**Focus**: ${m.sprint.focus}`);
+      lines.push(`**Focus**: ${frameInlineIfForeign(m.sprint.focus, sprintProjectId, local)}`);
     }
   }
 
@@ -308,14 +340,14 @@ export function formatMissionShowForLLM(result: CmosToolResult<MissionShowResult
   // Objective
   if (m.objective) {
     lines.push('## Objective');
-    lines.push(m.objective);
+    lines.push(frameTextIfForeign(m.objective, m.projectId, local));
     lines.push('');
   }
 
   // Context
   if (m.context) {
     lines.push('## Context');
-    lines.push(m.context);
+    lines.push(frameTextIfForeign(m.context, m.projectId, local));
     lines.push('');
   }
 
@@ -323,7 +355,7 @@ export function formatMissionShowForLLM(result: CmosToolResult<MissionShowResult
   if (m.successCriteria && m.successCriteria.length > 0) {
     lines.push('## Success Criteria');
     for (const criterion of m.successCriteria) {
-      lines.push(`- [ ] ${criterion}`);
+      lines.push(`- [ ] ${frameTextIfForeign(criterion, m.projectId, local)}`);
     }
     lines.push('');
   }
@@ -332,7 +364,7 @@ export function formatMissionShowForLLM(result: CmosToolResult<MissionShowResult
   if (m.deliverables && m.deliverables.length > 0) {
     lines.push('## Deliverables');
     for (const deliverable of m.deliverables) {
-      lines.push(`- ${deliverable}`);
+      lines.push(`- ${frameTextIfForeign(deliverable, m.projectId, local)}`);
     }
     lines.push('');
   }
