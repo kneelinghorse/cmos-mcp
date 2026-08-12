@@ -64,6 +64,7 @@ import {
 import { computeAuthState, type AuthState } from '../../auth/auth-state';
 import { getStaleConstraintCount as getStaleConstraintCountFromConstraints } from './cmos-constraints';
 import { loadTierConfig, type TierConfig } from './tier-config';
+import { appendWarnings } from './format-warnings';
 
 /**
  * Project identity from master context.
@@ -427,27 +428,43 @@ export interface RecentMessageSummary {
 /**
  * Input parameters schema for cmos_agent_onboard tool.
  */
-export const cmosAgentOnboardSchema = z.object({
-  /** Optional free-text UX feedback from the agent (Sprint 56 m03). */
-  agentFeedback: z
-    .string()
-    .max(2000)
-    .optional()
-    .describe(
-      'Optional free-text UX feedback. Use this to report rough edges, improvement ideas, or surprising tool behavior you hit during the prior session. Reviewed periodically via cmos_feedback(action="list").'
-    ),
+export const cmosAgentOnboardSchema = z
+  .object({
+    /** Optional free-text UX feedback from the agent (Sprint 56 m03). */
+    agentFeedback: z
+      .string()
+      .max(2000)
+      .optional()
+      .describe(
+        'Optional free-text UX feedback. Use this to report rough edges, improvement ideas, or surprising tool behavior you hit during the prior session. Reviewed periodically via cmos_feedback(action="list").'
+      ),
 
-  /** Optional: explicit project root to search from */
-  projectRoot: z
-    .string()
-    .optional()
-    .describe('Project root directory to search for CMOS database (defaults to cwd)'),
-});
+    /** Optional: explicit project root to search from */
+    projectRoot: z
+      .string()
+      .optional()
+      .describe('Project root directory to search for CMOS database (defaults to cwd)'),
+  })
+  // s86-m04: `.strict()` so the zod schema states what the published inputSchema has always
+  // stated (additionalProperties: false), matching the other 12 tools. INERT AT RUNTIME — the
+  // consolidated schemas are never parsed (src/index.ts casts every case), so this rejects
+  // nothing previously accepted; it aligns the two declarations.
+  .strict();
 
 export type CmosAgentOnboardParams = z.infer<typeof cmosAgentOnboardSchema>;
 
 interface InternalCmosAgentOnboardParams extends CmosAgentOnboardParams {
+  /**
+   * @internal MCP-boundary seam: the roots the CLIENT advertised, read by src/index.ts from the
+   * transport and passed inward. An agent cannot supply it — it describes the caller, not the
+   * request — so it is deliberately absent from the cmos_agent_onboard inputSchema.
+   */
   advertisedRoots?: readonly string[];
+  /**
+   * @internal MCP-boundary seam: whether the CALLER named a projectRoot, which only src/index.ts
+   * can know (an inward-passed `projectRoot` is indistinguishable from a resolved default once it
+   * is inside the handler). Not a caller decision, so not published.
+   */
   callerProvidedProjectRoot?: boolean;
 }
 
@@ -495,10 +512,15 @@ export async function cmosAgentOnboard(
 
       // Sprint 52 m01: seed metadata.owner from dashboard identity if absent, then
       // rewrite any legacy `cmos://unknown/*` address before project_identity is read.
-      // Best-effort — failure is silent; the identity row keeps an empty cmos_address
-      // until a later checkpoint resolves the owner.
+      // Best-effort — a THROWN failure is swallowed below; the identity row keeps an
+      // empty cmos_address until a later checkpoint resolves the owner.
+      //
+      // s86-m02b: a failed `metadata.owner` / `dashboard_slug` write is NOT swallowed.
+      // It leaves the store minting `cmos://unknown/*` addresses while this payload's
+      // projectIdentity reports a resolved identity, so the DB error rides the envelope.
       try {
-        await resolveAndPersistOwner(client);
+        const ownerResult = await resolveAndPersistOwner(client);
+        warnings.push(...(ownerResult.warnings ?? []));
         backfillUnknownCmosAddress(client);
       } catch {
         // never block onboard on identity resolution
@@ -566,8 +588,12 @@ export async function cmosAgentOnboard(
         warnings.push(staleWarning);
       }
 
-      // Detect and flag stale decisions/learnings
+      // Detect and flag stale decisions/learnings. s86-m02b: an errored
+      // `UPDATE ... SET status='stale'` folds into the same zero as "nothing matched", so
+      // without this splice `staleness.staleDecisions: 0` would read as a clean pass over a
+      // store where the flagging statement never ran.
       const stalenessResult = detectAndFlagStaleness(client);
+      warnings.push(...(stalenessResult.warnings ?? []));
       if (stalenessResult.totalStaleDecisions > 0 || stalenessResult.totalStaleLearnings > 0) {
         warnings.push(
           `${stalenessResult.totalStaleDecisions} stale decision(s) and ${stalenessResult.totalStaleLearnings} stale learning(s) detected (threshold: ${stalenessResult.threshold} sprints). ` +
@@ -756,6 +782,10 @@ export async function cmosAgentOnboard(
           result.feedbackId = fb.feedbackId;
         }
         feedbackSanitized.push(...fb.sanitizedFields);
+        // s86-m02b: a failed INSERT leaves feedbackId absent, which is also what an empty
+        // body produces — surface the DB error so the answer never implies the feedback
+        // was recorded.
+        warnings.push(...fb.warnings);
       }
 
       return createSuccess<CmosAgentOnboardResult>(result, warnings, feedbackSanitized);
@@ -2277,13 +2307,7 @@ export function formatAgentOnboardForLLM(result: CmosToolResult<CmosAgentOnboard
     lines.push(data.tierConfig.guide);
   }
 
-  if (result.warnings && result.warnings.length > 0) {
-    lines.push('');
-    lines.push('⚠️ **Warnings**');
-    for (const warning of result.warnings) {
-      lines.push(`  • ${warning}`);
-    }
-  }
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

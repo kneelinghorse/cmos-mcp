@@ -172,7 +172,13 @@ describe('agentFeedback write paths', () => {
       status: string;
       body: string;
     };
-    expect(row.tool_name).toBe('cmos_session_complete');
+    // s86-m03: was 'cmos_session_complete' — a tool name CMOS_TOOL_DEFINITIONS no longer publishes.
+    // Until m03 this write path was unreachable from any agent (cmos_session declared no
+    // `agentFeedback` key and forwarded none), so no row was ever stamped with it; m03 opens the
+    // path, and a brand-new DURABLE row naming a retired tool is exactly the defect class s86
+    // exists to close. The live convention is the REGISTERED name — cmos-mission-complete.ts
+    // writes 'cmos_mission_transition', cmos-agent-onboard.ts writes 'cmos_agent_onboard'.
+    expect(row.tool_name).toBe('cmos_session');
     expect(row.session_id).toBe(sessionId);
     expect(row.sprint_id).toBe('sprint-56');
     expect(row.status).toBe('open');

@@ -211,7 +211,7 @@ That's the loop: **onboard → start mission → execute → complete → onboar
 
 ## Local mode is the default
 
-Everything above ran without a network connection. Your data lives in `cmos/db/cmos.sqlite`. Snapshots land in `cmos.sqlite.bak-{timestamp}` before any destructive op. Soft deletes, append-only events, and dry-run flags protect your audit trail.
+Everything above ran without a network connection. Your data lives in `cmos/db/cmos.sqlite`. Append-only events protect your audit trail, and `cmos_db(action="snapshot")` copies the database whenever you ask it to — take one before anything destructive, because nothing does it for you.
 
 If you stay in local mode, you can ignore the next section forever.
 

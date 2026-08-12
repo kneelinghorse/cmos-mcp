@@ -4,6 +4,7 @@
 
 import * as crypto from 'crypto';
 import type { CmosDatabaseClient } from '../tools/cmos/client';
+import { checkWrite } from '../tools/cmos/write-guard';
 import { applyOfflineTransformersEnv, type TransformersEnv } from './transformers-offline-env';
 
 // ─── Public types ────────────────────────────────────────────────────────────
@@ -31,6 +32,13 @@ export type RecordEmbeddingAction = 'embedded' | 'skipped-no-change' | 'failed';
 export interface RecordEmbeddingResult {
   action: RecordEmbeddingAction;
   error?: string;
+  /**
+   * Sprint 86 m02b — DB errors from the vec0 upsert and the `last_embedded_hash`
+   * write, which used to be discarded. Present only when a write actually failed;
+   * callers splice these into their own warnings sink so the answer discloses that
+   * the row will not be findable by vector search.
+   */
+  warnings?: string[];
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -186,6 +194,10 @@ export function packEmbedding(values: Float32Array): Buffer {
  * missing rows. Returns an action enum for telemetry, not for control flow at
  * the caller.
  *
+ * Sprint 86 m02b: a vec0 or `last_embedded_hash` write that ERRORS is no longer
+ * discarded — its DB error comes back in `warnings` so the caller can splice it
+ * into its own sink. Still not control flow, and still never a throw.
+ *
  * The corresponding source-table row MUST already exist (write-path hooks call
  * after a successful INSERT/UPDATE returns).
  */
@@ -205,10 +217,11 @@ export async function recordEmbedding(
     const vec = await embed(target.inputText);
     const blob = packEmbedding(vec);
 
-    upsertVector(client, target.type, target.id, blob);
-    writeLastEmbeddedHash(client, target.type, target.id, hash);
+    const upsertError = upsertVector(client, target.type, target.id, blob);
+    const hashError = writeLastEmbeddedHash(client, target.type, target.id, hash);
 
-    return { action: 'embedded' };
+    const warnings = [upsertError, hashError].filter((w): w is string => w !== null);
+    return warnings.length > 0 ? { action: 'embedded', warnings } : { action: 'embedded' };
   } catch (error) {
     const message = error instanceof Error ? error.message : 'unknown error';
     console.error(`[WARN] embedding-pipeline: ${target.type}#${target.id} failed — ${message}`);
@@ -272,32 +285,46 @@ function readLastEmbeddedHash(
   return row.data.last_embedded_hash ?? null;
 }
 
+/** Returns a DB-error string when the UPDATE failed, null when it ran (s86-m02b). */
 function writeLastEmbeddedHash(
   client: CmosDatabaseClient,
   type: EmbeddingType,
   id: number | string,
   hash: string
-): void {
+): string | null {
   const meta = tableMeta(type);
-  client.execute(`UPDATE ${meta.sourceTable} SET last_embedded_hash = ? WHERE id = ?`, [hash, id]);
+  const warnings: string[] = [];
+  const updated = client.execute(
+    `UPDATE ${meta.sourceTable} SET last_embedded_hash = ? WHERE id = ?`,
+    [hash, id]
+  );
+  checkWrite(updated, warnings, `${meta.sourceTable}.last_embedded_hash`);
+  return warnings[0] ?? null;
 }
 
+/** Returns a DB-error string when either statement failed, null when both ran (s86-m02b). */
 function upsertVector(
   client: CmosDatabaseClient,
   type: EmbeddingType,
   id: number | string,
   blob: Buffer
-): void {
+): string | null {
   const meta = tableMeta(type);
   const coercedId = coerceVecId(id, meta.needsBigInt);
+  const warnings: string[] = [];
   // vec0 doesn't support ON CONFLICT — delete-then-insert is the canonical
   // upsert idiom. Safe in a single transaction; the source-table row is the
   // authoritative reference (the vec0 row is a derived index entry).
-  client.execute(`DELETE FROM ${meta.vecTable} WHERE ${meta.vecColumn} = ?`, [coercedId]);
-  client.execute(`INSERT INTO ${meta.vecTable}(${meta.vecColumn}, embedding) VALUES (?, ?)`, [
+  const deleted = client.execute(`DELETE FROM ${meta.vecTable} WHERE ${meta.vecColumn} = ?`, [
     coercedId,
-    blob,
   ]);
+  checkWrite(deleted, warnings, `${meta.vecTable}.delete`);
+  const inserted = client.execute(
+    `INSERT INTO ${meta.vecTable}(${meta.vecColumn}, embedding) VALUES (?, ?)`,
+    [coercedId, blob]
+  );
+  checkWrite(inserted, warnings, `${meta.vecTable}.insert`);
+  return warnings.length > 0 ? warnings.join('; ') : null;
 }
 
 // ─── Test reset (called between test cases) ──────────────────────────────────

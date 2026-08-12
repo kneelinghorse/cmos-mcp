@@ -14,6 +14,7 @@ import type { CmosToolResult } from './types';
 import { createError, createSuccess, CmosErrors } from './errors';
 import { isOpenStatus } from './terminal-status';
 import { buildDemotionWarning, writeSingleCurrentSprint } from './sprint-current-invariant';
+import { appendWarnings } from './format-warnings';
 
 /**
  * Result type for cmos_sprint_add.
@@ -279,13 +280,7 @@ export function formatSprintAddForLLM(result: CmosToolResult<SprintAddResult>): 
   // server TELLS the operator which sprints were auto-demoted (mirrors
   // formatSprintUpdateForLLM). index.ts renders only this text — warnings not
   // folded in here would be invisible to the operator.
-  if (result.warnings && result.warnings.length > 0) {
-    lines.push('');
-    lines.push('Warnings:');
-    for (const warning of result.warnings) {
-      lines.push(`- ${warning}`);
-    }
-  }
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

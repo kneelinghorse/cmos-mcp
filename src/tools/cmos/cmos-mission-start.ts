@@ -25,6 +25,8 @@ import {
   buildMissionSearchText,
   type RelevantDecision,
 } from './relevance-surfacing';
+import { appendWarnings } from './format-warnings';
+import { checkWrite } from './write-guard';
 
 /**
  * Result of starting a mission.
@@ -128,6 +130,8 @@ export async function cmosMissionStart(
 
   return withClientAsync(
     async (client) => {
+      const warnings: string[] = [];
+
       // Query mission by ID
       const missionResult = loadMissionForStart(client, missionId);
 
@@ -306,8 +310,8 @@ export async function cmosMissionStart(
         ]
       );
 
-      // Don't fail the operation if event logging fails (non-critical)
-      if (!eventResult.success) {
+      // Don't fail the operation if event logging fails (non-critical) — but say so.
+      if (!checkWrite(eventResult, warnings, 'mission start event logging')) {
         console.warn('Failed to log mission start event:', eventResult.error);
       }
 
@@ -330,15 +334,18 @@ export async function cmosMissionStart(
         }
       }
 
-      return createSuccess<MissionStartResult>({
-        missionId,
-        previousStatus: currentStatus,
-        currentStatus: targetStatus,
-        message: `Mission '${missionId}' is now In Progress`,
-        startedAt: now,
-        relevantDecisions,
-        localProjectId: getProjectId(client),
-      });
+      return createSuccess<MissionStartResult>(
+        {
+          missionId,
+          previousStatus: currentStatus,
+          currentStatus: targetStatus,
+          message: `Mission '${missionId}' is now In Progress`,
+          startedAt: now,
+          relevantDecisions,
+          localProjectId: getProjectId(client),
+        },
+        warnings
+      );
     },
     { projectRoot: params.projectRoot }
   );
@@ -426,23 +433,26 @@ function activateParentSprint(
     [startedAt, sprintId]
   );
 
+  // s86-m02b: stated as the NEGATIVE test (De Morgan of the original
+  // `success || code !== … || !message.includes(…)` early return) so the failure
+  // path is the one named in the condition. Behaviour is identical.
   if (
-    updateWithStartDate.success ||
-    updateWithStartDate.error?.code !== CMOS_ERROR_CODES.DB_SCHEMA_MISMATCH ||
-    !updateWithStartDate.error?.message.includes('start_date')
+    !updateWithStartDate.success &&
+    updateWithStartDate.error?.code === CMOS_ERROR_CODES.DB_SCHEMA_MISMATCH &&
+    updateWithStartDate.error?.message.includes('start_date')
   ) {
-    return updateWithStartDate;
-  }
-
-  return client.execute(
-    `
+    return client.execute(
+      `
       UPDATE sprints
       SET status = 'Active'
       WHERE id = ?
         AND status = 'Planned'
     `,
-    [sprintId]
-  );
+      [sprintId]
+    );
+  }
+
+  return updateWithStartDate;
 }
 
 /**
@@ -515,13 +525,7 @@ export function formatMissionStartForLLM(result: CmosToolResult<MissionStartResu
 
   // Surface warnings (incl. the m05 collab-sync warnings the transition dispatcher
   // folds in: lock contention, a superseded conflict, or a non-fatal broker-sync error).
-  if (result.warnings && result.warnings.length > 0) {
-    lines.push('');
-    lines.push('Warnings:');
-    for (const warning of result.warnings) {
-      lines.push(`- ${warning}`);
-    }
-  }
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

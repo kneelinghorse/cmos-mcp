@@ -195,3 +195,17 @@ export interface MissionStateChange {
   changedBy: string;
   notes?: string;
 }
+
+/**
+ * Per-action parameter lists for one action-bearing tool — s86-m04's applicability contract.
+ *
+ * Keyed by the tool's action union and constrained to its own parameter type, so naming a
+ * parameter the tool does not declare (or leaving one behind after a rename) is a COMPILE error
+ * rather than a row that silently fails to render. Lives here, not beside the registry in
+ * action-params.ts, so a tool module can type its map without importing the module that imports it.
+ *
+ * See src/tools/cmos/action-params.ts for why the maps are authored rather than generated.
+ */
+export type ActionParamMap<Action extends string, Params> = Readonly<
+  Record<Action, readonly (keyof Params & string)[]>
+>;

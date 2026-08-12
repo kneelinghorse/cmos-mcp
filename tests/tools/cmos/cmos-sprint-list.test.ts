@@ -21,6 +21,7 @@ import {
 import { CMOS_ERROR_CODES } from '../../../src/tools/cmos/errors';
 import { CmosDetector } from '../../../src/intelligence/cmos-detector';
 import type { CmosToolResult } from '../../../src/tools/cmos/types';
+import { SPRINT_SUMMARY_VIEW_SQL } from '../../../src/tools/cmos/schema';
 
 describe('cmos_sprint_list', () => {
   let tempDir: string;
@@ -69,26 +70,7 @@ describe('cmos_sprint_list', () => {
       );
 
       -- Create sprint_summary view
-      CREATE VIEW sprint_summary AS
-      SELECT
-        s.id AS sprint_id,
-        s.title,
-        s.status,
-        s.focus,
-        s.start_date,
-        s.end_date,
-        COUNT(m.id) AS total_missions,
-        COUNT(CASE WHEN m.status = 'Completed' THEN 1 END) AS completed_missions,
-        COUNT(CASE WHEN m.status = 'Blocked' THEN 1 END) AS blocked_missions,
-        COUNT(CASE WHEN m.status IN ('Current', 'In Progress') THEN 1 END) AS active_missions,
-        (
-          SELECT COUNT(DISTINCT sd.id)
-          FROM strategic_decisions sd
-          WHERE sd.sprint_id = s.id
-        ) AS decisions_count
-      FROM sprints s
-      LEFT JOIN missions m ON m.sprint_id = s.id
-      GROUP BY s.id, s.title, s.status, s.focus, s.start_date, s.end_date;
+      ${SPRINT_SUMMARY_VIEW_SQL}
 
       -- Insert test sprints
       INSERT INTO sprints (id, title, focus, status, start_date, end_date)
@@ -160,7 +142,7 @@ describe('cmos_sprint_list', () => {
         CREATE VIEW sprint_summary AS
         SELECT s.id AS sprint_id, s.title, s.status, s.focus, s.start_date, s.end_date,
                0 AS total_missions, 0 AS completed_missions, 0 AS blocked_missions,
-               0 AS active_missions, 0 AS decisions_count
+               0 AS active_missions, 0 AS parked_missions, 0 AS decisions_count
         FROM sprints s;
       `);
       db.close();
@@ -366,6 +348,7 @@ async function cmosSprintListWithDb(
     start_date: string | null;
     end_date: string | null;
     total_missions: number;
+    parked_missions: number;
     completed_missions: number;
     blocked_missions: number;
     active_missions: number;
@@ -395,7 +378,7 @@ async function cmosSprintListWithDb(
 
       const sql = `
         SELECT sprint_id, title, status, focus, start_date, end_date,
-               total_missions, completed_missions, blocked_missions,
+               total_missions, parked_missions, completed_missions, blocked_missions,
                active_missions, decisions_count
         FROM sprint_summary
         ${whereClause}
@@ -421,6 +404,7 @@ async function cmosSprintListWithDb(
         startDate: row.start_date,
         endDate: row.end_date,
         totalMissions: row.total_missions ?? 0,
+        parkedMissions: row.parked_missions ?? 0,
         completedMissions: row.completed_missions ?? 0,
         blockedMissions: row.blocked_missions ?? 0,
         activeMissions: row.active_missions ?? 0,

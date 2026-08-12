@@ -19,7 +19,7 @@ Bias: caution over speed on non-trivial work.
 
 ### Rule 0 — CMOS is the only durable state
 
-All planning state, sprint/mission cadence, decisions, learnings, and project trajectories live in CMOS — the strategic_decisions table, learnings table, sessions, and `cmos/planning/` foundational docs registered in `projectIdentity.foundational_docs`.
+All planning state, sprint/mission cadence, decisions, learnings, and project trajectories live in CMOS — the strategic_decisions table, learnings table, sessions, and the `cmos/foundational-docs/` files registered in `projectIdentity.foundational_docs`.
 
 Never write to `~/.claude/projects/.../memory/` or any hidden `.claude` directory. Those files are agent-local and invisible to other agents working on this project — storing plans, cadence, or process there hides them from the audit trail and from fresh-context agents.
 
@@ -355,9 +355,10 @@ test(auth): add integration tests for OAuth
 ### Context Loading Priority
 1. Load `project-root/agents.md` (THIS FILE) for application work
 2. Load `cmos/tiers/build.md` for CMOS operations
-3. Load `cmos/PROJECT_CONTEXT.json` for current state
-4. Load `cmos/context/MASTER_CONTEXT.json` for project history
-5. Reference `cmos/SESSIONS.jsonl` for recent session history
+3. Call `cmos_context(action="view")` for current state and project history
+
+The `cmos/context/*.json` files are seed snapshots written once at init. The database is the
+source of truth from the first write onward — read state through the tools, not those files.
 
 ### Output Standards
 - Use [Markdown, reStructuredText, etc.] for documentation

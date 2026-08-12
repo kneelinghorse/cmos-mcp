@@ -1427,17 +1427,35 @@ describe('cmosDbBackfill', () => {
     }).join(';\n');
     createDb(rows);
 
-    const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    // s86-m01: this it() has always been titled "to stderr" while asserting on
+    // console.error — an instance of the sprint's own class inside its own suite.
+    // cmos-db-backfill now writes via process.stderr.write (it is reachable from
+    // the fire-and-forget checkpoint IIFE, where a late console call throws
+    // "Cannot log after tests are done" and reds an otherwise-green run), so the
+    // capture matches the title. House pattern: tests/auth/legacy-auth-warn.test.ts.
+    const writes: string[] = [];
+    const originalWrite = process.stderr.write.bind(process.stderr);
+    (process.stderr as unknown as { write: (chunk: unknown) => boolean }).write = (chunk) => {
+      writes.push(
+        typeof chunk === 'string' ? chunk : new TextDecoder().decode(chunk as Uint8Array)
+      );
+      return true;
+    };
 
-    await cmosDbBackfill({ projectRoot: tempDir });
+    try {
+      await cmosDbBackfill({ projectRoot: tempDir });
+    } finally {
+      process.stderr.write = originalWrite;
+    }
 
-    // Should have logged at least one progress line with pushed/failed/remaining
-    const progressCalls = (consoleErrorSpy.mock.calls as unknown[][]).filter(
-      (call) => String(call[0]).includes('[backfill]') && String(call[0]).includes('pushed')
+    // Should have logged at least one progress line with pushed/failed/remaining.
+    // Both substring checks are deliberately kept: '[backfill]' proves the prefix
+    // survived the conversion and 'pushed' proves it is a progress/summary line
+    // rather than any other stderr traffic the run happens to emit.
+    const progressLines = writes.filter(
+      (line) => line.includes('[backfill]') && line.includes('pushed')
     );
-    expect(progressCalls.length).toBeGreaterThan(0);
-
-    consoleErrorSpy.mockRestore();
+    expect(progressLines.length).toBeGreaterThan(0);
   });
 
   // ─── LLM Formatter ─────────────────────────────────────────────────────────

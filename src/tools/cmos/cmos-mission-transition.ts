@@ -11,7 +11,7 @@
 
 import { z } from 'zod';
 import { createError, CmosErrors } from './errors';
-import type { CmosToolResult } from './types';
+import type { ActionParamMap, CmosToolResult } from './types';
 import {
   cmosMissionStart,
   formatMissionStartForLLM,
@@ -60,6 +60,19 @@ export const CMOS_MISSION_TRANSITION_ACTIONS = [
 ] as const;
 
 export type CmosMissionTransitionAction = (typeof CMOS_MISSION_TRANSITION_ACTIONS)[number];
+
+/** s86-m04 — which published parameter applies to which action (see action-params.ts). */
+export const CMOS_MISSION_TRANSITION_ACTION_PARAMS: ActionParamMap<
+  CmosMissionTransitionAction,
+  CmosMissionTransitionParams
+> = {
+  start: ['action', 'missionId', 'notes', 'projectRoot'],
+  complete: ['action', 'missionId', 'notes', 'decisions', 'agentFeedback', 'projectRoot'],
+  block: ['action', 'missionId', 'reason', 'blockers', 'projectRoot'],
+  unblock: ['action', 'missionId', 'resolution', 'targetStatus', 'projectRoot'],
+  drop: ['action', 'missionId', 'reason', 'projectRoot'],
+  defer: ['action', 'missionId', 'reason', 'deferUntil', 'projectRoot'],
+};
 
 export type CmosMissionTransitionResult =
   | MissionStartResult

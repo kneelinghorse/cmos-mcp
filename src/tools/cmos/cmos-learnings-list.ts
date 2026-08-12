@@ -16,6 +16,7 @@ import { frameForeignText } from '../../intelligence/provenance-frame';
 import { learningsTaggedAcrossProjects } from '../../intelligence/cross-store-queries';
 import type { CrossStoreError, CrossStoreQueryResult } from '../../intelligence/cross-store-query';
 import type { ProjectGraphRegistry } from '../../intelligence/project-graph-registry';
+import { appendWarnings } from './format-warnings';
 
 /**
  * Learning record surfaced to clients.
@@ -255,11 +256,17 @@ export async function cmosLearningsList(
  * The metadata envelope is identical to `cmos_decisions(acrossProjects)`; the domain
  * payload key is `learnings`. The `registry` seam is for deterministic tests only.
  */
-export async function cmosLearningsListAcrossProjects(params: {
-  category?: string;
-  limit?: number;
-  registry?: ProjectGraphRegistry;
-}): Promise<CmosToolResult<CmosLearningsListResult>> {
+export async function cmosLearningsListAcrossProjects(
+  params: {
+    category?: string;
+    limit?: number;
+  },
+  // s86-m03 — internal, NON-schema seam, moved out of parameter 0 onto the cmos-review.ts:294
+  // precedent: an injectable ProjectGraphRegistry for deterministic tests of the cross-store
+  // fan-out. NOT exposed on the tool inputSchema (it must never reach the MCP boundary). Being
+  // in parameter 0 made it indistinguishable from a caller-facing param that the router drops.
+  internalOpts: { registry?: ProjectGraphRegistry } = {}
+): Promise<CmosToolResult<CmosLearningsListResult>> {
   const tag = params.category?.trim();
   if (!tag) {
     return {
@@ -277,7 +284,7 @@ export async function cmosLearningsListAcrossProjects(params: {
   const pageSize = params.limit ?? 20;
   const fanout = await learningsTaggedAcrossProjects(tag, {
     limit: pageSize,
-    registry: params.registry,
+    registry: internalOpts.registry,
   });
 
   const learnings: Learning[] = fanout.results.map((row) => ({
@@ -368,6 +375,8 @@ export function formatLearningsListForLLM(result: CmosToolResult<CmosLearningsLi
   if (data.hasMore) {
     lines.push(`More results available. Use page=${data.page + 1} to see next page.`);
   }
+
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

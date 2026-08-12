@@ -1083,6 +1083,7 @@ async function cmosSessionCaptureWithDb(
         timestamp: now,
         captureCount: captures.length,
         message: `Captured ${category} in session '${sessionId}' (${captures.length} total captures)`,
+        writeFailures: [],
       };
 
       if (missionId) {

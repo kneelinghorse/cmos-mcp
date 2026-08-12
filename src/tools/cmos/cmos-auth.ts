@@ -53,16 +53,22 @@
  */
 
 import { z } from 'zod';
-import type { CmosToolResult } from './types';
+import type { ActionParamMap, CmosToolError, CmosToolResult } from './types';
 import { createError, createSuccess, CmosErrors } from './errors';
 import {
   CredentialStore,
+  type KeySource,
   type ProjectKeyRecord,
   type UserScopedKeyRecord,
 } from '../../intelligence/credential-store';
 import { DashboardClient, type ListedKey, CMOS_DASHBOARD_URL_ENV } from './dashboard-client';
 import { withClientAsync } from './client';
-import { recoverProjectKey } from '../../auth/project-key-capture';
+import {
+  classifyAttribution,
+  describeAttributionArm,
+  recoverProjectKey,
+  type AttributionFailure,
+} from '../../auth/project-key-capture';
 import {
   DeviceCodeError,
   buildUserAgent,
@@ -77,6 +83,7 @@ import {
   type DeviceCodeFlowOptions,
   type DeviceTokenSuccess,
 } from '../../auth/device-code';
+import { appendWarnings } from './format-warnings';
 
 export const CMOS_AUTH_ACTIONS = [
   'rotate',
@@ -89,6 +96,26 @@ export const CMOS_AUTH_ACTIONS = [
   'logout',
 ] as const;
 export type CmosAuthAction = (typeof CMOS_AUTH_ACTIONS)[number];
+
+/**
+ * s86-m04 — which published parameter applies to which action (see action-params.ts).
+ *
+ * cmos_auth's router hands the WHOLE params object to each handler, so "forwarded" is true of
+ * every key on every action and proves nothing. These lists come from what each handler READS:
+ * `login` and `login_init` take no request parameter at all (cmos-auth.ts:487-490 pass only
+ * process wiring), and `deviceCode`/`maxWaitSeconds`/`pollIntervalSeconds` belong to
+ * `login_complete` alone.
+ */
+export const CMOS_AUTH_ACTION_PARAMS: ActionParamMap<CmosAuthAction, CmosAuthParams> = {
+  rotate: ['action', 'projectRoot', 'graceSeconds'],
+  revoke: ['action', 'projectRoot', 'keyId'],
+  list: ['action', 'projectRoot', 'mineOnly'],
+  reissue: ['action', 'projectRoot'],
+  login: ['action'],
+  login_init: ['action'],
+  login_complete: ['action', 'deviceCode', 'maxWaitSeconds', 'pollIntervalSeconds'],
+  logout: ['action', 'projectRoot', 'keyId'],
+};
 
 const DEFAULT_LOGIN_COMPLETE_MAX_WAIT_SECONDS = 30;
 const DEFAULT_LOGIN_COMPLETE_INTERVAL_SECONDS = 2;
@@ -191,7 +218,19 @@ export interface ReissueActionResult {
   action: 'reissue';
   projectId: string;
   newKeyId: string;
+  /**
+   * s86-m06 — the keyIds the DASHBOARD reported revoking as part of this reissue
+   * (previously hardcoded `[]`). Empty when the dashboard reported an empty list AND
+   * when it reported no list at all — read `revokedKeyIdsReported` to tell those apart.
+   */
   revokedKeyIds: string[];
+  /**
+   * s86-m06 — whether the dashboard's response actually carried a revoked-key list.
+   * `false` means we do not know what was revoked, which is a different fact from
+   * "nothing was revoked"; the rendered answer says so rather than asserting the
+   * stronger claim. The response shape is not validated (nor verified from this repo).
+   */
+  revokedKeyIdsReported: boolean;
 }
 
 /**
@@ -302,7 +341,7 @@ export const cmosAuthToolDefinition = {
           'Specific dashboard keyId to revoke. Omit to revoke the current project key for projectRoot.',
       },
       graceSeconds: {
-        type: 'number',
+        type: 'integer',
         minimum: 1,
         maximum: 86_400,
         description: 'Rotate grace window (default: 300s dashboard-side).',
@@ -318,14 +357,14 @@ export const cmosAuthToolDefinition = {
           'login_complete only: deviceCode from a prior login_init call. Opaque dashboard-side handle.',
       },
       maxWaitSeconds: {
-        type: 'number',
+        type: 'integer',
         minimum: 1,
         maximum: 600,
         description:
           'login_complete only: bound the poll window before returning status=pending (default 30s).',
       },
       pollIntervalSeconds: {
-        type: 'number',
+        type: 'integer',
         minimum: 1,
         maximum: 60,
         description:
@@ -358,6 +397,27 @@ const defaultDashboardClientResolver: DashboardClientResolver = async (projectRo
   const result = await DashboardClient.fromEnvForProject(projectRoot);
   if (!result.success || !result.data) return null;
   return result.data.client;
+};
+
+/**
+ * s86-m06 — resolve a USER-scoped client for an operation that must not
+ * authenticate with a project-scoped credential. Returns the `{client, keySource}`
+ * pair because `keySource` is what lets the caller name WHICH arm failed to
+ * attribute (see `classifyAttribution`).
+ *
+ * Takes the CredentialStore so the resolution reads the SAME store the handler
+ * writes to — without it, an injected `deps.store` and the process singleton can
+ * diverge, and the handler would classify against one store while persisting to
+ * another.
+ */
+export type UserScopedClientResolver = (
+  store: CredentialStore
+) => Promise<{ client: DashboardClient; keySource: KeySource } | null>;
+
+const defaultUserScopedClientResolver: UserScopedClientResolver = async (store) => {
+  const result = await DashboardClient.fromEnvForUser({ credentialStore: store });
+  if (!result.success || !result.data) return null;
+  return { client: result.data.client, keySource: result.data.keySource };
 };
 
 const defaultDashboardProjectIdReader: DashboardProjectIdReader = async (projectRoot) => {
@@ -410,6 +470,13 @@ export type TokenPollerImpl = (options: BoundedPollOptions) => Promise<BoundedPo
 export interface CmosAuthDependencies {
   store?: CredentialStore;
   clientResolver?: DashboardClientResolver;
+  /**
+   * s86-m06 — user-scoped resolution, used by `reissue` ONLY. rotate / revoke /
+   * list / logout deliberately keep `clientResolver`: each either wants
+   * project-root-aware resolution or does not depend on the authenticating
+   * identity at all.
+   */
+  userClientResolver?: UserScopedClientResolver;
   projectIdReader?: DashboardProjectIdReader;
   /** Sprint 58 m01 — override for tests; default = `runDeviceCodeFlow`. */
   deviceCodeFlow?: DeviceCodeFlowImpl;
@@ -444,6 +511,7 @@ export async function cmosAuth(
 
   const store = deps.store ?? (await CredentialStore.create());
   const clientResolver = deps.clientResolver ?? defaultDashboardClientResolver;
+  const userClientResolver = deps.userClientResolver ?? defaultUserScopedClientResolver;
   const projectIdReader = deps.projectIdReader ?? defaultDashboardProjectIdReader;
   const deviceCodeFlow = deps.deviceCodeFlow ?? runDeviceCodeFlow;
   const deviceCodeRequester =
@@ -462,7 +530,7 @@ export async function cmosAuth(
     case 'list':
       return handleList(params, store, clientResolver);
     case 'reissue':
-      return handleReissue(params, store, clientResolver, projectIdReader);
+      return handleReissue(params, store, userClientResolver, projectIdReader);
     case 'login':
       return handleLogin(store, deviceCodeFlow, dashboardBaseUrl);
     case 'login_init':
@@ -513,6 +581,24 @@ async function handleRotate(
     params.graceSeconds !== undefined ? { graceSeconds: params.graceSeconds } : {}
   );
   if (!rotate.success || !rotate.data) {
+    // s86-m06 (f07) — rotate's CREDENTIAL SELECTION is deliberately untouched: it
+    // authenticates with the project-scoped credential resolved for this root,
+    // which is the very key being rotated, and changing that changes which
+    // principal the dashboard's ownership check evaluates (unverifiable from this
+    // repo). Only its HONESTY changes: a blind passthrough of a 401 surfaced the
+    // generic dashboard-auth suggestion, which points a device-code install at
+    // credentials it does not have and never mentions the recovery that exists.
+    //
+    // The message asserts the resolution RULE and the local row — not which
+    // credential actually went on the wire, which a caller-injected resolver can
+    // change. The error CODE is unchanged so no consumer branch breaks.
+    if (rotate.error?.code === 'DASHBOARD_AUTH_FAILED') {
+      return createError<CmosAuthResult>({
+        code: 'DASHBOARD_AUTH_FAILED',
+        message: `${rotate.error.message} — rotate authenticates with the project-scoped credential resolved for ${params.projectRoot}; the local row for that root is keyId=${existing.keyId}. If that key was revoked dashboard-side, rotate cannot recover it.`,
+        suggestion: `Run cmos_auth(action="reissue", projectRoot="${params.projectRoot}") to mint a fresh project key using your user-scoped credential.`,
+      });
+    }
     return createError<CmosAuthResult>(
       rotate.error ?? CmosErrors.dashboardError('rotate returned no data')
     );
@@ -674,10 +760,28 @@ async function handleList(
   });
 }
 
+/**
+ * `cmos_auth(action="reissue")` — lost-key recovery.
+ *
+ * s86-m06 rewrote two things about this handler:
+ *
+ *  1. IT RESOLVES A USER-SCOPED CLIENT (`userClientResolver`), not a
+ *     project-scoped one. Reissue exists to repair a broken local project row, so
+ *     it is called exactly when that row is present — and project-scoped
+ *     resolution keys off mere row EXISTENCE, with no revocation concept. The old
+ *     path therefore authenticated the repair with the credential being repaired
+ *     and could not attribute the mint, so the documented recovery path worked
+ *     ONLY when the local row was absent, which is when it is least needed.
+ *
+ *  2. NOTHING DESTRUCTIVE HAPPENS BEFORE CLASSIFICATION. The row used to be
+ *     deleted before the handler discovered it could not attribute the mint,
+ *     leaving an operator who asked for a repair with no project key row at all —
+ *     strictly worse off than before the call.
+ */
 async function handleReissue(
   params: CmosAuthParams,
   store: CredentialStore,
-  clientResolver: DashboardClientResolver,
+  userClientResolver: UserScopedClientResolver,
   projectIdReader: DashboardProjectIdReader
 ): Promise<CmosToolResult<CmosAuthResult>> {
   if (!params.projectRoot) {
@@ -693,20 +797,34 @@ async function handleReissue(
     });
   }
 
-  const client = await clientResolver(params.projectRoot);
-  if (!client) {
+  const resolved = await userClientResolver(store);
+
+  // Classify FIRST — before any write. A failure here must leave the operator's
+  // local row exactly as it was.
+  const attribution = await classifyAttribution(
+    resolved?.client ?? null,
+    resolved?.keySource ?? null,
+    store
+  );
+  if (!attribution.ok) {
+    return createError<CmosAuthResult>(reissueAttributionError(attribution.failure));
+  }
+  if (!resolved) {
+    // Unreachable: classifyAttribution returns a failure whenever there is no
+    // client. Typed rather than assumed, so an inconsistency cannot fall through.
     return createError<CmosAuthResult>(CmosErrors.dashboardNotConfigured());
   }
 
   // recoverProjectKey no-ops when a local key already exists; reissue should
   // force a fresh key even when something is present, so drop any existing
-  // row first.
+  // row first. This is the first destructive step and it now runs only after
+  // attribution succeeded.
   await store.removeProjectKey(params.projectRoot);
 
   const recovery = await recoverProjectKey({
     projectRoot: params.projectRoot,
     projectId,
-    client,
+    client: resolved.client,
     store,
   });
 
@@ -715,17 +833,23 @@ async function handleReissue(
       action: 'reissue',
       projectId,
       newKeyId: recovery.record.keyId,
-      revokedKeyIds: [],
+      // s86-m06 — what the dashboard actually revoked. Previously hardcoded `[]`,
+      // i.e. a success answer asserting "nothing was revoked" while N keys had been.
+      // The companion flag keeps "reported an empty list" distinct from "reported
+      // nothing", so neither is rendered as the other.
+      revokedKeyIds: recovery.revokedKeyIds ?? [],
+      revokedKeyIdsReported: recovery.revokedKeyIds !== undefined,
     });
   }
   if (recovery.kind === 'missing-parent-key-id') {
-    return createError<CmosAuthResult>({
-      code: 'DEVICE_CODE_REQUIRED',
-      message:
-        'Dashboard client has no authenticatingKeyId — device code flow must be run before reissue',
-      suggestion:
-        'Run the device code bootstrap (s57-m01) so the credential store has at least one user-scoped key.',
-    });
+    // Unreachable — classifyAttribution already passed. Reported as an internal
+    // inconsistency rather than reusing the DEVICE_CODE_REQUIRED wording, which
+    // would name a cause we have just proven false.
+    return createError<CmosAuthResult>(
+      CmosErrors.dashboardError(
+        'internal inconsistency: attribution classified as usable, but the recovery path found no parent keyId'
+      )
+    );
   }
   if (recovery.kind === 'reissue-failed') {
     return createError<CmosAuthResult>(CmosErrors.dashboardError(recovery.error));
@@ -734,6 +858,38 @@ async function handleReissue(
   return createError<CmosAuthResult>(
     CmosErrors.dashboardError('reissue recovery returned an unexpected state')
   );
+}
+
+/**
+ * Turn an attribution failure into the error the operator reads.
+ *
+ * s86-m06 — the single string this replaces blamed a missing device-code bootstrap
+ * for every attribution failure, which was false whenever the store held a
+ * user-scoped key: the credentials existed and worked, they were simply not the
+ * ones selected. Each branch below states only what is known, and none promises
+ * that a subsequent reissue will work.
+ */
+function reissueAttributionError(failure: AttributionFailure): CmosToolError {
+  switch (failure.kind) {
+    case 'no-user-scoped-key':
+      return {
+        code: 'DEVICE_CODE_REQUIRED',
+        message: `The credential store at ${failure.storePath} holds no user-scoped keys, so a reissued project key cannot be attributed to a parent credential.`,
+        suggestion:
+          'Run cmos_auth(action="login_init") then cmos_auth(action="login_complete") to bootstrap a user-scoped key, then retry reissue.',
+      };
+    case 'unattributable-credential':
+      return {
+        code: 'CREDENTIAL_NOT_ATTRIBUTABLE',
+        message: `Reissue resolved its credential from ${describeAttributionArm(failure.via)}, which is not a device-code user key, so the dashboard cannot bind the new project key to a parent credential.`,
+        suggestion:
+          'Run cmos_auth(action="login_init") + login_complete to hold a device-code user-scoped key in the local store; reissue selects the newest user-scoped key from it.',
+      };
+    case 'inconsistent-resolution':
+      return CmosErrors.dashboardError(
+        `credential resolution is inconsistent: ${failure.detail} (store: ${failure.storePath})`
+      );
+  }
 }
 
 async function handleLogin(
@@ -984,8 +1140,30 @@ function mapDeviceCodeError(err: DeviceCodeError): {
 }
 
 export function formatAuthForLLM(action: string, result: CmosToolResult<CmosAuthResult>): string {
+  const lines = [renderAuthBody(action, result)];
+
+  appendWarnings(lines, result);
+
+  return lines.join('\n');
+}
+
+/**
+ * The auth answer itself. Split out of formatAuthForLLM in s86-m02 so the envelope warnings
+ * channel has one tail to render from: every branch below returns a short single-line string, and
+ * threading `appendWarnings` through each of them would have meant fourteen call sites and
+ * fourteen chances to miss one.
+ */
+function renderAuthBody(action: string, result: CmosToolResult<CmosAuthResult>): string {
   if (!result.success || !result.data) {
-    return `cmos_auth ${action} failed: ${result.error?.message ?? 'unknown error'}`;
+    // s86-m06 — render the SUGGESTION too. Every auth error carries one and none of
+    // them reached the agent: only `formatted` becomes content[0].text, and this
+    // branch dropped the field entirely. Rewriting an error string into a channel
+    // nothing renders is fail-quiet about its own fixing.
+    const suggestion = result.error?.suggestion;
+    return (
+      `cmos_auth ${action} failed: ${result.error?.message ?? 'unknown error'}` +
+      (suggestion ? `\nSuggestion: ${suggestion}` : '')
+    );
   }
   const d = result.data;
   switch (d.action) {
@@ -995,8 +1173,21 @@ export function formatAuthForLLM(action: string, result: CmosToolResult<CmosAuth
       return `Revoked ${d.scope}-scoped key ${d.keyId}.`;
     case 'list':
       return `Listed ${d.userScoped.length} user-scoped + ${d.projectScoped.length} project-scoped keys (mineOnly=${d.mineOnly}, filteredOut=${d.filteredOut}).`;
-    case 'reissue':
-      return `Reissued project key on ${d.projectId}: new keyId=${d.newKeyId}.`;
+    case 'reissue': {
+      // s86-m06 — the revoked list is RENDERED, not only carried in structuredContent. Making
+      // the field truthful (it was hardcoded `[]`) while leaving it invisible in the text an
+      // agent reads would have fixed the payload and none of the answer.
+      //
+      // THREE states, not two. "The dashboard reported an empty list" and "the dashboard
+      // reported no list" are different facts, and rendering the second as the first would be
+      // this mission's own defect one layer down.
+      const revoked = !d.revokedKeyIdsReported
+        ? 'The dashboard response carried no revoked-key list, so which prior keys it revoked is unknown.'
+        : d.revokedKeyIds.length > 0
+          ? `Dashboard revoked ${d.revokedKeyIds.length} prior key(s): ${d.revokedKeyIds.join(', ')}.`
+          : 'Dashboard reported an empty revoked-key list.';
+      return `Reissued project key on ${d.projectId}: new keyId=${d.newKeyId}. ${revoked}`;
+    }
     case 'login':
       return `Logged in via device code (keyId=${d.keyId}, label="${d.label}"). Open ${d.verificationUri} and enter ${d.userCode} if you haven't already — this key is now persisted locally.`;
     case 'login_init':

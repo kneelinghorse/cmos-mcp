@@ -24,6 +24,8 @@ import {
   type SanitizedField,
 } from '../../intelligence/content-sanitizer';
 import { recordEmbedding, missionEmbeddingInput } from '../../intelligence/embedding-pipeline';
+import { appendWarnings } from './format-warnings';
+import { checkWrite } from './write-guard';
 
 /**
  * Fields that can be updated on a mission.
@@ -274,6 +276,8 @@ export async function cmosMissionUpdate(
 
   return withClientAsync(
     async (client) => {
+      const warnings: string[] = [];
+
       // Query mission by ID
       const missionResult = client.getOne<Mission>(
         `
@@ -301,7 +305,14 @@ export async function cmosMissionUpdate(
 
       // Validate status transition if status is being changed
       if (fields.status !== undefined && fields.status !== currentStatus) {
-        const validTransitions = VALID_STATE_TRANSITIONS[currentStatus];
+        // s86-m08: `?? []` is load-bearing, not defensive padding. `currentStatus` comes from
+        // the STORE, not from the type system, and the live store holds a mission whose status
+        // ('Archived') is not a key of this map — import and peer-merge paths do not validate it.
+        // Without the fallback this threw `Cannot read properties of undefined (reading
+        // 'includes')`, which escapes withClient and surfaces as TOOL_EXECUTION_ERROR telling the
+        // operator to "retry the call" — a loop with no exit. With it, an unknown current status
+        // yields the ordinary invalid-transition error, which names the statuses involved.
+        const validTransitions = VALID_STATE_TRANSITIONS[currentStatus] ?? [];
         if (!validTransitions.includes(fields.status)) {
           return createError<MissionUpdateResult>(
             CmosErrors.missionInvalidTransition(missionId, currentStatus, fields.status)
@@ -410,8 +421,8 @@ export async function cmosMissionUpdate(
           ]
         );
 
-        // Don't fail the operation if event logging fails (non-critical)
-        if (!eventResult.success) {
+        // Don't fail the operation if event logging fails (non-critical) — but say so.
+        if (!checkWrite(eventResult, warnings, 'mission update event logging')) {
           console.warn('Failed to log mission update event:', eventResult.error);
         }
       }
@@ -437,7 +448,7 @@ export async function cmosMissionUpdate(
             // Malformed JSON in legacy rows — skip success_criteria for embedding.
           }
         }
-        await recordEmbedding(client, {
+        const embedResult = await recordEmbedding(client, {
           type: 'mission',
           id: missionId,
           inputText: missionEmbeddingInput({
@@ -447,6 +458,9 @@ export async function cmosMissionUpdate(
             successCriteria: criteria,
           }),
         });
+        // s86-m02b: a failed vec0 upsert / hash write means the row will not be
+        // findable by vector search — say so instead of dropping it.
+        warnings.push(...(embedResult.warnings ?? []));
       }
 
       // Build result
@@ -461,7 +475,7 @@ export async function cmosMissionUpdate(
         result.currentStatus = newStatus;
       }
 
-      return createSuccess(result, undefined, sanitizedFields);
+      return createSuccess(result, warnings, sanitizedFields);
     },
     { projectRoot: params.projectRoot }
   );
@@ -504,6 +518,8 @@ export function formatMissionUpdateForLLM(result: CmosToolResult<MissionUpdateRe
   if (data.previousStatus && data.currentStatus) {
     lines.push(`Status: ${data.previousStatus} -> ${data.currentStatus}`);
   }
+
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

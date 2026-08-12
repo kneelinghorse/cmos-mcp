@@ -371,6 +371,10 @@ describe('CmosDatabaseClient project resolution', () => {
             completed_missions INTEGER DEFAULT 0,
             blocked_missions INTEGER DEFAULT 0,
             active_missions INTEGER DEFAULT 0,
+            -- s86-m08: sprint_summary gained parked_missions. This stub is a base TABLE, and
+            -- ensureSprintSummaryView deliberately never rewrites a table it did not create,
+            -- so the column is added here rather than by the migration.
+            parked_missions INTEGER DEFAULT 0,
             decisions_count INTEGER DEFAULT 0
           );
         `);

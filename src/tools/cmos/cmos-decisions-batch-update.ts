@@ -10,20 +10,31 @@
 import { withClientValidated } from './client';
 import type { CmosToolResult } from './types';
 import { createError, CmosErrors } from './errors';
+import { appendWarnings, appendWriteFailures } from './format-warnings';
+import { countWrite, type WriteFailure } from './write-guard';
 
 export interface CmosDecisionsBatchUpdateResult {
   /** Number of decisions updated */
   updated: number;
   /** Total decisions requested */
   requested: number;
-  /** IDs that were not found */
+  /** IDs the existence SELECT proved absent — the query RAN and returned no row */
   notFound: number[];
   /** IDs that were already in the target status */
   alreadyInStatus: number[];
+  /** IDs whose UPDATE was rejected by the database (s86-m02b) */
+  failed: number[];
+  /** IDs whose existence SELECT itself errored, so they are neither found nor not-found — their
+   *  state is UNKNOWN and nothing was attempted for them (s86-m02b). The DB error for each is in
+   *  `writeFailures`. Empty on every path where the lookup ran. */
+  lookupFailed: number[];
   /** New status applied */
   status: string;
   /** Confirmation message */
   message: string;
+  /** DB errors from the per-id existence SELECTs and UPDATEs; empty when every statement ran
+   *  (s86-m02b) */
+  writeFailures: WriteFailure[];
 }
 
 export interface CmosDecisionsBatchUpdateParams {
@@ -61,6 +72,9 @@ export async function cmosDecisionsBatchUpdate(
     (client) => {
       const notFound: number[] = [];
       const alreadyInStatus: number[] = [];
+      const failed: number[] = [];
+      const lookupFailed: number[] = [];
+      const writeFailures: WriteFailure[] = [];
       let updated = 0;
 
       for (const id of params.decisionIds) {
@@ -69,7 +83,22 @@ export async function cmosDecisionsBatchUpdate(
           [id]
         );
 
-        if (!existing.success || !existing.data) {
+        // s86-m02b: "the query failed" is NOT "the decision is absent" — the same split
+        // learning-reaffirm.ts makes non-cuttable. These two arms were one `||`, so an errored
+        // SELECT was reported to the operator as `Not found: [id]` and folded into the
+        // `N not found` message: a positive claim about the corpus made from a query that never
+        // answered. An errored lookup classifies NOTHING; it is disclosed instead.
+        if (!existing.success) {
+          lookupFailed.push(id);
+          writeFailures.push({
+            op: `strategic_decisions existence lookup id=${id}`,
+            code: existing.error?.code ?? 'DB_ERROR',
+            message: existing.error?.message ?? 'unknown',
+          });
+          continue;
+        }
+
+        if (!existing.data) {
           notFound.push(id);
           continue;
         }
@@ -84,8 +113,15 @@ export async function cmosDecisionsBatchUpdate(
           id,
         ]);
 
-        if (result.success && (result.data?.changes ?? 0) > 0) {
+        // s86-m02b: the row was just SELECTed and is not already in the target status, so a
+        // failed UPDATE is the only way this id can miss — it belongs in its own bucket, not
+        // folded into `updated` and not silently absent from every bucket.
+        if (
+          countWrite(result, { failures: writeFailures }, `strategic_decisions.status id=${id}`) > 0
+        ) {
           updated++;
+        } else if (!result.success) {
+          failed.push(id);
         }
       }
 
@@ -93,6 +129,8 @@ export async function cmosDecisionsBatchUpdate(
       if (notFound.length > 0) parts.push(`${notFound.length} not found`);
       if (alreadyInStatus.length > 0)
         parts.push(`${alreadyInStatus.length} already '${params.status}'`);
+      if (failed.length > 0) parts.push(`${failed.length} failed to update`);
+      if (lookupFailed.length > 0) parts.push(`${lookupFailed.length} not checked (lookup failed)`);
 
       return {
         success: true as const,
@@ -101,8 +139,11 @@ export async function cmosDecisionsBatchUpdate(
           requested: params.decisionIds.length,
           notFound,
           alreadyInStatus,
+          failed,
+          lookupFailed,
           status: params.status,
           message: parts.join(', '),
+          writeFailures,
         },
       };
     },
@@ -131,6 +172,19 @@ export function formatDecisionsBatchUpdateForLLM(
   if (d.notFound.length > 0) {
     lines.push(`  Not found: [${d.notFound.join(', ')}]`);
   }
+
+  if (d.failed.length > 0) {
+    lines.push(`  Failed to update: [${d.failed.join(', ')}]`);
+  }
+
+  if (d.lookupFailed.length > 0) {
+    // s86-m02b: distinct from "Not found" on purpose — the lookup errored, so these ids were
+    // neither confirmed present nor proven absent, and no UPDATE was attempted for them.
+    lines.push(`  State unknown, lookup failed: [${d.lookupFailed.join(', ')}]`);
+  }
+
+  appendWriteFailures(lines, d.writeFailures);
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

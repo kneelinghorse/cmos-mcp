@@ -12,6 +12,7 @@ import { withClientValidated } from './client';
 import type { CmosToolResult } from './types';
 import { reviewDecisionStaleness, type DecisionReviewResult } from './staleness-detection';
 import { buildUntaggedDecisionAdvisory } from './untagged-advisory';
+import { appendWarnings } from './format-warnings';
 
 export type CmosDecisionsReviewResult = DecisionReviewResult;
 
@@ -115,6 +116,8 @@ export function formatDecisionsReviewForLLM(
     }
     lines.push('');
   }
+
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

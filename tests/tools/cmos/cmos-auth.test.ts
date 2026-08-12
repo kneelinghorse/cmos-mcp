@@ -182,6 +182,12 @@ describe('cmos_auth', () => {
     return {
       store,
       clientResolver: async () => stubClient(),
+      // s86-m06 — `reissue` resolves a USER-scoped client and no longer consults
+      // `clientResolver`. Injecting both keeps every pre-existing test's intent: without
+      // this line the reissue cases would fall through to production resolution against an
+      // empty tmpdir store (the suite strips the dashboard credential env vars) and fail
+      // for a fixture reason rather than a behavioural one.
+      userClientResolver: async () => ({ client: stubClient(), keySource: 'user-scoped' }),
       projectIdReader: async () => 'dashboard-project-id',
       ...overrides,
     };
@@ -253,6 +259,42 @@ describe('cmos_auth', () => {
     );
     expect(result.success).toBe(false);
     expect(result.error?.message).toContain('rotate 500');
+  });
+
+  /**
+   * s86-m06 (fork f07) — rotate's CREDENTIAL SELECTION is out of scope and untouched:
+   * it authenticates with the project-scoped key resolved for the root, which is the very
+   * key being rotated, and changing that changes which principal the dashboard's ownership
+   * check evaluates. Only the HONESTY of the 401 changes. The message may assert the
+   * resolution RULE and the local row — not which credential actually went on the wire,
+   * since a caller-injected resolver can change that.
+   */
+  it('rotate names the local row and points at reissue on a dashboard auth failure', async () => {
+    const projectRoot = path.join(tempDir, 'rotate-401');
+    await store.upsertProjectKey(projectRoot, projectRecord({ keyId: 'p-live' }));
+
+    const result = await cmosAuth(
+      { action: 'rotate', projectRoot },
+      deps({
+        clientResolver: async () =>
+          stubClient({
+            rotate: {
+              success: false,
+              error: {
+                code: 'DASHBOARD_AUTH_FAILED',
+                message: "Authentication failed for dashboard at 'https://dash.test'",
+              },
+            } as CmosToolResult<RotateProjectKeyResult>,
+          }),
+      })
+    );
+
+    expect(result.success).toBe(false);
+    // The code is unchanged so no consumer branch breaks.
+    expect(result.error?.code).toBe('DASHBOARD_AUTH_FAILED');
+    expect(result.error?.message).toContain('p-live');
+    expect(result.error?.message).toContain('project-scoped credential resolved for');
+    expect(result.error?.suggestion).toContain('cmos_auth(action="reissue"');
   });
 
   // ─── revoke ──────────────────────────────────────────────────────────────
@@ -508,16 +550,65 @@ describe('cmos_auth', () => {
     expect(persisted?.key).toBe('cmk_reissued');
   });
 
-  it('reissue surfaces DEVICE_CODE_REQUIRED when the client has no authenticatingKeyId', async () => {
+  /**
+   * s86-m06 — this test used to be named "…when the client has no authenticatingKeyId"
+   * and injected `clientResolver: stubClient({authenticatingKeyId: undefined})`. After the
+   * resolver change it would have stayed GREEN for the wrong reason (the tmpdir store is
+   * empty, so ANY implementation returns DEVICE_CODE_REQUIRED) — the name would assert
+   * something the test no longer checked. It is renamed and the zero-user-key state is now
+   * seeded and asserted explicitly, and the code's TWO conditions have two tests.
+   */
+  it('reissue surfaces DEVICE_CODE_REQUIRED when the credential store holds no user-scoped key', async () => {
     const projectRoot = path.join(tempDir, 'reissue-no-parent');
+    // The state under test, stated rather than inherited from an empty fixture.
+    expect(Object.keys(await store.listUserScopedKeys())).toHaveLength(0);
+
+    const result = await cmosAuth(
+      { action: 'reissue', projectRoot },
+      // No userClientResolver override: production resolution must find the empty store.
+      { store, projectIdReader: async () => 'dashboard-project-id' }
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('DEVICE_CODE_REQUIRED');
+    expect(result.error?.message).toContain(store.path);
+    expect(result.error?.message).not.toContain('device code flow must be run');
+  });
+
+  it('reissue surfaces CREDENTIAL_NOT_ATTRIBUTABLE for a caller-supplied credential', async () => {
+    const projectRoot = path.join(tempDir, 'reissue-unattributable');
+    await store.upsertUserScopedKey('user-1', userRecord());
+
     const result = await cmosAuth(
       { action: 'reissue', projectRoot },
       deps({
-        clientResolver: async () => stubClient({ authenticatingKeyId: undefined }),
+        // keySource 'user-scoped' with no authenticating keyId is arm 1, and only arm 1.
+        userClientResolver: async () => ({
+          client: stubClient({ authenticatingKeyId: undefined }),
+          keySource: 'user-scoped',
+        }),
       })
     );
+
     expect(result.success).toBe(false);
-    expect(result.error?.code).toBe('DEVICE_CODE_REQUIRED');
+    expect(result.error?.code).toBe('CREDENTIAL_NOT_ATTRIBUTABLE');
+    // A user-scoped key IS present, so blaming device code would be false here.
+    expect(result.error?.message).not.toContain('device code flow must be run');
+    expect(result.error?.message).toContain('caller-supplied apiKey override');
+  });
+
+  it('reissue reports the keyIds the dashboard actually revoked', async () => {
+    const projectRoot = path.join(tempDir, 'reissue-revoked-ids');
+
+    const result = await cmosAuth({ action: 'reissue', projectRoot }, deps());
+
+    expect(result.success).toBe(true);
+    if (result.success && result.data?.action === 'reissue') {
+      // The stub dashboard reports ['orphan-id']; the handler used to hardcode [].
+      expect(result.data.revokedKeyIds).toEqual(['orphan-id']);
+    } else {
+      throw new Error('expected a reissue success payload');
+    }
   });
 
   // ─── login (Sprint 58 m01) ───────────────────────────────────────────────

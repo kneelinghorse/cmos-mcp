@@ -25,7 +25,10 @@ jest.mock('../../../src/auth/project-key-capture', () => ({
   captureRegisterResponse: jest.fn(async () => 'captured'),
 }));
 
-import { triggerCheckpointBackfill } from '../../../src/tools/cmos/checkpoint-backfill';
+import {
+  triggerCheckpointBackfill,
+  CMOS_CHECKPOINT_SYNC_ENV,
+} from '../../../src/tools/cmos/checkpoint-backfill';
 import { cmosDbBackfill } from '../../../src/tools/cmos/cmos-db-backfill';
 import { withClientAsync } from '../../../src/tools/cmos/client';
 import { DashboardClient } from '../../../src/tools/cmos/dashboard-client';
@@ -75,6 +78,81 @@ function makeSyncResult() {
     },
   };
 }
+
+/**
+ * s86-m01 — MANDATORY OPT-OUT from the CMOS_CHECKPOINT_SYNC kill switch.
+ *
+ * tests/jest-global-setup.ts defaults that var to 'off' for the whole run, which
+ * would short-circuit `triggerCheckpointBackfill` before any of the real gates —
+ * silently neutering all 24 call sites in this file, including the four s70-m04
+ * device-code gate tests. This file is the one place that must exercise the real
+ * behaviour, so it deletes the var for every test.
+ *
+ * Declared at TOP LEVEL, outside all three describes, so it runs before each of
+ * their own beforeEach hooks (Jest runs beforeEach outermost-first). The switch's
+ * own behaviour test lives in its own describe below, which re-sets the var in a
+ * nested beforeEach — that runs after this one, so it wins.
+ */
+const ORIGINAL_CHECKPOINT_SYNC = process.env.CMOS_CHECKPOINT_SYNC;
+
+beforeEach(() => {
+  delete process.env[CMOS_CHECKPOINT_SYNC_ENV];
+});
+
+afterEach(() => {
+  if (ORIGINAL_CHECKPOINT_SYNC === undefined) {
+    delete process.env[CMOS_CHECKPOINT_SYNC_ENV];
+  } else {
+    process.env[CMOS_CHECKPOINT_SYNC_ENV] = ORIGINAL_CHECKPOINT_SYNC;
+  }
+});
+
+describe('CMOS_CHECKPOINT_SYNC kill switch (s86-m01)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env.CMOS_DASHBOARD_API_KEY = 'test-key';
+  });
+
+  afterEach(() => {
+    delete process.env.CMOS_DASHBOARD_API_KEY;
+  });
+
+  it("resolves without touching any gate when set to 'off'", async () => {
+    process.env[CMOS_CHECKPOINT_SYNC_ENV] = 'off';
+
+    await triggerCheckpointBackfill({ projectRoot: '/tmp/whatever', force: true });
+
+    // The switch is read BEFORE every other gate, so none of these is reached.
+    expect(mockFromEnvForProject).not.toHaveBeenCalled();
+    expect(mockBackfill).not.toHaveBeenCalled();
+    expect(mockWithClientAsync).not.toHaveBeenCalled();
+  });
+
+  it("does NOT disable the sync when set to 'on'", async () => {
+    process.env[CMOS_CHECKPOINT_SYNC_ENV] = 'on';
+    mockFromEnvForProject.mockResolvedValue({
+      success: false as const,
+      error: { code: 'NO_CREDENTIALS', message: 'none' },
+    } as never);
+
+    await triggerCheckpointBackfill({ projectRoot: '/tmp/whatever', force: true });
+
+    // 'on' is not special-cased — it falls through to the real credential gate.
+    expect(mockFromEnvForProject).toHaveBeenCalled();
+  });
+
+  it('does NOT disable the sync when unset', async () => {
+    delete process.env[CMOS_CHECKPOINT_SYNC_ENV];
+    mockFromEnvForProject.mockResolvedValue({
+      success: false as const,
+      error: { code: 'NO_CREDENTIALS', message: 'none' },
+    } as never);
+
+    await triggerCheckpointBackfill({ projectRoot: '/tmp/whatever', force: true });
+
+    expect(mockFromEnvForProject).toHaveBeenCalled();
+  });
+});
 
 describe('checkpoint-backfill', () => {
   const originalUrl = process.env.CMOS_DASHBOARD_URL;

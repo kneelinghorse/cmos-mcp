@@ -25,6 +25,7 @@ import { frameInlineIfForeign } from '../../intelligence/provenance-frame';
 import { activeMissionsAcrossProjects } from '../../intelligence/cross-store-queries';
 import type { CrossStoreError, CrossStoreQueryResult } from '../../intelligence/cross-store-query';
 import type { ProjectGraphRegistry } from '../../intelligence/project-graph-registry';
+import { appendWarnings } from './format-warnings';
 
 /**
  * Mission item with sprint context for the status view.
@@ -563,10 +564,19 @@ async function resolveAmbientLocalProjectId(): Promise<string | null> {
  * `registry` seam is for deterministic tests (not exposed on the tool schema).
  */
 export async function missionStatusAcrossProjects(
-  opts: { limit?: number; registry?: ProjectGraphRegistry } = {}
+  opts: { limit?: number } = {},
+  // s86-m03 — internal, NON-schema seam, moved out of parameter 0 onto the cmos-review.ts:295
+  // precedent (the same move applied to cmosLearningsListAcrossProjects in this mission): an
+  // injectable ProjectGraphRegistry for deterministic tests of the cross-store fan-out. NOT
+  // exposed on the tool inputSchema — it must never reach the MCP boundary. Sitting in
+  // parameter 0 made it indistinguishable from a caller-facing param the router drops.
+  internalOpts: { registry?: ProjectGraphRegistry } = {}
 ): Promise<CmosToolResult<CmosMissionPortfolioResult>> {
   const pageSize = opts.limit ?? 50;
-  const fanout = await activeMissionsAcrossProjects({ limit: pageSize, registry: opts.registry });
+  const fanout = await activeMissionsAcrossProjects({
+    limit: pageSize,
+    registry: internalOpts.registry,
+  });
 
   const missions: PortfolioMissionItem[] = fanout.results.map((row) => ({
     id: row.id,
@@ -629,6 +639,8 @@ export function formatMissionPortfolioForLLM(
     lines.push('⚠️  Per-store errors:');
     for (const e of data.errors) lines.push(`  - ${e.projectId || e.storePath}: ${e.error}`);
   }
+  appendWarnings(lines, result);
+
   return lines.join('\n');
 }
 
@@ -745,6 +757,8 @@ export function formatMissionStatusForLLM(result: CmosToolResult<CmosMissionStat
   // Next action recommendation
   lines.push('---');
   lines.push(`**Next:** ${data.summary.nextAction}`);
+
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

@@ -32,6 +32,7 @@
  */
 
 import type { CmosDatabaseClient } from './client';
+import { checkWrite, type WriteSink } from './write-guard';
 
 // ─── Provenance ────────────────────────────────────────────────────────────────
 
@@ -301,11 +302,23 @@ export function readPullCursor(db: CmosDatabaseClient, slug: string): number {
   return Number.isFinite(raw) && raw > 0 ? raw : 0;
 }
 
-export function persistPullCursor(db: CmosDatabaseClient, slug: string, cursor: number): void {
-  db.execute(`INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)`, [
+/**
+ * Persist a project's PULL cursor. `sink` carries a failed cursor write into the caller's
+ * answer (s86-m02b): the pull/clone otherwise reports `cursorSeeded: N` for a high-water
+ * mark that never landed, and the NEXT incremental pull silently re-drains from the old
+ * position. The default drops the record for callers that have no answer to attach it to.
+ */
+export function persistPullCursor(
+  db: CmosDatabaseClient,
+  slug: string,
+  cursor: number,
+  sink: WriteSink = []
+): void {
+  const res = db.execute(`INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)`, [
     pullCursorKey(slug),
     String(cursor),
   ]);
+  checkWrite(res, sink, `PULL cursor persist (${pullCursorKey(slug)})`);
 }
 
 export function readDashboardSlug(db: CmosDatabaseClient): string | null {

@@ -10,7 +10,7 @@
 
 import { z } from 'zod';
 import { createError, CmosErrors } from './errors';
-import type { CmosToolResult } from './types';
+import type { ActionParamMap, CmosToolResult } from './types';
 import {
   cmosDecisionsList,
   formatDecisionsListForLLM,
@@ -52,6 +52,29 @@ export const CMOS_DECISIONS_ACTIONS = [
 
 export type CmosDecisionsAction = (typeof CMOS_DECISIONS_ACTIONS)[number];
 
+/** s86-m04 — which published parameter applies to which action (see action-params.ts). */
+export const CMOS_DECISIONS_ACTION_PARAMS: ActionParamMap<
+  CmosDecisionsAction,
+  CmosDecisionsParams
+> = {
+  list: [
+    'action',
+    'domain',
+    'sprintId',
+    'missionId',
+    'since',
+    'until',
+    'page',
+    'pageSize',
+    'acrossProjects',
+    'projectRoot',
+  ],
+  search: ['action', 'domain', 'sprintId', 'query', 'limit', 'projectRoot'],
+  update: ['action', 'decisionId', 'supersededBy', 'status', 'projectRoot'],
+  review: ['action', 'includeApproaching', 'projectRoot'],
+  batch_update: ['action', 'status', 'decisionIds', 'projectRoot'],
+};
+
 export type CmosDecisionsResult =
   | CmosDecisionsListResult
   | CmosDecisionsSearchResult
@@ -61,7 +84,10 @@ export type CmosDecisionsResult =
 
 export const cmosDecisionsSchema = z
   .object({
-    action: z.enum(CMOS_DECISIONS_ACTIONS).describe('Decisions action: list | search | update'),
+    action: z
+      .enum(CMOS_DECISIONS_ACTIONS)
+      // s86-m04: DERIVED. Listed 3 of 5 — review and batch_update were unreachable by reading.
+      .describe(`Decisions action: ${CMOS_DECISIONS_ACTIONS.join(' | ')}`),
     // shared params
     domain: z.string().optional().describe('Filter by domain for list/search actions'),
     sprintId: z.string().optional().describe('Filter by sprint ID for list/search actions'),
@@ -96,7 +122,9 @@ export const cmosDecisionsSchema = z
       .optional()
       .describe('ID of the decision that supersedes this one (for update action)'),
     status: z
-      .string()
+      // s86-m04: matches the published JSON enum exactly. Fleet-verified safe — no stored
+      // strategic_decisions.status across the 18 registered stores falls outside these four.
+      .enum(['active', 'superseded', 'archived', 'stale'])
       .optional()
       .describe(
         'New status for update/batch_update action (active | superseded | archived | stale)'
@@ -133,7 +161,7 @@ export const cmosDecisionsToolDefinition = {
       action: {
         type: 'string',
         enum: [...CMOS_DECISIONS_ACTIONS],
-        description: 'Decisions action: list | search | update',
+        description: `Decisions action: ${CMOS_DECISIONS_ACTIONS.join(' | ')}`,
       },
       domain: { type: 'string', description: 'Filter by domain' },
       sprintId: { type: 'string', description: 'Filter by sprint ID' },
@@ -143,9 +171,9 @@ export const cmosDecisionsToolDefinition = {
       },
       since: { type: 'string', description: 'ISO date lower bound for list action' },
       until: { type: 'string', description: 'ISO date upper bound for list action' },
-      page: { type: 'number', minimum: 1, description: 'Page number for list action' },
+      page: { type: 'integer', minimum: 1, description: 'Page number for list action' },
       pageSize: {
-        type: 'number',
+        type: 'integer',
         minimum: 1,
         maximum: 100,
         description: 'Page size for list action',
@@ -157,18 +185,18 @@ export const cmosDecisionsToolDefinition = {
       },
       query: { type: 'string', description: 'Search query for search action' },
       limit: {
-        type: 'number',
+        type: 'integer',
         minimum: 1,
         maximum: 100,
         description: 'Maximum results for search action',
       },
       decisionId: {
-        type: 'number',
+        type: 'integer',
         minimum: 1,
         description: 'Decision ID for update action',
       },
       supersededBy: {
-        type: 'number',
+        type: 'integer',
         minimum: 1,
         description: 'ID of the decision that supersedes this one (for update action)',
       },
@@ -183,7 +211,7 @@ export const cmosDecisionsToolDefinition = {
       },
       decisionIds: {
         type: 'array',
-        items: { type: 'number', minimum: 1 },
+        items: { type: 'integer', minimum: 1 },
         description: 'Array of decision IDs for batch_update action (max 100)',
       },
       projectRoot: {

@@ -10,7 +10,7 @@
 
 import { z } from 'zod';
 import { createError, CmosErrors } from './errors';
-import type { CmosToolResult } from './types';
+import type { ActionParamMap, CmosToolResult } from './types';
 import {
   cmosLearningsList,
   cmosLearningsListAcrossProjects,
@@ -41,6 +41,45 @@ export const CMOS_LEARNINGS_ACTIONS = ['list', 'search', 'update', 'reaffirm'] a
 
 export type CmosLearningsAction = (typeof CMOS_LEARNINGS_ACTIONS)[number];
 
+/**
+ * s86-m04 — which published parameter applies to which action. See action-params.ts for why this
+ * is product data rather than a generated artifact.
+ *
+ * THE ENTRY THAT OPENED THIS ARC: `evergreen` appears under BOTH `update` and `reaffirm`. The
+ * router forwarded it only to `update` until s86-m03, so `cmos_learnings(action="reaffirm",
+ * evergreen=true)` reported success and wrote nothing — and no gate could see it, because
+ * `CmosLearningsReaffirmParams` under-declared the key in the same way. Two lists claiming it is
+ * what makes that class of defect red instead of silent.
+ *
+ * `learningId` likewise appears under `update` AND `reaffirm`. Its description used to read
+ * "Learning ID for update action" — wrong in exactly the way this map exists to expose, since
+ * per-action tables put that sentence under a `reaffirm` heading that contradicts it. Both the
+ * description and the map now say update/reaffirm, and
+ * tests/tools/cmos/action-clause-agreement.test.ts keeps them agreeing.
+ */
+export const CMOS_LEARNINGS_ACTION_PARAMS: ActionParamMap<
+  CmosLearningsAction,
+  CmosLearningsParams
+> = {
+  list: [
+    'action',
+    'category',
+    'sprintId',
+    'missionId',
+    'status',
+    'since',
+    'until',
+    'page',
+    'pageSize',
+    'acrossProjects',
+    'limit',
+    'projectRoot',
+  ],
+  search: ['action', 'category', 'sprintId', 'query', 'limit', 'projectRoot'],
+  update: ['action', 'status', 'learningId', 'evergreen', 'projectRoot'],
+  reaffirm: ['action', 'learningId', 'evergreen', 'projectRoot'],
+};
+
 export type CmosLearningsResult =
   | CmosLearningsListResult
   | CmosLearningsSearchResult
@@ -65,10 +104,15 @@ export const cmosLearningsSchema = z
       .optional()
       .describe('s85-m04: filter to rows stamped with this mission (#487 mission -> row trail)'),
     status: z
-      .string()
+      // s86-m04 (fork f04, fleet-resolved): four members, not three. CMOS ITSELF writes 'stale'
+      // at staleness-detection.ts:494-499, and 246 such rows exist across 7 of 18 registered
+      // stores — so the published 3-member enum forbade callers from naming a value the server
+      // had been writing for sprints. cmos_decisions never had this bug; that asymmetry is the
+      // evidence the enum was wrong, not the data.
+      .enum(['active', 'archived', 'superseded', 'stale'])
       .optional()
       .describe(
-        'Filter by status for list action, or new status for update action (active | archived | superseded)'
+        'Filter by status for list action, or new status for update action (active | archived | superseded | stale)'
       ),
     since: z.string().optional().describe('ISO date lower bound for list action'),
     until: z.string().optional().describe('ISO date upper bound for list action'),
@@ -88,14 +132,19 @@ export const cmosLearningsSchema = z
       .positive()
       .max(50)
       .optional()
-      .describe('Maximum results for search action'),
+      .describe('Maximum results for search action, or the across-project cap for list action'),
     // update params
-    learningId: z.number().int().positive().optional().describe('Learning ID for update action'),
+    learningId: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe('Learning ID for update/reaffirm actions'),
     evergreen: z
       .boolean()
       .optional()
       .describe(
-        'Sprint 61 m03 — toggle institutional-rule flag. true = exclude from staleness signal; false = clear flag.'
+        'Toggle institutional-rule flag. Applies to the update and reaffirm actions. true = exclude from staleness signal; false = clear flag; omitted = leave unchanged.'
       ),
     projectRoot: z
       .string()
@@ -110,7 +159,7 @@ export const cmosLearningsToolDefinition = {
   name: 'cmos_learnings',
   description:
     'Consolidated learnings tool with action parameter support. ' +
-    'Actions: list, search, update. ' +
+    `Actions: ${CMOS_LEARNINGS_ACTIONS.join(', ')}. ` +
     'Use list to browse learnings with category/sprint/status filters. ' +
     'Use search to find learnings by keyword. ' +
     'Use update to change status (active, archived, superseded). ' +
@@ -125,8 +174,11 @@ export const cmosLearningsToolDefinition = {
       },
       category: {
         type: 'string',
-        enum: ['technical', 'process', 'agent-behavior', 'tooling'],
-        description: 'Filter by category',
+        // s86-m04 (fork f04): NO enum. `learnings.category` is `TEXT` with no CHECK constraint
+        // (schema.ts), so publishing a closed set claimed an enforcement the server does not
+        // perform — and the fleet already carries an out-of-set value ('voice', Writing-and-
+        // Strategy). The four canonical values are guidance, not a contract.
+        description: 'Filter by category. Commonly: technical | process | agent-behavior | tooling',
       },
       sprintId: { type: 'string', description: 'Filter by sprint ID' },
       missionId: {
@@ -135,14 +187,14 @@ export const cmosLearningsToolDefinition = {
       },
       status: {
         type: 'string',
-        enum: ['active', 'archived', 'superseded'],
+        enum: ['active', 'archived', 'superseded', 'stale'],
         description: 'Filter by status (list) or new status (update)',
       },
       since: { type: 'string', description: 'ISO date lower bound for list action' },
       until: { type: 'string', description: 'ISO date upper bound for list action' },
-      page: { type: 'number', minimum: 1, description: 'Page number for list action' },
+      page: { type: 'integer', minimum: 1, description: 'Page number for list action' },
       pageSize: {
-        type: 'number',
+        type: 'integer',
         minimum: 1,
         maximum: 100,
         description: 'Page size for list action',
@@ -154,20 +206,20 @@ export const cmosLearningsToolDefinition = {
       },
       query: { type: 'string', description: 'Search query for search action' },
       limit: {
-        type: 'number',
+        type: 'integer',
         minimum: 1,
         maximum: 50,
-        description: 'Maximum results for search action',
+        description: 'Maximum results for search action, or the across-project cap for list action',
       },
       learningId: {
-        type: 'number',
+        type: 'integer',
         minimum: 1,
-        description: 'Learning ID for update action',
+        description: 'Learning ID for update/reaffirm actions',
       },
       evergreen: {
         type: 'boolean',
         description:
-          'Toggle institutional-rule flag for the learning. true = exclude from staleness signal; false = clear flag (Sprint 61 m03).',
+          'Toggle institutional-rule flag for the learning. Applies to the update and reaffirm actions. true = exclude from staleness signal; false = clear flag; omitted = leave unchanged.',
       },
       projectRoot: {
         type: 'string',
@@ -234,6 +286,13 @@ export async function cmosLearnings(
     case 'reaffirm':
       return cmosLearningsReaffirm({
         learningId: params.learningId ?? 0,
+        // s86-m03: `evergreen` is declared on this router (zod :94-99 + JSON inputSchema :167-171)
+        // with no action scoping, and is forwarded to `update` one branch above — but was dropped
+        // here, so `cmos_learnings(action="reaffirm", evergreen=true)` returned success and wrote
+        // nothing. A handler-only test would have passed throughout: cmosLearningsReaffirm never
+        // received the value to ignore. The real-store read-back fire drives THIS ROUTER, not the
+        // handler, and fails if this line is removed.
+        evergreen: params.evergreen,
         projectRoot: params.projectRoot,
       } satisfies CmosLearningsReaffirmParams);
   }

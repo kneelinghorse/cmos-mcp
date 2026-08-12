@@ -133,6 +133,18 @@ export async function readLocalSenderIdentity(projectRoot?: string): Promise<Loc
         let localIdentity = readIdentity();
         if (shouldAttemptIdentityRepair(localIdentity.projectId, localIdentity.cmosAddress, db)) {
           try {
+            // s86-m02b: `resolveAndPersistOwner` returns a `warnings` array naming any
+            // metadata write that errored, and this call site DROPS it — deliberately, and
+            // this is the one caller of the three that must. It is a PRODUCER WITH NO
+            // CONSUMER BY CONSTRUCTION: `readLocalSenderIdentity` is a resolver, not a tool
+            // handler. It returns a bare `LocalSenderIdentity` (the `createSuccess` envelope
+            // below is discarded by the `result.data` unwrap at the end of this function),
+            // it has no `format*ForLLM`, and its two callers — cmos-message.ts's handleSend
+            // and cmos-sprint-carry-forward.ts — consume only `{projectId, cmosAddress}`.
+            // Carrying the failure out would mean widening this resolver's return type and
+            // both call sites; the disclosure the operator actually gets is the NULL identity
+            // this function then fails closed with, plus the same warnings surfaced by the
+            // other two callers (cmos-agent-onboard, checkpoint-backfill) on their own answers.
             await resolveAndPersistOwner(db);
             backfillUnknownCmosAddress(db);
             localIdentity = readIdentity();

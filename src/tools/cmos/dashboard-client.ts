@@ -279,21 +279,56 @@ export interface ResolveAddressParams {
   address: string;
 }
 
+/**
+ * GET /api/messages/resolve.
+ *
+ * s86-m07 — `resolved` is an OBJECT, not a boolean, and there are no top-level `projectName` /
+ * `agentId` keys. The pre-s86 declaration described a response the endpoint has never sent;
+ * `request()` returns the whole body as `data` (there is no `data` envelope key on this route),
+ * so the live body is `{success, resolved: {...}}` verbatim. Recorded 2026-08-10 against
+ * https://cmos.aquex.ai for cmos://derek/cmos-mcp:
+ *
+ *     {"success":true,"resolved":{"projectId":"ec2b4987-…","projectName":"cmos-mcp",
+ *      "projectSlug":"cmos-mcp"}}
+ *
+ * The members are optional because the route's own body varies by address kind; only
+ * `resolved`'s PRESENCE is load-bearing (handleSend already treats a non-error response as
+ * "the address exists"). The endpoint also returns a server-internal filesystem path to the
+ * store — deliberately NOT modelled here: a path on the dashboard host is not this codebase's
+ * business, and typing it would invite a caller to read it.
+ */
 export interface ResolveAddressResult {
-  resolved: boolean;
-  projectName?: string;
-  agentId?: string;
+  success?: boolean;
+  resolved: {
+    userId?: string;
+    username?: string;
+    displayName?: string;
+    projectId?: string;
+    projectName?: string;
+    projectSlug?: string;
+  };
 }
 
-/** A project entry from the dashboard directory. */
+/**
+ * A project entry from the dashboard directory.
+ *
+ * s86-m07 — NO `description` member. GET /api/projects/directory/public returns exactly
+ * `{id, name, slug, owner, ownerDisplayName, cmosAddress, createdAt}` and no description for
+ * any row (measured 2026-08-10, 37 rows), so the field and its renderer were permanently inert.
+ * `isOwner` is likewise never populated by that route — only GET /api/projects/me returns it,
+ * which is why `cmos_message(directory)` joins the two (cmos-message.ts handleDirectory).
+ * `createdAt` is the REGISTRATION date; it is not an activity or freshness signal and must not
+ * be rendered as one.
+ */
 export interface DirectoryProject {
   id: string;
   name: string;
   address: string;
   owner: string;
-  description?: string;
   slug?: string;
   isOwner?: boolean;
+  createdAt?: string;
+  ownerDisplayName?: string;
 }
 
 export interface ListDirectoryResult {
@@ -319,6 +354,35 @@ function pickNewestUserScopedKey(
   return { keyId: best[0], record: best[1] };
 }
 
+/**
+ * s86-m06 — the resolution envelope both `fromEnvForProject` and `fromEnvForUser`
+ * return. Deliberately the SAME shape for both: `keySource` is what lets a caller
+ * tell the arms apart by rule (see `classifyAttribution`), so no entry point needs
+ * a divergent field to be interpretable.
+ */
+export interface ResolvedDashboardClient {
+  client: DashboardClient;
+  keySource: KeySource;
+  matchedProjectRoot: string | null;
+}
+
+/**
+ * s86-m06 — the api-key config literal, shared by `fromEnvForProject` and
+ * `fromEnvForUser` so the two entry points cannot drift on how a key becomes a
+ * client config.
+ */
+function apiKeyConfig(
+  baseUrl: string,
+  apiKey: string,
+  timeoutMs: number | undefined
+): DashboardClientConfig {
+  return {
+    baseUrl,
+    apiKey,
+    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+  };
+}
+
 function parseOwnerFromAddress(address: string | undefined): string | undefined {
   if (!address || !address.startsWith('cmos://')) {
     return undefined;
@@ -338,9 +402,12 @@ function normalizeDirectoryProject(project: RawDirectoryProject): DirectoryProje
     name: project.name ?? '',
     address,
     owner,
-    ...(project.description ? { description: project.description } : {}),
     ...(project.slug ? { slug: project.slug } : {}),
     ...(project.isOwner !== undefined ? { isOwner: project.isOwner } : {}),
+    // s86-m07: the directory route sends both of these and this whitelist used to drop them.
+    // Conditional-include (not `?? null`) so a lean row stays byte-identical — no null-wall.
+    ...(project.createdAt ? { createdAt: project.createdAt } : {}),
+    ...(project.ownerDisplayName ? { ownerDisplayName: project.ownerDisplayName } : {}),
   };
 }
 
@@ -682,6 +749,17 @@ export interface SyncProjectStateResult {
  * All methods return CmosToolResult for consistent error handling.
  */
 export class DashboardClient {
+  /**
+   * The dashboard origin this client talks to, after trailing-slash normalization.
+   *
+   * s86-m07 — exposed read-only so a caller can key a per-ORIGIN cache (the send-path
+   * ambiguity lookup in cmos-message.ts) without reaching into credential state. It is the
+   * one field of this client that is not a secret and not per-project.
+   */
+  get dashboardOrigin(): string {
+    return this.baseUrl;
+  }
+
   private readonly baseUrl: string;
   private readonly email: string;
   private readonly password: string;
@@ -779,20 +857,11 @@ export class DashboardClient {
   static async fromEnvForProject(
     projectRoot: string | undefined,
     overrides?: Partial<DashboardClientConfig> & { credentialStore?: CredentialStore }
-  ): Promise<
-    CmosToolResult<{
-      client: DashboardClient;
-      keySource: KeySource;
-      matchedProjectRoot: string | null;
-    }>
-  > {
+  ): Promise<CmosToolResult<ResolvedDashboardClient>> {
     const baseUrl = resolveDashboardBaseUrl(overrides?.baseUrl);
 
-    const buildConfig = (apiKey: string): DashboardClientConfig => ({
-      baseUrl,
-      apiKey,
-      ...(overrides?.timeoutMs !== undefined ? { timeoutMs: overrides.timeoutMs } : {}),
-    });
+    const buildConfig = (apiKey: string): DashboardClientConfig =>
+      apiKeyConfig(baseUrl, apiKey, overrides?.timeoutMs);
 
     // (1) Explicit override.
     if (overrides?.apiKey) {
@@ -817,11 +886,77 @@ export class DashboardClient {
       }
     }
 
+    // (3) → (5) — the user-scoped chain, shared with `fromEnvForUser`.
+    return DashboardClient.resolveUserScopedChain(store, baseUrl, overrides);
+  }
+
+  /**
+   * s86-m06 — resolve a client for an operation whose credential MUST be
+   * user-scoped, i.e. arms 3 → 4 → 5 only, deliberately skipping arm 2.
+   *
+   * WHY THIS EXISTS. `cmos_auth(action="reissue")` exists to repair a local
+   * project-key row, so it is called exactly when that row is present-but-broken
+   * — and arm 2 returns a project-scoped client on mere row EXISTENCE
+   * (`CredentialStore.getProjectKey` is a map lookup with no revocation or
+   * expiry concept). Routing reissue through `fromEnvForProject` therefore
+   * authenticates the repair with the very credential being repaired, and leaves
+   * `authenticatingKeyId` unset so the mint cannot be attributed. The fix is NOT
+   * to stamp `authenticatingKeyId` in every arm: that field never reaches the
+   * wire (the wire credential is `cachedToken`, set in the constructor and read
+   * by `getAuthToken`), so a revoked project key would still 401 — and the
+   * recorded `parentKeyId` would then name a user key that did not authorize the
+   * mint, diverging from the dashboard's own binding to the CALLER's
+   * parent_key_id and corrupting the mine-only filter in `cmos_auth(list)`.
+   *
+   * Arm 1 (explicit `apiKey` override) is honored here too: silently ignoring a
+   * caller-supplied credential would be its own lie. It is the ONLY arm that can
+   * return `keySource: 'user-scoped'` with `authenticatingKeyId === undefined`,
+   * which is what makes the two attribution failures separable by rule.
+   */
+  static async fromEnvForUser(
+    overrides?: Partial<DashboardClientConfig> & { credentialStore?: CredentialStore }
+  ): Promise<CmosToolResult<ResolvedDashboardClient>> {
+    const baseUrl = resolveDashboardBaseUrl(overrides?.baseUrl);
+
+    // (1) Explicit override.
+    if (overrides?.apiKey) {
+      return createSuccess({
+        client: new DashboardClient(apiKeyConfig(baseUrl, overrides.apiKey, overrides.timeoutMs)),
+        keySource: 'user-scoped' as KeySource,
+        matchedProjectRoot: null,
+      });
+    }
+
+    const store = overrides?.credentialStore ?? (await CredentialStore.create());
+    return DashboardClient.resolveUserScopedChain(store, baseUrl, overrides);
+  }
+
+  /**
+   * Arms (3) newest user-scoped store key → (4) legacy `CMOS_DASHBOARD_API_KEY`
+   * → (5) email/password. Extracted in s86-m06 so `fromEnvForProject` and
+   * `fromEnvForUser` share ONE copy of the chain: arm order and `keySource`
+   * values are mirrored by nine call sites (cmos-status, the four sync modules,
+   * cmos-db-backfill, checkpoint-backfill, cmos-message, and `deriveAuthTier`),
+   * so a second copy that drifted would silently change which credential
+   * authenticates ordinary sends.
+   *
+   * This is also the single home of the codebase's only authenticating-keyId
+   * setter call — reachable from two entry points, still written once. Keep it
+   * that way: stamping it in arm 1 or arm 2 records an attribution the wire
+   * credential does not support.
+   */
+  private static async resolveUserScopedChain(
+    store: CredentialStore,
+    baseUrl: string,
+    overrides?: Partial<DashboardClientConfig>
+  ): Promise<CmosToolResult<ResolvedDashboardClient>> {
     // (3) Newest user-scoped key in the credential store.
     const userScopedKeys = await store.listUserScopedKeys();
     const pick = pickNewestUserScopedKey(userScopedKeys);
     if (pick) {
-      const client = new DashboardClient(buildConfig(pick.record.key));
+      const client = new DashboardClient(
+        apiKeyConfig(baseUrl, pick.record.key, overrides?.timeoutMs)
+      );
       client.setAuthenticatingKeyId(pick.keyId);
       return createSuccess({
         client,
@@ -835,7 +970,7 @@ export class DashboardClient {
     if (envKey) {
       warnLegacyAuth('legacy-env');
       return createSuccess({
-        client: new DashboardClient(buildConfig(envKey)),
+        client: new DashboardClient(apiKeyConfig(baseUrl, envKey, overrides?.timeoutMs)),
         keySource: 'legacy-env' as KeySource,
         matchedProjectRoot: null,
       });

@@ -13,6 +13,7 @@
 
 import type { CmosDatabaseClient } from './client';
 import { ensureReviewTimestamps, ensureLearningsTable } from './schema-migrations';
+import { countWrite } from './write-guard';
 
 /**
  * Default staleness threshold in sprints.
@@ -54,6 +55,22 @@ export interface StalenessResult {
 
   /** Cutoff sprint number (items at or below this are stale candidates) */
   cutoffSprintNumber: number | null;
+
+  /**
+   * s86-m02b — failed flagging writes, in the shape `<what> failed: <code> — <message>`.
+   *
+   * `decisionsFlagged` / `learningsFlagged` are row COUNTS, and before this field an
+   * errored `UPDATE ... SET status = 'stale'` folded into the same 0 as "the WHERE clause
+   * matched nothing". The triage surfaces built on those counts (cmos_agent_onboard,
+   * cmos_context(view)) therefore reported a clean staleness pass over a store where CMOS
+   * had written no status value at all. Both call sites hold a `warnings` array they push
+   * into; splice this into it.
+   *
+   * OPTIONAL so the read-only-role stand-in literal at cmos-context-view.ts stays
+   * assignable — a legitimate zero carries no warnings, and only an errored statement
+   * populates it.
+   */
+  warnings?: string[];
 }
 
 /**
@@ -128,11 +145,15 @@ export function detectAndFlagStaleness(
 
   const placeholders = staleSprintIds.map(() => '?').join(', ');
 
+  // s86-m02b: both flag helpers write a status value; a failed UPDATE must not arrive here
+  // as an ordinary zero.
+  const warnings: string[] = [];
+
   // Flag stale decisions (excluding referenced ones)
-  const decisionsFlagged = flagStaleDecisions(client, staleSprintIds, placeholders);
+  const decisionsFlagged = flagStaleDecisions(client, staleSprintIds, placeholders, warnings);
 
   // Flag stale learnings
-  const learningsFlagged = flagStaleLearnings(client, staleSprintIds, placeholders);
+  const learningsFlagged = flagStaleLearnings(client, staleSprintIds, placeholders, warnings);
 
   return {
     decisionsFlagged,
@@ -142,6 +163,7 @@ export function detectAndFlagStaleness(
     threshold,
     currentSprintNumber,
     cutoffSprintNumber,
+    warnings,
   };
 }
 
@@ -415,7 +437,8 @@ function getStaleSprintIds(client: CmosDatabaseClient, cutoffSprintNumber: numbe
 function flagStaleDecisions(
   client: CmosDatabaseClient,
   staleSprintIds: string[],
-  placeholders: string
+  placeholders: string,
+  warnings: string[] = []
 ): number {
   // Check if the table and required columns exist
   const columns = getTableColumns(client, 'strategic_decisions');
@@ -453,7 +476,7 @@ function flagStaleDecisions(
     params
   );
 
-  return result.success ? (result.data?.changes ?? 0) : 0;
+  return countWrite(result, warnings, "strategic_decisions.status = 'stale'");
 }
 
 /**
@@ -471,7 +494,8 @@ function flagStaleDecisions(
 function flagStaleLearnings(
   client: CmosDatabaseClient,
   staleSprintIds: string[],
-  placeholders: string
+  placeholders: string,
+  warnings: string[] = []
 ): number {
   const columns = getTableColumns(client, 'learnings');
   if (!columns.has('status') || !columns.has('sprint_id')) return 0;
@@ -499,7 +523,7 @@ function flagStaleLearnings(
        ${evergreenClause}`,
     params
   );
-  return result.success ? (result.data?.changes ?? 0) : 0;
+  return countWrite(result, warnings, "learnings.status = 'stale'");
 }
 
 /**

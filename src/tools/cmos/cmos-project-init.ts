@@ -28,6 +28,7 @@ import { CMOS_SCHEMA, CMOS_SCHEMA_VERSION } from './schema';
 import { assertJestDbPathIsolated } from './real-store-guard';
 import { ProjectGraphRegistry } from '../../intelligence/project-graph-registry';
 import { CmosDetector } from '../../intelligence/cmos-detector';
+import { appendWarnings } from './format-warnings';
 
 /**
  * Resolve the path to the cmos-seed directory.
@@ -106,7 +107,11 @@ function buildClaudeMd(projectName: string): string {
     '',
     `## ${title}`,
     '',
-    '- Read `agents.md` first for repository-specific rules.',
+    // s86-m05: this used to say "Read `agents.md` first" — but init does not create a
+    // project-root agents.md. It copies the TEMPLATE to cmos/templates/agents.md, so point
+    // there and say what to do with it, rather than sending every new project to a file that
+    // is not going to be present.
+    '- Copy `cmos/templates/agents.md` to this project root and fill it in — it holds the repository-specific rules.',
     '- Use the shared `mcp__cmos-mcp__*` tools for CMOS operations.',
     '- If sender attribution looks wrong, run `cmos_message(action="whoami")` before sending messages.',
     '',
@@ -656,6 +661,8 @@ export function formatProjectInitForLLM(result: CmosToolResult<CmosProjectInitRe
 
   lines.push('');
   lines.push('Next: Run cmos_agent_onboard to get project context');
+
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

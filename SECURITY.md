@@ -23,7 +23,7 @@ speaks JSON-RPC over stdin/stdout to its MCP host and opens **no** listening soc
 A previous release also shipped an HTTP transport bin (`cmos-mcp-http`) that bound a port with
 `Access-Control-Allow-Origin: *`, no authentication, and full read-write access to every registered
 store. **It has been removed** — source, bin, export, script, docs, and PM2 config are all deleted
-(see the `[Unreleased] → Removed` entry in [CHANGELOG.md](CHANGELOG.md)). There is no unauthenticated
+(see the `[2.0.0] → Removed` entry in [CHANGELOG.md](CHANGELOG.md)). There is no unauthenticated
 network surface.
 
 ## Outbound network
@@ -203,4 +203,5 @@ subagent type (e.g. the `Explore` agent) — that is a mitigation, not the machi
 
 ---
 
-_Last verified against the source: Sprint 78 (Arc C, "Trustworthy Base")._
+_Last verified against the source: Sprint 86 (s86-m05, "Say Only What You Know"). Authored in
+Sprint 78 (Arc C, "Trustworthy Base"); the body documents work through s84-m03._

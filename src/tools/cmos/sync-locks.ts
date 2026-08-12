@@ -45,14 +45,19 @@ import {
 } from './sync-mutable';
 import { getProjectIdentity } from './project-identity';
 import { pushMutableStatus, type PushMutableStatusResult } from './sync-mutable-push';
+import { checkWrite, type WriteSink } from './write-guard';
 
 function readMeta(db: CmosDatabaseClient, key: string): string | null {
   const row = db.getOne<{ value: string }>('SELECT value FROM metadata WHERE key = ?', [key]);
   return row.success && row.data?.value ? row.data.value : null;
 }
 
-function writeMeta(db: CmosDatabaseClient, key: string, value: string): void {
-  db.execute('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)', [key, value]);
+function writeMeta(db: CmosDatabaseClient, key: string, value: string, sink: WriteSink): void {
+  const res = db.execute('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)', [
+    key,
+    value,
+  ]);
+  checkWrite(res, sink, `metadata.${key}`);
 }
 
 /** Slug-scoped cache key (matches the `pull_cursor:<slug>` convention), so a store
@@ -67,11 +72,20 @@ function platformProjectIdKey(slug: string): string {
  * the slug can't be matched in getMyProjects() (e.g. not a member, or the dashboard is
  * unreachable) — the caller then proceeds lockless. NOT the cmos_projects.id that the
  * clone stores as dashboard_project_id (different namespace — the whole point).
+ *
+ * `sink` carries a failed CACHE write into the caller's warnings (s86-m02b). The write is
+ * a memo, not the lock itself — the resolved id is returned either way and the lock still
+ * acquires — so its failure costs one extra getMyProjects() round-trip per edit, which the
+ * answer should say rather than present the resolution as cached. It is REQUIRED and carries
+ * no default: `pushMutableStatusUnderLock` passes the `warnings` array it returns on
+ * `PushUnderLockResult`, which `maybePropagateMutableStatus` folds into `result.warnings`
+ * (rendered by `appendWarnings`). A default would let a future caller drop that silently.
  */
 export async function resolvePlatformProjectId(
   db: CmosDatabaseClient,
   client: DashboardClient,
-  slug: string
+  slug: string,
+  sink: WriteSink
 ): Promise<string | null> {
   const cacheKey = platformProjectIdKey(slug);
   const cached = readMeta(db, cacheKey);
@@ -80,7 +94,7 @@ export async function resolvePlatformProjectId(
   if (!mine.success || !mine.data) return null;
   const match = mine.data.projects.find((p) => p.slug === slug);
   if (!match || !match.id) return null;
-  writeMeta(db, cacheKey, match.id);
+  writeMeta(db, cacheKey, match.id, sink);
   return match.id;
 }
 
@@ -150,7 +164,9 @@ export async function pushMutableStatusUnderLock(
     async (db) => {
       const slug = params.slug ?? readDashboardSlug(db);
       if (!slug) return createSuccess<string | null>(null);
-      return createSuccess<string | null>(await resolvePlatformProjectId(db, client!, slug));
+      return createSuccess<string | null>(
+        await resolvePlatformProjectId(db, client!, slug, warnings)
+      );
     },
     { projectRoot: params.projectRoot }
   );

@@ -19,6 +19,8 @@ import {
 } from './errors';
 import { ensureMissionTimestamps } from './schema-migrations';
 import { sanitizeContentField, sanitizeStringArray } from '../../intelligence/content-sanitizer';
+import { appendWarnings } from './format-warnings';
+import { checkWrite } from './write-guard';
 
 /**
  * Result of blocking a mission.
@@ -151,6 +153,8 @@ export async function cmosMissionBlock(
 
   return withClientValidated(
     (client) => {
+      const warnings: string[] = [];
+
       // Query mission by ID
       const missionResult = client.getOne<Mission>(
         `
@@ -270,8 +274,8 @@ export async function cmosMissionBlock(
         ]
       );
 
-      // Don't fail the operation if event logging fails (non-critical)
-      if (!eventResult.success) {
+      // Don't fail the operation if event logging fails (non-critical) — but say so.
+      if (!checkWrite(eventResult, warnings, 'mission block event logging')) {
         console.warn('Failed to log mission block event:', eventResult.error);
       }
 
@@ -284,7 +288,7 @@ export async function cmosMissionBlock(
           message: `Mission '${missionId}' has been blocked: ${reason}`,
           blockedAt: now,
         },
-        undefined,
+        warnings,
         inputSanitized
       );
     },
@@ -330,13 +334,7 @@ export function formatMissionBlockForLLM(result: CmosToolResult<MissionBlockResu
 
   // Surface warnings (incl. the m05 collab-sync warnings the transition dispatcher
   // folds in: lock contention, a superseded conflict, or a non-fatal broker-sync error).
-  if (result.warnings && result.warnings.length > 0) {
-    lines.push('');
-    lines.push('Warnings:');
-    for (const warning of result.warnings) {
-      lines.push(`- ${warning}`);
-    }
-  }
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

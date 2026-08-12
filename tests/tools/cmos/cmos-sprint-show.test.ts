@@ -20,6 +20,7 @@ import {
 import { CMOS_ERROR_CODES } from '../../../src/tools/cmos/errors';
 import { CmosDetector } from '../../../src/intelligence/cmos-detector';
 import type { CmosToolResult } from '../../../src/tools/cmos/types';
+import { SPRINT_SUMMARY_VIEW_SQL } from '../../../src/tools/cmos/schema';
 
 describe('cmos_sprint_show', () => {
   let tempDir: string;
@@ -95,26 +96,7 @@ describe('cmos_sprint_show', () => {
         value TEXT
       );
 
-      CREATE VIEW sprint_summary AS
-      SELECT
-        s.id AS sprint_id,
-        s.title,
-        s.status,
-        s.focus,
-        s.start_date,
-        s.end_date,
-        COUNT(m.id) AS total_missions,
-        COUNT(CASE WHEN m.status = 'Completed' THEN 1 END) AS completed_missions,
-        COUNT(CASE WHEN m.status = 'Blocked' THEN 1 END) AS blocked_missions,
-        COUNT(CASE WHEN m.status IN ('Current', 'In Progress') THEN 1 END) AS active_missions,
-        (
-          SELECT COUNT(DISTINCT sd.id)
-          FROM strategic_decisions sd
-          WHERE sd.sprint_id = s.id
-        ) AS decisions_count
-      FROM sprints s
-      LEFT JOIN missions m ON m.sprint_id = s.id
-      GROUP BY s.id, s.title, s.status, s.focus, s.start_date, s.end_date;
+      ${SPRINT_SUMMARY_VIEW_SQL}
 
       INSERT INTO sprints (id, title, focus, status, start_date, end_date)
       VALUES

@@ -171,20 +171,31 @@ describe('cmos_learnings', () => {
       ]);
     });
 
-    it('has category enum', () => {
-      expect(cmosLearningsToolDefinition.inputSchema.properties.category.enum).toEqual([
-        'technical',
-        'process',
-        'agent-behavior',
-        'tooling',
-      ]);
+    it('publishes NO category enum — the column has no CHECK, so a closed set would be a lie', () => {
+      // s86-m04 (fork f04, fleet-resolved): this assertion is INVERTED from what it was. The
+      // published enum claimed an enforcement the server does not perform — `learnings.category`
+      // is `TEXT` with no CHECK constraint — and the fleet already carries an out-of-set value
+      // ('voice', 1 row in Writing-and-Strategy). Widening to include 'voice' would have enshrined
+      // one store's accident as a fleet contract; the four canonical values are guidance instead.
+      const category = cmosLearningsToolDefinition.inputSchema.properties.category as {
+        type: string;
+        description: string;
+        enum?: string[];
+      };
+      expect(category.enum).toBeUndefined();
+      expect(category.type).toBe('string');
+      expect(category.description).toContain('technical | process | agent-behavior | tooling');
     });
 
-    it('has status enum', () => {
+    it('has status enum, INCLUDING the value the server writes', () => {
+      // s86-m04 (fork f04, fleet-resolved): 'stale' was missing. staleness-detection.ts writes it,
+      // and 246 such rows exist across 7 of 18 registered stores — so the published 3-member enum
+      // forbade callers from naming a value CMOS itself had been writing for sprints.
       expect(cmosLearningsToolDefinition.inputSchema.properties.status.enum).toEqual([
         'active',
         'archived',
         'superseded',
+        'stale',
       ]);
     });
 

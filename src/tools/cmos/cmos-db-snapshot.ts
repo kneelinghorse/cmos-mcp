@@ -16,6 +16,7 @@ import { z } from 'zod';
 import { withClient } from './client';
 import type { CmosToolResult } from './types';
 import { createError, createSuccess } from './errors';
+import { appendWarnings } from './format-warnings';
 
 const SNAPSHOT_FILE_PREFIX = 'snapshot-';
 const SNAPSHOT_FILE_EXTENSION = '.sqlite';
@@ -281,6 +282,8 @@ export function formatDbSnapshotForLLM(result: CmosToolResult<CmosDbSnapshotResu
 
   lines.push('');
   lines.push(data.message);
+
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

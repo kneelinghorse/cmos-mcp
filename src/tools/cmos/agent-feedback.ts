@@ -1,10 +1,11 @@
 // ABOUTME: Persistence helper for the Sprint 56 m03 agentFeedback standing channel.
-// ABOUTME: Called by cmos_session_complete, cmos_mission_transition, cmos_agent_onboard when the optional field is set.
+// ABOUTME: Called by cmos_session, cmos_mission_transition, cmos_agent_onboard when the optional field is set.
 
 import type { CmosDatabaseClient } from './client';
 import { ensureAgentFeedbackTable } from './schema-migrations';
 import { sanitizeContentField } from '../../intelligence/content-sanitizer';
 import type { SanitizedFieldReport } from './types';
+import { checkWrite } from './write-guard';
 
 /** Context that follows the feedback row so triage can scope by sprint/session/mission. */
 export interface AgentFeedbackContext {
@@ -18,6 +19,12 @@ export interface AgentFeedbackContext {
 export interface RecordAgentFeedbackResult {
   feedbackId: number | null;
   sanitizedFields: SanitizedFieldReport[];
+  /**
+   * Sprint 86 m02b — the DB error when the agent_feedback INSERT failed, which
+   * used to be swallowed into a null feedbackId. Callers splice these into their
+   * own warnings sink so the answer never implies the feedback was recorded.
+   */
+  warnings: string[];
 }
 
 /**
@@ -36,7 +43,7 @@ export function recordAgentFeedback(
 ): RecordAgentFeedbackResult {
   const trimmed = body.trim();
   if (!trimmed) {
-    return { feedbackId: null, sanitizedFields: [] };
+    return { feedbackId: null, sanitizedFields: [], warnings: [] };
   }
 
   ensureAgentFeedbackTable(client);
@@ -52,7 +59,7 @@ export function recordAgentFeedback(
 
   const cleaned = sanitation.cleaned;
   if (!cleaned) {
-    return { feedbackId: null, sanitizedFields };
+    return { feedbackId: null, sanitizedFields, warnings: [] };
   }
 
   const now = new Date().toISOString();
@@ -71,7 +78,10 @@ export function recordAgentFeedback(
     ]
   );
 
+  const warnings: string[] = [];
+  checkWrite(insertResult, warnings, 'agent feedback insert');
+
   const feedbackId =
     insertResult.success && insertResult.data ? Number(insertResult.data.lastInsertRowid) : null;
-  return { feedbackId, sanitizedFields };
+  return { feedbackId, sanitizedFields, warnings };
 }

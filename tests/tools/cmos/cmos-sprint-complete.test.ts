@@ -463,7 +463,12 @@ describe('cmos_sprint_complete', () => {
       });
 
       expect(result.success).toBe(true);
-      expect(result.warnings).toContain('Sprint closeout event logging failed.');
+      // s86-m02b: the message now carries the DB error code and text verbatim — it used to
+      // say only that logging failed, which told an operator nothing about why. Matched on
+      // the stable prefix so the assertion pins the DISCLOSURE, not one DB's wording.
+      expect(
+        result.warnings?.some((w) => w.startsWith('Sprint closeout event logging failed'))
+      ).toBe(true);
     });
   });
 

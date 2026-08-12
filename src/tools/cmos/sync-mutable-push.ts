@@ -49,6 +49,7 @@ import {
   buildMutableEventData,
   type MutableFieldScope,
 } from './sync-mutable';
+import { appendWarnings } from './format-warnings';
 
 export interface PushMutableStatusParams {
   projectRoot?: string;
@@ -281,5 +282,7 @@ export function formatPushMutableStatusForLLM(
         : `Conflict ${d.conflict.id}: you won; '${d.conflict.supersededValue}' was superseded.`
     );
   }
+  appendWarnings(lines, result);
+
   return lines.join('\n');
 }

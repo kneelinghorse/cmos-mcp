@@ -228,7 +228,14 @@ describe('recoverProjectKey', () => {
     expect(await store.getProjectKey(projectRoot)).toEqual(existing);
   });
 
-  it('returns missing-parent-key-id when the client has no authenticatingKeyId', async () => {
+  /**
+   * s86-m06 — this guard is now UNREACHABLE from both production callers: each classifies
+   * attribution via `classifyAttribution` first and returns a typed failure before getting
+   * here. It is kept (and kept tested directly) so a future caller that skips the
+   * classification fails loudly rather than writing a record with empty attribution — the
+   * consumers map it to an internal-invariant error, never to a skip.
+   */
+  it('still refuses to write a record with empty attribution when called without classification', async () => {
     const store = await CredentialStore.create({ configDir: tempDir });
     const projectRoot = path.join(tempDir, 'orphan');
     const client = mockClient({ authenticatingKeyId: undefined });
@@ -242,6 +249,31 @@ describe('recoverProjectKey', () => {
 
     expect(result.kind).toBe('missing-parent-key-id');
     expect(await store.getProjectKey(projectRoot)).toBeUndefined();
+  });
+
+  it('reports the revoked keyIds the dashboard returned on a successful recovery', async () => {
+    const store = await CredentialStore.create({ configDir: tempDir });
+    const projectRoot = path.join(tempDir, 'revoked-ids');
+    const client = mockClient({
+      authenticatingKeyId: 'user-parent-1',
+      reissue: {
+        success: true,
+        data: {
+          key: 'cmk_fresh',
+          keyId: 'fresh-id',
+          label: 'fresh',
+          revokedKeyIds: ['orphan-a', 'orphan-b'],
+        },
+      } as CmosToolResult<ReissueProjectKeyResult>,
+    });
+
+    const result = await recoverProjectKey({ projectRoot, projectId: 'p', client, store });
+
+    // Previously discarded here and reported to the operator as a hardcoded [].
+    expect(result.kind).toBe('recovered');
+    if (result.kind === 'recovered') {
+      expect(result.revokedKeyIds).toEqual(['orphan-a', 'orphan-b']);
+    }
   });
 
   it('surfaces reissue-failed when the dashboard returns an error', async () => {

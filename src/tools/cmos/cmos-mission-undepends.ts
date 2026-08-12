@@ -10,6 +10,8 @@
 import { withClientValidated } from './client';
 import type { CmosToolResult } from './types';
 import { createError, createSuccess, CMOS_ERROR_CODES } from './errors';
+import { appendWarnings } from './format-warnings';
+import { checkWrite } from './write-guard';
 
 /**
  * Result type for dependency removal.
@@ -55,6 +57,8 @@ export async function cmosMissionUndepends(
 
   return withClientValidated(
     (client) => {
+      const warnings: string[] = [];
+
       // Verify the dependency exists
       const existing = client.getOne<{ from_id: string; to_id: string; type: string }>(
         'SELECT from_id, to_id, type FROM mission_dependencies WHERE from_id = ? AND to_id = ?',
@@ -91,7 +95,7 @@ export async function cmosMissionUndepends(
       const now = new Date().toISOString();
 
       // Log removal event
-      client.execute(
+      const eventResult = client.execute(
         `INSERT INTO session_events (ts, agent, mission, action, status, summary, raw_event)
          VALUES (?, 'mcp-tool', ?, 'dependency', ?, ?, ?)`,
         [
@@ -108,12 +112,17 @@ export async function cmosMissionUndepends(
         ]
       );
 
-      return createSuccess<MissionUndependsResult>({
-        fromId: fromId.trim(),
-        toId: toId.trim(),
-        removedAt: now,
-        message: `Dependency removed: ${fromId} no longer ${existing.data.type.toLowerCase()} ${toId}`,
-      });
+      checkWrite(eventResult, warnings, 'mission dependency remove event logging');
+
+      return createSuccess<MissionUndependsResult>(
+        {
+          fromId: fromId.trim(),
+          toId: toId.trim(),
+          removedAt: now,
+          message: `Dependency removed: ${fromId} no longer ${existing.data.type.toLowerCase()} ${toId}`,
+        },
+        warnings
+      );
     },
     { projectRoot: params.projectRoot }
   );
@@ -142,12 +151,16 @@ export function formatMissionUndependsForLLM(
   }
 
   const data = result.data;
-  return [
+  const lines = [
     'Dependency removed',
     '',
     `From: ${data.fromId}`,
     `To: ${data.toId}`,
     '',
     data.message,
-  ].join('\n');
+  ];
+
+  appendWarnings(lines, result);
+
+  return lines.join('\n');
 }

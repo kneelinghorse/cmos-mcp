@@ -15,6 +15,7 @@ import { z } from 'zod';
 import { withClient } from './client';
 import type { CmosToolResult } from './types';
 import { CMOS_ERROR_CODES, CmosErrors, createError, createSuccess } from './errors';
+import { appendWarnings } from './format-warnings';
 
 const SNAPSHOT_FILE_EXTENSION = '.sqlite';
 const PRE_RESTORE_BACKUP_PREFIX = 'pre-restore-';
@@ -253,7 +254,7 @@ export function formatDbRestoreForLLM(result: CmosToolResult<CmosDbRestoreResult
   }
 
   const data = result.data;
-  return [
+  const lines = [
     '✅ Database restore complete',
     '',
     `**Snapshot ID**: ${data.snapshotId}`,
@@ -267,7 +268,11 @@ export function formatDbRestoreForLLM(result: CmosToolResult<CmosDbRestoreResult
     `- Contexts: ${data.contextCount}`,
     '',
     data.message,
-  ].join('\n');
+  ];
+
+  appendWarnings(lines, result);
+
+  return lines.join('\n');
 }
 
 async function resolveDbPath(projectRoot?: string): Promise<CmosToolResult<DbPathResult>> {

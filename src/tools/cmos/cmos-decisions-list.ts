@@ -19,6 +19,7 @@ import {
   type CrossStoreQueryResult,
   type CrossStoreRow,
 } from '../../intelligence/cross-store-query';
+import { appendWarnings } from './format-warnings';
 
 /**
  * Decision record surfaced to clients.
@@ -433,6 +434,8 @@ export function formatDecisionsListForLLM(result: CmosToolResult<CmosDecisionsLi
         : `More results available. Use page=${data.page + 1} to see next page.`
     );
   }
+
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

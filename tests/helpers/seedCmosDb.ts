@@ -1,5 +1,34 @@
 // ABOUTME: Real SQLite fixture helper for sender-attribution and messaging tests.
-// ABOUTME: Creates temp CMOS projects with seeded metadata + project_identity rows.
+// ABOUTME: Creates temp CMOS projects with seeded metadata + all three contexts rows.
+
+/**
+ * SEEDED IS NOT REALISTIC — read this before treating a fixture from here as a
+ * stand-in for a real store (s86-m01, Step 5d).
+ *
+ * As of s86-m01 this helper models what a FRESHLY-INITED store looks like: all
+ * three contexts rows present, metadata.project_type set. That closed the
+ * row-PRESENCE gap which had been making decision capture fail an FK silently on
+ * every fixture. It did NOT close two verified SHAPE gaps, and neither should be
+ * "fixed" here:
+ *
+ *  1. FK SHAPE. This helper builds every fixture with `db.exec(CMOS_SCHEMA)`, and
+ *     CMOS_SCHEMA declares SIX foreign keys on strategic_decisions (context_id,
+ *     sprint_id, snapshot_id, author_session_id, mission_id, superseded_by). The
+ *     live store carries exactly THREE — `PRAGMA foreign_key_list` returns
+ *     snapshot_id, sprint_id, context_id. So a fixture ENFORCES a mission_id FK
+ *     that the live store does not. Narrowing CMOS_SCHEMA to match is out of scope;
+ *     the schema is the target a new store is born into.
+ *
+ *  2. contexts.source_path. Init writes real paths (mirrored byte-for-byte below),
+ *     but the live store's master_context and project_context rows carry EMPTY
+ *     source_path — only project_identity has one. Matching init is the right
+ *     target for a fixture; matching one older store's history is not.
+ *
+ * Consequence, and the reason this note exists: any behaviour gated on a DB column
+ * or query needs a positive-fire test against a tmpdir COPY of a real store, not
+ * only against a fixture from here. A green fixture test does not prove the SQL
+ * matches a real store's columns.
+ */
 
 import Database from 'better-sqlite3';
 import { promises as fs } from 'fs';
@@ -54,6 +83,20 @@ export function seedCmosDb(projectRoot: string, options: SeedCmosDbOptions = {})
   upsertMetadata.run('project_id', projectId);
   upsertMetadata.run('dashboard_slug', projectSlug);
 
+  // s86-m01 (5b) — make `options.tier` actually do something.
+  //
+  // It used to be a decoy: the value was written only into the project_identity
+  // JSON blob below, while the code that resolves a project's tier — getProjectType
+  // in cmos-agent-onboard.ts — reads the metadata key `project_type` (which is what
+  // cmos_project(init) writes). So `seedCmosDb({tier: 'managed'})` looked like it
+  // configured a tier and could not affect any read path.
+  //
+  // Behaviour-neutral today, and that claim is falsifiable: zero of the importing
+  // test files pass `tier`, so every fixture gains project_type='build', which is
+  // exactly what getProjectType already returned by default.
+  const projectType = options.tier ?? 'build';
+  upsertMetadata.run('project_type', projectType);
+
   if (options.dashboardProjectId) {
     upsertMetadata.run('dashboard_project_id', options.dashboardProjectId);
   }
@@ -70,8 +113,10 @@ export function seedCmosDb(projectRoot: string, options: SeedCmosDbOptions = {})
     cmos_address: options.cmosAddress ?? '',
     platform: 'aquex.ai',
     domain: '',
-    project_type: 'build',
-    tier: options.tier ?? 'build',
+    // s86-m01 (5b): derived from the same value as metadata.project_type above,
+    // instead of being hardcoded to 'build' while metadata carried nothing.
+    project_type: projectType,
+    tier: projectType,
     status: 'active_development',
     description: options.description ?? '',
     objectives: [],
@@ -84,10 +129,42 @@ export function seedCmosDb(projectRoot: string, options: SeedCmosDbOptions = {})
     updated_at: now,
   };
 
-  db.prepare(
+  const upsertContext = db.prepare(
     `INSERT OR REPLACE INTO contexts (id, source_path, content, updated_at)
      VALUES (?, ?, ?, ?)`
-  ).run('project_identity', 'cmos/contexts/project-identity.json', JSON.stringify(identity), now);
+  );
+  upsertContext.run(
+    'project_identity',
+    'cmos/contexts/project-identity.json',
+    JSON.stringify(identity),
+    now
+  );
+
+  // s86-m01 (5a) — a real store carries THREE contexts rows; this fixture used to
+  // write only project_identity, and the omission failed QUIETLY.
+  //
+  // strategic_decisions.context_id is `NOT NULL DEFAULT 'master_context'` with a FK
+  // to contexts(id), and the client turns FK enforcement ON at connection open. So
+  // on every seeded fixture, decision capture violated that FK and the handler
+  // still returned success:true with decisionExtractionCount 0 — measured before
+  // this change: capture succeeded, extraction count 0, `SELECT COUNT(*) FROM
+  // strategic_decisions` 0. Three test files had each grown their own local
+  // workaround for it; all three are deleted now that the helper is honest.
+  //
+  // source_path values are byte-identical to what cmos_project(init) writes
+  // (cmos-project-init.ts) — deliberately NOT the 'cmos/contexts/master-context.json'
+  // spelling the deleted workarounds used, which would have baked in a second,
+  // quieter fidelity gap.
+  //
+  // content '{}' is load-bearing and verified behaviour-neutral on both readers:
+  // detectFreshProject lowercases master_context content and looks for
+  // 'project brief'/'project_brief' — '{}' has neither, so it still returns true,
+  // identical to the row being absent; and project-identity.ts reads `tier` out of
+  // project_context, where JSON.parse('{}')['tier'] is undefined, so tier stays
+  // 'build'. There is deliberately NO opt-out flag: an opt-in recreates exactly the
+  // two-worlds problem that produced this bug.
+  upsertContext.run('project_context', 'cmos/context/project_context.json', '{}', now);
+  upsertContext.run('master_context', 'cmos/context/master_context.json', '{}', now);
 
   db.close();
   CmosDetector.resetInstance();

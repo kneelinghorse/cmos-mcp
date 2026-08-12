@@ -35,6 +35,8 @@ import {
 import { applyLearningReaffirm, sanitizeLearningIds } from './learning-reaffirm';
 import { ensureMissionIdColumn } from './cmos-mission-complete';
 import { recordEmbedding, decisionEmbeddingInput } from '../../intelligence/embedding-pipeline';
+import { appendWarnings, appendWriteFailures } from './format-warnings';
+import { checkWrite, type WriteFailure } from './write-guard';
 
 /**
  * Result of session complete operation.
@@ -100,6 +102,13 @@ export interface CmosSessionCompleteResult {
 
   /** Message describing the result */
   message: string;
+
+  /**
+   * s86-m02b — writes this call ATTEMPTED and the database REJECTED. Always present, `[]` on the
+   * happy path. The extraction counts above and `aggregation.contextsUpdated` report what
+   * actually landed, so a non-empty array here is the gap between intent and outcome.
+   */
+  writeFailures: WriteFailure[];
 
   /** Persisted agent_feedback.id when agentFeedback was supplied (Sprint 56 m03). */
   feedbackId?: number;
@@ -309,6 +318,15 @@ export async function cmosSessionComplete(
 
   return withClientAsync(
     async (client) => {
+      // s86-m02b — SINK HOISTING. `warnings` used to be declared ~250 lines below, after the
+      // session_events insert and all four extraction loops, so wiring their failures into it
+      // would not have compiled and would have tempted a second array into existence. One sink,
+      // declared before anything can write to it.
+      const warnings: string[] = [];
+      // Writes this handler attempted and the database rejected. Separate from `warnings`
+      // (fork f09): a lost next-step row and a sprint-closeout advisory are different news.
+      const writeSink = { failures: [] as WriteFailure[] };
+
       // Find the session to complete
       let sessionId = params.sessionId;
 
@@ -423,10 +441,14 @@ export async function cmosSessionComplete(
         nextSteps,
       });
 
-      client.execute(
-        `INSERT INTO session_events (ts, agent, mission, action, status, summary, next_hint, raw_event)
-         VALUES (?, ?, ?, 'complete', 'completed', ?, ?, ?)`,
-        [now, agent, sessionId, summary, nextSteps?.join('; ') ?? null, rawEvent]
+      checkWrite(
+        client.execute(
+          `INSERT INTO session_events (ts, agent, mission, action, status, summary, next_hint, raw_event)
+           VALUES (?, ?, ?, 'complete', 'completed', ?, ?, ?)`,
+          [now, agent, sessionId, summary, nextSteps?.join('; ') ?? null, rawEvent]
+        ),
+        warnings,
+        'session completion event logging'
       );
 
       // ============================================================
@@ -460,7 +482,17 @@ export async function cmosSessionComplete(
             `SELECT id FROM next_steps WHERE content_hash = ? AND session_id = ?`,
             [hash, sessionId]
           );
-          if (existing.success && existing.data) continue;
+          // s86-m02b (fork f10, read side): a FAILED dedup SELECT reads as "no duplicate" and falls
+          // through to the INSERT. Behaviour is UNCHANGED — a duplicate row is recoverable and
+          // detectable, unlike a lost write — but the operator is told rather than left to find out.
+          if (!existing.success) {
+            warnings.push(
+              `next-step de-duplication check failed (next_steps); a duplicate row may have been ` +
+                `written: ${existing.error?.code ?? 'DB_ERROR'} — ${existing.error?.message ?? 'unknown'}`
+            );
+          } else if (existing.data) {
+            continue;
+          }
           // Per-capture missionId WINS over the call-level default: the capture stated which
           // mission it belongs to, which is strictly better information.
           const captureMissionId =
@@ -479,7 +511,8 @@ export async function cmosSessionComplete(
               ...g.values,
             ]
           );
-          if (insertResult.success) nextStepsExtracted++;
+          if (checkWrite(insertResult, writeSink, 'next_steps extraction insert'))
+            nextStepsExtracted++;
         }
       }
 
@@ -497,7 +530,17 @@ export async function cmosSessionComplete(
             `SELECT id FROM next_steps WHERE content_hash = ? AND session_id = ?`,
             [hash, sessionId]
           );
-          if (existing.success && existing.data) continue;
+          // s86-m02b (fork f10, read side): a FAILED dedup SELECT reads as "no duplicate" and falls
+          // through to the INSERT. Behaviour is UNCHANGED — a duplicate row is recoverable and
+          // detectable, unlike a lost write — but the operator is told rather than left to find out.
+          if (!existing.success) {
+            warnings.push(
+              `next-step de-duplication check failed (next_steps); a duplicate row may have been ` +
+                `written: ${existing.error?.code ?? 'DB_ERROR'} — ${existing.error?.message ?? 'unknown'}`
+            );
+          } else if (existing.data) {
+            continue;
+          }
           const g = genesisColumns(client, 'next_steps', getProjectId(client));
           const insertResult = client.execute(
             `INSERT INTO next_steps (content, status, session_id, sprint_id, mission_id, created_at, content_hash, ${g.columns.join(', ')})
@@ -512,7 +555,8 @@ export async function cmosSessionComplete(
               ...g.values,
             ]
           );
-          if (insertResult.success) nextStepsExtracted++;
+          if (checkWrite(insertResult, writeSink, 'next_steps extraction insert'))
+            nextStepsExtracted++;
         }
       }
 
@@ -531,7 +575,17 @@ export async function cmosSessionComplete(
             `SELECT id FROM constraints WHERE content_hash = ? AND status = 'active'`,
             [hash]
           );
-          if (existing.success && existing.data) continue;
+          // s86-m02b (fork f10, read side): a FAILED dedup SELECT reads as "no duplicate" and falls
+          // through to the INSERT. Behaviour is UNCHANGED — a duplicate row is recoverable and
+          // detectable, unlike a lost write — but the operator is told rather than left to find out.
+          if (!existing.success) {
+            warnings.push(
+              `constraint de-duplication check failed (constraints); a duplicate row may have been ` +
+                `written: ${existing.error?.code ?? 'DB_ERROR'} — ${existing.error?.message ?? 'unknown'}`
+            );
+          } else if (existing.data) {
+            continue;
+          }
           const expiresAt = (capture as { expiresAt?: string }).expiresAt ?? null;
           const g = genesisColumns(client, 'constraints', getProjectId(client));
           const insertResult = client.execute(
@@ -539,7 +593,8 @@ export async function cmosSessionComplete(
              VALUES (?, 'active', ?, ?, ?, ?, ?, ${g.placeholders})`,
             [trimmed, sessionId, session.sprint_id ?? null, now, expiresAt, hash, ...g.values]
           );
-          if (insertResult.success) constraintsExtracted++;
+          if (checkWrite(insertResult, writeSink, 'constraints extraction insert'))
+            constraintsExtracted++;
         }
       }
 
@@ -576,7 +631,9 @@ export async function cmosSessionComplete(
         );
         const projectDomain = domainResult.success ? (domainResult.data?.value ?? null) : null;
         // s69-m04 — settle the author_* rename before the dedup SELECT/INSERT below.
-        ensureAuthorNamespaceColumns(client);
+        // s86-m02b (fork f23): one of the six migration call sites whose warnings can reach a
+        // rendered answer. A half-applied rename must not be silent.
+        warnings.push(...(ensureAuthorNamespaceColumns(client).warnings ?? []));
         // s85-m04 — DECISIONS-ONLY column guard. strategic_decisions.mission_id rides the v2.1
         // migration, so an un-migrated store lacks it and the INSERT below would throw
         // "no such column". learnings.mission_id and next_steps.mission_id are in the SEED BASE
@@ -591,7 +648,17 @@ export async function cmosSessionComplete(
             'SELECT id FROM strategic_decisions WHERE decision_text = ? AND author_session_id = ?',
             [decisionText, sessionId]
           );
-          if (existing.success && existing.data) continue;
+          // s86-m02b (fork f10, read side): a FAILED dedup SELECT reads as "no duplicate" and falls
+          // through to the INSERT. Behaviour is UNCHANGED — a duplicate row is recoverable and
+          // detectable, unlike a lost write — but the operator is told rather than left to find out.
+          if (!existing.success) {
+            warnings.push(
+              `decision de-duplication check failed (strategic_decisions); a duplicate row may have been ` +
+                `written: ${existing.error?.code ?? 'DB_ERROR'} — ${existing.error?.message ?? 'unknown'}`
+            );
+          } else if (existing.data) {
+            continue;
+          }
           const g = genesisColumns(client, 'strategic_decisions', getProjectId(client));
           // s85-m04: mission_id was omitted from this column list entirely — the second of the
           // two SQL omissions behind #487. The call-level missionId applies UNIFORMLY here and
@@ -614,18 +681,19 @@ export async function cmosSessionComplete(
               ...g.values,
             ]
           );
-          if (insertResult.success) {
+          if (checkWrite(insertResult, writeSink, 'strategic_decisions extraction insert')) {
             decisionsExtracted++;
             // Sprint 66 m03 — write-path embedding hook
             const newId = insertResult.data?.lastInsertRowid;
             const numericId =
               typeof newId === 'bigint' ? Number(newId) : typeof newId === 'number' ? newId : null;
             if (numericId !== null) {
-              await recordEmbedding(client, {
+              const embedResult = await recordEmbedding(client, {
                 type: 'decision',
                 id: numericId,
                 inputText: decisionEmbeddingInput(decisionText),
               });
+              warnings.push(...(embedResult.warnings ?? []));
             }
           }
         }
@@ -651,6 +719,9 @@ export async function cmosSessionComplete(
             newContent: decisionText,
             reaffirmedAt: now,
           });
+          // s86-m02b: see the note in cmos-session-capture.ts — an errored lookup makes these
+          // lists incomplete, and the answer must say so rather than imply a clean pass.
+          writeSink.failures.push(...reaffirm.writeFailures);
           for (const id of reaffirm.explicitlyReaffirmedIds) {
             explicitlyReaffirmedSet.add(id);
           }
@@ -669,20 +740,23 @@ export async function cmosSessionComplete(
       // ============================================================
       // Context Aggregation (matches Python SessionRuntime behavior)
       // ============================================================
-      const aggregation = aggregateSessionIntoContexts(client, {
-        sessionId,
-        sprintId: session.sprint_id,
-        sessionType: session.type,
-        sessionTitle: session.title,
-        captures: captures as CaptureItem[],
-        summary,
-        completedAt: now,
-        agent,
-        nextSteps: nextSteps && nextSteps.length > 0 ? nextSteps : null,
-      });
+      const aggregation = aggregateSessionIntoContexts(
+        client,
+        {
+          sessionId,
+          sprintId: session.sprint_id,
+          sessionType: session.type,
+          sessionTitle: session.title,
+          captures: captures as CaptureItem[],
+          summary,
+          completedAt: now,
+          agent,
+          nextSteps: nextSteps && nextSteps.length > 0 ? nextSteps : null,
+        },
+        writeSink
+      );
 
       // Sprint closeout guardrail
-      const warnings: string[] = [];
       if (session.sprint_id) {
         const totalResult = client.getOne<{ count: number }>(
           'SELECT COUNT(*) as count FROM missions WHERE sprint_id = ?',
@@ -709,7 +783,14 @@ export async function cmosSessionComplete(
       let feedbackId: number | undefined;
       if (params.agentFeedback && params.agentFeedback.trim().length > 0) {
         const fbResult = recordAgentFeedback(client, params.agentFeedback, {
-          toolName: 'cmos_session_complete',
+          // s86-m03: was 'cmos_session_complete' — a tool name the server no longer publishes
+          // (CMOS_TOOL_DEFINITIONS holds 15 entries and none is cmos_session_complete). Until this
+          // sprint the site was unreachable, so no row ever carried it; forwarding agentFeedback
+          // from the router without this change would have filed brand-new DURABLE rows stamped
+          // with a retired tool — this sprint's own defect class, inside its own fix. The live
+          // convention is the REGISTERED name (cmos-mission-complete.ts writes
+          // 'cmos_mission_transition'; cmos-agent-onboard.ts writes 'cmos_agent_onboard').
+          toolName: 'cmos_session',
           sessionId,
           sprintId: session.sprint_id ?? null,
         });
@@ -719,6 +800,10 @@ export async function cmosSessionComplete(
         if (fbResult.sanitizedFields.length > 0) {
           sanitizedFields.push(...fbResult.sanitizedFields);
         }
+        // s86-m02b: on a rejected agent_feedback INSERT, `feedbackId` is null and simply OMITTED
+        // from the answer — so the caller is told nothing, and reasonably reads that as "recorded".
+        // The producer records the DB error; this is the splice that lets it be read.
+        warnings.push(...fbResult.warnings);
       }
 
       const explicitlyReaffirmedLearningIds =
@@ -748,6 +833,7 @@ export async function cmosSessionComplete(
           constraintsExtracted,
           aggregation,
           message: `Session '${sessionId}' completed (${captures.length} captures, ${durationMinutes}min, ${nextStepsExtracted} next-steps extracted, ${decisionsExtracted} decisions extracted, ${constraintsExtracted} constraints extracted)`,
+          writeFailures: writeSink.failures,
           ...(feedbackId !== undefined ? { feedbackId } : {}),
           ...(explicitlyReaffirmedLearningIds ? { explicitlyReaffirmedLearningIds } : {}),
           ...(implicitlyReaffirmedLearningIds ? { implicitlyReaffirmedLearningIds } : {}),
@@ -830,6 +916,9 @@ export function formatSessionCompleteForLLM(
     }
   }
 
+  appendWriteFailures(lines, data.writeFailures);
+  appendWarnings(lines, result);
+
   return lines.join('\n');
 }
 
@@ -877,7 +966,8 @@ const VALID_CAPTURE_CATEGORIES = ['decision', 'learning', 'constraint', 'context
  */
 function aggregateSessionIntoContexts(
   client: CmosDatabaseClient,
-  params: AggregationParams
+  params: AggregationParams,
+  sink: { failures: WriteFailure[] }
 ): AggregationResult {
   const {
     sessionId,
@@ -949,26 +1039,31 @@ function aggregateSessionIntoContexts(
   updateContextHealth(masterContext, completedAt, retentionPolicy);
 
   // Step 7: Persist both contexts with snapshots
-  const projectSnapshotId = persistContext(
+  const projectPersist = persistContext(
     client,
     'project_context',
     projectContext,
     sessionId,
-    `session_complete:${sessionId}`
+    `session_complete:${sessionId}`,
+    sink
   );
-  const masterSnapshotId = persistContext(
+  const masterPersist = persistContext(
     client,
     'master_context',
     masterContext,
     sessionId,
-    `session_complete:${sessionId}`
+    `session_complete:${sessionId}`,
+    sink
   );
 
   return {
+    // s86-m02b: this was a hardcoded `true`. It now reports whether the CONTEXT ROWS were
+    // written — not whether their snapshots were, which is a different fact carried by the
+    // two snapshot ids beside it. The matching `writeFailures` entry names any failure.
     capturesRouted,
-    contextsUpdated: true,
-    projectSnapshotId,
-    masterSnapshotId,
+    contextsUpdated: projectPersist.contextWritten && masterPersist.contextWritten,
+    projectSnapshotId: projectPersist.snapshotId,
+    masterSnapshotId: masterPersist.snapshotId,
     condensation: {
       projectArchivedSprints: projectCondensation.archivedSprintIds,
       masterArchivedSprints: masterCondensation.archivedSprintIds,
@@ -1181,8 +1276,9 @@ function persistContext(
   contextId: string,
   content: Record<string, unknown>,
   sessionId: string,
-  snapshotSource: string
-): number | null {
+  snapshotSource: string,
+  sink: { failures: WriteFailure[] }
+): { snapshotId: number | null; contextWritten: boolean } {
   const now = new Date().toISOString();
   const contentStr = JSON.stringify(content);
 
@@ -1191,22 +1287,60 @@ function persistContext(
     contextId,
   ]);
 
-  if (existing.success && existing.data) {
-    client.execute('UPDATE contexts SET content = ?, updated_at = ? WHERE id = ?', [
-      contentStr,
-      now,
-      contextId,
-    ]);
+  // s86-m02b, THE READ HALF (fork f10, non-cuttable): a FAILED existence SELECT used to take the
+  // INSERT arm against a row that already exists — turning a transient read error into a
+  // constraint violation on a path that then reported success. Read failure is now its own case:
+  // we do not guess which arm is right, we decline to write and say so.
+  if (!existing.success) {
+    sink.failures.push({
+      op: `contexts.persist(${contextId})`,
+      code: existing.error?.code ?? 'DB_ERROR',
+      message:
+        `could not determine whether the context row exists, so neither UPDATE nor INSERT was ` +
+        `attempted: ${existing.error?.message ?? 'unknown'}`,
+    });
+    return { snapshotId: null, contextWritten: false };
+  }
+
+  // WHETHER THE CONTEXT ROW LANDED IS A SEPARATE QUESTION FROM WHETHER THE SNAPSHOT DID, and
+  // conflating them was a false negative in the opposite direction: deriving `contextsUpdated`
+  // from the snapshot id reported "contexts not updated" for a run whose contexts WERE durably
+  // written and whose snapshot merely failed. Two facts, two fields.
+  let contextWritten: boolean;
+
+  if (existing.data) {
+    // s86-m02b, THE WRITE HALF: this was a bare execute. On failure the function went on to write
+    // a snapshot and return its id, so the answer reported a persisted context and a snapshot id
+    // for content that was never stored — the single largest durable-loss site in the class.
+    contextWritten = checkWrite(
+      client.execute('UPDATE contexts SET content = ?, updated_at = ? WHERE id = ?', [
+        contentStr,
+        now,
+        contextId,
+      ]),
+      sink,
+      `contexts.update(${contextId})`
+    );
   } else {
     const sourcePath =
       contextId === 'master_context'
         ? 'context/MASTER_CONTEXT.json'
         : 'context/PROJECT_CONTEXT.json';
-    client.execute(
-      'INSERT INTO contexts (id, source_path, content, updated_at) VALUES (?, ?, ?, ?)',
-      [contextId, sourcePath, contentStr, now]
+    contextWritten = checkWrite(
+      client.execute(
+        'INSERT INTO contexts (id, source_path, content, updated_at) VALUES (?, ?, ?, ?)',
+        [contextId, sourcePath, contentStr, now]
+      ),
+      sink,
+      `contexts.insert(${contextId})`
     );
   }
+
+  // DELIBERATELY NOT AN EARLY RETURN. Before s86-m02b a failed context write still fell through
+  // to the snapshot INSERT, and that snapshot was the only durable copy of the aggregated
+  // content — recoverable later via cmos_context(history). Returning here would have made the
+  // answer honest by DESTROYING data the old code preserved, which is a worse trade. The write
+  // failure is already recorded above; the snapshot still gets its chance.
 
   // Create snapshot with dedup
   const contentHash = crypto.createHash('sha256').update(contentStr).digest('hex').substring(0, 16);
@@ -1216,8 +1350,19 @@ function persistContext(
     [contextId, contentHash]
   );
 
-  if (existingSnapshot.success && existingSnapshot.data) {
-    return existingSnapshot.data.id;
+  // The snapshot dedup is the BENIGN direction of the same read defect (noted in fork f10 and
+  // deliberately left alone): a failed dedup falls through to INSERT, producing a duplicate
+  // snapshot rather than losing one. Disclosed, not "fixed".
+  if (!existingSnapshot.success) {
+    sink.failures.push({
+      op: `context_snapshots.dedup(${contextId})`,
+      code: existingSnapshot.error?.code ?? 'DB_ERROR',
+      message: `snapshot de-duplication check failed; a duplicate snapshot may have been written: ${
+        existingSnapshot.error?.message ?? 'unknown'
+      }`,
+    });
+  } else if (existingSnapshot.data) {
+    return { snapshotId: existingSnapshot.data.id, contextWritten };
   }
 
   const g = genesisColumns(client, 'context_snapshots', getProjectId(client));
@@ -1227,7 +1372,10 @@ function persistContext(
     [contextId, sessionId, snapshotSource, contentHash, contentStr, now, ...g.values]
   );
 
-  return insertResult.success ? Number(insertResult.data?.lastInsertRowid) : null;
+  if (!checkWrite(insertResult, sink, `context_snapshots.insert(${contextId})`)) {
+    return { snapshotId: null, contextWritten };
+  }
+  return { snapshotId: Number(insertResult.data?.lastInsertRowid), contextWritten };
 }
 
 // ---- Utility helpers ----

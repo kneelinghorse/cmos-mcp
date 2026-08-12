@@ -530,8 +530,16 @@ export class CmosDatabaseClient {
    * Handle query errors and translate to CmosToolError
    */
   private handleQueryError<T>(error: unknown, _sql: string): CmosToolResult<T> {
+    // s86-m02b: DUCK-TYPED, not `instanceof Error`. A better-sqlite3 SqliteError that crosses a
+    // module-registry / realm boundary (Jest's per-file registry is the everyday case) fails
+    // `instanceof`, and the old fallback `String(error)` then produced the class-name-prefixed
+    // "SqliteError: <msg>" instead of "<msg>". That text is now DISCLOSED IN ANSWERS via
+    // checkWrite/countWrite, so a message that changes shape depending on which realm threw it
+    // makes the answer non-deterministic — and made a mission test order-dependent.
     const rawMessage =
-      error instanceof Error ? error.message : String(error ?? 'Unknown database error');
+      typeof (error as { message?: unknown } | null)?.message === 'string'
+        ? (error as { message: string }).message
+        : String(error ?? 'Unknown database error');
     const message = rawMessage.toLowerCase();
     const sqliteCode =
       typeof error === 'object' &&

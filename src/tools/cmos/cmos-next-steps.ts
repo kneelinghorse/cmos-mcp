@@ -16,6 +16,8 @@ import { withClient, type CmosDatabaseClient } from './client';
 import type { CmosToolResult } from './types';
 import { createError, createSuccess, CmosErrors } from './errors';
 import { ensureNextStepsTable, type NextStepStatus } from './schema-migrations';
+import { appendWarnings, appendWriteFailures } from './format-warnings';
+import { countWrite, type WriteFailure } from './write-guard';
 
 /**
  * A next-step record from the database.
@@ -39,6 +41,13 @@ export interface NextStepsResult {
   items?: NextStepRecord[];
   /** Count of items affected */
   affected: number;
+  /** s86-m02b — writes an action ATTEMPTED and the database REJECTED. Emitted by every write
+   *  action (complete/carry/drop), `[]` on the happy path; absent on `list`, which writes
+   *  nothing. `affected` above counts rows the UPDATE actually changed, so a non-empty array
+   *  here is the difference between the intent and the outcome. A caller-supplied id that
+   *  matched no pending row is NOT a failure — the statement ran, its WHERE matched nothing —
+   *  and produces no entry. */
+  writeFailures?: WriteFailure[];
   /** Message */
   message: string;
 }
@@ -172,6 +181,8 @@ function transitionNextSteps(
   }
 
   const now = new Date().toISOString();
+  const writeSink = { failures: [] as WriteFailure[] };
+  const op = targetStatus === 'completed' ? 'next_steps.complete' : 'next_steps.drop';
   let affected = 0;
 
   for (const id of ids) {
@@ -179,14 +190,16 @@ function transitionNextSteps(
       `UPDATE next_steps SET status = ?, resolved_at = ? WHERE id = ? AND status = 'pending'`,
       [targetStatus, now, id]
     );
-    if (result.success && result.data?.changes && result.data.changes > 0) {
-      affected++;
-    }
+    // s86-m02b: the ids come from the TOOL CALL and were never re-selected, so `changes: 0` on a
+    // statement that RAN means "no pending row with that id" — legitimate, and countWrite records
+    // nothing for it. Only an errored statement reaches writeSink.
+    affected += countWrite(result, writeSink, `${op} #${id}`);
   }
 
   return createSuccess<NextStepsResult>({
     nextStepAction: targetStatus === 'completed' ? 'complete' : 'drop',
     affected,
+    writeFailures: writeSink.failures,
     message: `${affected} next-step(s) marked as ${targetStatus}`,
   });
 }
@@ -198,6 +211,7 @@ function carryNextSteps(
 ): CmosToolResult<NextStepsResult> {
   // If no IDs provided, carry ALL pending next-steps
   const now = new Date().toISOString();
+  const writeSink = { failures: [] as WriteFailure[] };
 
   if (!ids || ids.length === 0) {
     // Carry all pending
@@ -205,10 +219,11 @@ function carryNextSteps(
       `UPDATE next_steps SET status = 'carried', resolved_at = ?, carried_to_sprint = ? WHERE status = 'pending'`,
       [now, targetSprint]
     );
-    const affected = result.success && result.data?.changes ? result.data.changes : 0;
+    const affected = countWrite(result, writeSink, 'next_steps.carry (all pending)');
     return createSuccess<NextStepsResult>({
       nextStepAction: 'carry',
       affected,
+      writeFailures: writeSink.failures,
       message: targetSprint
         ? `${affected} pending next-step(s) carried to ${targetSprint}`
         : `${affected} pending next-step(s) marked as carried`,
@@ -221,14 +236,15 @@ function carryNextSteps(
       `UPDATE next_steps SET status = 'carried', resolved_at = ?, carried_to_sprint = ? WHERE id = ? AND status = 'pending'`,
       [now, targetSprint, id]
     );
-    if (result.success && result.data?.changes && result.data.changes > 0) {
-      affected++;
-    }
+    // Caller-supplied id: a zero from a WHERE that matched no pending row is ordinary and is
+    // recorded nowhere. Only an errored statement becomes a writeFailures entry.
+    affected += countWrite(result, writeSink, `next_steps.carry #${id}`);
   }
 
   return createSuccess<NextStepsResult>({
     nextStepAction: 'carry',
     affected,
+    writeFailures: writeSink.failures,
     message: targetSprint
       ? `${affected} next-step(s) carried to ${targetSprint}`
       : `${affected} next-step(s) marked as carried`,
@@ -239,6 +255,19 @@ function carryNextSteps(
  * Format next-steps result for LLM readability.
  */
 export function formatNextStepsForLLM(result: CmosToolResult<NextStepsResult>): string {
+  const lines = [renderNextStepsBody(result)];
+
+  appendWriteFailures(lines, result.data?.writeFailures);
+  appendWarnings(lines, result);
+
+  return lines.join('\n');
+}
+
+/**
+ * The next-steps answer itself. Split out of formatNextStepsForLLM in s86-m02 so the envelope
+ * warnings channel renders from one tail instead of once per action branch.
+ */
+function renderNextStepsBody(result: CmosToolResult<NextStepsResult>): string {
   if (!result.success || !result.data) {
     const error = result.error;
     return `Failed to manage next-steps: ${error?.message ?? 'Unknown error'}`;

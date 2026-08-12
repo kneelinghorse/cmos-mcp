@@ -613,6 +613,7 @@ describe('cmos_session_complete', () => {
             projectSnapshotId: 1,
             masterSnapshotId: 2,
           },
+          writeFailures: [],
           message: 'Done',
         },
       };

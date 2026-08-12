@@ -21,6 +21,7 @@ import * as crypto from 'crypto';
 import type { CmosDatabaseClient } from './client';
 import { genesisColumns, getProjectId } from './genesis-columns';
 import { snapshotDedupPrunedFilter } from './schema-migrations';
+import { checkWrite } from './write-guard';
 
 // ---------------------------------------------------------------------------
 // Public constants
@@ -55,6 +56,12 @@ export interface BlobMigrationResult {
   migrationsApplied: number[];
   /** The post-migration blob (equals input blob when migrated=false). */
   blob: Record<string, unknown>;
+  /**
+   * s86-m02b — DB errors from the migration's own writes (snapshot, blob write-back,
+   * version bump). A half-applied migration must reach the caller's answer instead of
+   * being inferred from `migrated: true`, which reports intent, not a persisted row.
+   */
+  warnings: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -123,12 +130,23 @@ export function getBlobSchemaVersion(client: CmosDatabaseClient): number {
 
 /**
  * Persist the blob schema version in the metadata table.
+ *
+ * A failed bump leaves the store's blob transformed but its version stale, so the next
+ * read re-runs the migration — the error is recorded into `warnings` rather than dropped.
  */
-function setBlobSchemaVersion(client: CmosDatabaseClient, version: number): void {
-  client.execute('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)', [
-    BLOB_SCHEMA_VERSION_KEY,
-    String(version),
-  ]);
+function setBlobSchemaVersion(
+  client: CmosDatabaseClient,
+  version: number,
+  warnings: string[]
+): void {
+  checkWrite(
+    client.execute('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)', [
+      BLOB_SCHEMA_VERSION_KEY,
+      String(version),
+    ]),
+    warnings,
+    `metadata.${BLOB_SCHEMA_VERSION_KEY} bump to v${version}`
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -143,7 +161,8 @@ function takePreMigrationSnapshot(
   client: CmosDatabaseClient,
   contextId: string,
   rawContent: string,
-  migrationVersion: number
+  migrationVersion: number,
+  warnings: string[]
 ): void {
   const contentHash = crypto.createHash('sha256').update(rawContent).digest('hex').substring(0, 16);
 
@@ -157,18 +176,22 @@ function takePreMigrationSnapshot(
 
   const now = new Date().toISOString();
   const g = genesisColumns(client, 'context_snapshots', getProjectId(client));
-  client.execute(
-    `INSERT INTO context_snapshots (context_id, session_id, source, content_hash, content, created_at, ${g.columns.join(', ')})
+  checkWrite(
+    client.execute(
+      `INSERT INTO context_snapshots (context_id, session_id, source, content_hash, content, created_at, ${g.columns.join(', ')})
      VALUES (?, ?, ?, ?, ?, ?, ${g.placeholders})`,
-    [
-      contextId,
-      null,
-      `pre-migration: blob-schema-v${migrationVersion}`,
-      contentHash,
-      rawContent,
-      now,
-      ...g.values,
-    ]
+      [
+        contextId,
+        null,
+        `pre-migration: blob-schema-v${migrationVersion}`,
+        contentHash,
+        rawContent,
+        now,
+        ...g.values,
+      ]
+    ),
+    warnings,
+    `context_snapshots pre-migration snapshot (blob-schema-v${migrationVersion})`
   );
 }
 
@@ -203,19 +226,23 @@ export function applyPendingBlobMigrations(
 ): BlobMigrationResult {
   // Only master_context carries the dead sections
   if (contextId !== 'master_context') {
-    return { migrated: false, migrationsApplied: [], blob: parsedBlob };
+    return { migrated: false, migrationsApplied: [], blob: parsedBlob, warnings: [] };
   }
 
   const currentVersion = getBlobSchemaVersion(client);
   const pending = BLOB_MIGRATIONS.filter((m) => m.version > currentVersion);
 
   if (pending.length === 0) {
-    return { migrated: false, migrationsApplied: [], blob: parsedBlob };
+    return { migrated: false, migrationsApplied: [], blob: parsedBlob, warnings: [] };
   }
+
+  // s86-m02b: every write below reports through this sink, so a half-applied migration
+  // is disclosed rather than reported as a clean `migrated: true`.
+  const warnings: string[] = [];
 
   // Snapshot before any writes (using the highest pending version as the label)
   const targetVersion = Math.max(...pending.map((m) => m.version));
-  takePreMigrationSnapshot(client, contextId, rawContent, targetVersion);
+  takePreMigrationSnapshot(client, contextId, rawContent, targetVersion, warnings);
 
   // Apply each pending migration in version order
   let result = parsedBlob;
@@ -228,14 +255,18 @@ export function applyPendingBlobMigrations(
   // Write pruned blob back to contexts table
   const newContent = JSON.stringify(result);
   const now = new Date().toISOString();
-  client.execute('UPDATE contexts SET content = ?, updated_at = ? WHERE id = ?', [
-    newContent,
-    now,
-    contextId,
-  ]);
+  checkWrite(
+    client.execute('UPDATE contexts SET content = ?, updated_at = ? WHERE id = ?', [
+      newContent,
+      now,
+      contextId,
+    ]),
+    warnings,
+    `contexts.content blob write-back (${contextId}, blob-schema-v${targetVersion})`
+  );
 
   // Bump version in metadata
-  setBlobSchemaVersion(client, targetVersion);
+  setBlobSchemaVersion(client, targetVersion, warnings);
 
-  return { migrated: true, migrationsApplied: applied, blob: result };
+  return { migrated: true, migrationsApplied: applied, blob: result, warnings };
 }

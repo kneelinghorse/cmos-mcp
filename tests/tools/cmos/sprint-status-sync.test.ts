@@ -18,6 +18,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { cmosSprint } from '../../../src/tools/cmos/cmos-sprint';
+import { __drainCheckpointBackfill } from '../../../src/tools/cmos/checkpoint-backfill';
 import { maybePropagateSprintStatus } from '../../../src/tools/cmos/sync-locks';
 import { formatSprintUpdateForLLM } from '../../../src/tools/cmos/cmos-sprint-update';
 import { createSuccess } from '../../../src/tools/cmos/errors';
@@ -138,7 +139,20 @@ describe('sprint_status emit (Sprint 72 m02)', () => {
     setupFetchMock();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    // s86-m01: THIS describe is the one that armed the CI late-log flake. Its
+    // beforeEach re-sets the three dashboard credential vars that the root
+    // beforeEach (tests/jest-setup-after-env.ts) strips, which opens the
+    // credential gate in triggerCheckpointBackfill. cmos_sprint(action='complete')
+    // fires that sync and drops the promise, so without an explicit drain the
+    // detached body is still running when this hook restores the env below —
+    // it then re-resolves credentials mid-flight, falls to the no-slug path, and
+    // logs "[CHECKPOINT] Backfill failed: …" after Jest has torn the suite down.
+    //
+    // ORDER IS LOAD-BEARING: drain BEFORE the restore loop. Draining after the
+    // env is gone reproduces the bug rather than fixing it.
+    await __drainCheckpointBackfill();
+
     for (const [k, v] of Object.entries(ENV_BACKUP)) {
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;

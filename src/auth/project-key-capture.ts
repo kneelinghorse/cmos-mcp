@@ -25,7 +25,11 @@
 import { DashboardClient } from '../tools/cmos/dashboard-client';
 import type { RegisterProjectResult } from '../tools/cmos/dashboard-client';
 import { withClientAsync } from '../tools/cmos/client';
-import { CredentialStore, type ProjectKeyRecord } from '../intelligence/credential-store';
+import {
+  CredentialStore,
+  type KeySource,
+  type ProjectKeyRecord,
+} from '../intelligence/credential-store';
 
 /**
  * Status returned by the capture/recovery functions so callers can log
@@ -90,6 +94,109 @@ export async function captureRegisterResponse(
   return 'captured';
 }
 
+// ─── s86-m06: attribution classification ─────────────────────────────────────
+
+/**
+ * Why a project-key mint cannot be attributed to a user-scoped parent.
+ *
+ * These are DIFFERENT operator situations that the pre-s86-m06 code collapsed into
+ * one message blaming a missing device-code bootstrap — false whenever the store
+ * already holds a user-scoped key. Splitting the type is what makes two honest
+ * messages possible.
+ */
+export type AttributionFailure =
+  /** The credential store holds zero user-scoped keys — device code genuinely has not been run. */
+  | { kind: 'no-user-scoped-key'; storePath: string }
+  /**
+   * A credential resolved, but it is not a device-code user key, so the dashboard
+   * cannot bind the mint to a parent. `via` names which arm supplied it.
+   */
+  | {
+      kind: 'unattributable-credential';
+      via: 'explicit-override' | 'legacy-env' | 'password-fallback';
+    }
+  /**
+   * Impossible by construction — kept as a TYPED failure rather than a skip so an
+   * internal inconsistency surfaces instead of silently disabling recovery
+   * (agents.md Process Hardening #4: no silent fail-open on an activation predicate).
+   */
+  | { kind: 'inconsistent-resolution'; detail: string; storePath: string };
+
+export type AttributionResult =
+  | { ok: true; parentKeyId: string }
+  | { ok: false; failure: AttributionFailure };
+
+/**
+ * Decide whether a resolved dashboard client can attribute a project-key mint,
+ * and if not, WHY — by rule, from the resolution arm that produced it.
+ *
+ * The rules are ordered and each is derivable from `fromEnvForUser`'s arms; none
+ * is an allowlist:
+ *
+ *  1. `authenticatingKeyId` set → attributable. Only arm 3 sets it.
+ *  2. `keySource === 'user-scoped'` with no id → arm 1, an explicit `apiKey`
+ *     override. This combination arises from arm 1 and ONLY arm 1 (arm 3 always
+ *     stamps the id) — asserted by test rather than trusted from this comment.
+ *  3. `keySource` of `legacy-env` / `password-fallback` → arms 4 / 5.
+ *  4. No client at all → the chain fell off its end. An empty store is
+ *     `no-user-scoped-key` (naming the store's path so the operator knows which
+ *     file); a NON-empty store is impossible by construction (arm 3 would have
+ *     fired) and returns the inconsistency.
+ *  5. Anything else (a project-scoped client handed in by a caller that resolved
+ *     through the wrong entry point) is also the inconsistency, never a skip.
+ *
+ * Every branch returns `{ok:true, parentKeyId}` or a typed failure. There is no
+ * bare `undefined` and no "carry on without attribution" path.
+ */
+export async function classifyAttribution(
+  client: DashboardClient | null,
+  keySource: KeySource | null,
+  store: CredentialStore
+): Promise<AttributionResult> {
+  // (1) Attributable — arm 3 stamped the user-scoped keyId that authenticated us.
+  const parentKeyId = client?.authenticatingKeyId;
+  if (parentKeyId) {
+    return { ok: true, parentKeyId };
+  }
+
+  if (client) {
+    // (2) Arm 1 — a caller-supplied credential. We cannot know whose it is.
+    if (keySource === 'user-scoped') {
+      return {
+        ok: false,
+        failure: { kind: 'unattributable-credential', via: 'explicit-override' },
+      };
+    }
+    // (3) Arms 4 / 5 — legacy env key or email+password.
+    if (keySource === 'legacy-env' || keySource === 'password-fallback') {
+      return { ok: false, failure: { kind: 'unattributable-credential', via: keySource } };
+    }
+    // (5) A client whose arm cannot attribute and is not one of the above.
+    return {
+      ok: false,
+      failure: {
+        kind: 'inconsistent-resolution',
+        detail: `a client resolved with keySource=${keySource ?? 'null'} carries no authenticating keyId; the user-scoped entry point cannot return this arm`,
+        storePath: store.path,
+      },
+    };
+  }
+
+  // (4) No client at all.
+  const userKeys = await store.listUserScopedKeys();
+  if (Object.keys(userKeys).length === 0) {
+    return { ok: false, failure: { kind: 'no-user-scoped-key', storePath: store.path } };
+  }
+  return {
+    ok: false,
+    failure: {
+      kind: 'inconsistent-resolution',
+      detail: `no dashboard client resolved, yet the credential store holds ${Object.keys(userKeys).length} user-scoped key(s); the user-scoped arm should have fired`,
+      storePath: store.path,
+    },
+  };
+}
+
 export interface RecoverProjectKeyOptions {
   /** Absolute project root the recovered key should be keyed under. */
   projectRoot: string;
@@ -102,8 +209,25 @@ export interface RecoverProjectKeyOptions {
 }
 
 export type ProjectKeyRecoveryStatus =
-  | { kind: 'recovered'; record: ProjectKeyRecord }
+  /**
+   * s86-m06 — `revokedKeyIds` is what the DASHBOARD reported it revoked as part of
+   * this reissue. It used to be discarded here and reported to the operator as a
+   * hardcoded `[]`, i.e. "nothing was revoked" while N keys had been.
+   *
+   * `undefined` means the response carried NO such list — which is NOT the same fact
+   * as an empty list, and must not be rendered as one. `request<T>` casts the body
+   * without validating it, so an absent (or non-array) field is a real possibility
+   * and the dashboard-side response shape is unverified from this repo.
+   */
+  | { kind: 'recovered'; record: ProjectKeyRecord; revokedKeyIds: string[] | undefined }
   | { kind: 'no-op-already-present' }
+  /**
+   * s86-m06 — now UNREACHABLE from both callers: each classifies attribution via
+   * `classifyAttribution` before calling in. Kept as a guard so a future caller
+   * that skips the classification fails loudly instead of writing a record with
+   * empty attribution; both consumers map it to a typed internal-invariant error,
+   * never to a skip.
+   */
   | { kind: 'missing-parent-key-id' }
   | { kind: 'reissue-failed'; error: string };
 
@@ -144,7 +268,14 @@ export async function recoverProjectKey(
     lastUsedAt: now,
   };
   await store.upsertProjectKey(options.projectRoot, record);
-  return { kind: 'recovered', record };
+  return {
+    kind: 'recovered',
+    record,
+    // Deliberately NOT `?? []`: coercing an absent field to an empty list would let the
+    // answer assert that the dashboard reported nothing revoked when it reported nothing
+    // at all. A non-array body is treated as "not reported" for the same reason.
+    revokedKeyIds: Array.isArray(result.data.revokedKeyIds) ? result.data.revokedKeyIds : undefined,
+  };
 }
 
 // ─── Startup recovery hook ───────────────────────────────────────────────────
@@ -157,7 +288,15 @@ export interface StartupProjectKeyRecoveryResult {
     | 'skipped-not-registered'
     | 'skipped-already-present'
     | 'skipped-unconfigured'
-    | 'skipped-no-parent-key-id'
+    /**
+     * s86-m06 — the single `skipped-no-parent-key-id` split in two, because it
+     * named ONE cause ("run device code") for two states, and that cause is false
+     * in the second one. Both are logged at [WARN] by index.ts: a state in which
+     * auto-recovery is structurally impossible until the operator acts is not
+     * information.
+     */
+    | 'skipped-no-user-scoped-key'
+    | 'skipped-unattributable-credential'
     | 'recovered'
     | 'error';
   message: string;
@@ -168,8 +307,16 @@ export type ProjectMetadataReader = (
   projectRoot: string
 ) => Promise<{ registered: boolean; projectId: string | null } | null>;
 
-/** Thin abstraction so tests can stub dashboard-client construction. */
-export type DashboardClientFactory = (projectRoot: string) => Promise<DashboardClient | null>;
+/**
+ * Thin abstraction so tests can stub dashboard-client construction.
+ *
+ * s86-m06 — returns the `{client, keySource}` PAIR rather than a bare client:
+ * `keySource` is what lets `classifyAttribution` name which arm failed to
+ * attribute, and a bare client makes the two failure states indistinguishable.
+ */
+export type DashboardClientFactory = (
+  projectRoot: string
+) => Promise<{ client: DashboardClient; keySource: KeySource } | null>;
 
 async function defaultMetadataReader(
   projectRoot: string
@@ -203,10 +350,33 @@ async function defaultMetadataReader(
   }
 }
 
-async function defaultClientFactory(projectRoot: string): Promise<DashboardClient | null> {
-  const result = await DashboardClient.fromEnvForProject(projectRoot);
+async function defaultClientFactory(
+  // Unused by design: user-scoped resolution is not project-keyed. The parameter
+  // stays because the injectable factory type is called with a project root.
+  _projectRoot: string
+): Promise<{ client: DashboardClient; keySource: KeySource } | null> {
+  // s86-m06 — USER-scoped resolution, deliberately not `fromEnvForProject`.
+  //
+  // HONEST STATEMENT OF WHAT THIS CHANGE DOES TODAY: nothing observable. This
+  // factory is only ever reached AFTER `runStartupProjectKeyRecovery`'s
+  // `skipped-already-present` early return has proven no local project row
+  // exists, so `fromEnvForProject`'s arm 2 is provably dead at this call site and
+  // the two entry points resolve identically here. It is a latent-trap removal,
+  // not a behaviour fix: reissue-on-a-present-row is the reachable defect and it
+  // lives in `handleReissue`, not here.
+  //
+  // Its gate is therefore STRUCTURAL: no CALL to the project-scoped entry point may
+  // remain anywhere under src/auth — enforced by
+  // tests/auth/user-scoped-resolution-gate.test.ts, which counts call sites, not
+  // mentions (s86-m06 criterion 9, whose literal "the grep returns zero" form is not
+  // achievable: this comment and auth-state.ts's accurate prose both name the chain).
+  // Do NOT revert this line to the project-scoped resolver as a "no-op
+  // simplification" in a later dead-code sweep: the next caller who removes the
+  // early return above would silently reintroduce authenticating a repair with the
+  // credential being repaired.
+  const result = await DashboardClient.fromEnvForUser();
   if (!result.success || !result.data) return null;
-  return result.data.client;
+  return { client: result.data.client, keySource: result.data.keySource };
 }
 
 /**
@@ -253,8 +423,8 @@ export async function runStartupProjectKeyRecovery(
   }
 
   const clientFactory = options.clientFactory ?? defaultClientFactory;
-  const client = await clientFactory(options.projectRoot);
-  if (!client) {
+  const resolved = await clientFactory(options.projectRoot);
+  if (!resolved) {
     return {
       checked: true,
       status: 'skipped-unconfigured',
@@ -262,10 +432,20 @@ export async function runStartupProjectKeyRecovery(
     };
   }
 
+  // s86-m06 — classify BEFORE calling reissue, and say which of the two states we
+  // are in. The old single status told the operator to bootstrap a device code and
+  // promised the next reissue would then work — asserted even when the store already
+  // held user-scoped keys, and even though startup recovery skips outright whenever a
+  // local row exists.
+  const attribution = await classifyAttribution(resolved.client, resolved.keySource, store);
+  if (!attribution.ok) {
+    return startupResultForAttributionFailure(attribution.failure);
+  }
+
   const result = await recoverProjectKey({
     projectRoot: options.projectRoot,
     projectId: metadata.projectId,
-    client,
+    client: resolved.client,
     store,
   });
 
@@ -283,11 +463,13 @@ export async function runStartupProjectKeyRecovery(
         message: 'local project key present on re-read',
       };
     case 'missing-parent-key-id':
+      // Unreachable: classifyAttribution above already returned on this state.
+      // Surfaced as an error rather than a skip so the inconsistency is audible.
       return {
         checked: true,
-        status: 'skipped-no-parent-key-id',
+        status: 'error',
         message:
-          'dashboard client has no authenticatingKeyId — run device code flow, then reissue will succeed',
+          'internal inconsistency: attribution classified as usable, but the recovery path found no parent keyId',
       };
     case 'reissue-failed':
       return {
@@ -295,6 +477,51 @@ export async function runStartupProjectKeyRecovery(
         status: 'error',
         message: `reissue failed: ${result.error}`,
       };
+  }
+}
+
+/**
+ * Map an attribution failure to a startup status + a message that names the state
+ * it is actually in. s86-m06: no branch here may say "device code flow must be
+ * run" when the credential store holds a user-scoped key, and none may promise
+ * that a later reissue "will succeed".
+ */
+function startupResultForAttributionFailure(
+  failure: AttributionFailure
+): StartupProjectKeyRecoveryResult {
+  switch (failure.kind) {
+    case 'no-user-scoped-key':
+      return {
+        checked: true,
+        status: 'skipped-no-user-scoped-key',
+        message: `credential store at ${failure.storePath} holds no user-scoped keys, so an auto-issued project key cannot be attributed; run cmos_auth(action="login") to bootstrap one`,
+      };
+    case 'unattributable-credential':
+      return {
+        checked: true,
+        status: 'skipped-unattributable-credential',
+        message: `the resolved dashboard credential (${describeAttributionArm(failure.via)}) is not a device-code user key, so the dashboard cannot bind a reissued project key to a parent; migrate to a device-code user key via cmos_auth(action="login")`,
+      };
+    case 'inconsistent-resolution':
+      return {
+        checked: true,
+        status: 'error',
+        message: `credential resolution is inconsistent: ${failure.detail} (store: ${failure.storePath})`,
+      };
+  }
+}
+
+/** Operator-facing name for the resolution arm that supplied an unattributable credential. */
+export function describeAttributionArm(
+  via: 'explicit-override' | 'legacy-env' | 'password-fallback'
+): string {
+  switch (via) {
+    case 'explicit-override':
+      return 'a caller-supplied apiKey override';
+    case 'legacy-env':
+      return 'the legacy CMOS_DASHBOARD_API_KEY environment variable';
+    case 'password-fallback':
+      return 'the CMOS_DASHBOARD_USER + CMOS_DASHBOARD_PASSWORD fallback';
   }
 }
 

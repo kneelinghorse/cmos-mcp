@@ -12,13 +12,15 @@
 // {
 //   schemaVersion: 1,
 //   meta: { measuredAt, durationMs, tool, configSource },
-//   stores: { registered, reachable, queried, unreachable: [...], openErrors: [...] },
+//   stores: { registered, reachable, queried, unreachable: [...], openErrors: [...],
+//             unreliable: [{ projectRoot, queryErrors }], absentTables: [{ projectRoot, tables }] },
 //   mutableWriteShare: {
 //     thresholds: { crdtPct, approachingPct },
+//     coverage: { storesCounted, storesExcluded, complete, note },     // what the shares cover
 //     overall: { appendWrites, transitionWrites, sharePct, status },   // headline
 //     softLock: { byTable: {...}, surfaceWrites, totalWrites, sharePct, status, note },
-//     projectIdentityEdits: { byProject: [{ projectRoot, identitySnapshots }], note },
-//     perProject: [{ projectRoot, appendWrites, transitionWrites, ...durable counts }]
+//     projectIdentityEdits: { byProject: [{ projectRoot, identitySnapshots, reliable }], note },
+//     perProject: [{ projectRoot, appendWrites, transitionWrites, reliable, ...durable counts }]
 //   },
 //   fanInLatency: {
 //     thresholds: { triggerMs, approachingMs }, runsPerQuery,
@@ -33,6 +35,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { performance } from 'perf_hooks';
 import { CmosDatabaseClient } from '../src/tools/cmos/client';
+import type { CmosToolError } from '../src/tools/cmos/types';
 import { ProjectGraphRegistry } from '../src/intelligence/project-graph-registry';
 
 // ─── Thresholds (from s68 ADR Section 5.1 + CMOS-MULTIUSER-COLLAB-01-01) ──────
@@ -110,10 +113,44 @@ const EMPTY_COUNTS: StoreWriteCounts = {
   identitySnapshots: 0,
 };
 
-interface PerStoreCounts extends StoreWriteCounts {
+/** One count query that could not be answered, in `table WHERE clause` vocabulary. */
+export interface CountQueryError {
+  query: string;
+  reason: string;
+}
+
+/**
+ * What a store's read pass learned BESIDES the counts. The two ways a count can
+ * come back 0 are kept STRICTLY apart, because folding them together publishes a
+ * false zero into an aggregate that is then written to disk as fact:
+ *
+ *  - `absentTables` — the table is not in `sqlite_master`. The count genuinely IS
+ *    zero (a foreign or partial store). Recorded ONCE PER STORE so the zero is
+ *    disclosed rather than silent.
+ *  - `queryErrors` — a count query ERRORED on a table that EXISTS (a corrupt page,
+ *    a missing module/collation, a lock, a broken connection). The count is
+ *    UNKNOWN — never zero. Any entry here makes the whole store's counts
+ *    UNRELIABLE, and they are held OUT of the aggregate instead of contributing 0.
+ */
+export interface StoreReadDiagnostics {
+  absentTables: string[];
+  queryErrors: CountQueryError[];
+}
+
+export function newReadDiagnostics(): StoreReadDiagnostics {
+  return { absentTables: [], queryErrors: [] };
+}
+
+export interface PerStoreCounts extends StoreWriteCounts {
   projectRoot: string;
   appendWrites: number;
   transitionWrites: number;
+  /** False when a count query errored on an EXISTING table — counts are unknown, not zero. */
+  reliable: boolean;
+  /** Tables absent from this store; their counts are a genuine, recorded 0. */
+  absentTables: string[];
+  /** Count queries that errored on an existing table. Non-empty ⇒ `reliable: false`. */
+  queryErrors: CountQueryError[];
 }
 
 // ─── Pure helpers (exported for tests) ───────────────────────────────────────
@@ -258,55 +295,128 @@ export function computeMutableShare(c: StoreWriteCounts): {
 
 // ─── Per-store reads ─────────────────────────────────────────────────────────
 
-function tableExists(client: CmosDatabaseClient, name: string): boolean {
+/** Is the table there, missing, or did the probe itself fail? Three answers, not two. */
+type TablePresence =
+  | { state: 'present' }
+  | { state: 'absent' }
+  | { state: 'error'; reason: string };
+
+function probeTable(client: CmosDatabaseClient, name: string): TablePresence {
   const row = client.getOne<{ name: string }>(
     "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
     [name]
   );
-  return row.success && !!row.data;
+  if (!row.success) {
+    return { state: 'error', reason: describeError(row.error) };
+  }
+  return row.data ? { state: 'present' } : { state: 'absent' };
 }
 
-/** COUNT(*) for a where-clause, returning 0 if the table is absent or the query fails. */
-function safeCount(client: CmosDatabaseClient, table: string, where = ''): number {
-  if (!tableExists(client, table)) return 0;
-  const row = client.getOne<{ c: number }>(
-    `SELECT COUNT(*) AS c FROM ${table}${where ? ` WHERE ${where}` : ''}`,
-    []
-  );
-  return row.success && row.data ? row.data.c : 0;
+function describeError(error: CmosToolError | undefined): string {
+  return `${error?.code ?? 'DB_ERROR'} — ${error?.message ?? 'unknown'}`;
+}
+
+function noteAbsent(diag: StoreReadDiagnostics, table: string): void {
+  // Once per store, not once per query — `missions` is counted three times.
+  if (!diag.absentTables.includes(table)) diag.absentTables.push(table);
 }
 
 /**
- * Read durable write counts from one store's append-only domain tables. Every
- * query is defensive (missing table → 0) so a foreign/partial store never throws.
+ * COUNT(*) for a where-clause. THE TWO ZEROS ARE NOT THE SAME ZERO (s86-m02b, f10
+ * non-cuttable core): an absent table is a genuine 0 and is recorded as such; a
+ * query that ERRORS on an existing table yields an UNKNOWN count, which is
+ * recorded into `diag.queryErrors` so the caller can exclude the whole store from
+ * any published aggregate. The returned 0 in the error case is a placeholder that
+ * MUST NOT be read as a count — `PerStoreCounts.reliable` is the flag that says so.
+ *
+ * Exported as the seam a test drives against a fixture store whose table exists
+ * but cannot be queried.
  */
-export function countStoreWrites(client: CmosDatabaseClient): StoreWriteCounts {
+export function safeCount(
+  client: CmosDatabaseClient,
+  table: string,
+  where: string,
+  diag: StoreReadDiagnostics
+): number {
+  const label = `${table}${where ? ` WHERE ${where}` : ''}`;
+  const presence = probeTable(client, table);
+  if (presence.state === 'error') {
+    // The PREDICATE failed, so we do not know whether the table is there. Never
+    // fail open into "absent → 0" (agents.md standing gate: no silent fail-open).
+    diag.queryErrors.push({ query: `sqlite_master probe for ${table}`, reason: presence.reason });
+    return 0;
+  }
+  if (presence.state === 'absent') {
+    noteAbsent(diag, table);
+    return 0;
+  }
+  const row = client.getOne<{ c: number }>(`SELECT COUNT(*) AS c FROM ${label}`, []);
+  if (!row.success) {
+    diag.queryErrors.push({ query: label, reason: describeError(row.error) });
+    return 0;
+  }
+  if (!row.data) {
+    // COUNT(*) always returns a row; no row on a successful query is anomalous.
+    diag.queryErrors.push({ query: label, reason: 'COUNT(*) returned no row' });
+    return 0;
+  }
+  return row.data.c;
+}
+
+/**
+ * Read durable write counts from one store's append-only domain tables. A missing
+ * table counts 0 (and is recorded in `diag.absentTables`) so a foreign/partial
+ * store never throws; a table that exists but cannot be queried is recorded in
+ * `diag.queryErrors` and makes the store's counts unreliable.
+ *
+ * The `diag` default exists only for direct unit use where the counts are asserted
+ * in place; every path that PUBLISHES a number passes the store's own sink
+ * (see `readStoreCounts`), so no aggregate is ever built from unread diagnostics.
+ */
+export function countStoreWrites(
+  client: CmosDatabaseClient,
+  diag: StoreReadDiagnostics = newReadDiagnostics()
+): StoreWriteCounts {
   return {
-    decisions: safeCount(client, 'strategic_decisions'),
-    learnings: safeCount(client, 'learnings'),
-    missions: safeCount(client, 'missions'),
-    sprints: safeCount(client, 'sprints'),
-    sessions: safeCount(client, 'sessions'),
-    nextSteps: safeCount(client, 'next_steps'),
-    constraints: safeCount(client, 'constraints'),
-    contextSnapshots: safeCount(client, 'context_snapshots'),
-    missionsStarted: safeCount(client, 'missions', 'started_at IS NOT NULL'),
-    missionsCompleted: safeCount(client, 'missions', 'completed_at IS NOT NULL'),
-    sprintsCompleted: safeCount(client, 'sprints', "status = 'Completed'"),
-    sessionsCompleted: safeCount(client, 'sessions', 'completed_at IS NOT NULL'),
-    decisionsSuperseded: safeCount(client, 'strategic_decisions', 'superseded_by IS NOT NULL'),
-    identitySnapshots: safeCount(client, 'context_snapshots', "context_id = 'project_identity'"),
+    decisions: safeCount(client, 'strategic_decisions', '', diag),
+    learnings: safeCount(client, 'learnings', '', diag),
+    missions: safeCount(client, 'missions', '', diag),
+    sprints: safeCount(client, 'sprints', '', diag),
+    sessions: safeCount(client, 'sessions', '', diag),
+    nextSteps: safeCount(client, 'next_steps', '', diag),
+    constraints: safeCount(client, 'constraints', '', diag),
+    contextSnapshots: safeCount(client, 'context_snapshots', '', diag),
+    missionsStarted: safeCount(client, 'missions', 'started_at IS NOT NULL', diag),
+    missionsCompleted: safeCount(client, 'missions', 'completed_at IS NOT NULL', diag),
+    sprintsCompleted: safeCount(client, 'sprints', "status = 'Completed'", diag),
+    sessionsCompleted: safeCount(client, 'sessions', 'completed_at IS NOT NULL', diag),
+    decisionsSuperseded: safeCount(
+      client,
+      'strategic_decisions',
+      'superseded_by IS NOT NULL',
+      diag
+    ),
+    identitySnapshots: safeCount(
+      client,
+      'context_snapshots',
+      "context_id = 'project_identity'",
+      diag
+    ),
   };
 }
 
 /** Read a store's write counts from an already-open read-only client. */
-function readStoreCounts(projectRoot: string, client: CmosDatabaseClient): PerStoreCounts {
-  const counts = countStoreWrites(client);
+export function readStoreCounts(projectRoot: string, client: CmosDatabaseClient): PerStoreCounts {
+  const diag = newReadDiagnostics();
+  const counts = countStoreWrites(client, diag);
   return {
     projectRoot,
     ...counts,
     appendWrites: sumAppendWrites(counts),
     transitionWrites: sumTransitionWrites(counts),
+    reliable: diag.queryErrors.length === 0,
+    absentTables: diag.absentTables,
+    queryErrors: diag.queryErrors,
   };
 }
 
@@ -451,11 +561,21 @@ export interface BaselineReport {
     queried: number;
     unreachable: { projectRoot: string; reason: string }[];
     openErrors: { projectRoot: string; reason: string }[];
+    /** Opened, but a count query errored on an existing table — counts UNKNOWN, excluded. */
+    unreliable: { projectRoot: string; queryErrors: CountQueryError[] }[];
+    /** Opened, missing one or more CMOS tables — a genuine 0, recorded not swallowed. */
+    absentTables: { projectRoot: string; tables: string[] }[];
   };
   mutableWriteShare: ReturnType<typeof computeMutableShare> & {
     thresholds: { crdtPct: number; approachingPct: number };
+    coverage: {
+      storesCounted: number;
+      storesExcluded: number;
+      complete: boolean;
+      note: string;
+    };
     projectIdentityEdits: {
-      byProject: { projectRoot: string; identitySnapshots: number }[];
+      byProject: { projectRoot: string; identitySnapshots: number; reliable: boolean }[];
       note: string;
     };
     perProject: PerStoreCounts[];
@@ -508,6 +628,9 @@ export async function buildReport(
     // Per-store durable write counts.
     perProject = open.map(({ projectRoot, client }) => readStoreCounts(projectRoot, client));
     for (const p of perProject) {
+      // A store whose count query errored contributes NOTHING — not a 0. Folding
+      // its placeholder zeros in would publish a smaller denominator as fact.
+      if (!p.reliable) continue;
       for (const k of Object.keys(aggregate) as (keyof StoreWriteCounts)[]) {
         aggregate[k] += p[k];
       }
@@ -519,6 +642,13 @@ export async function buildReport(
   }
 
   const share = computeMutableShare(aggregate);
+  const unreliableStores = perProject
+    .filter((p) => !p.reliable)
+    .map((p) => ({ projectRoot: p.projectRoot, queryErrors: p.queryErrors }));
+  const absentTableStores = perProject
+    .filter((p) => p.absentTables.length > 0)
+    .map((p) => ({ projectRoot: p.projectRoot, tables: p.absentTables }));
+  const storesCounted = perProject.length - unreliableStores.length;
   // Worst-case (max) per-query p95 — App-View Trigger A fires if ANY query's
   // fan-in p95 exceeds 200ms, so the max is the honest portfolio headline (a
   // mean/percentile-of-percentiles over 4 points would mask a slow query).
@@ -538,19 +668,36 @@ export async function buildReport(
       queried: open.length,
       unreachable,
       openErrors,
+      unreliable: unreliableStores,
+      absentTables: absentTableStores,
     },
     mutableWriteShare: {
       thresholds: { crdtPct: CRDT_THRESHOLD_PCT, approachingPct: CRDT_APPROACHING_PCT },
+      coverage: {
+        storesCounted,
+        storesExcluded: unreliableStores.length,
+        complete: unreliableStores.length === 0,
+        note:
+          'Every share below is computed over the storesCounted stores whose count queries ALL ' +
+          'succeeded. A store where a count query errored on an EXISTING table has UNKNOWN counts, ' +
+          'not zero counts, so it is held OUT of the aggregate rather than contributing a false 0 ' +
+          'to the denominator — see stores.unreliable for the store and the failing query. An ' +
+          'ABSENT table is a different thing: it is a genuine 0, counted as 0, and recorded in ' +
+          'stores.absentTables so the zero is disclosed rather than silent.',
+      },
       ...share,
       projectIdentityEdits: {
         byProject: perProject.map((p) => ({
           projectRoot: p.projectRoot,
           identitySnapshots: p.identitySnapshots,
+          reliable: p.reliable,
         })),
         note:
           'Lower-bound history-depth proxy: count of context_snapshots taken of the project_identity ' +
           'context. The live contexts row is a single PK row (one updated_at value), so SQLite retains ' +
-          'no per-UPDATE history. Not every edit is snapshotted — treat as a floor, not a count.',
+          'no per-UPDATE history. Not every edit is snapshotted — treat as a floor, not a count. ' +
+          'A row with reliable:false had a count query error, so its number is a placeholder and ' +
+          'not even a floor.',
       },
       perProject,
     },
@@ -570,6 +717,57 @@ export function renderMarkdownSummary(report: BaselineReport): string {
   const m = report.mutableWriteShare;
   const f = report.fanInLatency;
   const date = report.meta.measuredAt.slice(0, 10);
+  const storeName = (root: string): string => path.basename(root) || root;
+  // The shares below are only a portfolio fact when every queried store answered.
+  // When one did not, say so ON the number, not only in a footnote — an excluded
+  // store is a hole in the denominator, and the block is published as fact.
+  const partialTag = m.coverage.complete ? '' : ' — **PARTIAL CORPUS, see coverage note**';
+  const coverageLines = m.coverage.complete
+    ? []
+    : [
+        `- **COUNTS INCOMPLETE — ${m.coverage.storesExcluded} of ` +
+          `${m.coverage.storesCounted + m.coverage.storesExcluded} queried store(s) EXCLUDED:** a count query ` +
+          'errored on a table that EXISTS, so those counts are UNKNOWN (never 0) and are held out of the ' +
+          'aggregate rather than shrinking the denominator: ' +
+          report.stores.unreliable
+            .map(
+              (u) =>
+                `\`${storeName(u.projectRoot)}\` (${u.queryErrors
+                  .map((e) => `${e.query}: ${e.reason}`)
+                  .join('; ')})`
+            )
+            .join(', '),
+      ];
+  const absentLines = report.stores.absentTables.length
+    ? [
+        '- **Absent tables (a genuine zero, recorded not swallowed):** ' +
+          report.stores.absentTables
+            .map((a) => `\`${storeName(a.projectRoot)}\` (${a.tables.join(', ')})`)
+            .join(', '),
+      ]
+    : [];
+  // PER-STORE ROWS, not a bare fleet aggregate (s86-m09 §4(2)). The aggregate above is a
+  // portfolio total; a reader cannot tell from it whether one store dominates the share or
+  // whether a store contributed nothing because it could not be counted. Those are different
+  // facts and the block is published as fact. An UNRELIABLE store prints no share at all —
+  // its counts are unknown, and a number in that cell would be the defect this instrument
+  // exists to close.
+  const storeRows = [...m.perProject]
+    .sort((a, b) => b.appendWrites + b.transitionWrites - (a.appendWrites + a.transitionWrites))
+    .map((p) => {
+      const total = p.appendWrites + p.transitionWrites;
+      const share =
+        p.reliable && total > 0 ? `${round((p.transitionWrites / total) * 100, 2)}%` : '—';
+      const note = !p.reliable
+        ? `**UNRELIABLE, EXCLUDED** (${p.queryErrors.map((e) => e.query).join(', ')})`
+        : p.absentTables.length
+          ? `absent: ${p.absentTables.join(', ')}`
+          : '';
+      return `| ${storeName(p.projectRoot)} | ${p.reliable ? p.appendWrites : '?'} | ${
+        p.reliable ? p.transitionWrites : '?'
+      } | ${share} | ${note} |`;
+    });
+
   const lines = [
     MARK_START,
     '',
@@ -581,7 +779,9 @@ export function renderMarkdownSummary(report: BaselineReport): string {
       (report.stores.unreachable.length
         ? ` (${report.stores.unreachable.length} unreachable)`
         : ''),
-    `- **All-transitions write share (upper bound):** ${m.overall.sharePct}% ` +
+    ...coverageLines,
+    ...absentLines,
+    `- **All-transitions write share (upper bound):** ${m.overall.sharePct}%${partialTag} ` +
       `(transition ${m.overall.transitionWrites} / total ${m.overall.transitionWrites + m.overall.appendWrites}; ` +
       `includes routine workflow transitions) — **${m.overall.status}**`,
     `- **Soft-lock contested share (ADR §6.3 strict lower bound):** ${m.softLock.sharePct}% ` +
@@ -591,6 +791,13 @@ export function renderMarkdownSummary(report: BaselineReport): string {
       `Not precisely measurable until durable transition logging (event_log) lands.`,
     `- **Worst-case fan-in p95 (slowest of 4 named queries, ${f.runsPerQuery} runs):** ${f.aggregateP95Ms}ms ` +
       `(threshold ${f.thresholds.triggerMs}ms, approaching ${f.thresholds.approachingMs}ms) — **${f.status}**`,
+    '',
+    `**Per-store write counts** (the aggregate above is the sum of the reliable rows only — ` +
+      `${m.coverage.storesCounted} of ${m.coverage.storesCounted + m.coverage.storesExcluded} queried):`,
+    '',
+    '| Store | append | transition | share | note |',
+    '| --- | --- | --- | --- | --- |',
+    ...storeRows,
     '',
     '| Query | p95 (ms) | cold (ms) | results | stores | errors |',
     '| --- | --- | --- | --- | --- | --- |',
@@ -604,7 +811,12 @@ export function renderMarkdownSummary(report: BaselineReport): string {
     }** — N=${report.stores.queried} and worst fan-in p95=${f.aggregateP95Ms}ms both have wide headroom. ` +
       `CRDT-revisit trigger (25% contested-surface share): the contested surface upper bound (${m.overall.sharePct}%) ` +
       `is below 25%, so the trigger is **not firing**, but the all-transitions share is in the approaching band — ` +
-      `worth a re-measure once contested edits are durably logged.`,
+      `worth a re-measure once contested edits are durably logged.` +
+      (m.coverage.complete
+        ? ''
+        : ` **This CRDT reading is PROVISIONAL:** it covers ${m.coverage.storesCounted} of ` +
+          `${m.coverage.storesCounted + m.coverage.storesExcluded} queried stores, and the excluded ` +
+          `store(s) could move it in either direction — re-run before quoting it.`),
     '',
     '**Caveats:** project_identity edits are not recorded anywhere (lower-bound proxy only); ' +
       'pre-m03 schema, so the four queries use `created_at` as the `occurred_at` proxy and ' +
@@ -689,10 +901,31 @@ async function main(): Promise<void> {
     fs.writeFileSync(ROADMAP_PATH, upsertMarkdownSection(roadmap, renderMarkdownSummary(report)));
   }
 
+  // Absent tables are a genuine zero, but a silent genuine zero is still a story
+  // the operator never hears — note it once per store.
+  for (const s of report.stores.absentTables) {
+    process.stdout.write(
+      `Note: ${s.projectRoot} — table(s) absent, counted as 0: ${s.tables.join(', ')}\n`
+    );
+  }
+  // A failed count on an EXISTING table is not a zero at all. Say so loudly, and
+  // say that the published share does not cover that store.
+  for (const s of report.stores.unreliable) {
+    process.stderr.write(
+      `WARNING: ${s.projectRoot} — counts UNRELIABLE, EXCLUDED from the aggregate: ` +
+        `${s.queryErrors.map((e) => `${e.query} → ${e.reason}`).join('; ')}\n`
+    );
+  }
+
+  const coverage = report.mutableWriteShare.coverage;
   process.stdout.write(
     `Baseline measured: N=${report.stores.queried}/${report.stores.registered} queried ` +
       `(${report.stores.reachable} reachable), ` +
-      `mutable-write share ${report.mutableWriteShare.overall.sharePct}% (${report.mutableWriteShare.overall.status}), ` +
+      `mutable-write share ${report.mutableWriteShare.overall.sharePct}% (${report.mutableWriteShare.overall.status}` +
+      (coverage.complete
+        ? ''
+        : `, PARTIAL — counts from ${coverage.storesCounted}/${coverage.storesCounted + coverage.storesExcluded} stores`) +
+      `), ` +
       `fan-in p95 ${report.fanInLatency.aggregateP95Ms}ms (${report.fanInLatency.status}).\n` +
       `Report: ${path.relative(process.cwd(), REPORT_PATH)}\n`
   );

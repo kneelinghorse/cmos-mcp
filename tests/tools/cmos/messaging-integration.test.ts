@@ -412,7 +412,9 @@ describe('directory discovery', () => {
     expect(formatted).toContain('Project Directory');
     expect(formatted).toContain('5 addressable project(s)');
     expect(formatted).toContain('cmos://derek/cmos-mcp');
-    expect(formatted).toContain('MCP server');
+    // s86-m07: the description column is GONE — GET /api/projects/directory/public returns no
+    // description for any row, so the renderer that printed one was guarding a dead field.
+    expect(formatted).not.toContain('MCP server');
   });
 });
 
@@ -501,7 +503,10 @@ describe('regression: Sprint 29 send pattern', () => {
     const result = await cmosMessage({ action: 'list', status: 'pending' });
     expect(result.success).toBe(true);
     expect((result.data as any).messages).toHaveLength(1);
-    expect((result.data as any).unreadCount).toBe(1);
+    // s86-m07: `unreadCount` is now two separately-named numbers — the dashboard's user-wide
+    // total, and the count this view can vouch for.
+    expect((result.data as any).unreadCountUserWide).toBe(1);
+    expect((result.data as any).unreadInThisView).toBe(1);
   });
 });
 

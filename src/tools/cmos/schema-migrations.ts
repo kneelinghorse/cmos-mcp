@@ -10,6 +10,9 @@
 import * as crypto from 'crypto';
 import { ulid } from 'ulid';
 import type { CmosDatabaseClient } from './client';
+import { checkWrite, countWrite } from './write-guard';
+import { isReadOnlyAgentSession } from './read-only-agent-guard';
+import { SPRINT_SUMMARY_VIEW_SQL } from './schema';
 import {
   FIREHOSE_TABLES,
   GENESIS_TYPE_BY_TABLE,
@@ -90,7 +93,8 @@ function ensureColumn(
   client: CmosDatabaseClient,
   tableName: string,
   column: ColumnSpec,
-  existingColumns: Set<string>
+  existingColumns: Set<string>,
+  warnings: string[] = []
 ): boolean {
   if (existingColumns.has(column.name)) {
     return false;
@@ -100,7 +104,7 @@ function ensureColumn(
     `ALTER TABLE ${tableName} ADD COLUMN ${column.name} ${column.type}`,
     []
   );
-  return result.success;
+  return checkWrite(result, warnings, `ALTER TABLE ${tableName} ADD COLUMN ${column.name}`);
 }
 
 export interface MigrationResult {
@@ -108,6 +112,118 @@ export interface MigrationResult {
   indexesCreated: string[];
   rowsUpdated: number;
   alreadyCurrent: boolean;
+  /**
+   * s86-m02b (fork f23) — the failed-write channel for migrations. A migration that
+   * silently half-applies is the purest form of "report intent as fact": `columnsAdded`
+   * and `alreadyCurrent` describe what the code MEANT to do, and before this field a
+   * failed `ALTER`/`CREATE INDEX`/`INSERT INTO metadata` was indistinguishable from
+   * "nothing to do".
+   *
+   * WHAT IS ACTUALLY GUARDED (counted, not asserted). 30 of the 40 `client.execute`
+   * calls in this module route through `checkWrite`/`countWrite` into the enclosing
+   * helper's warnings array. The other 10 are already fail-loud — they `throw
+   * SchemaMigrationError` rather than disclose (the ALTER/backfill steps of
+   * `ensureRenamedColumn`, `ensureColumnWithCheck`, `migrateFirehoseTable` and
+   * `ensureAuthorNamespaceColumns`, plus the row copy inside
+   * `rebuildTableWithConstraints`). **Not covered at all:** the `client.raw` DDL — nine
+   * `CREATE TRIGGER` statements whose result is never read (in `ensureDecisionsFts5` and
+   * `ensureVectorStorage`) and five `CREATE VIRTUAL TABLE` statements in
+   * `ensureVectorStorage` whose `.success` is read only to decide whether to push onto
+   * `columnsAdded`, so a failed vec0/FTS5 create still returns `alreadyCurrent`. That is
+   * a KNOWN OPEN GAP, recorded here so nobody reads this field as full coverage.
+   *
+   * OPTIONAL BY DESIGN: no exported helper takes a sink parameter — each builds its own
+   * local array — so every signature, and all 57 call sites across src/ (42 for the
+   * MigrationResult helpers + 9 `snapshotDedupPrunedFilter` + 6 `computeContentHash`),
+   * keep their shape. Threading a sink PARAMETER through all 22 exported functions was
+   * rejected (disproportionate, and it would touch every read path); so was a
+   * module-scope collector (global mutable state shared across concurrent client opens).
+   *
+   * ── REACH MAP ────────────────────────────────────────────────────────────────────
+   *
+   * Re-derived MECHANICALLY at the s86-m02b critic pass, not read off the previous
+   * prose. Re-derive it the same way rather than trusting this list — line numbers are
+   * deliberately omitted because they rot within a sprint:
+   *
+   *   git grep -nE '\b(ensure|migrate)[A-Z][A-Za-z]*\(' -- src/ \
+   *     | grep -v src/tools/cmos/schema-migrations.ts
+   *
+   * 19 of the 22 exported functions can return a non-empty `warnings`
+   * (`computeContentHash` and `snapshotDedupPrunedFilter` return no MigrationResult;
+   * `ensureRenamedColumn` never populates the field — it throws). Those 19 have 42 call
+   * sites in src/, in three groups (A+B+C = 42); group D names the two helpers with no
+   * src/ call site at all:
+   *
+   *  A. SPLICED — 6 sites already carry the warnings onto a rendered answer:
+   *     cmos-sprint-complete.ts (×2, pre-BEGIN firehose + author-namespace ensures),
+   *     cmos-session-capture.ts (×2, the author-namespace ensure before each dedup
+   *     SELECT), cmos-session-complete.ts (×1, same), cmos-db-backfill.ts (×1,
+   *     `migrateContentHash`).
+   *
+   *  B. UNSPLICED BUT REACHABLE — 29 sites DISCARD the MigrationResult inside a handler
+   *     whose answer DOES render a warnings channel. These are WORK, not structure: a
+   *     later mission can wire each one without inventing a carrier, and must not read
+   *     this block as saying they cannot be reached.
+   *       - cmos-constraints.ts — `ensureConstraintsTable`,
+   *         `ensureConstraintReviewTimestamp`, `ensureConstraintEvergreen` (×3)
+   *       - cmos-next-steps.ts — `ensureNextStepsTable`
+   *       - cmos-learnings-update.ts — `ensureReviewTimestamps` + `ensureLearningsTable`
+   *         (×2; the handler already builds a `warnings` array a few lines below)
+   *       - cmos-learnings-list.ts, cmos-learnings-search.ts — `ensureLearningsTable`
+   *       - cmos-learnings-reaffirm.ts — `ensureReviewTimestamps`
+   *       - cmos-feedback.ts, agent-feedback.ts — `ensureAgentFeedbackTable` (×2;
+   *         `recordAgentFeedback` returns its own `warnings` array ~30 lines below its
+   *         own call to the migration)
+   *       - cmos-mission-{add,block,complete,defer,drop,start,unblock}.ts —
+   *         `ensureMissionTimestamps` (×7)
+   *       - cmos-session-capture.ts — `ensureSessionMissionsTable`,
+   *         `ensureLearningsTable`, `ensureConstraintsTable` (×3) and
+   *         cmos-session-complete.ts — `ensureNextStepsTable` ×2, `ensureConstraintsTable`
+   *         (×3): both handlers already hold the live `warnings` array the group-A sites
+   *         push onto, so these are the cheapest of all to wire
+   *       - cmos-sprint-complete.ts — `ensureArchivalColumns` inside
+   *         `archiveSprintDecisionsAndLearnings`, whose result already carries an `error`
+   *         string out to the answer
+   *       - learning-reaffirm.ts — `ensureReviewTimestamps` inside
+   *         `reaffirmLearningsByIds`, which already returns a rendered `writeFailures[]`
+   *       - sprint-current-invariant.ts — `ensureFirehoseEventColumns` +
+   *         `ensureAuthorNamespaceColumns` (×2) inside `writeSingleCurrentSprint`, whose
+   *         two callers (cmos-sprint-add.ts, cmos-sprint-update.ts) already pass a
+   *         warnings array to `success()`; wiring needs one field on
+   *         `SingleCurrentSprintResult`
+   *     Reachable by CHAIN rather than by a direct call site: cmos-mission-complete.ts
+   *     calls `ensureStrategicDecisionsSchema` (→ {@link migrateStrategicDecisionsV21})
+   *     from `ensureMissionIdColumn`, which returns `void` — that `void` is the whole
+   *     break. Its three callers (cmos-mission-complete.ts, cmos-session-capture.ts,
+   *     cmos-session-complete.ts) all sit next to a live warnings array.
+   *
+   *  C. NO ANSWER TO ATTACH TO — 7 sites are shared resolvers whose own return type
+   *     carries no envelope: genesis-columns.ts ×2 (`genesisColumns` returns a
+   *     `GenesisStamp` spliced into 20 INSERT statements), fts5-retriever.ts ×2
+   *     (`search()` returns `RankedResult[]`), staleness-detection.ts ×3
+   *     (`StalenessResult` / a bare count pair, read from onboard + context-view).
+   *     Reaching an answer from here means inventing a disclosure carrier on a hot read
+   *     path and threading it through every consumer — deliberately not done.
+   *
+   *  D. NOT REACHED FROM src/ AT ALL — {@link ensureColumnWithCheck} is test-only
+   *     (tests/tools/cmos/schema-migrations.test.ts) and {@link ensureContentPrunedColumn}
+   *     is script-only (scripts/prune-context-snapshots.ts — a CLI that prints to stdout;
+   *     there is no MCP answer). {@link ensureVectorStorage} also has a script caller
+   *     (scripts/backfill-embeddings.ts) alongside its group-C src/ call site.
+   *
+   * CORRECTION — what this block used to say, and why it was wrong. It carried "of the 11
+   * call sites … only 6 have a sink that reaches a rendered answer", a figure computed for
+   * the ten PLANNED bare-execute sites in six helpers and never re-derived after the
+   * implementation widened the guard to the 30 `client.execute` calls above. Six is the count
+   * of sites ALREADY SPLICED (group A), not the count of sites that CAN be. Two of its
+   * named "structural facts" were also false: {@link migrateStrategicDecisionsV21} was
+   * called "ZERO call sites in src/ — test-only", when it has been reachable since Sprint
+   * 16-18 via `ensureStrategicDecisionsSchema` → `ensureMissionIdColumn`; and the two
+   * sprint-current-invariant.ts sites were called "producers with no consumer BY
+   * CONSTRUCTION", when they sit on the cmos_sprint(add|update) WRITE path whose answers
+   * already render warnings. Structural unreachability is group C and group D only.
+   */
+  warnings?: string[];
 }
 
 /**
@@ -118,6 +234,14 @@ export interface MigrationResult {
  * Creates indexes on status, category, and mission_id.
  *
  * Safe to call multiple times (idempotent).
+ *
+ * s86-m02b, CORRECTED at the critic pass: this helper is NOT test-only, and its `warnings`
+ * are not structurally unreachable. Direct callers in src/ are zero, but
+ * {@link ensureStrategicDecisionsSchema} (immediately below) delegates to it verbatim,
+ * and cmos-mission-complete.ts calls that from `ensureMissionIdColumn` — which returns
+ * `void`, discarding the result before it can reach any of its three handler call sites.
+ * The channel is populated here because a consumer IS missing (group B of
+ * {@link MigrationResult.warnings}), not for uniformity.
  */
 export function migrateStrategicDecisionsV21(client: CmosDatabaseClient): MigrationResult {
   const existingColumns = getTableColumns(client, 'strategic_decisions');
@@ -127,9 +251,10 @@ export function migrateStrategicDecisionsV21(client: CmosDatabaseClient): Migrat
   }
 
   const columnsAdded: string[] = [];
+  const warnings: string[] = [];
 
   for (const column of STRATEGIC_DECISIONS_V21_COLUMNS) {
-    if (ensureColumn(client, 'strategic_decisions', column, existingColumns)) {
+    if (ensureColumn(client, 'strategic_decisions', column, existingColumns, warnings)) {
       columnsAdded.push(column.name);
     }
   }
@@ -141,31 +266,31 @@ export function migrateStrategicDecisionsV21(client: CmosDatabaseClient): Migrat
       "UPDATE strategic_decisions SET status = 'active' WHERE status IS NULL",
       []
     );
-    if (updateResult.success && updateResult.data?.changes) {
-      rowsUpdated = updateResult.data.changes;
-    }
+    rowsUpdated = countWrite(updateResult, warnings, 'strategic_decisions.status backfill');
   }
 
   // Create indexes
   const indexesCreated: string[] = [];
   for (const index of STRATEGIC_DECISIONS_V21_INDEXES) {
     const result = client.execute(index.sql, []);
-    if (result.success) {
+    if (checkWrite(result, warnings, `CREATE INDEX ${index.name}`)) {
       indexesCreated.push(index.name);
     }
   }
 
   // Update schema version in metadata
-  client.execute(
+  const versionResult = client.execute(
     "INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_version', '2.1')",
     []
   );
+  checkWrite(versionResult, warnings, "metadata.schema_version = '2.1'");
 
   return {
     columnsAdded,
     indexesCreated,
     rowsUpdated,
     alreadyCurrent: columnsAdded.length === 0,
+    warnings,
   };
 }
 
@@ -200,9 +325,10 @@ export function ensureMissionTimestamps(client: CmosDatabaseClient): MigrationRe
   }
 
   const columnsAdded: string[] = [];
+  const warnings: string[] = [];
 
   for (const column of MISSIONS_TIMESTAMP_COLUMNS) {
-    if (ensureColumn(client, 'missions', column, existingColumns)) {
+    if (ensureColumn(client, 'missions', column, existingColumns, warnings)) {
       columnsAdded.push(column.name);
     }
   }
@@ -212,6 +338,7 @@ export function ensureMissionTimestamps(client: CmosDatabaseClient): MigrationRe
     indexesCreated: [],
     rowsUpdated: 0,
     alreadyCurrent: columnsAdded.length === 0,
+    warnings,
   };
 }
 
@@ -240,6 +367,7 @@ export type LearningCategory = (typeof LEARNING_CATEGORIES)[number];
  * Safe to call multiple times (idempotent).
  */
 export function ensureLearningsTable(client: CmosDatabaseClient): MigrationResult {
+  const warnings: string[] = [];
   const createResult = client.execute(
     // s69-m04: create with the post-rename canonical name author_session_id (NOT
     // session_id). Critical: ensureAuthorNamespaceColumns is marker-gated and the
@@ -263,7 +391,7 @@ export function ensureLearningsTable(client: CmosDatabaseClient): MigrationResul
     []
   );
 
-  const tableCreated = createResult.success;
+  const tableCreated = checkWrite(createResult, warnings, 'CREATE TABLE learnings');
   const columnsAdded: string[] = tableCreated ? ['learnings (table)'] : [];
 
   // Lazy column migration for pre-existing tables (added pre-Sprint 61 m03).
@@ -273,7 +401,7 @@ export function ensureLearningsTable(client: CmosDatabaseClient): MigrationResul
       `ALTER TABLE learnings ADD COLUMN evergreen INTEGER NOT NULL DEFAULT 0`,
       []
     );
-    if (alterResult.success) {
+    if (checkWrite(alterResult, warnings, 'ALTER TABLE learnings ADD COLUMN evergreen')) {
       columnsAdded.push('learnings.evergreen');
     }
   }
@@ -310,7 +438,7 @@ export function ensureLearningsTable(client: CmosDatabaseClient): MigrationResul
 
   for (const index of indexes) {
     const result = client.execute(index.sql, []);
-    if (result.success) {
+    if (checkWrite(result, warnings, `CREATE INDEX ${index.name}`)) {
       indexResults.push(index.name);
     }
   }
@@ -320,6 +448,7 @@ export function ensureLearningsTable(client: CmosDatabaseClient): MigrationResul
     indexesCreated: indexResults,
     rowsUpdated: 0,
     alreadyCurrent: false,
+    warnings,
   };
 }
 
@@ -361,18 +490,19 @@ const CONTENT_HASH_COLUMNS: {
 export function migrateContentHash(client: CmosDatabaseClient): MigrationResult {
   const columnsAdded: string[] = [];
   const indexesCreated: string[] = [];
+  const warnings: string[] = [];
   let rowsUpdated = 0;
 
   for (const spec of CONTENT_HASH_COLUMNS) {
     const existingColumns = getTableColumns(client, spec.table);
     if (existingColumns.size === 0) continue;
 
-    if (ensureColumn(client, spec.table, spec.column, existingColumns)) {
+    if (ensureColumn(client, spec.table, spec.column, existingColumns, warnings)) {
       columnsAdded.push(`${spec.table}.${spec.column.name}`);
     }
 
     const indexResult = client.execute(spec.index.sql, []);
-    if (indexResult.success) {
+    if (checkWrite(indexResult, warnings, `CREATE INDEX ${spec.index.name}`)) {
       indexesCreated.push(spec.index.name);
     }
   }
@@ -389,11 +519,15 @@ export function migrateContentHash(client: CmosDatabaseClient): MigrationResult 
   if (unhashed.success && unhashed.data) {
     for (const row of unhashed.data) {
       const hash = computeContentHash(row.decision_text, row.project_domain ?? 'general');
-      client.execute(`UPDATE strategic_decisions SET content_hash = ? WHERE id = ?`, [
-        hash,
-        row.id,
-      ]);
-      rowsUpdated++;
+      const hashed = client.execute(
+        `UPDATE strategic_decisions SET content_hash = ? WHERE id = ?`,
+        [hash, row.id]
+      );
+      rowsUpdated += countWrite(
+        hashed,
+        warnings,
+        `strategic_decisions.content_hash backfill (id ${row.id})`
+      );
     }
   }
 
@@ -406,16 +540,24 @@ export function migrateContentHash(client: CmosDatabaseClient): MigrationResult 
   if (unhashedLearnings.success && unhashedLearnings.data) {
     for (const row of unhashedLearnings.data) {
       const hash = computeContentHash(row.content, row.category ?? '');
-      client.execute(`UPDATE learnings SET content_hash = ? WHERE id = ?`, [hash, row.id]);
-      rowsUpdated++;
+      const hashedLearning = client.execute(`UPDATE learnings SET content_hash = ? WHERE id = ?`, [
+        hash,
+        row.id,
+      ]);
+      rowsUpdated += countWrite(
+        hashedLearning,
+        warnings,
+        `learnings.content_hash backfill (id ${row.id})`
+      );
     }
   }
 
   if (columnsAdded.length > 0) {
-    client.execute(
+    const versionResult = client.execute(
       "INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_version', '2.2')",
       []
     );
+    checkWrite(versionResult, warnings, "metadata.schema_version = '2.2'");
   }
 
   return {
@@ -423,6 +565,7 @@ export function migrateContentHash(client: CmosDatabaseClient): MigrationResult 
     indexesCreated,
     rowsUpdated,
     alreadyCurrent: columnsAdded.length === 0 && rowsUpdated === 0,
+    warnings,
   };
 }
 
@@ -452,13 +595,16 @@ const ARCHIVAL_SESSION_TABLES = ['strategic_decisions', 'learnings'] as const;
  */
 export function ensureArchivalColumns(client: CmosDatabaseClient): MigrationResult {
   const columnsAdded: string[] = [];
+  const warnings: string[] = [];
   for (const table of ARCHIVAL_SESSION_TABLES) {
     const existing = getTableColumns(client, table);
     if (existing.size === 0) continue;
     // Either name present → the archival query has a column to read. Only a table
     // with NEITHER (fresh/foreign) gets the post-rename name added.
     if (existing.has('author_session_id') || existing.has('session_id')) continue;
-    if (ensureColumn(client, table, { name: 'author_session_id', type: 'TEXT' }, existing)) {
+    if (
+      ensureColumn(client, table, { name: 'author_session_id', type: 'TEXT' }, existing, warnings)
+    ) {
       columnsAdded.push(`${table}.author_session_id`);
     }
   }
@@ -467,6 +613,7 @@ export function ensureArchivalColumns(client: CmosDatabaseClient): MigrationResu
     indexesCreated: [],
     rowsUpdated: 0,
     alreadyCurrent: columnsAdded.length === 0,
+    warnings,
   };
 }
 
@@ -488,11 +635,12 @@ const REVIEW_TIMESTAMP_TABLES: { table: string; column: ColumnSpec }[] = [
  */
 export function ensureReviewTimestamps(client: CmosDatabaseClient): MigrationResult {
   const columnsAdded: string[] = [];
+  const warnings: string[] = [];
 
   for (const spec of REVIEW_TIMESTAMP_TABLES) {
     const existing = getTableColumns(client, spec.table);
     if (existing.size === 0) continue; // table doesn't exist on this DB
-    if (ensureColumn(client, spec.table, spec.column, existing)) {
+    if (ensureColumn(client, spec.table, spec.column, existing, warnings)) {
       columnsAdded.push(`${spec.table}.${spec.column.name}`);
     }
   }
@@ -502,6 +650,7 @@ export function ensureReviewTimestamps(client: CmosDatabaseClient): MigrationRes
     indexesCreated: [],
     rowsUpdated: 0,
     alreadyCurrent: columnsAdded.length === 0,
+    warnings,
   };
 }
 
@@ -530,6 +679,7 @@ export function computeContentHash(text: string, domain: string): string {
  * Safe to call multiple times (idempotent).
  */
 export function ensureSessionMissionsTable(client: CmosDatabaseClient): MigrationResult {
+  const warnings: string[] = [];
   const createResult = client.execute(
     `CREATE TABLE IF NOT EXISTS session_missions (
       session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -541,14 +691,14 @@ export function ensureSessionMissionsTable(client: CmosDatabaseClient): Migratio
     []
   );
 
-  const tableCreated = createResult.success;
+  const tableCreated = checkWrite(createResult, warnings, 'CREATE TABLE session_missions');
 
   const indexResults: string[] = [];
   const indexResult = client.execute(
     'CREATE INDEX IF NOT EXISTS idx_session_missions_mission ON session_missions (mission_id)',
     []
   );
-  if (indexResult.success) {
+  if (checkWrite(indexResult, warnings, 'CREATE INDEX idx_session_missions_mission')) {
     indexResults.push('idx_session_missions_mission');
   }
 
@@ -557,6 +707,7 @@ export function ensureSessionMissionsTable(client: CmosDatabaseClient): Migratio
     indexesCreated: indexResults,
     rowsUpdated: 0,
     alreadyCurrent: false,
+    warnings,
   };
 }
 
@@ -574,6 +725,7 @@ export type NextStepStatus = (typeof NEXT_STEP_STATUSES)[number];
  * Safe to call multiple times (idempotent).
  */
 export function ensureNextStepsTable(client: CmosDatabaseClient): MigrationResult {
+  const warnings: string[] = [];
   const createResult = client.execute(
     `CREATE TABLE IF NOT EXISTS next_steps (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -590,7 +742,7 @@ export function ensureNextStepsTable(client: CmosDatabaseClient): MigrationResul
     []
   );
 
-  const tableCreated = createResult.success;
+  const tableCreated = checkWrite(createResult, warnings, 'CREATE TABLE next_steps');
 
   const indexResults: string[] = [];
   const indexes = [
@@ -617,7 +769,7 @@ export function ensureNextStepsTable(client: CmosDatabaseClient): MigrationResul
 
   for (const index of indexes) {
     const result = client.execute(index.sql, []);
-    if (result.success) {
+    if (checkWrite(result, warnings, `CREATE INDEX ${index.name}`)) {
       indexResults.push(index.name);
     }
   }
@@ -627,6 +779,7 @@ export function ensureNextStepsTable(client: CmosDatabaseClient): MigrationResul
     indexesCreated: indexResults,
     rowsUpdated: 0,
     alreadyCurrent: false,
+    warnings,
   };
 }
 
@@ -644,6 +797,7 @@ export type ConstraintStatus = (typeof CONSTRAINT_STATUSES)[number];
  * Safe to call multiple times (idempotent).
  */
 export function ensureConstraintsTable(client: CmosDatabaseClient): MigrationResult {
+  const warnings: string[] = [];
   const createResult = client.execute(
     `CREATE TABLE IF NOT EXISTS constraints (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -659,7 +813,7 @@ export function ensureConstraintsTable(client: CmosDatabaseClient): MigrationRes
     []
   );
 
-  const tableCreated = createResult.success;
+  const tableCreated = checkWrite(createResult, warnings, 'CREATE TABLE constraints');
 
   const indexResults: string[] = [];
   const indexes = [
@@ -679,7 +833,7 @@ export function ensureConstraintsTable(client: CmosDatabaseClient): MigrationRes
 
   for (const index of indexes) {
     const result = client.execute(index.sql, []);
-    if (result.success) {
+    if (checkWrite(result, warnings, `CREATE INDEX ${index.name}`)) {
       indexResults.push(index.name);
     }
   }
@@ -689,6 +843,7 @@ export function ensureConstraintsTable(client: CmosDatabaseClient): MigrationRes
     indexesCreated: indexResults,
     rowsUpdated: 0,
     alreadyCurrent: false,
+    warnings,
   };
 }
 
@@ -708,17 +863,20 @@ export function ensureConstraintReviewTimestamp(client: CmosDatabaseClient): Mig
     // Table doesn't exist on this DB yet — nothing to alter.
     return { columnsAdded: [], indexesCreated: [], rowsUpdated: 0, alreadyCurrent: true };
   }
+  const warnings: string[] = [];
   const added = ensureColumn(
     client,
     'constraints',
     { name: 'last_reviewed_at', type: 'TEXT' },
-    existing
+    existing,
+    warnings
   );
   return {
     columnsAdded: added ? ['constraints.last_reviewed_at'] : [],
     indexesCreated: [],
     rowsUpdated: 0,
     alreadyCurrent: !added,
+    warnings,
   };
 }
 
@@ -735,17 +893,20 @@ export function ensureContentPrunedColumn(client: CmosDatabaseClient): Migration
     // Table doesn't exist on this DB yet — nothing to alter.
     return { columnsAdded: [], indexesCreated: [], rowsUpdated: 0, alreadyCurrent: true };
   }
+  const warnings: string[] = [];
   const added = ensureColumn(
     client,
     'context_snapshots',
     { name: 'content_pruned_at', type: 'TEXT' },
-    existing
+    existing,
+    warnings
   );
   return {
     columnsAdded: added ? ['context_snapshots.content_pruned_at'] : [],
     indexesCreated: [],
     rowsUpdated: 0,
     alreadyCurrent: !added,
+    warnings,
   };
 }
 
@@ -763,17 +924,20 @@ export function ensureConstraintEvergreen(client: CmosDatabaseClient): Migration
   if (existing.size === 0) {
     return { columnsAdded: [], indexesCreated: [], rowsUpdated: 0, alreadyCurrent: true };
   }
+  const warnings: string[] = [];
   const added = ensureColumn(
     client,
     'constraints',
     { name: 'evergreen', type: 'INTEGER NOT NULL DEFAULT 0' },
-    existing
+    existing,
+    warnings
   );
   return {
     columnsAdded: added ? ['constraints.evergreen'] : [],
     indexesCreated: [],
     rowsUpdated: 0,
     alreadyCurrent: !added,
+    warnings,
   };
 }
 
@@ -836,12 +1000,13 @@ export function ensureDecisionsFts5(client: CmosDatabaseClient): MigrationResult
   `);
 
   // Rebuild index from existing data
+  const warnings: string[] = [];
   let rowsUpdated = 0;
   const rebuildResult = client.execute(
     "INSERT INTO decisions_fts(decisions_fts) VALUES('rebuild')",
     []
   );
-  if (rebuildResult.success) {
+  if (checkWrite(rebuildResult, warnings, 'decisions_fts rebuild')) {
     const countResult = client.getOne<{ count: number }>(
       'SELECT COUNT(*) as count FROM strategic_decisions',
       []
@@ -854,6 +1019,7 @@ export function ensureDecisionsFts5(client: CmosDatabaseClient): MigrationResult
     indexesCreated: ['decisions_fts_insert', 'decisions_fts_delete', 'decisions_fts_update'],
     rowsUpdated,
     alreadyCurrent: false,
+    warnings,
   };
 }
 
@@ -879,6 +1045,7 @@ export type AgentFeedbackStatus = (typeof AGENT_FEEDBACK_STATUSES)[number];
  * Safe to call multiple times (idempotent).
  */
 export function ensureAgentFeedbackTable(client: CmosDatabaseClient): MigrationResult {
+  const warnings: string[] = [];
   const createResult = client.execute(
     `CREATE TABLE IF NOT EXISTS agent_feedback (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -896,7 +1063,7 @@ export function ensureAgentFeedbackTable(client: CmosDatabaseClient): MigrationR
     []
   );
 
-  const tableCreated = createResult.success;
+  const tableCreated = checkWrite(createResult, warnings, 'CREATE TABLE agent_feedback');
 
   const indexResults: string[] = [];
   const indexes = [
@@ -916,7 +1083,7 @@ export function ensureAgentFeedbackTable(client: CmosDatabaseClient): MigrationR
 
   for (const index of indexes) {
     const result = client.execute(index.sql, []);
-    if (result.success) {
+    if (checkWrite(result, warnings, `CREATE INDEX ${index.name}`)) {
       indexResults.push(index.name);
     }
   }
@@ -926,6 +1093,7 @@ export function ensureAgentFeedbackTable(client: CmosDatabaseClient): MigrationR
     indexesCreated: indexResults,
     rowsUpdated: 0,
     alreadyCurrent: false,
+    warnings,
   };
 }
 
@@ -948,6 +1116,7 @@ export function ensureAgentFeedbackTable(client: CmosDatabaseClient): MigrationR
 export function ensureVectorStorage(client: CmosDatabaseClient): MigrationResult {
   const columnsAdded: string[] = [];
   const indexesCreated: string[] = [];
+  const warnings: string[] = [];
   let rowsUpdated = 0;
 
   // ─── Vector tables (vec0) ────────────────────────────────────────────────
@@ -994,7 +1163,7 @@ export function ensureVectorStorage(client: CmosDatabaseClient): MigrationResult
 
   for (const table of ['strategic_decisions', 'learnings', 'missions']) {
     const cols = getTableColumns(client, table);
-    if (cols.size > 0 && ensureColumn(client, table, embedHashCol, cols)) {
+    if (cols.size > 0 && ensureColumn(client, table, embedHashCol, cols, warnings)) {
       columnsAdded.push(`${table}.last_embedded_hash`);
     }
   }
@@ -1037,7 +1206,7 @@ export function ensureVectorStorage(client: CmosDatabaseClient): MigrationResult
         "INSERT INTO learnings_fts(learnings_fts) VALUES('rebuild')",
         []
       );
-      if (rebuilt.success) {
+      if (checkWrite(rebuilt, warnings, 'learnings_fts rebuild')) {
         const count = client.getOne<{ count: number }>(
           'SELECT COUNT(*) as count FROM learnings',
           []
@@ -1093,7 +1262,7 @@ export function ensureVectorStorage(client: CmosDatabaseClient): MigrationResult
         "INSERT INTO missions_fts(missions_fts) VALUES('rebuild')",
         []
       );
-      if (rebuilt.success) {
+      if (checkWrite(rebuilt, warnings, 'missions_fts rebuild')) {
         const count = client.getOne<{ count: number }>(
           'SELECT COUNT(*) as count FROM missions',
           []
@@ -1107,10 +1276,11 @@ export function ensureVectorStorage(client: CmosDatabaseClient): MigrationResult
 
   // Bump schema_version on first successful application. Re-runs are no-ops.
   if (!alreadyCurrent) {
-    client.execute(
+    const versionResult = client.execute(
       "INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_version', '2.3')",
       []
     );
+    checkWrite(versionResult, warnings, "metadata.schema_version = '2.3'");
   }
 
   return {
@@ -1118,6 +1288,7 @@ export function ensureVectorStorage(client: CmosDatabaseClient): MigrationResult
     indexesCreated,
     rowsUpdated,
     alreadyCurrent,
+    warnings,
   };
 }
 
@@ -1362,11 +1533,15 @@ function buildConstrainedDdl(
  *
  * @throws SchemaMigrationError if the DDL can't be rewritten, a constrained value
  *   is violated during the copy, or the rebuild introduces an FK violation.
+ * @param warnings s86-m02b sink for the post-rebuild FTS5 resync, the one write here
+ *   that is NOT already fail-loud: it runs AFTER the transaction committed, so it
+ *   cannot throw without un-doing a successful rebuild. It is disclosed instead.
  */
 function rebuildTableWithConstraints(
   client: CmosDatabaseClient,
   table: string,
-  constraints: ColumnConstraint[]
+  constraints: ColumnConstraint[],
+  warnings: string[] = []
 ): void {
   const ddl = getTableSql(client, table);
   if (!ddl) {
@@ -1458,7 +1633,8 @@ function rebuildTableWithConstraints(
 
   // Resync FTS5 content tables that mirror the rebuilt table.
   for (const fts of ftsTargets) {
-    client.execute(`INSERT INTO ${fts}(${fts}) VALUES('rebuild')`, []);
+    const resync = client.execute(`INSERT INTO ${fts}(${fts}) VALUES('rebuild')`, []);
+    checkWrite(resync, warnings, `${fts} resync after rebuilding "${table}"`);
   }
 }
 
@@ -1569,13 +1745,15 @@ export function ensureColumnWithCheck(
   }
 
   // Step 4 — 12-step rebuild to add NOT NULL + CHECK with enforced validation.
-  rebuildTableWithConstraints(client, table, [{ column, type, check: checkConstraint }]);
+  const warnings: string[] = [];
+  rebuildTableWithConstraints(client, table, [{ column, type, check: checkConstraint }], warnings);
 
   return {
     columnsAdded: columnAdded ? [column] : [],
     indexesCreated: [],
     rowsUpdated,
     alreadyCurrent: false,
+    warnings,
   };
 }
 
@@ -1642,7 +1820,11 @@ function columnIsNotNull(client: CmosDatabaseClient, table: string, column: stri
  * true only when it ACTUALLY created the index (not when it already existed), so
  * a re-run reports `alreadyCurrent` rather than re-claiming the index as new.
  */
-function ensureAggIndex(client: CmosDatabaseClient, table: string): boolean {
+function ensureAggIndex(
+  client: CmosDatabaseClient,
+  table: string,
+  warnings: string[] = []
+): boolean {
   const name = `idx_${table}_aggkey`;
   const existing = client.getOne<{ name: string }>(
     "SELECT name FROM sqlite_master WHERE type='index' AND name=?",
@@ -1653,7 +1835,7 @@ function ensureAggIndex(client: CmosDatabaseClient, table: string): boolean {
     `CREATE INDEX IF NOT EXISTS ${name} ON ${table} (project_id, event_type, occurred_at)`,
     []
   );
-  return result.success;
+  return checkWrite(result, warnings, `CREATE INDEX ${name}`);
 }
 
 /**
@@ -1667,6 +1849,7 @@ function ensureAggIndex(client: CmosDatabaseClient, table: string): boolean {
  * rebuild applies all NOT NULL + the event_type CHECK with enforced validation.
  */
 function migrateFirehoseTable(client: CmosDatabaseClient, table: FirehoseTable): MigrationResult {
+  const warnings: string[] = [];
   const existing = getTableColumns(client, table);
   if (existing.size === 0) {
     // Table absent in this store (e.g. a partial/foreign DB) — nothing to do.
@@ -1677,12 +1860,13 @@ function migrateFirehoseTable(client: CmosDatabaseClient, table: FirehoseTable):
   // sites don't break), and the migration must still upgrade them to NOT NULL +
   // CHECK. event_type being NOT NULL is the "fully migrated" signal.
   if (columnIsNotNull(client, table, 'event_type')) {
-    const created = ensureAggIndex(client, table);
+    const created = ensureAggIndex(client, table, warnings);
     return {
       columnsAdded: [],
       indexesCreated: created ? [`idx_${table}_aggkey`] : [],
       rowsUpdated: 0,
       alreadyCurrent: true,
+      warnings,
     };
   }
 
@@ -1769,22 +1953,28 @@ function migrateFirehoseTable(client: CmosDatabaseClient, table: FirehoseTable):
   }
 
   // Step 5 — one 12-step rebuild applying all NOT NULL + the event_type CHECK.
-  rebuildTableWithConstraints(client, table, [
-    { column: 'project_id', type: 'TEXT' },
-    { column: 'stable_event_id', type: 'TEXT' },
-    { column: 'occurred_at', type: 'INTEGER' },
-    { column: 'origin_seq', type: 'INTEGER' },
-    { column: 'event_type', type: 'TEXT', check: `event_type IN ('${verb}')` },
-  ]);
+  rebuildTableWithConstraints(
+    client,
+    table,
+    [
+      { column: 'project_id', type: 'TEXT' },
+      { column: 'stable_event_id', type: 'TEXT' },
+      { column: 'occurred_at', type: 'INTEGER' },
+      { column: 'origin_seq', type: 'INTEGER' },
+      { column: 'event_type', type: 'TEXT', check: `event_type IN ('${verb}')` },
+    ],
+    warnings
+  );
 
   // Step 6 — composite index.
-  const idxCreated = ensureAggIndex(client, table);
+  const idxCreated = ensureAggIndex(client, table, warnings);
 
   return {
     columnsAdded,
     indexesCreated: idxCreated ? [`idx_${table}_aggkey`] : [],
     rowsUpdated: 0,
     alreadyCurrent: false,
+    warnings,
   };
 }
 
@@ -1811,22 +2001,26 @@ export function ensureFirehoseEventColumns(client: CmosDatabaseClient): Migratio
 
   const columnsAdded: string[] = [];
   const indexesCreated: string[] = [];
+  const warnings: string[] = [];
   let anyMigrated = false; // any table did real work (added cols OR upgraded NOT NULL)
   for (const table of FIREHOSE_TABLES) {
     const res = migrateFirehoseTable(client, table);
     columnsAdded.push(...res.columnsAdded);
     indexesCreated.push(...res.indexesCreated);
+    if (res.warnings) warnings.push(...res.warnings);
     if (!res.alreadyCurrent) anyMigrated = true;
   }
 
-  client.execute(
+  const markerResult = client.execute(
     `INSERT OR REPLACE INTO metadata (key, value) VALUES ('${FIREHOSE_MARKER_KEY}', '${FIREHOSE_SCHEMA_VERSION}')`,
     []
   );
-  client.execute(
+  checkWrite(markerResult, warnings, `metadata.${FIREHOSE_MARKER_KEY} marker`);
+  const versionResult = client.execute(
     `INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_version', '${FIREHOSE_SCHEMA_VERSION}')`,
     []
   );
+  checkWrite(versionResult, warnings, `metadata.schema_version = '${FIREHOSE_SCHEMA_VERSION}'`);
 
   return {
     columnsAdded,
@@ -1836,6 +2030,7 @@ export function ensureFirehoseEventColumns(client: CmosDatabaseClient): Migratio
     // store upgrades nullable→NOT NULL without adding columns/indexes, which is
     // still real work.
     alreadyCurrent: !anyMigrated,
+    warnings,
   };
 }
 
@@ -1910,6 +2105,7 @@ export function ensureAuthorNamespaceColumns(client: CmosDatabaseClient): Migrat
 
   const columnsAdded: string[] = [];
   const indexesCreated: string[] = [];
+  const warnings: string[] = [];
   let anyWork = false;
 
   // 1. Rename session_id → author_session_id (the 4-case guard throws on a
@@ -1943,7 +2139,8 @@ export function ensureAuthorNamespaceColumns(client: CmosDatabaseClient): Migrat
     // Skip a table absent from this store, or one whose rename didn't land (e.g.
     // a foreign DB without the column) — an index on a missing column would fail.
     if (!getTableColumns(client, table).has('author_session_id')) continue;
-    client.execute(`DROP INDEX IF EXISTS ${oldName}`, []);
+    const dropped = client.execute(`DROP INDEX IF EXISTS ${oldName}`, []);
+    checkWrite(dropped, warnings, `DROP INDEX ${oldName}`);
     const existsNew = client.getOne<{ name: string }>(
       "SELECT name FROM sqlite_master WHERE type='index' AND name=?",
       [newName]
@@ -1953,7 +2150,7 @@ export function ensureAuthorNamespaceColumns(client: CmosDatabaseClient): Migrat
       `CREATE INDEX IF NOT EXISTS ${newName} ON ${table} (author_session_id)`,
       []
     );
-    if (created.success && !hadNew) {
+    if (checkWrite(created, warnings, `CREATE INDEX ${newName}`) && !hadNew) {
       indexesCreated.push(newName);
       anyWork = true;
     }
@@ -1989,10 +2186,161 @@ export function ensureAuthorNamespaceColumns(client: CmosDatabaseClient): Migrat
     anyWork = true;
   }
 
-  client.execute(
+  const markerResult = client.execute(
     `INSERT OR REPLACE INTO metadata (key, value) VALUES ('${AUTHOR_NAMESPACE_MARKER_KEY}', '${AUTHOR_NAMESPACE_SCHEMA_VERSION}')`,
     []
   );
+  checkWrite(markerResult, warnings, `metadata.${AUTHOR_NAMESPACE_MARKER_KEY} marker`);
 
-  return { columnsAdded, indexesCreated, rowsUpdated: 0, alreadyCurrent: !anyWork };
+  return { columnsAdded, indexesCreated, rowsUpdated: 0, alreadyCurrent: !anyWork, warnings };
+}
+
+/**
+ * s86-m08 — bring a store's `sprint_summary` view up to the current definition.
+ *
+ * WHY A MIGRATION AT ALL. `CREATE VIEW IF NOT EXISTS` is a no-op against an existing view, so
+ * the corrected counting rule in {@link SPRINT_SUMMARY_VIEW_SQL} would reach FRESH stores only.
+ * Every store created before this change would keep reporting Deferred and Dropped work inside
+ * `total_missions` while new stores did not — the same column name meaning two different things
+ * across the fleet, which is worse than either rule alone.
+ *
+ * COMPARE-THEN-WRITE. The steady state performs ZERO writes: this runs on READ paths
+ * (cmos_sprint list/show/analytics), and a read path that writes on every call would be both a
+ * surprise and a hazard on a store opened read-only. Only a genuinely stale definition is
+ * rewritten, and only once.
+ *
+ * IT NEVER DESTROYS SOMETHING IT DID NOT CREATE. If `sprint_summary` is a base TABLE — a shape
+ * that exists in this repo's own fixtures — it is left completely alone. `DROP VIEW` against a
+ * table does not silently no-op, it errors ("use DROP TABLE to delete table sprint_summary"),
+ * and a "helpful" DROP TABLE variant on a READ path would be a data-loss event.
+ *
+ * A MISSING BASE TABLE IS SAFE. SQLite permits `CREATE VIEW` over tables that do not exist (the
+ * error surfaces at query time, not definition time), so a foreign or partial store — one of the
+ * fleet stores missing `missions` or `strategic_decisions` — neither throws nor changes.
+ *
+ * NO SILENT FAIL-OPEN. On a read-only store the DROP/CREATE fails; `client.raw()` maps
+ * SQLITE_READONLY to a failed envelope rather than throwing, and that failure is RECORDED in
+ * `warnings` so the calling handler can tell the operator its totals still include parked work.
+ * Swallowing it would leave an answer quietly reporting the old rule under the new column name.
+ *
+ * (Contract note: this block documents `ensureSprintSummaryView` below.)
+ */
+/**
+ * `CREATE VIEW IF NOT EXISTS` vs `CREATE VIEW`, and a trailing semicolon, are not differences —
+ * SQLite stores the statement text verbatim in `sqlite_master.sql` EXCEPT that it drops the
+ * `IF NOT EXISTS` clause. Everything else is compared EXACTLY.
+ *
+ * WHY NOT COLLAPSE WHITESPACE. An earlier form ran `.replace(/\s+/g, ' ')`, which also collapses
+ * whitespace INSIDE quoted string literals — so a view differing only in `'In  Progress'` would
+ * have compared equal and never been rewritten. Exact comparison outside those two normalizations
+ * is both simpler and stricter; the round-trip is asserted by the idempotence test (a second call
+ * must report alreadyCurrent), which is what proves this comparison does not rewrite forever.
+ */
+function normalizeViewSql(sql: string): string {
+  return sql
+    .replace(/CREATE\s+VIEW\s+IF\s+NOT\s+EXISTS/i, 'CREATE VIEW')
+    .replace(/;\s*$/, '')
+    .trim();
+}
+
+/**
+ * What a caller needs to know beyond "did it work": whether it may SELECT `parked_missions`.
+ *
+ * THIS FIELD EXISTS BECAUSE THE MIGRATION IS ALLOWED TO FAIL. A store whose `sprint_summary` is
+ * a base table, or that is open read-only, or whose DROP loses a race for the write lock, keeps
+ * the OLD view — and a reader that then selects the new column does not degrade, it ERRORS. The
+ * boolean lets the reader ask the question instead of assuming the answer.
+ */
+export interface SprintSummaryViewResult extends MigrationResult {
+  /** True when `sprint_summary` now carries `parked_missions` and a reader may select it. */
+  parkedAvailable: boolean;
+}
+
+export function ensureSprintSummaryView(client: CmosDatabaseClient): SprintSummaryViewResult {
+  const warnings: string[] = [];
+
+  // s86-m08 critic: cmos_sprint list/show are classified 'read' by the fail-closed security
+  // taxonomy (action-taxonomy.ts), and a review-pinned agent is promised that a read mutates
+  // NOTHING anywhere. A DROP VIEW / CREATE VIEW on that path would break that promise even
+  // though it is idempotent and loses no data. Suppressed at the same layer cmos_review already
+  // suppresses its registry touch — and the reader is told why its totals are the old rule,
+  // rather than being handed a silently stale number.
+  if (isReadOnlyAgentSession()) {
+    return {
+      columnsAdded: [],
+      indexesCreated: [],
+      rowsUpdated: 0,
+      alreadyCurrent: false,
+      parkedAvailable: false,
+      warnings: [
+        'sprint_summary was not upgraded because this is a read-only agent session; total_missions on this store still counts Deferred and Dropped work, and parked_missions is reported as 0.',
+      ],
+    };
+  }
+  const none: SprintSummaryViewResult = {
+    columnsAdded: [],
+    indexesCreated: [],
+    rowsUpdated: 0,
+    alreadyCurrent: true,
+    parkedAvailable: true,
+  };
+
+  const existing = client.getOne<{ type: string; sql: string | null }>(
+    `SELECT type, sql FROM sqlite_master WHERE name = 'sprint_summary'`,
+    []
+  );
+
+  if (!existing.success) {
+    // Cannot read sqlite_master: say so rather than assuming the view is fine.
+    warnings.push(
+      `sprint_summary view check failed: ${existing.error?.code ?? 'DB_ERROR'} — ${existing.error?.message ?? 'unknown'}`
+    );
+    return { ...none, alreadyCurrent: false, parkedAvailable: false, warnings };
+  }
+
+  const row = existing.data;
+
+  // A base table of this name is a fixture/consumer artifact. Leave it exactly as it is.
+  if (row && row.type !== 'view') {
+    return {
+      ...none,
+      alreadyCurrent: false,
+      // Its columns are whatever the caller made them; the reader must not assume ours.
+      parkedAvailable: false,
+      warnings: [
+        `sprint_summary exists as a ${row.type}, not a view — leaving it untouched. Totals from it are whatever that ${row.type} holds, not the current counting rule.`,
+      ],
+    };
+  }
+
+  if (row && row.sql && normalizeViewSql(row.sql) === normalizeViewSql(SPRINT_SUMMARY_VIEW_SQL)) {
+    return none; // steady state: no writes, ever again
+  }
+
+  if (row) {
+    const dropResult = client.raw('DROP VIEW IF EXISTS sprint_summary;');
+    if (!dropResult.success) {
+      warnings.push(
+        `sprint_summary view is stale on this store and could not be replaced (${dropResult.error?.code ?? 'DB_ERROR'} — ${dropResult.error?.message ?? 'unknown'}); total_missions still counts Deferred and Dropped work.`
+      );
+      return { ...none, alreadyCurrent: false, parkedAvailable: false, warnings };
+    }
+  }
+
+  const createResult = client.raw(SPRINT_SUMMARY_VIEW_SQL);
+  if (!createResult.success) {
+    warnings.push(
+      `sprint_summary view could not be created (${createResult.error?.code ?? 'DB_ERROR'} — ${createResult.error?.message ?? 'unknown'}); sprint totals are unavailable or stale on this store.`
+    );
+    return { ...none, alreadyCurrent: false, parkedAvailable: false, warnings };
+  }
+
+  return {
+    columnsAdded: [],
+    indexesCreated: ['sprint_summary'],
+    rowsUpdated: 0,
+    alreadyCurrent: false,
+    parkedAvailable: true,
+    warnings,
+  };
 }

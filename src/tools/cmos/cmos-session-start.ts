@@ -8,7 +8,7 @@
  */
 
 import { z } from 'zod';
-import { withClientValidated } from './client';
+import { withClientValidated, type CmosDatabaseClient } from './client';
 import { resolveCurrentSprintId, resolveOpenSprintIdForWrite } from './current-sprint';
 import { genesisColumns, getProjectId } from './genesis-columns';
 import type { CmosToolResult, Session } from './types';
@@ -26,6 +26,8 @@ import {
   refreshMasterContextFromRecentActivity,
   type ContextFreshness,
 } from './context-freshness';
+import { appendWarnings } from './format-warnings';
+import { checkWrite } from './write-guard';
 
 // Re-export for convenience
 export { VALID_SESSION_TYPES };
@@ -336,8 +338,10 @@ export async function cmosSessionStart(
       const todayPrefix = `PS-${new Date().toISOString().split('T')[0]}-`;
       const MAX_ID_RETRIES = 3;
       let sessionId = '';
-      let insertResult = client.execute('SELECT 1', []); // placeholder; overwritten in loop
-      insertResult = { success: false }; // ensure loop runs at least once
+      // s86-m02b: this was `client.execute('SELECT 1')` as a type placeholder, immediately
+      // overwritten — a real DB round-trip whose result was discarded, and an instance of this
+      // mission's own class. A typed declaration says the same thing without the query.
+      let insertResult: ReturnType<CmosDatabaseClient['execute']> = { success: false };
 
       for (let attempt = 0; attempt < MAX_ID_RETRIES; attempt++) {
         const existingResult = client.getMany<{ id: string }>(
@@ -383,10 +387,16 @@ export async function cmosSessionStart(
         summary: title,
       });
 
-      client.execute(
-        `INSERT INTO session_events (ts, agent, mission, action, status, summary, next_hint, raw_event)
-         VALUES (?, ?, ?, 'start', 'active', ?, ?, ?)`,
-        [now, agent, sessionId, title, sprintId, rawEvent]
+      // s86-m02b: the session DID start, so a lost event row must not abort it — but it must not
+      // be silent either, or the answer reports provenance that was never written.
+      checkWrite(
+        client.execute(
+          `INSERT INTO session_events (ts, agent, mission, action, status, summary, next_hint, raw_event)
+           VALUES (?, ?, ?, 'start', 'active', ?, ?, ?)`,
+          [now, agent, sessionId, title, sprintId, rawEvent]
+        ),
+        warnings,
+        'Session start event logging'
       );
 
       return createSuccess<CmosSessionStartResult>(
@@ -466,13 +476,7 @@ export function formatSessionStartForLLM(result: CmosToolResult<CmosSessionStart
     }`
   );
 
-  if (result.warnings && result.warnings.length > 0) {
-    lines.push('');
-    lines.push('Warnings:');
-    for (const warning of result.warnings) {
-      lines.push(`- ${warning}`);
-    }
-  }
+  appendWarnings(lines, result);
 
   lines.push('');
   lines.push(

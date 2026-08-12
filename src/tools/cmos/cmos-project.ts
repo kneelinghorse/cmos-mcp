@@ -11,7 +11,7 @@
 
 import { z } from 'zod';
 import { createError, CmosErrors } from './errors';
-import type { CmosToolResult } from './types';
+import type { ActionParamMap, CmosToolResult } from './types';
 import {
   cmosProjectInit,
   formatProjectInitForLLM,
@@ -62,6 +62,34 @@ export const CMOS_PROJECT_ACTIONS = [
 ] as const;
 
 export type CmosProjectAction = (typeof CMOS_PROJECT_ACTIONS)[number];
+
+/**
+ * s86-m04 — which published parameter applies to which action (see action-params.ts).
+ *
+ * THREE ACTIONS DO NOT TAKE `projectRoot`, and that is the tree, not an omission: `list`,
+ * `validate` and `sweep` operate on the per-user project-graph registry rather than on one store
+ * (cmos-project.ts:309-335), and `prune` forwards a hardcoded `{prune: true}` and reads nothing.
+ * The flat table published `projectRoot` against all eight.
+ */
+export const CMOS_PROJECT_ACTION_PARAMS: ActionParamMap<CmosProjectAction, CmosProjectParams> = {
+  init: [
+    'action',
+    'projectRoot',
+    'projectName',
+    'projectId',
+    'tracelabProjectId',
+    'initialSprint',
+    'initialMissions',
+    'projectType',
+  ],
+  register: ['action', 'projectRoot', 'name', 'setAsDefault'],
+  list: ['action', 'prune', 'validate'],
+  unregister: ['action', 'projectRoot'],
+  validate: ['action', 'prune'],
+  prune: ['action'],
+  update: ['action', 'projectRoot', 'projectType'],
+  sweep: ['action', 'instances', 'statusFilter', 'itemType'],
+};
 
 export type CmosProjectResult =
   | CmosProjectInitResult
@@ -114,7 +142,12 @@ export const cmosProjectSchema = z
     name: z.string().optional().describe('Display name for register action'),
     setAsDefault: z.boolean().optional().describe('Set as default project for register action'),
     // validate params
-    prune: z.boolean().optional().describe('Prune invalid entries for validate action'),
+    prune: z
+      .boolean()
+      .optional()
+      .describe(
+        'Prune invalid entries for validate action, or for list action when validate is set'
+      ),
     // list with validate flag
     validate: z
       .boolean()
@@ -165,18 +198,59 @@ export const cmosProjectToolDefinition = {
       projectName: { type: 'string', description: 'Project name for init action' },
       projectId: { type: 'string', description: 'Project ID for init action' },
       tracelabProjectId: { type: 'string', description: 'TraceLab project ID for init action' },
+      // s86-m04: both sub-shapes are TRANSCRIBED from their zod schemas (initialSprintSchema /
+      // initialMissionSchema above), not invented. Both are `.strict()` in zod while publishing
+      // neither their properties nor `additionalProperties`, so the published half said nothing
+      // where the server enforces a closed four- and seven-key shape. Publishing
+      // `additionalProperties: false` WITHOUT the properties would have been the same defect in
+      // the opposite direction — "no keys are accepted" — so the keys land with it.
       initialSprint: {
         type: 'object',
         description: 'Initial sprint config for init action',
+        properties: {
+          id: { type: 'string', description: 'Sprint ID' },
+          title: { type: 'string', description: 'Sprint title' },
+          focus: { type: 'string', description: 'Sprint focus' },
+          status: { type: 'string', description: 'Sprint status' },
+        },
+        additionalProperties: false,
       },
       initialMissions: {
         type: 'array',
         description: 'Initial missions for init action',
-        items: { type: 'object' },
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', description: 'Mission ID' },
+            name: { type: 'string', description: 'Mission name' },
+            sprintId: { type: 'string', description: 'Owning sprint ID' },
+            objective: { type: 'string', description: 'Mission objective' },
+            successCriteria: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Success criteria',
+            },
+            deliverables: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Deliverables',
+            },
+            status: {
+              type: 'string',
+              enum: ['Queued', 'Current'],
+              description: 'Initial mission status',
+            },
+          },
+          additionalProperties: false,
+        },
       },
       name: { type: 'string', description: 'Display name for register action' },
       setAsDefault: { type: 'boolean', description: 'Set as default project for register action' },
-      prune: { type: 'boolean', description: 'Prune invalid entries for validate action' },
+      prune: {
+        type: 'boolean',
+        description:
+          'Prune invalid entries for validate action, or for list action when validate is set',
+      },
       validate: {
         type: 'boolean',
         description: 'Run validation on list action (routes to validate handler)',

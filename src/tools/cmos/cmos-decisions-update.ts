@@ -10,6 +10,7 @@
 import { withClientValidated } from './client';
 import type { CmosToolResult } from './types';
 import { createError, createSuccess, CmosErrors, CMOS_ERROR_CODES } from './errors';
+import { appendWarnings } from './format-warnings';
 
 export interface CmosDecisionsUpdateResult {
   /** ID of the updated decision */
@@ -185,6 +186,8 @@ export function formatDecisionsUpdateForLLM(
   if (d.supersededBy !== null) {
     lines.push(`**Superseded By**: #${d.supersededBy}`);
   }
+
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

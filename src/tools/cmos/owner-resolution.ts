@@ -4,6 +4,7 @@
 
 import type { CmosDatabaseClient } from './client';
 import { DashboardClient } from './dashboard-client';
+import { checkWrite, type WriteSink } from './write-guard';
 
 export interface OwnerResolutionResult {
   owner: string | null;
@@ -17,6 +18,13 @@ export interface OwnerResolutionResult {
    * Every early return (reconcile skipped / dashboard unreachable) reports false.
    */
   incumbentConfirmed: boolean;
+  /**
+   * s86-m02b — metadata writes that ERRORED during this resolution. The result still
+   * reports the owner/slug it resolved, so without this a failed `metadata.owner` write
+   * reads as a persisted owner while the store keeps minting `cmos://unknown/*`
+   * addresses. Callers with a warnings channel should splice this into it.
+   */
+  warnings?: string[];
 }
 
 interface DashboardProjectLike {
@@ -153,8 +161,17 @@ function readProjectIdentityAddress(client: CmosDatabaseClient): string | null {
   }
 }
 
-function writeMetadata(client: CmosDatabaseClient, key: string, value: string): void {
-  client.execute('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)', [key, value]);
+function writeMetadata(
+  client: CmosDatabaseClient,
+  key: string,
+  value: string,
+  sink: WriteSink
+): void {
+  checkWrite(
+    client.execute('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)', [key, value]),
+    sink,
+    `metadata.${key}`
+  );
 }
 
 /**
@@ -220,11 +237,15 @@ export async function resolveAndPersistOwner(
   });
   const matchedProject = match.project;
 
+  // s86-m02b — every metadata write below is reported as done by the returned result;
+  // a failed one is carried out on `warnings` rather than assumed to have landed.
+  const warnings: string[] = [];
+
   if (matchedProject?.slug && matchedProject.slug.trim().length > 0) {
-    writeMetadata(client, 'dashboard_slug', matchedProject.slug.trim());
+    writeMetadata(client, 'dashboard_slug', matchedProject.slug.trim(), warnings);
   }
   if (matchedProject?.id && matchedProject.id.trim().length > 0) {
-    writeMetadata(client, 'dashboard_project_id', matchedProject.id.trim());
+    writeMetadata(client, 'dashboard_project_id', matchedProject.id.trim(), warnings);
   }
 
   // API-key auth skips the login that populates cachedIdentity. Fall back to the
@@ -237,14 +258,31 @@ export async function resolveAndPersistOwner(
     }
   }
 
+  const surfaced = (): string[] | undefined => (warnings.length > 0 ? warnings : undefined);
+
   if (!username || username.trim().length === 0) {
     return existing
-      ? { owner: existing, source: 'metadata', incumbentConfirmed: match.confirmed }
-      : { owner: null, source: 'unresolved', incumbentConfirmed: match.confirmed };
+      ? {
+          owner: existing,
+          source: 'metadata',
+          incumbentConfirmed: match.confirmed,
+          warnings: surfaced(),
+        }
+      : {
+          owner: null,
+          source: 'unresolved',
+          incumbentConfirmed: match.confirmed,
+          warnings: surfaced(),
+        };
   }
 
   const trimmed = username.trim();
-  writeMetadata(client, 'owner', trimmed);
-  writeMetadata(client, 'dashboard_username', trimmed);
-  return { owner: trimmed, source: 'dashboard', incumbentConfirmed: match.confirmed };
+  writeMetadata(client, 'owner', trimmed, warnings);
+  writeMetadata(client, 'dashboard_username', trimmed, warnings);
+  return {
+    owner: trimmed,
+    source: 'dashboard',
+    incumbentConfirmed: match.confirmed,
+    warnings: surfaced(),
+  };
 }

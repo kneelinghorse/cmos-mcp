@@ -185,6 +185,7 @@ import {
   cmosMessageToolDefinition,
   cmosMessageSchema,
   formatMessageForLLM,
+  __resetDirectoryCacheForTesting,
   CMOS_MESSAGE_ACTIONS,
   MESSAGE_TYPE_MAP,
   VALID_MESSAGE_TYPES,
@@ -212,10 +213,20 @@ function mockClient() {
     getMyProjects: jest.fn() as AnyMock,
   };
 
-  // Default: resolveAddress succeeds (pre-send validation passes)
-  client.resolveAddress.mockResolvedValue(
-    createSuccess({ resolved: true, projectName: 'test-project' })
-  );
+  // Default: resolveAddress succeeds (pre-send validation passes). s86-m07 — the shape is the
+  // LIVE one: `resolved` is an object, and the address resolves to itself, which is the normal
+  // case. Tests that need a mismatch or a lean body override this per-case.
+  client.resolveAddress.mockImplementation(async (params: { address: string }) => {
+    const slug = params.address.replace('cmos://', '').split('/')[1] ?? '';
+    return createSuccess({
+      success: true,
+      resolved: { projectId: `${slug}-uuid`, projectName: slug, projectSlug: slug },
+    });
+  });
+
+  // s86-m07 default: an empty directory, so the send-path ambiguity lookup finds no siblings
+  // and adds no warning. Directory/collision cases override this.
+  client.listDirectory.mockResolvedValue(createSuccess({ projects: [], totalCount: 0 }));
 
   // s84-m02 default: the read-one endpoint is "absent" (404) so handleGet falls back to
   // the paging scan — this preserves the pre-m02 behavior for every existing get test.
@@ -259,6 +270,9 @@ let prevMsgConfigEnv: string | undefined;
 
 beforeEach(async () => {
   jest.clearAllMocks();
+  // s86-m07: the send-path directory memo is module-level (keyed by dashboard origin), so drop
+  // it between cases — no test may inherit another's directory.
+  __resetDirectoryCacheForTesting();
   // s79-m03: cmos_agent_onboard's ambiguity resolution now reads the project-graph
   // registry. Isolate CMOS_CONFIG_DIR to a per-test empty graph so the shared
   // run-wide graph file (populated by other suites' registrations) can't leak in
@@ -468,7 +482,10 @@ describe('s78-m05 foreign-content provenance framing', () => {
     expect(msg.provenance).toEqual({ source: 'recipient-uuid-123', trust: 'foreign' });
   });
 
-  it('directory: frames a foreign (non-owner) project description', async () => {
+  it('directory: frames a foreign (non-owner) row label as untrusted', async () => {
+    // s86-m07: the foreign-authored field on a directory row is now `ownerDisplayName` —
+    // `description` was deleted because /api/projects/directory/public returns none. The
+    // s78-m05 contract is unchanged: another user's free text is fenced, never rendered bare.
     const client = mockClient();
     client.listDirectory.mockResolvedValueOnce(
       createSuccess({
@@ -478,7 +495,7 @@ describe('s78-m05 foreign-content provenance framing', () => {
             name: 'Evil',
             address: 'cmos://evil/proj',
             owner: 'evil',
-            description: INJECTION,
+            ownerDisplayName: INJECTION,
             isOwner: false,
           },
         ],
@@ -800,6 +817,10 @@ describe('send action', () => {
     expect(result.data).toEqual({
       messageId: 'msg-001',
       targetAddress: 'cmos://birch/design-system',
+      // s86-m07: WHO the address resolved to, carried from the pre-send resolve that was
+      // already being made and thrown away.
+      targetProjectId: 'design-system-uuid',
+      targetProjectName: 'design-system',
       status: 'pending',
       summary: 'Add feature X',
       verb: 'create',
@@ -1489,12 +1510,16 @@ describe('list action', () => {
     const result = await cmosMessage({ action: 'list' });
 
     expect(result.success).toBe(true);
+    // s86-m07: the answer names two scopes instead of conflating them, and says so in the
+    // warnings channel when the credential is not project-scoped (here: user-scoped).
     expect(result.data).toEqual({
       messages: expect.any(Array),
-      unreadCount: 1,
+      unreadCountUserWide: 1,
+      unreadInThisView: 1,
       totalCount: 1,
       tab: 'inbox',
       statusFilter: null,
+      warnings: [expect.stringContaining('unreadCountUserWide')],
     });
 
     expect(client.listMessages).toHaveBeenCalledWith({
@@ -1813,7 +1838,8 @@ describe('formatMessageForLLM', () => {
           provenance: { source: 'cmos://derek/dashboard', trust: 'foreign' as const },
         },
       ],
-      unreadCount: 1,
+      unreadCountUserWide: 1,
+      unreadInThisView: 1,
       totalCount: 1,
       tab: 'inbox',
       statusFilter: null,
@@ -1821,7 +1847,9 @@ describe('formatMessageForLLM', () => {
 
     const output = formatMessageForLLM('list', result);
     expect(output).toContain('inbox');
-    expect(output).toContain('1 unread');
+    // s86-m07: two numbers, each labelled with the scope it actually has.
+    expect(output).toContain('1 unread in this view');
+    expect(output).toContain('1 unread user-wide');
     // s78-m05: inbound summaries are framed as untrusted foreign content, labeled with sender.
     expect(output).toContain('[pending] (msg-001)');
     expect(output).toContain('⟪untrusted, from cmos://derek/dashboard⟫ Add feature ⟪/untrusted⟫');
@@ -1830,7 +1858,8 @@ describe('formatMessageForLLM', () => {
   it('formats empty list', () => {
     const result = createSuccess({
       messages: [],
-      unreadCount: 0,
+      unreadCountUserWide: 0,
+      unreadInThisView: 0,
       totalCount: 0,
       tab: 'inbox',
       statusFilter: null,
@@ -1894,7 +1923,8 @@ describe('formatMessageForLLM', () => {
     expect(output).toContain('Project Directory');
     expect(output).toContain('2 addressable project(s)');
     expect(output).toContain('cmos://derek/cmos-mcp');
-    expect(output).toContain('MCP server');
+    // s86-m07: no description column — the route returns none for any row.
+    expect(output).not.toContain('MCP server');
     expect(output).toContain('cmos://derek/cmos-dashboard');
   });
 
@@ -2210,5 +2240,134 @@ describe('send action — address resolution', () => {
     expect(result.error?.code).toBe('DASHBOARD_AUTH_FAILED');
     expect(client.sendMessage).not.toHaveBeenCalled();
     expect(client.listDirectory).not.toHaveBeenCalled();
+  });
+});
+
+// ─── s86-m07: the send-time collision advisory ───────────────────────────────
+
+/**
+ * The defect, at the surface where it happened: `cmos://derek/cmos-mcp` (dormant) and
+ * `cmos://derek/cmos-mcp-pro` (live) are indistinguishable to a sender, and the dead one looks
+ * MORE correct (npm package @aquex/cmos-mcp, repo kneelinghorse/cmos-mcp, tool prefix cmos_*).
+ * The send must still SUCCEED — a bounce would break every legitimate send to a prefixed
+ * name — and must say, once, in the text an agent reads, who it actually reached.
+ *
+ * The same assertions are re-made over MCP stdio against the BUILT dist/ in
+ * tests/e2e/message-address-collision.e2e.ts.
+ */
+describe('s86-m07 send: ambiguous target advisory', () => {
+  const COLLIDING_DIRECTORY = {
+    projects: [
+      {
+        id: 'ec2b4987-dbc1-4f16-946e-9843c4080ac1',
+        name: 'cmos-mcp',
+        slug: 'cmos-mcp',
+        address: 'cmos://derek/cmos-mcp',
+        owner: 'derek',
+      },
+      {
+        id: 'c02ea1cb-3db7-40b0-a263-7d17ef2a656f',
+        name: 'CMOS-MCP Pro',
+        slug: 'cmos-mcp-pro',
+        address: 'cmos://derek/cmos-mcp-pro',
+        owner: 'derek',
+      },
+      {
+        id: '9566f5ce-f171-4e95-a24e-ad756c2b8807',
+        name: 'CMOS Dashboard',
+        slug: 'cmos-dashboard',
+        address: 'cmos://derek/cmos-dashboard',
+        owner: 'derek',
+      },
+    ],
+    totalCount: 3,
+  };
+
+  function sendTo(address: string) {
+    return cmosMessage({
+      action: 'send',
+      targetAddress: address,
+      type: 'question',
+      summary: 'Does this reach the project I meant?',
+    });
+  }
+
+  it('warns on the prefix sibling, exactly once in the rendered text, and still SENDS', async () => {
+    const client = mockClient();
+    client.listDirectory.mockResolvedValue(createSuccess(COLLIDING_DIRECTORY));
+    client.sendMessage.mockResolvedValue(createSuccess({ id: 'msg-collide', status: 'pending' }));
+
+    const result = await sendTo('cmos://derek/cmos-mcp');
+
+    // NEVER BLOCK: the collision check may not fail a send.
+    expect(result.success).toBe(true);
+    expect(client.sendMessage).toHaveBeenCalledTimes(1);
+
+    const text = formatMessageForLLM('send', result);
+    expect(text).toContain('cmos-mcp'); // the resolved project name
+    expect(text).toContain('cmos://derek/cmos-mcp-pro'); // the prefix sibling
+    // A count assertion, not a presence assertion: one channel, one render.
+    expect(result.warnings).toHaveLength(1);
+    expect(text.split('shares a slug prefix with').length - 1).toBe(1);
+  });
+
+  it('says nothing about ambiguity when the target has no prefix sibling', async () => {
+    const client = mockClient();
+    client.listDirectory.mockResolvedValue(createSuccess(COLLIDING_DIRECTORY));
+    client.sendMessage.mockResolvedValue(createSuccess({ id: 'msg-clean', status: 'pending' }));
+
+    const result = await sendTo('cmos://derek/cmos-dashboard');
+
+    expect(result.success).toBe(true);
+    expect(result.warnings).toBeUndefined();
+    expect(formatMessageForLLM('send', result)).not.toContain('Warnings:');
+  });
+
+  it('warns when the address resolves to a project the caller did not name', async () => {
+    const client = mockClient();
+    client.listDirectory.mockResolvedValue(createSuccess({ projects: [], totalCount: 0 }));
+    client.resolveAddress.mockResolvedValue(
+      createSuccess({
+        success: true,
+        resolved: {
+          projectId: 'ec2b4987-dbc1-4f16-946e-9843c4080ac1',
+          projectName: 'cmos-mcp',
+          projectSlug: 'cmos-mcp',
+        },
+      })
+    );
+    client.sendMessage.mockResolvedValue(createSuccess({ id: 'msg-alias', status: 'pending' }));
+
+    const result = await sendTo('cmos://derek/cmos-mcp-pro');
+
+    expect(result.success).toBe(true);
+    expect(result.warnings).toHaveLength(1);
+    expect(result.warnings?.[0]).toContain("names 'cmos-mcp-pro'");
+    expect(result.warnings?.[0]).toContain("resolves to project 'cmos-mcp'");
+  });
+
+  it('omits targetProjectId/targetProjectName when the resolve body lacks them', async () => {
+    const client = mockClient();
+    client.resolveAddress.mockResolvedValue(createSuccess({ success: true, resolved: {} }));
+    client.sendMessage.mockResolvedValue(createSuccess({ id: 'msg-lean', status: 'pending' }));
+
+    const result = await sendTo('cmos://derek/cmos-dashboard');
+
+    expect(result.success).toBe(true);
+    const data = result.data as MessageSendResult;
+    expect('targetProjectId' in data).toBe(false);
+    expect('targetProjectName' in data).toBe(false);
+  });
+
+  it('a directory lookup failure loses no receipt and invents no claim', async () => {
+    const client = mockClient();
+    client.listDirectory.mockRejectedValue(new Error('dashboard unreachable'));
+    client.sendMessage.mockResolvedValue(createSuccess({ id: 'msg-degraded', status: 'pending' }));
+
+    const result = await sendTo('cmos://derek/cmos-mcp');
+
+    expect(result.success).toBe(true);
+    expect((result.data as MessageSendResult).messageId).toBe('msg-degraded');
+    expect(result.warnings).toBeUndefined();
   });
 });

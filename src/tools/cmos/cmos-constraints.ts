@@ -20,6 +20,8 @@ import {
   ensureConstraintEvergreen,
   type ConstraintStatus,
 } from './schema-migrations';
+import { appendWarnings, appendWriteFailures } from './format-warnings';
+import { countWrite, type WriteFailure } from './write-guard';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -56,6 +58,13 @@ export interface ConstraintsResult {
   constraintId?: number;
   /** ISO timestamp the reaffirm bumped last_reviewed_at to (Sprint 82 m01). */
   reaffirmedAt?: string;
+  /** s86-m02b — writes the action ATTEMPTED and the database REJECTED. Emitted by `archive`,
+   *  `[]` on the happy path; absent on the read actions and on `reaffirm`, which returns
+   *  createError with the DB message instead. `affected` above counts rows the UPDATE actually
+   *  changed, so a non-empty array here is the difference between the intent and the outcome.
+   *  A caller-supplied id that matched no ACTIVE row is NOT a failure — the statement ran, its
+   *  WHERE matched nothing — and produces no entry. */
+  writeFailures?: WriteFailure[];
 }
 
 export interface CmosConstraintsParams {
@@ -296,6 +305,7 @@ function archiveConstraints(
   ids: number[] | undefined
 ): CmosToolResult<ConstraintsResult> {
   const now = new Date().toISOString();
+  const writeSink = { failures: [] as WriteFailure[] };
 
   if (!ids || ids.length === 0) {
     // Archive all expired constraints
@@ -304,14 +314,27 @@ function archiveConstraints(
        WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at <= ?`,
       [now, now]
     );
-    const affected = result.success && result.data?.changes ? result.data.changes : 0;
+    const affected = countWrite(result, writeSink, 'constraints.archive (all expired)');
     return createSuccess<ConstraintsResult>({
       constraintAction: 'archive',
       affected,
+      writeFailures: writeSink.failures,
+      // s86-m02b — THE THIRD ARM. `affected === 0` used to render 'No expired constraints to
+      // archive' whether the UPDATE ran and matched nothing or the database REJECTED it. In the
+      // rejected case the statement never ran, so whether expired constraints exist is UNKNOWN —
+      // and this string is what renderConstraintsBody returns as the answer's FIRST line, ahead of
+      // the write-failures block. Structurally the same defect as "Extraction skipped"
+      // (cmos-session-capture.ts), and the same cure: the failure gets its OWN words. Only one
+      // statement runs in this arm, so a non-empty sink means exactly "the archive did not happen".
+      // The words live on `message` rather than in a formatter branch because for `archive` the
+      // formatter returns `d.message` verbatim — a branch there would be a second copy of this
+      // sentence, and the structured `data.message` would keep asserting the false one.
       message:
-        affected > 0
-          ? `${affected} expired constraint(s) archived`
-          : 'No expired constraints to archive',
+        writeSink.failures.length > 0
+          ? 'Archive FAILED — the database rejected the UPDATE, so nothing was archived and whether any expired constraints exist is unknown'
+          : affected > 0
+            ? `${affected} expired constraint(s) archived`
+            : 'No expired constraints to archive',
     });
   }
 
@@ -321,14 +344,16 @@ function archiveConstraints(
       `UPDATE constraints SET status = 'archived', archived_at = ? WHERE id = ? AND status = 'active'`,
       [now, id]
     );
-    if (result.success && result.data?.changes && result.data.changes > 0) {
-      affected++;
-    }
+    // s86-m02b: the ids come from the TOOL CALL and were never re-selected, so `changes: 0` on a
+    // statement that RAN means "no active constraint with that id" (already archived, say) —
+    // legitimate, and countWrite records nothing for it. Only an errored statement is a failure.
+    affected += countWrite(result, writeSink, `constraints.archive #${id}`);
   }
 
   return createSuccess<ConstraintsResult>({
     constraintAction: 'archive',
     affected,
+    writeFailures: writeSink.failures,
     message: `${affected} constraint(s) archived`,
   });
 }
@@ -454,6 +479,20 @@ export function getStaleConstraintCount(
 // ─── LLM Formatter ──────────────────────────────────────────────────────────
 
 export function formatConstraintsForLLM(result: CmosToolResult<ConstraintsResult>): string {
+  const lines = [renderConstraintsBody(result)];
+
+  appendWriteFailures(lines, result.data?.writeFailures);
+  appendWarnings(lines, result);
+
+  return lines.join('\n');
+}
+
+/**
+ * The constraints answer itself. Split out of formatConstraintsForLLM in s86-m02: the body has one
+ * return per constraintAction, so a single tail renders the envelope warnings channel once for all
+ * of them rather than once per branch.
+ */
+function renderConstraintsBody(result: CmosToolResult<ConstraintsResult>): string {
   if (!result.success || !result.data) {
     const error = result.error;
     return `Failed to manage constraints: ${error?.message ?? 'Unknown error'}`;

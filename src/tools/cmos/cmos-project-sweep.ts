@@ -7,6 +7,7 @@ import * as path from 'path';
 
 import { ProjectGraphRegistry } from '../../intelligence/project-graph-registry';
 import type { CmosToolResult } from './types';
+import { appendWarnings } from './format-warnings';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -248,6 +249,8 @@ export function formatProjectSweepForLLM(result: CmosToolResult<SweepResult>): s
     lines.push('⚠️  Warnings:');
     for (const w of warnings) lines.push(`  - ${w}`);
   }
+
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

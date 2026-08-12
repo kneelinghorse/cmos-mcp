@@ -18,6 +18,8 @@ import {
   VALID_STATE_TRANSITIONS,
 } from './errors';
 import { ensureMissionTimestamps } from './schema-migrations';
+import { appendWarnings } from './format-warnings';
+import { checkWrite } from './write-guard';
 
 /**
  * Result of unblocking a mission.
@@ -130,6 +132,8 @@ export async function cmosMissionUnblock(
 
   return withClientValidated(
     (client) => {
+      const warnings: string[] = [];
+
       // Query mission by ID
       const missionResult = client.getOne<Mission>(
         `
@@ -258,19 +262,22 @@ export async function cmosMissionUnblock(
         ]
       );
 
-      // Don't fail the operation if event logging fails (non-critical)
-      if (!eventResult.success) {
+      // Don't fail the operation if event logging fails (non-critical) — but say so.
+      if (!checkWrite(eventResult, warnings, 'mission unblock event logging')) {
         console.warn('Failed to log mission unblock event:', eventResult.error);
       }
 
-      return createSuccess<MissionUnblockResult>({
-        missionId,
-        previousStatus: currentStatus,
-        currentStatus: targetStatus,
-        resolution: params.resolution ?? null,
-        message: `Mission '${missionId}' has been unblocked`,
-        unblockedAt: now,
-      });
+      return createSuccess<MissionUnblockResult>(
+        {
+          missionId,
+          previousStatus: currentStatus,
+          currentStatus: targetStatus,
+          resolution: params.resolution ?? null,
+          message: `Mission '${missionId}' has been unblocked`,
+          unblockedAt: now,
+        },
+        warnings
+      );
     },
     { projectRoot: params.projectRoot }
   );
@@ -321,13 +328,7 @@ export function formatMissionUnblockForLLM(result: CmosToolResult<MissionUnblock
 
   // Surface warnings (incl. the m05 collab-sync warnings the transition dispatcher
   // folds in: lock contention, a superseded conflict, or a non-fatal broker-sync error).
-  if (result.warnings && result.warnings.length > 0) {
-    lines.push('');
-    lines.push('Warnings:');
-    for (const warning of result.warnings) {
-      lines.push(`- ${warning}`);
-    }
-  }
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

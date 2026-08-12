@@ -246,6 +246,55 @@ describe('Mission Protocol entry lifecycle', () => {
     }
   });
 
+  /**
+   * s86-m06 — both attribution-failure statuses are logged at [WARN], not [INFO].
+   *
+   * The status they replaced fell into the catch-all else arm and was logged at [INFO]
+   * alongside genuinely uninteresting skips ("no project", "not registered"). In either of
+   * these two states auto-recovery is structurally impossible until the operator acts, so
+   * INFO understated it — and the single message it carried named a cause that is false in
+   * one of the two. Driven through the existing runner seam, one status per case.
+   */
+  test.each(['skipped-no-user-scoped-key' as const, 'skipped-unattributable-credential' as const])(
+    'initializeServer logs project-key recovery status %s at [WARN]',
+    async (status) => {
+      const moduleData = await loadIndexModule();
+      const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+      const context = createMockContext();
+      moduleData.indexModule.__test__.setContextBuilder(async () => context);
+      moduleData.indexModule.__test__.setStartupAttributionSelfTestRunner(async () => ({
+        projectRoot: '/tmp/current-project',
+        source: 'cwd',
+        errorCode: null,
+        warning: null,
+      }));
+      moduleData.indexModule.__test__.setStartupProjectKeyRecoveryRunner(async () => ({
+        checked: true,
+        status,
+        message: 'attribution unavailable for this credential',
+      }));
+
+      try {
+        await moduleData.indexModule.__test__.initializeServer();
+
+        expect(consoleSpy).toHaveBeenCalledWith(
+          expect.stringContaining(`[WARN] Project key recovery: ${status}`)
+        );
+        // And NOT at INFO — the catch-all arm it used to fall into.
+        expect(consoleSpy).not.toHaveBeenCalledWith(
+          expect.stringContaining(`[INFO] Project key recovery: ${status}`)
+        );
+      } finally {
+        moduleData.cleanup();
+        moduleData.indexModule.__test__.resetStartupAttributionSelfTestRunner();
+        moduleData.indexModule.__test__.resetStartupProjectKeyRecoveryRunner();
+        moduleData.indexModule.__test__.resetContextBuilder();
+        consoleSpy.mockRestore();
+      }
+    }
+  );
+
   test('initializeServer emits a soft WARN when registry prune errors but continues startup', async () => {
     const moduleData = await loadIndexModule();
     const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});

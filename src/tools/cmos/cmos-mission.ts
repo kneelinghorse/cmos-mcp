@@ -2,7 +2,7 @@
  * cmos_mission Tool
  *
  * Consolidated mission CRUD tool with action parameter support.
- * Actions: list, show, status, add, update, depends.
+ * Actions: list, show, status, add, update, move, depends, undepends.
  * Routes to existing mission handlers without rewriting business logic.
  *
  * @module tools/cmos/cmos-mission
@@ -10,7 +10,7 @@
 
 import { z } from 'zod';
 import { createError, CmosErrors } from './errors';
-import type { CmosToolResult } from './types';
+import type { ActionParamMap, CmosToolResult } from './types';
 import {
   cmosMissionList,
   formatMissionListForLLM,
@@ -52,6 +52,12 @@ import {
   type MissionDependsResult,
 } from './cmos-mission-depends';
 import {
+  cmosMissionMove,
+  formatMissionMoveForLLM,
+  type CmosMissionMoveParams,
+  type MissionMoveResult,
+} from './cmos-mission-move';
+import {
   cmosMissionUndepends,
   formatMissionUndependsForLLM,
   type CmosMissionUndependsParams,
@@ -64,11 +70,40 @@ export const CMOS_MISSION_ACTIONS = [
   'status',
   'add',
   'update',
+  'move',
   'depends',
   'undepends',
 ] as const;
 
 export type CmosMissionAction = (typeof CMOS_MISSION_ACTIONS)[number];
+
+/** s86-m04 — which published parameter applies to which action (see action-params.ts). */
+export const CMOS_MISSION_ACTION_PARAMS: ActionParamMap<CmosMissionAction, CmosMissionParams> = {
+  list: ['action', 'sprintId', 'status', 'limit', 'projectRoot'],
+  show: ['action', 'missionId', 'projectRoot'],
+  // `limit` reaches only the acrossProjects arm (cmos-mission.ts:321) and `queuedLimit` only the
+  // local one, but both are genuinely settable on this action, so both are published for it.
+  status: ['action', 'limit', 'includeBlocked', 'queuedLimit', 'acrossProjects', 'projectRoot'],
+  add: [
+    'action',
+    'missionId',
+    'sprintId',
+    'status',
+    'name',
+    'objective',
+    'context',
+    'successCriteria',
+    'deliverables',
+    'referenceDocs',
+    'domainFields',
+    'notes',
+    'projectRoot',
+  ],
+  update: ['action', 'missionId', 'fields', 'projectRoot'],
+  move: ['action', 'missionId', 'toSprintId', 'reason', 'projectRoot'],
+  depends: ['action', 'fromId', 'toId', 'type', 'projectRoot'],
+  undepends: ['action', 'fromId', 'toId', 'projectRoot'],
+};
 
 export type CmosMissionResult =
   | CmosMissionListResult
@@ -77,6 +112,7 @@ export type CmosMissionResult =
   | CmosMissionPortfolioResult
   | MissionAddResult
   | MissionUpdateResult
+  | MissionMoveResult
   | MissionDependsResult
   | MissionUndependsResult;
 
@@ -102,17 +138,24 @@ export const cmosMissionSchema = z
   .object({
     action: z
       .enum(CMOS_MISSION_ACTIONS)
-      .describe('Mission action: list | show | status | add | update | depends | undepends'),
-    missionId: z.string().optional().describe('Mission ID for show/add/update actions'),
+      .describe('Mission action: list | show | status | add | update | move | depends | undepends'),
+    missionId: z.string().optional().describe('Mission ID for show/add/update/move actions'),
     sprintId: z.string().optional().describe('Sprint ID for list filter or add action'),
-    status: z.string().optional().describe('Status filter for list action'),
+    toSprintId: z.string().optional().describe('Destination sprint ID for move action'),
+    reason: z.string().optional().describe('Reason recorded on the breadcrumb for move action'),
+    status: z
+      .string()
+      .optional()
+      .describe('Status filter for list action, or initial status for add action'),
     limit: z
       .number()
       .int()
       .positive()
       .max(100)
       .optional()
-      .describe('Maximum missions to return for list action'),
+      .describe(
+        'Maximum missions to return for list action, or across-project cap for status action'
+      ),
     includeBlocked: z.boolean().optional().describe('Include blocked missions in status action'),
     acrossProjects: z
       .boolean()
@@ -139,8 +182,8 @@ export const cmosMissionSchema = z
     domainFields: z.record(z.unknown()).optional().describe('Domain fields for add action'),
     notes: z.string().optional().describe('Notes for add action'),
     fields: cmosMissionFieldsSchema.optional().describe('Fields payload for update action'),
-    fromId: z.string().optional().describe('Dependent mission ID for depends action'),
-    toId: z.string().optional().describe('Dependency mission ID for depends action'),
+    fromId: z.string().optional().describe('Dependent mission ID for depends/undepends actions'),
+    toId: z.string().optional().describe('Dependency mission ID for depends/undepends actions'),
     type: z
       .enum(['Blocks', 'Requires', 'Enables'])
       .optional()
@@ -158,7 +201,7 @@ export const cmosMissionToolDefinition = {
   name: 'cmos_mission',
   description:
     'Consolidated mission tool with action parameter support. ' +
-    'Actions: list, show, status, add, update, depends, undepends. ' +
+    'Actions: list, show, status, add, update, move, depends, undepends. ' +
     'Routes to the existing mission handlers without changing mission business logic.',
   inputSchema: {
     type: 'object',
@@ -166,32 +209,42 @@ export const cmosMissionToolDefinition = {
       action: {
         type: 'string',
         enum: [...CMOS_MISSION_ACTIONS],
-        description: 'Mission action: list | show | status | add | update | depends | undepends',
+        description:
+          'Mission action: list | show | status | add | update | move | depends | undepends',
       },
       missionId: {
         type: 'string',
-        description: 'Mission ID for show/add/update actions',
+        description: 'Mission ID for show/add/update/move actions',
       },
       sprintId: {
         type: 'string',
         description: 'Sprint ID for list filter or add action',
       },
+      toSprintId: {
+        type: 'string',
+        description: 'Destination sprint ID for move action',
+      },
+      reason: {
+        type: 'string',
+        description: 'Reason recorded on the breadcrumb for move action',
+      },
       status: {
         type: 'string',
-        description: 'Status filter for list action',
+        description: 'Status filter for list action, or initial status for add action',
       },
       limit: {
-        type: 'number',
+        type: 'integer',
         minimum: 1,
         maximum: 100,
-        description: 'Maximum missions to return for list action',
+        description:
+          'Maximum missions to return for list action, or across-project cap for status action',
       },
       includeBlocked: {
         type: 'boolean',
         description: 'Include blocked missions in status action',
       },
       queuedLimit: {
-        type: 'number',
+        type: 'integer',
         minimum: 1,
         maximum: 50,
         description: 'Maximum queued missions for status action',
@@ -258,11 +311,11 @@ export const cmosMissionToolDefinition = {
       },
       fromId: {
         type: 'string',
-        description: 'Dependent mission ID for depends action',
+        description: 'Dependent mission ID for depends/undepends actions',
       },
       toId: {
         type: 'string',
-        description: 'Dependency mission ID for depends action',
+        description: 'Dependency mission ID for depends/undepends actions',
       },
       type: {
         type: 'string',
@@ -346,6 +399,13 @@ export async function cmosMission(
         fields: (params.fields ?? {}) as MissionUpdateFields,
         projectRoot: params.projectRoot,
       } satisfies CmosMissionUpdateParams);
+    case 'move':
+      return cmosMissionMove({
+        missionId: params.missionId ?? '',
+        toSprintId: params.toSprintId ?? '',
+        reason: params.reason,
+        projectRoot: params.projectRoot,
+      } satisfies CmosMissionMoveParams);
     case 'depends':
       return cmosMissionDepends({
         fromId: params.fromId ?? '',
@@ -403,6 +463,8 @@ export function formatMissionForLLM(
       return formatMissionAddForLLM(result as CmosToolResult<MissionAddResult>);
     case 'update':
       return formatMissionUpdateForLLM(result as CmosToolResult<MissionUpdateResult>);
+    case 'move':
+      return formatMissionMoveForLLM(result as CmosToolResult<MissionMoveResult>);
     case 'depends':
       return formatMissionDependsForLLM(result as CmosToolResult<MissionDependsResult>);
     case 'undepends':

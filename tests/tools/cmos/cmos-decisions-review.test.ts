@@ -365,11 +365,17 @@ describe('cmos_decisions review & batch_update', () => {
       expect(result.success).toBe(false);
     });
 
-    it('rejects invalid status', async () => {
+    it('rejects invalid status AT RUNTIME, independently of the schema', async () => {
+      // s86-m04 tightened `status` to a 4-member z.enum, so the cast is now needed to express a
+      // value the TYPE forbids. Keeping this test is the point: the consolidated zod schemas are
+      // never parsed at runtime (src/index.ts casts every case), so the zod enum rejects NOTHING
+      // an agent can send. What actually rejects this is the handler's own guard — and this
+      // assertion is the only thing that proves that guard exists rather than being assumed from
+      // the presence of a schema.
       const result = await cmosDecisions({
         action: 'batch_update',
         decisionIds: [1],
-        status: 'invalid_status',
+        status: 'invalid_status' as unknown as 'archived',
         projectRoot: tempDir,
       });
 

@@ -2165,6 +2165,14 @@ describe('cmos_agent_onboard authState (Sprint 57 m04)', () => {
   beforeEach(() => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'onboard-auth-state-'));
     credDir = fs.mkdtempSync(path.join(os.tmpdir(), 'onboard-auth-cred-'));
+    // s86-m01: SAVE before overwriting. This afterEach used to `delete` this var
+    // unconditionally and never restore it, which stripped the per-run tmpdir
+    // that jest-global-setup provisions — after which CredentialStore and
+    // ProjectGraphRegistry both fall back to the developer's real
+    // ~/.config/cmos-mcp. This file is rank 2 of 180 by size, so it runs near the
+    // start of a --runInBand run and isolation was gone for essentially the whole
+    // suite. Same preservedEnv mechanism the credential vars below already use.
+    preservedEnv[CMOS_CONFIG_DIR_ENV] = process.env[CMOS_CONFIG_DIR_ENV];
     process.env[CMOS_CONFIG_DIR_ENV] = credDir;
     // Sprint 58 m02: authTier reads these env vars; clear them so the
     // "none" case is deterministic on developer machines that have legacy
@@ -2193,7 +2201,12 @@ describe('cmos_agent_onboard authState (Sprint 57 m04)', () => {
   });
 
   afterEach(() => {
-    delete process.env[CMOS_CONFIG_DIR_ENV];
+    // s86-m01: restore rather than delete — see the beforeEach note.
+    if (preservedEnv[CMOS_CONFIG_DIR_ENV] === undefined) {
+      delete process.env[CMOS_CONFIG_DIR_ENV];
+    } else {
+      process.env[CMOS_CONFIG_DIR_ENV] = preservedEnv[CMOS_CONFIG_DIR_ENV];
+    }
     for (const key of envKeysToClear) {
       if (preservedEnv[key] === undefined) {
         delete process.env[key];

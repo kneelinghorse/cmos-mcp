@@ -46,6 +46,7 @@ import {
   isForeignProject,
 } from '../../intelligence/provenance-frame';
 import { isReadOnlyAgentSession } from './read-only-agent-guard';
+import { appendWarnings } from './format-warnings';
 
 /**
  * Compact action descriptor for the flat top-level next_actions array.
@@ -200,12 +201,18 @@ export interface CmosReviewResult {
 /**
  * Input schema for cmos_review.
  */
-export const cmosReviewSchema = z.object({
-  projectRoot: z
-    .string()
-    .optional()
-    .describe('Project root directory to search for CMOS database (defaults to cwd)'),
-});
+export const cmosReviewSchema = z
+  .object({
+    projectRoot: z
+      .string()
+      .optional()
+      .describe('Project root directory to search for CMOS database (defaults to cwd)'),
+  })
+  // s86-m04: `.strict()` so the zod schema states what the published inputSchema has always
+  // stated (additionalProperties: false), matching the other 12 tools. INERT AT RUNTIME — the
+  // consolidated schemas are never parsed (src/index.ts casts every case), so this rejects
+  // nothing previously accepted; it aligns the two declarations.
+  .strict();
 
 export type CmosReviewParams = z.infer<typeof cmosReviewSchema>;
 
@@ -409,16 +416,23 @@ function buildDigest(
 
   // Insert a priority-1 build-freshness entry above the existing actions when stale.
   // Top-N cap is reapplied so the array still respects NEXT_ACTIONS_TOP_N.
-  // Sprint 70 m02: this review surface stays ADVISORY (non-blocking), but the same
-  // stale condition is now ENFORCED at cmos_sprint(action='complete') — the wording
-  // names that so the two surfaces describe one condition, not two.
+  //
+  // Build-freshness is ADVISORY ON BOTH SURFACES. The s70-m02 wording here promised that the
+  // same condition was ENFORCED at cmos_sprint(action='complete') and that close "now blocks on
+  // this"; the s74 review retired that gate, and cmos-sprint-complete.ts states plainly that
+  // staleness "is now surfaced as a warning after the work completes ... never as a block".
+  // The two surfaces still describe ONE condition — they just both describe it as advice.
   const next_actions = buildFreshness?.stale
     ? [
         {
+          // s86-m05: ONE wording for both situations a reader can be in. `npm run build` only
+          // exists in a source checkout — package.json files[] ships dist/, not scripts/ or the
+          // build toolchain — so an unconditional "run npm run build" is an instruction a
+          // consumer of the published package cannot follow. Name the packaged case too.
           action:
             buildFreshness.reason === 'dist-missing'
-              ? 'build output missing — run npm run build before starting work (sprint close now blocks on this)'
-              : 'build output is behind src/ — rebuild before starting fresh sessions (sprint close now blocks on this)',
+              ? 'build output missing — rebuild from source (npm run build) or reinstall the package before starting work'
+              : 'build output is behind src/ — rebuild from source (npm run build) or reinstall the package before starting fresh sessions',
           command: 'npm run build',
           priority: 1,
         },
@@ -1058,5 +1072,7 @@ export function formatReviewForLLM(result: CmosToolResult<CmosReviewResult>): st
 
   lines.push('');
   lines.push(`Digest size: ${d.digestSizeBytes} bytes (budget 4096)`);
+  appendWarnings(lines, result);
+
   return lines.join('\n');
 }

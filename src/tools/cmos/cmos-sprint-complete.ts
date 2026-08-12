@@ -37,6 +37,9 @@ import {
 import { getServerHealth, getServerProjectRoot } from '../../server-health';
 import { resolveProjectRootEnhanced } from '../../intelligence/project-resolution';
 import * as path from 'path';
+import { appendWarnings, appendWriteFailures } from './format-warnings';
+import { isParkedMissionStatus } from './terminal-status';
+import { countWrite, type WriteFailure } from './write-guard';
 
 type CloseoutContextType = 'master_context' | 'project_context';
 type CloseoutCondensationStrategy = 'none' | 'conservative' | 'auto' | 'aggressive';
@@ -86,11 +89,14 @@ interface LoadedCloseoutContext {
  * Sprint readiness summary used in the closeout receipt.
  */
 export interface SprintCloseoutReadiness {
+  /** s86-m08: EXCLUDES parked (Deferred/Dropped) work — the denominator completionRate uses. */
   totalMissions: number;
   completedMissions: number;
   blockedMissions: number;
   skippedMissions: number;
   openMissions: number;
+  /** s86-m08: Deferred + Dropped. Outside totalMissions, reported so it is not hidden. */
+  parkedMissions: number;
   completedMissionIds: string[];
   blockedMissionIds: string[];
   skippedMissionIds: string[];
@@ -146,13 +152,19 @@ export interface CmosSprintCompleteResult {
   /** Build-freshness report, included ONLY when stale=true (omitted on the happy path
    *  to keep the response shape unchanged for fresh-build sprints). */
   buildFreshness?: BuildFreshnessReport;
+  /** s86-m02b — writes the closeout ATTEMPTED and the database REJECTED. Always present, `[]`
+   *  on the happy path. `nextStepsReconciled` above counts rows the UPDATE actually changed,
+   *  so a non-empty array here is the difference between the intent and the outcome. */
+  writeFailures: WriteFailure[];
   message: string;
 }
 
 /**
  * s84-m04 — context_snapshots growth thresholds for the non-blocking sprint-close advisory.
- * Either the row count OR the total content bytes crossing its threshold fires the nudge toward
- * `npm run prune:snapshots`. Advisory-only — never gates the close.
+ * Either the row count OR the total content bytes crossing its threshold fires the advisory,
+ * which describes the retention decision and names no command (s86-m05, fork f05 — the tooling
+ * for reclaiming this content lives in `scripts/`, which does not ship). Advisory-only — never
+ * gates the close.
  */
 const SNAPSHOT_GROWTH_ROW_THRESHOLD = 500;
 const SNAPSHOT_GROWTH_BYTE_THRESHOLD = 20 * 1024 * 1024; // 20 MB
@@ -266,6 +278,10 @@ export async function cmosSprintComplete(
   return withClientAsync(
     async (client) => {
       const warnings: string[] = [];
+      // s86-m02b — writes the closeout attempted and the database rejected. Kept apart from
+      // `warnings` on purpose (fork f09): a lost next_steps reconciliation and "your build looks
+      // stale" are not the same kind of news, and an operator must be able to tell them apart.
+      const writeSink = { failures: [] as WriteFailure[] };
 
       // Build-freshness is ADVISORY, not blocking (post-s74 review). It used to be
       // an ENFORCED gate here (s70-m02) that blocked closeout with BUILD_STALE
@@ -282,11 +298,14 @@ export async function cmosSprintComplete(
       // firehose 12-step migration toggles foreign_keys (a no-op inside a
       // transaction), so it MUST run here, before BEGIN, not lazily mid-closeout.
       // Idempotent + marker-gated: a fast no-op on already-migrated stores.
-      ensureFirehoseEventColumns(client);
+      // s86-m02b (fork f23) — a migration that half-applies is the purest form of this
+      // sprint's defect class, and this is one of only six call sites whose warnings can
+      // reach a rendered answer. Splice them rather than letting them die in the result.
+      warnings.push(...(ensureFirehoseEventColumns(client).warnings ?? []));
       // s69-m04 — settle the author_* namespace before BEGIN too. Its ALTERs are
       // transaction-safe (no 12-step rebuild), but ensuring it pre-BEGIN keeps the
       // rename out of the closeout transaction and mirrors the firehose pattern.
-      ensureAuthorNamespaceColumns(client);
+      warnings.push(...(ensureAuthorNamespaceColumns(client).warnings ?? []));
       const beginResult = client.execute('BEGIN IMMEDIATE', []);
 
       if (!beginResult.success) {
@@ -448,7 +467,9 @@ export async function cmosSprintComplete(
         sprintId,
         readiness.completedMissionIds,
         readiness.blockedMissionIds,
-        completedAt
+        completedAt,
+        writeSink,
+        warnings
       );
 
       // --- Lifecycle Trigger: Archive sprint-scoped decisions/learnings ---
@@ -529,14 +550,36 @@ export async function cmosSprintComplete(
         ]
       );
       if (!eventResult.success) {
-        warnings.push('Sprint closeout event logging failed.');
+        // s86-m02b: this warned but dropped the error text entirely, so an operator learned that
+        // logging failed and nothing about why. Name the DB error, as context-freshness.ts does.
+        warnings.push(
+          `Sprint closeout event logging failed: ${eventResult.error?.code ?? 'DB_ERROR'} — ` +
+            `${eventResult.error?.message ?? 'unknown'}`
+        );
       }
 
       // s84-m04 (FORK-3=b): NON-BLOCKING context_snapshots growth advisory. Computed here,
       // AFTER the closeout COMMIT (transactionOpen=false) — NEVER inside the BEGIN IMMEDIATE
       // and NEVER an auto-prune (the firehose migration is txn-order-sensitive; a prune is a
-      // deliberate operator action). When the write-only snapshot content has grown large,
-      // nudge toward `npm run prune:snapshots`; a hiccup here never affects the committed close.
+      // deliberate operator action). A hiccup here never affects the committed close.
+      //
+      // s86-m05 (fork f05, resolved (b)): this advisory NAMES NO COMMAND. It used to say "Run
+      // 'npm run prune:snapshots' (dry-run) to preview…", which is unreachable for every
+      // consumer of the published package: package.json `files` ships dist, cmos-seed, the
+      // licences and four docs — `scripts/` is in none of them, and `bin` is only cmos-mcp.
+      // So the advisory described a retention DECISION instead, which is true for everyone.
+      //
+      // THE ALTERNATIVES WERE CONSIDERED AND REJECTED; do not re-open them:
+      //  (a) add a bin/ entry so the command becomes real — rejected. It would drag scripts/
+      //      (or a compiled equivalent) plus a ts-node runtime into installable surface, for a
+      //      chore almost no consumer will ever run.
+      //  (c) drop the advisory entirely — rejected. The growth signal is genuinely useful; it
+      //      is the prescription that was wrong, not the observation.
+      //
+      // TWO STAGE1 CLAIMS ABOUT THIS SITE WERE REFUTED at plan time and are recorded so a later
+      // sprint does not act on them: the advisory is NOT emitted inside the closeout transaction
+      // (it runs after the COMMIT, as the comment above says), and it does NOT auto-prune or
+      // otherwise mutate context_snapshots — it only counts rows and bytes.
       try {
         const growth = client.getOne<{ rows: number; bytes: number }>(
           `SELECT COUNT(*) AS rows, COALESCE(SUM(LENGTH(content)), 0) AS bytes FROM context_snapshots`,
@@ -550,8 +593,11 @@ export async function cmosSprintComplete(
         ) {
           warnings.push(
             `context_snapshots has grown to ${growth.data.rows} rows / ` +
-              `${(growth.data.bytes / (1024 * 1024)).toFixed(1)} MB of write-only content. ` +
-              `Run 'npm run prune:snapshots' (dry-run) to preview reclaimable content; --apply to reclaim.`
+              `${(growth.data.bytes / (1024 * 1024)).toFixed(1)} MB. That content is write-only — ` +
+              `no read path in CMOS returns it, and the row, its metadata and its audit event are ` +
+              `all kept whether or not the bytes are. Reclaiming it is a deliberate operator ` +
+              `decision, not something a sprint close should do for you, and it is irreversible ` +
+              `apart from a database backup.`
           );
         }
       } catch {
@@ -609,6 +655,7 @@ export async function cmosSprintComplete(
         nextStepsReconciled: nextStepsTable.reconciled,
         nextStepsCarried: nextStepsTable.carried,
         pendingFlagged: nextStepsTable.pendingFlagged,
+        writeFailures: writeSink.failures,
         message: buildCloseoutMessage(sprintId, condensation, readiness),
       };
 
@@ -712,8 +759,10 @@ function buildStaleAdvisory(report: BuildFreshnessReport): string {
     : '';
   return (
     `Advisory: this project's build looks stale — ${report.reason ?? 'src newer than build'}` +
-    `${examples}. Rebuild (npm run build) and restart the MCP server if the running ` +
-    `code should reflect these changes. This does not block sprint close.`
+    // s86-m05: one wording for both situations — `npm run build` only exists in a source
+    // checkout, so a packaged install needs the reinstall arm named.
+    `${examples}. Rebuild from source (npm run build) or reinstall the package, then restart ` +
+    `the MCP server if the running code should reflect these changes. This does not block sprint close.`
   );
 }
 
@@ -736,12 +785,20 @@ function summarizeSprintReadiness(missions: SprintMissionRow[]): SprintCloseoutR
     .filter((mission) => !TERMINAL_FOR_SPRINT_CLOSE.has(mission.status))
     .map((mission) => mission.id);
 
+  // s86-m08: sprint close computes from SprintMissionRow[], NOT from sprint_summary, so the
+  // view fix does not reach it. Same rule, same source constant: the closeout receipt must not
+  // score a sprint against work it parked, and must still say how much it parked.
+  const parkedMissionCount = missions.filter((mission) =>
+    isParkedMissionStatus(mission.status)
+  ).length;
+
   return {
-    totalMissions: missions.length,
+    totalMissions: missions.length - parkedMissionCount,
     completedMissions: completedMissionIds.length,
     blockedMissions: blockedMissionIds.length,
     skippedMissions: skippedMissionIds.length,
     openMissions: openMissionIds.length,
+    parkedMissions: parkedMissionCount,
     completedMissionIds,
     blockedMissionIds,
     skippedMissionIds,
@@ -866,7 +923,9 @@ function reconcileSprintNextStepsTable(
   sprintId: string,
   completedMissionIds: string[],
   blockedMissionIds: string[],
-  completedAt: string
+  completedAt: string,
+  sink: { failures: WriteFailure[] },
+  warnings: string[]
 ): {
   reconciled: number;
   carried: number;
@@ -877,7 +936,18 @@ function reconcileSprintNextStepsTable(
     `SELECT id, content, mission_id FROM next_steps WHERE sprint_id = ? AND status = 'pending'`,
     [sprintId]
   );
-  if (!rows.success || !rows.data) return empty;
+  // s86-m02b: a FAILED read here used to return `empty` — reconciled 0, indistinguishable from
+  // "there was nothing pending to reconcile". The closeout then reported a clean reconciliation
+  // of a table it never managed to read. The read half of the same defect as the write below.
+  if (!rows.success) {
+    warnings.push(
+      `next_steps reconciliation skipped: could not read pending rows for '${sprintId}' — ` +
+        `${rows.error?.code ?? 'DB_ERROR'}: ${rows.error?.message ?? 'unknown'}. ` +
+        `Sprint-linked next steps were NOT reconciled and remain pending.`
+    );
+    return empty;
+  }
+  if (!rows.data) return empty;
 
   const completed = new Set(completedMissionIds);
   const blocked = new Set(blockedMissionIds);
@@ -901,15 +971,31 @@ function reconcileSprintNextStepsTable(
     pendingFlagged.push({ id: row.id, content: row.content, missionId: mid });
   }
 
-  if (toComplete.length > 0) {
-    const placeholders = toComplete.map(() => '?').join(', ');
-    client.execute(
-      `UPDATE next_steps SET status = 'completed', resolved_at = ? WHERE id IN (${placeholders}) AND status = 'pending'`,
-      [completedAt, ...toComplete]
-    );
+  if (toComplete.length === 0) {
+    return { reconciled: 0, carried, pendingFlagged };
   }
 
-  return { reconciled: toComplete.length, carried, pendingFlagged };
+  const placeholders = toComplete.map(() => '?').join(', ');
+  const updateResult = client.execute(
+    `UPDATE next_steps SET status = 'completed', resolved_at = ? WHERE id IN (${placeholders}) AND status = 'pending'`,
+    [completedAt, ...toComplete]
+  );
+
+  // s86-m02b: report the rows the UPDATE ACTUALLY changed, not the rows we meant to change.
+  //
+  // A SHORT COUNT HERE IS NOT THE BENIGN WHERE-MISS IT IS ELSEWHERE, and the distinction is the
+  // reason `countWrite` leaves this judgement to the call site. `toComplete` was built by the
+  // SELECT above, which carries the IDENTICAL `sprint_id = ? AND status = 'pending'` predicate,
+  // on the SAME connection, INSIDE the same BEGIN IMMEDIATE transaction — so no row in
+  // `toComplete` can have left 'pending' between the SELECT and the UPDATE. At THIS site a
+  // successful statement always changes exactly `toComplete.length` rows, and anything less
+  // means the statement errored. (At cmos-next-steps.ts the ids come from the tool call and were
+  // never re-selected, so a short count there IS ordinary and must not be reported as a failure.)
+  return {
+    reconciled: countWrite(updateResult, sink, 'next_steps reconciliation'),
+    carried,
+    pendingFlagged,
+  };
 }
 
 function clearSprintLinkedNextSteps(
@@ -1049,11 +1135,16 @@ function completeSprintRecord(
     [completedAt, sprintId]
   );
 
+  // s86-m02b: inverted from `if (success || not-the-schema-mismatch) return it` by De Morgan.
+  // Behaviour is identical; the failure is now READ negatively, which is what the no-silent-write
+  // gate requires and what makes the fallback's precondition ("the column is missing") legible.
   if (
-    updateWithEndDate.success ||
-    updateWithEndDate.error?.code !== CMOS_ERROR_CODES.DB_SCHEMA_MISMATCH ||
-    !updateWithEndDate.error?.message.includes('end_date')
+    !updateWithEndDate.success &&
+    updateWithEndDate.error?.code === CMOS_ERROR_CODES.DB_SCHEMA_MISMATCH &&
+    updateWithEndDate.error?.message.includes('end_date')
   ) {
+    // Pre-end_date store — fall through to the column-free UPDATE below.
+  } else {
     return updateWithEndDate;
   }
 
@@ -1129,10 +1220,11 @@ function archiveSprintDecisionsAndLearnings(
          OR mission_id IN (SELECT id FROM missions WHERE sprint_id = ?)
          OR author_session_id IN (SELECT id FROM sessions WHERE sprint_id = ?))`;
 
+  // s86-m02b: inverted to an early return on failure. Already correct — it names the DB message —
+  // but the no-silent-write gate requires the failure to be read negatively, and the early-return
+  // form is what the rest of this file uses.
   const decisionResult = client.execute(decisionsSql, [sprintId, sprintId, sprintId]);
-  if (decisionResult.success) {
-    decisionsArchived = decisionResult.data?.changes ?? 0;
-  } else {
+  if (!decisionResult.success) {
     const msg = decisionResult.error?.message ?? 'Failed to archive decisions';
     return {
       success: false,
@@ -1141,6 +1233,7 @@ function archiveSprintDecisionsAndLearnings(
       error: `strategic_decisions: ${msg} — SQL: ${decisionsSql.replace(/\s+/g, ' ')}`,
     };
   }
+  decisionsArchived = decisionResult.data?.changes ?? 0;
 
   const learningsSql = `UPDATE learnings SET status = 'archived'
      WHERE status = 'active'
@@ -1148,10 +1241,9 @@ function archiveSprintDecisionsAndLearnings(
          OR mission_id IN (SELECT id FROM missions WHERE sprint_id = ?)
          OR author_session_id IN (SELECT id FROM sessions WHERE sprint_id = ?))`;
 
+  // s86-m02b: same inversion as the decisions branch above.
   const learningResult = client.execute(learningsSql, [sprintId, sprintId, sprintId]);
-  if (learningResult.success) {
-    learningsArchived = learningResult.data?.changes ?? 0;
-  } else {
+  if (!learningResult.success) {
     const msg = learningResult.error?.message ?? 'Failed to archive learnings';
     return {
       success: false,
@@ -1160,6 +1252,7 @@ function archiveSprintDecisionsAndLearnings(
       error: `learnings: ${msg} — SQL: ${learningsSql.replace(/\s+/g, ' ')}`,
     };
   }
+  learningsArchived = learningResult.data?.changes ?? 0;
 
   return { success: true, decisionsArchived, learningsArchived };
 }
@@ -1323,7 +1416,7 @@ export function formatSprintCompleteForLLM(
     `Completed at: ${data.completedAt}`,
     `Summary: ${data.summary}`,
     '',
-    `Readiness: ${data.readiness.completedMissions}/${data.readiness.totalMissions} completed, ${data.readiness.blockedMissions} blocked, ${data.readiness.openMissions} open`,
+    `Readiness: ${data.readiness.completedMissions}/${data.readiness.totalMissions} completed, ${data.readiness.blockedMissions} blocked, ${data.readiness.openMissions} open, ${data.readiness.parkedMissions} parked (outside the total)`,
     '',
     `KPIs: completion rate ${(data.lifecycle.kpis.completionRate * 100).toFixed(0)}%, avg cycle time ${data.lifecycle.kpis.avgCycleTimeDays !== null ? `${data.lifecycle.kpis.avgCycleTimeDays}d` : 'N/A'}, ${data.lifecycle.kpis.decisionCount} decisions, ${data.lifecycle.kpis.learningCount} learnings`,
     `Archived: ${data.lifecycle.decisionsArchived} decisions, ${data.lifecycle.learningsArchived} learnings`,
@@ -1348,13 +1441,24 @@ export function formatSprintCompleteForLLM(
     }
   }
 
-  if (result.warnings && result.warnings.length > 0) {
-    lines.push('');
-    lines.push('Warnings:');
-    for (const warning of result.warnings) {
-      lines.push(`- ${warning}`);
-    }
+  // s86-m02b: the next_steps TABLE reconciliation was structuredContent-ONLY — an agent reading
+  // content[0].text (src/index.ts) had never seen it, true or false. Making the count honest is
+  // the mission's highest-value fix and it was invisible in the channel agents actually read;
+  // `cleared N next step(s)` above is a DIFFERENT number (the per-context JSON arrays).
+  lines.push('');
+  lines.push(
+    `Next-steps table: ${data.nextStepsReconciled} auto-completed, ` +
+      `${data.nextStepsCarried} carried (blocked-linked), ` +
+      `${data.pendingFlagged.length} flagged for you`
+  );
+  for (const flagged of data.pendingFlagged) {
+    lines.push(
+      `  - #${flagged.id}${flagged.missionId ? ` (${flagged.missionId})` : ''}: ${flagged.content}`
+    );
   }
+
+  appendWriteFailures(lines, data.writeFailures);
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

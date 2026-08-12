@@ -14,7 +14,7 @@
 import { z } from 'zod';
 import path from 'path';
 import { createError, createSuccess, CmosErrors } from './errors';
-import type { CmosToolResult } from './types';
+import type { ActionParamMap, CmosToolResult } from './types';
 import {
   foreignDescriptor,
   frameForeignInline,
@@ -22,7 +22,13 @@ import {
   type ProvenanceDescriptor,
 } from '../../intelligence/provenance-frame';
 import { computeAuthState, type AuthState } from '../../auth/auth-state';
-import { DashboardClient, type DashboardMessage, type DirectoryProject } from './dashboard-client';
+import {
+  DashboardClient,
+  type DashboardMessage,
+  type DirectoryProject,
+  type ResolveAddressResult,
+} from './dashboard-client';
+import type { KeySource } from '../../intelligence/credential-store';
 import { CMOS_PROJECT_ROOT_ENV } from './client';
 import {
   assertSenderIdentityValid,
@@ -39,6 +45,7 @@ import {
   type SenderContext,
   type SenderResolutionSource,
 } from '../../intelligence/sender-context';
+import { appendWarnings } from './format-warnings';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -52,6 +59,33 @@ export const CMOS_MESSAGE_ACTIONS = [
   'whoami',
 ] as const;
 export type CmosMessageAction = (typeof CMOS_MESSAGE_ACTIONS)[number];
+
+/**
+ * s86-m04 — which published parameter applies to which action (see action-params.ts).
+ *
+ * `projectRoot` is on every action because `cmosMessage` consumes it once, before the switch, to
+ * resolve the dashboard client for all of them (cmos-message.ts:1175) — and `whoami` reads it
+ * directly on the early-return path above that. Like cmos_auth, this router is pass-through, so
+ * these lists are the keys each handler actually reads, not the keys it receives.
+ */
+export const CMOS_MESSAGE_ACTION_PARAMS: ActionParamMap<CmosMessageAction, CmosMessageParams> = {
+  send: [
+    'action',
+    'targetAddress',
+    'type',
+    'summary',
+    'body',
+    'senderProjectId',
+    'evidence',
+    'projectRoot',
+  ],
+  list: ['action', 'tab', 'status', 'limit', 'offset', 'projectRoot'],
+  get: ['action', 'messageId', 'projectRoot'],
+  respond: ['action', 'messageId', 'respondStatus', 'notes', 'projectRoot'],
+  ack: ['action', 'messageId', 'projectRoot'],
+  directory: ['action', 'projectRoot'],
+  whoami: ['action', 'projectRoot'],
+};
 
 export const VALID_MESSAGE_TYPES = [
   'backlog_request',
@@ -109,6 +143,12 @@ export interface MessageSendResult {
   senderAddress?: string;
   /** Dashboard-reported delivery/routing status (e.g. "queued", "delivered"). Absent when the dashboard has not yet exposed an ACK surface. */
   deliveryStatus?: string;
+  /** s86-m07: who the address ACTUALLY resolved to, from the pre-send resolve the handler was
+   *  already making and throwing away. Conditional-include, so a resolve body without these
+   *  keys reproduces the pre-m07 bytes exactly. `targetProjectName` is the display name — the
+   *  discriminator that distinguishes 'cmos-mcp' from 'CMOS-MCP Pro'. */
+  targetProjectId?: string;
+  targetProjectName?: string;
 }
 
 /** s78-m05: a DashboardMessage plus an additive {source, trust:'foreign'} descriptor.
@@ -157,7 +197,21 @@ export interface MessageSummary {
 
 export interface MessageListResult {
   messages: MessageSummary[];
-  unreadCount: number;
+  /**
+   * s86-m07 — RENAMED from `unreadCount`, because that name asserted a scope this number does
+   * not have. The dashboard's `unreadCount` is USER-WIDE across every project the caller owns,
+   * while `totalCount` and `messages` are scoped to this call's credential, tab and filters.
+   * Printed side by side under one name they produced a header that read "0 total, 7 unread"
+   * against an empty pending inbox — a badge that names no project and can never clear, which
+   * is how two Stage1 defect reports sat unread through a whole sprint.
+   */
+  unreadCountUserWide: number;
+  /**
+   * s86-m07 — the count this view can actually vouch for: returned rows with status 'pending'.
+   * On the inbox tab that is "unread by me"; on the sent tab it is "not yet responded to by the
+   * recipient". Client-computed from the rows in `messages`, so it never exceeds what was read.
+   */
+  unreadInThisView: number;
   totalCount: number;
   tab: string;
   statusFilter: string | null;
@@ -190,9 +244,18 @@ export interface MessageAckResult {
   ackedAt: string;
 }
 
-/** s78-m05: a DirectoryProject plus an additive provenance descriptor. Descriptions
- *  come from other users' project registrations and are untrusted foreign content. */
-export type FramedDirectoryProject = DirectoryProject & { provenance?: ProvenanceDescriptor };
+/** s78-m05: a DirectoryProject plus an additive provenance descriptor. Row content comes from
+ *  other users' project registrations and is untrusted foreign content.
+ *  s86-m07: plus `ambiguousWith` — computed here, never sent by the dashboard. */
+export type FramedDirectoryProject = DirectoryProject & {
+  provenance?: ProvenanceDescriptor;
+  /**
+   * s86-m07 — addresses under the SAME owner whose slug is a strict prefix of, or strictly
+   * prefixed by, this row's slug. NON-WIRE: computed client-side from the directory payload.
+   * Present only when non-empty.
+   */
+  ambiguousWith?: string[];
+};
 
 export interface MessageDirectoryResult {
   projects: FramedDirectoryProject[];
@@ -306,6 +369,12 @@ export const cmosMessageSchema = z
 export type CmosMessageParams = z.infer<typeof cmosMessageSchema>;
 
 interface InternalCmosMessageParams extends CmosMessageParams {
+  /**
+   * @internal MCP-boundary seam: the roots the CLIENT advertised, read by src/index.ts from the
+   * transport (`getClientProjectRoots()`) and passed inward to resolve the sender. An agent cannot
+   * supply it — it describes the caller, not the request — so it is deliberately absent from the
+   * cmos_message inputSchema. Same seam, same reason, as cmos_agent_onboard's `advertisedRoots`.
+   */
   advertisedRoots?: readonly string[];
 }
 
@@ -375,13 +444,13 @@ export const cmosMessageToolDefinition = {
         description: 'Filter by message status for list action',
       },
       limit: {
-        type: 'number',
+        type: 'integer',
         minimum: 1,
         maximum: 100,
         description: 'Max messages to return (default 20)',
       },
       offset: {
-        type: 'number',
+        type: 'integer',
         minimum: 0,
         description: 'Pagination offset for list (SQL-side, dashboard m05). Omit for page 0.',
       },
@@ -624,6 +693,153 @@ export async function getWhoamiDiagnostics(
   };
 }
 
+// ─── s86-m07: the address-ambiguity rule ─────────────────────────────────────
+
+/**
+ * The slug a directory row is addressed by. Prefers the dashboard's own `slug`; falls back to
+ * the address path so a lean row (pre-cutover, slug absent) still participates in the rule
+ * rather than being silently excluded from it.
+ */
+function slugOfProject(project: DirectoryProject): string {
+  if (project.slug) return project.slug;
+  const parts = project.address.replace('cmos://', '').split('/');
+  return parts[1] ?? '';
+}
+
+/**
+ * s86-m07 — the ambiguity relation, stated as a RULE over the payload rather than a list of
+ * known-colliding names: two slugs are prefix siblings when one is a STRICT prefix of the other.
+ *
+ * STRICT ON BOTH SIDES IS LOAD-BEARING. Equal slugs under one owner are a duplicate
+ * registration, not an ambiguity — the operator has one name that resolves one way, and
+ * flagging it would report a different defect under this one's wording.
+ *
+ * WHY PREFIX, AND NOT DORMANCY (fork f15, closed at plan time — do not re-open). The sender did
+ * not pick the dead address for lack of an activity timestamp; they picked it because two
+ * addresses were indistinguishable and the dead one looked MORE correct (npm package
+ * @aquex/cmos-mcp, repo kneelinghorse/cmos-mcp, tool prefix cmos_*). Dormancy is also
+ * unbuildable here: no dashboard endpoint carries last-activity, /api/projects/{id}/identity
+ * reports status "active_development" for the dormant project, `createdAt` is the REGISTRATION
+ * date (it would flag every healthy long-lived project), and a sent-history approximation is
+ * sender-scoped and silent on first contact. This predicate needs nothing from the dashboard
+ * and fires on exactly the case that bit us.
+ */
+function isPrefixSibling(a: string, b: string): boolean {
+  if (!a || !b || a === b) return false;
+  return a.startsWith(b) || b.startsWith(a);
+}
+
+/** Addresses under `owner` whose slug is a prefix sibling of `slug`, deduplicated. */
+function prefixSiblingAddresses(
+  projects: readonly DirectoryProject[],
+  owner: string,
+  slug: string
+): string[] {
+  const out = new Set<string>();
+  for (const candidate of projects) {
+    if (candidate.owner !== owner) continue;
+    if (isPrefixSibling(slugOfProject(candidate), slug)) out.add(candidate.address);
+  }
+  return [...out];
+}
+
+/** `{owner, slug}` of a validated cmos:// address. */
+function addressParts(address: string): { owner: string; slug: string } {
+  const parts = address.replace('cmos://', '').split('/');
+  return { owner: parts[0] ?? '', slug: parts[1] ?? '' };
+}
+
+/**
+ * s86-m07 — the directory rows the SEND path reads for its ambiguity advisory, memoized per
+ * dashboard ORIGIN.
+ *
+ * WHY MEMOIZED RATHER THAN FETCHED PER SEND. The relation is defined over OTHER projects'
+ * slugs, so no local pre-filter can decide "this send cannot collide" without the directory —
+ * a per-send fetch would add a third round-trip to every send (resolve + directory + post).
+ * Keyed by ORIGIN and not by client instance because `cmosMessage` builds a fresh
+ * DashboardClient per call, so an instance key would never hit; the route is `/public`, so two
+ * credentials against one origin see the same rows. The TTL is deliberately short: a stale
+ * sibling claim is a lie of the same family this mission exists to remove.
+ */
+const DIRECTORY_CACHE_TTL_MS = 60_000;
+const directoryCache = new Map<string, { fetchedAt: number; projects: DirectoryProject[] }>();
+
+/** Test hook: drop the memo so one case cannot inherit another's directory. */
+export function __resetDirectoryCacheForTesting(): void {
+  directoryCache.clear();
+}
+
+async function loadDirectoryForAmbiguity(client: DashboardClient): Promise<DirectoryProject[]> {
+  const origin = client.dashboardOrigin;
+  const hit = directoryCache.get(origin);
+  const now = Date.now();
+  if (hit && now - hit.fetchedAt < DIRECTORY_CACHE_TTL_MS) return hit.projects;
+
+  // A lookup failure is NOT a send failure: by the time this runs the message is DELIVERED, so
+  // a throw here would report a sent message as a failed tool call and invite a double-send.
+  // Say nothing about ambiguity rather than inventing a claim or losing an accepted send. The
+  // catch covers a transport throw and any caller whose client does not answer in the envelope
+  // shape — deliberately broad, because nothing about an advisory is worth a lost receipt.
+  let projects: DirectoryProject[];
+  try {
+    const result = await client.listDirectory();
+    if (!result?.success || !result.data) return [];
+    projects = result.data.projects;
+  } catch {
+    return [];
+  }
+
+  directoryCache.set(origin, { fetchedAt: now, projects });
+  return projects;
+}
+
+/** `'CMOS-MCP Pro' (cmos://derek/cmos-mcp-pro)` — name when the directory knows one, address always. */
+function labelForAddress(projects: readonly DirectoryProject[], address: string): string {
+  const match = projects.find((p) => p.address === address);
+  return match?.name ? `'${match.name}' (${address})` : address;
+}
+
+/**
+ * s86-m07 — the NON-BLOCKING send advisory. Returns the warnings to ride the envelope; never
+ * an error, and no caller may turn a non-empty return into a failed send. The message is
+ * already delivered when this runs.
+ */
+async function buildTargetAmbiguityWarnings(
+  client: DashboardClient,
+  targetAddress: string,
+  resolved: ResolveAddressResult['resolved'] | undefined
+): Promise<string[]> {
+  const warnings: string[] = [];
+  const typed = addressParts(targetAddress);
+  const resolvedSlug = resolved?.projectSlug;
+  const resolvedName = resolved?.projectName;
+  const resolvedId = resolved?.projectId;
+  const idSuffix = resolvedId ? ` (${resolvedId})` : '';
+
+  // (a) The dashboard resolved the address to a project the caller did not name. Free — this
+  //     needs nothing beyond the resolve response handleSend was already discarding.
+  if (resolvedSlug && typed.slug && resolvedSlug !== typed.slug) {
+    warnings.push(
+      `target address names '${typed.slug}' but resolves to project '${resolvedName ?? resolvedSlug}'${idSuffix} — confirm this is the intended recipient.`
+    );
+  }
+
+  // (b) The resolved target shares a slug prefix with another project under the same owner.
+  const slug = resolvedSlug ?? typed.slug;
+  if (!slug || !typed.owner) return warnings;
+
+  const projects = await loadDirectoryForAmbiguity(client);
+  const siblings = prefixSiblingAddresses(projects, typed.owner, slug);
+  if (siblings.length > 0) {
+    const rendered = siblings.map((address) => labelForAddress(projects, address)).join(', ');
+    warnings.push(
+      `target resolves to project '${resolvedName ?? slug}'${idSuffix}, which shares a slug prefix with ${rendered} — confirm this is the intended recipient.`
+    );
+  }
+
+  return warnings;
+}
+
 /**
  * Fetch the project directory and return addresses that are close matches
  * to the given target. Uses simple substring matching on address components.
@@ -790,7 +1006,20 @@ async function handleSend(
   // Forward dashboard-reported routing/delivery status when present. Absence here
   // is expected today and does not imply failure; see DashboardMessage.deliveryStatus.
   if (response.deliveryStatus) out.deliveryStatus = response.deliveryStatus;
-  return createSuccess<MessageSendResult>(out);
+
+  // s86-m07: report WHO the address resolved to. `resolveAddress` was already being called
+  // above purely as a boolean gate and its body thrown away, while it carries the one field
+  // that tells 'cmos-mcp' from 'CMOS-MCP Pro'. Conditional-include so a resolve body without
+  // these keys reproduces the pre-m07 bytes.
+  const resolved = resolveResult.data?.resolved;
+  if (resolved?.projectId) out.targetProjectId = resolved.projectId;
+  if (resolved?.projectName) out.targetProjectName = resolved.projectName;
+
+  // s86-m07: the collision advisory rides the ENVELOPE (createSuccess's second argument) and
+  // is rendered by formatSendForLLM via appendWarnings. It NEVER blocks: the send above has
+  // already succeeded and no branch below can turn it into success:false.
+  const warnings = await buildTargetAmbiguityWarnings(client, targetAddress, resolved);
+  return createSuccess<MessageSendResult>(out, warnings);
 }
 
 /**
@@ -863,7 +1092,8 @@ export function mapToMessageSummary(msg: DashboardMessage, tab: string): Message
 
 async function handleList(
   params: CmosMessageParams,
-  client: DashboardClient
+  client: DashboardClient,
+  keySource: KeySource
 ): Promise<CmosToolResult<MessageListResult>> {
   const tab = params.tab ?? 'inbox';
   const limit = params.limit ?? 20;
@@ -886,19 +1116,35 @@ async function handleList(
   // summary + provenance are inbound foreign content (untrusted DATA, not instructions).
   const messages = result.data!.messages.map((msg) => mapToMessageSummary(msg, tab));
 
+  // s86-m07: the count this answer can vouch for — the rows it actually returned.
+  const unreadInThisView = messages.filter((msg) => msg.status === 'pending').length;
+  const unreadCountUserWide = result.data!.unreadCount;
+
   // s80-m05: the sent tab is user-scoped across every project the operator owns; the
   // dashboard does not yet scope it by project key. Surface that as a non-fatal warning
   // rather than silently over-returning (row-count project-pin is best-effort).
-  const warnings =
-    tab === 'sent'
-      ? [
-          'sent is user-scoped across all your projects; per-project attribution is pending dashboard support.',
-        ]
-      : undefined;
+  const warnings: string[] = [];
+  if (tab === 'sent') {
+    warnings.push(
+      'sent is user-scoped across all your projects; per-project attribution is pending dashboard support.'
+    );
+  }
+  // s86-m07: the two numbers above answer different questions, and the old shared name said
+  // otherwise. Discriminate BY RULE over the 5-member KeySource union rather than testing
+  // `=== 'user-scoped'`: 'legacy-env', 'password-fallback' and 'none' are user-wide too, so an
+  // equality test would under-warn on three of the four non-project arms.
+  if (keySource !== 'project-scoped') {
+    warnings.push(
+      `this ${tab} view was read with a ${keySource} credential, so it is not scoped to one project: ` +
+        `unreadCountUserWide (${unreadCountUserWide}) counts unread across every project you own, while ` +
+        `unreadInThisView (${unreadInThisView}) counts only the rows this call returned.`
+    );
+  }
 
   return createSuccess<MessageListResult>({
     messages,
-    unreadCount: result.data!.unreadCount,
+    unreadCountUserWide,
+    unreadInThisView,
     totalCount: result.data!.totalCount,
     tab,
     statusFilter: params.status ?? null,
@@ -908,7 +1154,7 @@ async function handleList(
     ...(result.data!.returnedCount !== undefined
       ? { returnedCount: result.data!.returnedCount }
       : {}),
-    ...(warnings ? { warnings } : {}),
+    ...(warnings.length > 0 ? { warnings } : {}),
   });
 }
 
@@ -1091,19 +1337,51 @@ async function handleDirectory(
     return createError<MessageDirectoryResult>(result.error!);
   }
 
-  // s78-m05: directory descriptions are authored by other users — tag each with a
-  // foreign-provenance descriptor (own-project entries stay 'local').
-  const framedProjects: FramedDirectoryProject[] = result.data!.projects.map((p) => ({
-    ...p,
-    provenance: p.isOwner
-      ? { source: p.address, trust: 'local' as const }
-      : foreignDescriptor(p.address),
-  }));
+  const projects = result.data!.projects;
+  const warnings: string[] = [];
 
-  return createSuccess<MessageDirectoryResult>({
-    projects: framedProjects,
-    totalCount: result.data!.totalCount,
+  // s86-m07: GET /api/projects/directory/public NEVER returns isOwner, so before this the
+  // ternary below framed every row — including the operator's own project — as trust:'foreign',
+  // and the one signal that says "this address is yours" was always absent. /api/projects/me is
+  // the only route that carries it. This second call belongs to the discovery-only `directory`
+  // action, where doubling latency is acceptable; it must NOT be added to the send path.
+  const mine = await client.getMyProjects();
+  let ownedIds: Set<string> | null = null;
+  if (mine.success && mine.data) {
+    ownedIds = new Set(mine.data.projects.map((p) => p.id).filter((id) => id.length > 0));
+  } else {
+    // Do not fail the directory call, and do not silently reclassify every row as foreign
+    // without saying so — a swallowed failure here is the defect class this mission fixes.
+    warnings.push(
+      `ownership signal degraded: GET /api/projects/me failed (${mine.error?.message ?? 'unknown error'}), ` +
+        `so isOwner is unset on every row below and none is claimed as yours. The directory rows themselves are unaffected.`
+    );
+  }
+
+  // s78-m05: directory rows are authored by other users — tag each with a foreign-provenance
+  // descriptor (own-project entries stay 'local').
+  const framedProjects: FramedDirectoryProject[] = projects.map((p) => {
+    const isOwner = ownedIds ? ownedIds.has(p.id) : p.isOwner;
+    const ambiguousWith = prefixSiblingAddresses(projects, p.owner, slugOfProject(p));
+    return {
+      ...p,
+      // Conditional-include: an unknown ownership stays ABSENT rather than becoming `false`,
+      // which would assert "not yours" on a degraded signal.
+      ...(isOwner !== undefined ? { isOwner } : {}),
+      ...(ambiguousWith.length > 0 ? { ambiguousWith } : {}),
+      provenance: isOwner
+        ? { source: p.address, trust: 'local' as const }
+        : foreignDescriptor(p.address),
+    };
   });
+
+  return createSuccess<MessageDirectoryResult>(
+    {
+      projects: framedProjects,
+      totalCount: result.data!.totalCount,
+    },
+    warnings
+  );
 }
 
 async function handleWhoami(
@@ -1144,12 +1422,15 @@ export async function cmosMessage(
   }
 
   const client = clientResult.data!.client;
+  // s86-m07: `keySource` was resolved here and discarded. `list` is the one action whose answer
+  // asserts a SCOPE, so it is the one handler that receives it — the other five are unchanged.
+  const keySource = clientResult.data!.keySource;
 
   switch (actionValue) {
     case 'send':
       return handleSend(params, client);
     case 'list':
-      return handleList(params, client);
+      return handleList(params, client, keySource);
     case 'get':
       return handleGet(params, client);
     case 'respond':
@@ -1177,6 +1458,8 @@ function formatSendForLLM(result: CmosToolResult<MessageSendResult>): string {
     `  Type: ${d.verb}/${d.object}`,
     `  Status: ${d.status}`,
   ];
+  appendWarnings(lines, result);
+
   return lines.join('\n');
 }
 
@@ -1186,7 +1469,12 @@ function formatListForLLM(result: CmosToolResult<MessageListResult>): string {
   }
 
   const d = result.data!;
-  const lines = [`Messages (${d.tab}) — ${d.totalCount} total, ${d.unreadCount} unread`];
+  // s86-m07: two numbers, two labels. The old single-name header could read "0 total, 7 unread"
+  // — a sentence that contradicts itself in seven characters.
+  const lines = [
+    `Messages (${d.tab}) — ${d.totalCount} total, ${d.unreadInThisView} unread in this view, ` +
+      `${d.unreadCountUserWide} unread user-wide (all your projects)`,
+  ];
 
   if (d.statusFilter) {
     lines[0] += ` (filtered: ${d.statusFilter})`;
@@ -1216,6 +1504,8 @@ function formatListForLLM(result: CmosToolResult<MessageListResult>): string {
   }
   lines.push('  (use cmos_message get, messageId=<id> for the full body)');
 
+  appendWarnings(lines, result);
+
   return lines.join('\n');
 }
 
@@ -1239,6 +1529,8 @@ function formatGetForLLM(result: CmosToolResult<MessageGetResult>): string {
     frameForeignInline(body, src),
   ];
   if (m.responseNotes) lines.push(`  Response notes: ${frameForeignInline(m.responseNotes, src)}`);
+  appendWarnings(lines, result);
+
   return lines.join('\n');
 }
 
@@ -1248,12 +1540,16 @@ function formatRespondForLLM(result: CmosToolResult<MessageRespondResult>): stri
   }
 
   const d = result.data!;
-  return [
+  const lines = [
     `Response recorded`,
     `  Message: ${d.messageId}`,
     `  Status: ${d.previousStatus} → ${d.currentStatus}`,
     `  Responded at: ${d.respondedAt}`,
-  ].join('\n');
+  ];
+
+  appendWarnings(lines, result);
+
+  return lines.join('\n');
 }
 
 function formatAckForLLM(result: CmosToolResult<MessageAckResult>): string {
@@ -1262,12 +1558,16 @@ function formatAckForLLM(result: CmosToolResult<MessageAckResult>): string {
   }
 
   const d = result.data!;
-  return [
+  const lines = [
     `Message acknowledged`,
     `  Message: ${d.messageId}`,
     `  Status: ${d.previousStatus} → ${d.status}`,
     `  Acked at: ${d.ackedAt}`,
-  ].join('\n');
+  ];
+
+  appendWarnings(lines, result);
+
+  return lines.join('\n');
 }
 
 function formatDirectoryForLLM(result: CmosToolResult<MessageDirectoryResult>): string {
@@ -1282,15 +1582,22 @@ function formatDirectoryForLLM(result: CmosToolResult<MessageDirectoryResult>): 
     lines.push('  No projects found');
   } else {
     for (const p of d.projects) {
-      // s78-m05: descriptions are foreign-authored — frame non-owner descriptions untrusted.
-      const desc = p.description
-        ? p.provenance?.trust === 'foreign'
-          ? ` — ${frameForeignInline(p.description, p.address)}`
-          : ` — ${p.description}`
+      // s86-m07: no description branch — GET /api/projects/directory/public returns no
+      // description for any row, so the old renderer was dead code guarding a dead field.
+      const label = p.ownerDisplayName
+        ? ` — ${frameForeignInline(p.ownerDisplayName, p.address)}`
         : '';
-      lines.push(`  ${p.address} (${p.id})${desc}`);
+      // createdAt is the REGISTRATION date. Labeled as such, never as activity or freshness.
+      const registered = p.createdAt ? `, registered ${p.createdAt}` : '';
+      const mine = p.isOwner ? ', yours' : '';
+      lines.push(`  ${p.address} (${p.id})${label}${registered}${mine}`);
+      if (p.ambiguousWith && p.ambiguousWith.length > 0) {
+        lines.push(`      AMBIGUOUS with ${p.ambiguousWith.join(', ')}`);
+      }
     }
   }
+
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }
@@ -1325,12 +1632,7 @@ function formatWhoamiForLLM(result: CmosToolResult<MessageWhoamiResult>): string
   );
   lines.push(`  ${CMOS_PROJECT_ROOT_ENV}: ${d?.serverInstall.envCmosProjectRoot ?? 'unset'}`);
 
-  if (result.warnings && result.warnings.length > 0) {
-    lines.push('Warnings:');
-    for (const warning of result.warnings) {
-      lines.push(`  - ${warning}`);
-    }
-  }
+  appendWarnings(lines, result);
 
   lines.push('Candidate trace:');
   if (!d || d.candidates.length === 0) {

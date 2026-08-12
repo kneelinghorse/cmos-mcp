@@ -44,7 +44,6 @@ export const CMOS_ERROR_CODES = {
   SPRINT_ID_EXISTS: 'SPRINT_ID_EXISTS',
   SPRINT_ALREADY_COMPLETED: 'SPRINT_ALREADY_COMPLETED',
   SPRINT_NOT_READY: 'SPRINT_NOT_READY',
-  BUILD_STALE: 'BUILD_STALE',
 
   // Validation errors
   INVALID_PARAMETER: 'INVALID_PARAMETER',
@@ -328,35 +327,15 @@ export const CmosErrors = {
     };
   },
 
-  /**
-   * Sprint 70 m02 — the enforced build-freshness gate fired at sprint close. Takes
-   * pre-extracted primitives (not the BuildFreshnessReport type) so errors.ts keeps
-   * no dependency on build-freshness.ts. `reason`/`staleFiles` describe the
-   * source-newer-than-dist signal; `serverStaleMessage` describes the
-   * running-server-on-stale-code signal. Either or both may be present.
-   */
-  buildStale(args: {
-    reason?: string;
-    staleFiles?: string[];
-    serverStaleMessage?: string | null;
-  }): CmosToolError {
-    const parts: string[] = [];
-    if (args.reason) {
-      parts.push(`Build is stale (${args.reason}).`);
-      if (args.staleFiles && args.staleFiles.length > 0) {
-        parts.push(`Source files newer than the last build: ${args.staleFiles.join(', ')}.`);
-      }
-    }
-    if (args.serverStaleMessage) {
-      parts.push(args.serverStaleMessage);
-    }
-    return {
-      code: CMOS_ERROR_CODES.BUILD_STALE,
-      message: parts.join(' ') || 'Build is stale.',
-      suggestion:
-        "Run 'npm run build' and restart the MCP server, then retry. If this is an intentional dist-only/packaged install, pass forceComplete:true to override.",
-    };
-  },
+  // s86-m05 — the `buildStale` factory was DELETED here, along with the BUILD_STALE code
+  // constant above. It built the error the s70-m02 enforced gate returned at sprint close; the
+  // s74 review retired that gate and build-freshness became advisory, leaving the factory with
+  // no caller in the tree and no test enumerating its code. Its `suggestion` told operators to
+  // "pass forceComplete:true to override" — a param the same package publishes as a no-op, so
+  // the one string still reachable by a reader prescribed a remedy that does nothing.
+  // `buildStaleAdvisory` in cmos-sprint-complete.ts is a DIFFERENT, LIVE function that produces
+  // the advisory warning; it is not affected. Recorded for the 2.6.0 CHANGELOG's Removed
+  // section: unreachable surface, not a working capability.
 
   dashboardUnreachable(url: string, reason: string): CmosToolError {
     return {
@@ -371,7 +350,15 @@ export const CmosErrors = {
     return {
       code: CMOS_ERROR_CODES.DASHBOARD_AUTH_FAILED,
       message: `Authentication failed for dashboard at '${url}'`,
-      suggestion: 'Verify CMOS_DASHBOARD_USER and CMOS_DASHBOARD_PASSWORD are correct',
+      // s86-m06 — the old suggestion told EVERY dashboard auth failure to verify
+      // CMOS_DASHBOARD_USER / CMOS_DASHBOARD_PASSWORD. Device code has been the
+      // default bootstrap since s57, so for most installs that named credentials
+      // they do not have and never mentioned the key that actually authenticated.
+      // This wording covers the arms that exist without asserting which one fired
+      // — all four call sites are inside the shared request paths, which do not
+      // know how their credential was resolved.
+      suggestion:
+        'Check which credential is in play with cmos_auth(action="list"); if the key was revoked or expired, run cmos_auth(action="login_init") + login_complete for a fresh user-scoped key, or cmos_auth(action="reissue", projectRoot=…) for a project-scoped one. Legacy installs: verify CMOS_DASHBOARD_API_KEY, or the CMOS_DASHBOARD_USER + CMOS_DASHBOARD_PASSWORD pair if you authenticate that way.',
     };
   },
 

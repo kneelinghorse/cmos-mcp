@@ -13,6 +13,7 @@ import { z } from 'zod';
 import { ProjectGraphRegistry } from '../../intelligence/project-graph-registry';
 import type { CmosToolResult } from './types';
 import { createError, createSuccess } from './errors';
+import { appendWarnings } from './format-warnings';
 
 /**
  * Validation result for a single project.
@@ -232,6 +233,8 @@ export function formatProjectValidateForLLM(result: CmosToolResult<ProjectValida
   if (stale.length > 0 || missing.length > 0) {
     lines.push('Tip: Use cmos_project(action="validate", prune=true) to remove invalid entries.');
   }
+
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

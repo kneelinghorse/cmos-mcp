@@ -29,6 +29,8 @@ import {
   decisionEmbeddingInput,
   learningEmbeddingInput,
 } from '../../intelligence/embedding-pipeline';
+import { appendWarnings, appendWriteFailures } from './format-warnings';
+import { checkWrite, type WriteFailure } from './write-guard';
 
 /**
  * Valid capture categories matching the Python session_runtime.
@@ -65,6 +67,12 @@ export interface CmosSessionCaptureResult {
   /** Message describing the result */
   message: string;
 
+  /**
+   * s86-m02b — writes this capture ATTEMPTED and the database REJECTED. Always present, `[]` on
+   * the happy path. The extraction flags above report what actually landed.
+   */
+  writeFailures: WriteFailure[];
+
   /** Associated mission ID (when missionId was provided) */
   missionId?: string;
 
@@ -74,16 +82,35 @@ export interface CmosSessionCaptureResult {
   /** Whether the decision was already extracted (present for decision category captures) */
   decisionAlreadyExtracted?: boolean;
 
+  /**
+   * s86-m02b — THE THIRD STATE. Present ONLY when the strategic_decisions INSERT was attempted
+   * and the database REJECTED it, carrying the DB error verbatim.
+   *
+   * There have always been two reported outcomes — "already exists" and "auto-extracted (n)" —
+   * and an `else` arm (present since Sprint 20) that set count=0 + alreadyExtracted=false on a
+   * FAILED insert. The formatter rendered that pair as "Decision Extraction: Extraction skipped".
+   * Nothing was skipped; an INSERT errored, and the answer positively asserted a false event.
+   * A third state is the fix — not a new branch, since the branch already existed.
+   */
+  decisionExtractionFailed?: string;
+
   /** Source chunk IDs for decision provenance tracking */
   sourceChunkIds?: string[];
 
   /** Evidence references stored with the decision */
   evidenceStored?: Array<{ type: string; id: string }>;
 
-  /** Whether a learning was extracted to the learnings table */
+  /**
+   * Whether a learning was extracted to the learnings table.
+   * s86-m02b: `false` now means ONLY "a duplicate already existed". A failed INSERT is reported
+   * through `writeFailures` instead of collapsing into this flag, which used to mean both.
+   */
   learningExtracted?: boolean;
 
-  /** Whether a constraint was extracted to the constraints table */
+  /**
+   * Whether a constraint was extracted to the constraints table.
+   * s86-m02b: same split as `learningExtracted` — `false` means duplicate, never "errored".
+   */
   constraintExtracted?: boolean;
 
   /** Supersession candidates detected for this decision */
@@ -313,6 +340,14 @@ export async function cmosSessionCapture(
 
   return withClientAsync(
     async (client) => {
+      // s86-m02b — SINK HOISTING. `warnings` was declared ~400 lines below, AFTER the decision
+      // INSERT, the learning arm and the constraint arm. Wiring their failures into it required
+      // moving the declaration here; the alternative — a second array — is explicitly forbidden.
+      const warnings: string[] = [];
+      // Writes attempted and rejected. Distinct from `warnings` (fork f09): a lost decision must
+      // not be buried beside "you forgot missionId".
+      const writeSink = { failures: [] as WriteFailure[] };
+
       // Find the session to capture to
       let sessionId = params.sessionId;
 
@@ -387,6 +422,7 @@ export async function cmosSessionCapture(
         content: string;
         context?: string;
         missionId?: string;
+        expiresAt?: string;
       } = {
         timestamp: now,
         category,
@@ -397,6 +433,14 @@ export async function cmosSessionCapture(
       }
       if (missionId) {
         newCapture.missionId = missionId;
+      }
+      // s86-m03: the SECOND of expiresAt's two independent drops. The direct-write path below
+      // already reads `params.expiresAt` into the constraints INSERT, so forwarding the router
+      // param alone makes THAT leg work — while cmos-session-complete.ts:589, which extracts
+      // `expiresAt` off this stored capture blob to build the constraint at session close, stays
+      // permanently undefined. A test exercising only capture would report the bug fixed.
+      if (params.expiresAt) {
+        newCapture.expiresAt = params.expiresAt;
       }
       captures.push(newCapture);
 
@@ -427,20 +471,28 @@ export async function cmosSessionCapture(
         missionId,
       });
 
-      client.execute(
-        `INSERT INTO session_events (ts, agent, mission, action, status, summary, next_hint, raw_event)
-         VALUES (?, ?, ?, 'capture', 'active', ?, ?, ?)`,
-        [now, agent, sessionId, summary, captureContext, rawEvent]
+      checkWrite(
+        client.execute(
+          `INSERT INTO session_events (ts, agent, mission, action, status, summary, next_hint, raw_event)
+           VALUES (?, ?, ?, 'capture', 'active', ?, ?, ?)`,
+          [now, agent, sessionId, summary, captureContext, rawEvent]
+        ),
+        warnings,
+        'capture event logging'
       );
 
       // Track session→mission association when missionId is provided
       if (missionId) {
         ensureSessionMissionsTable(client);
         // INSERT OR IGNORE: idempotent — won't duplicate if already linked
-        client.execute(
-          `INSERT OR IGNORE INTO session_missions (session_id, mission_id, linked_at, source)
-           VALUES (?, ?, ?, 'capture')`,
-          [sessionId, missionId, now]
+        checkWrite(
+          client.execute(
+            `INSERT OR IGNORE INTO session_missions (session_id, mission_id, linked_at, source)
+             VALUES (?, ?, ?, 'capture')`,
+            [sessionId, missionId, now]
+          ),
+          warnings,
+          'session-to-mission association'
         );
       }
 
@@ -452,6 +504,7 @@ export async function cmosSessionCapture(
         timestamp: now,
         captureCount: captures.length,
         message: `Captured ${category} in session '${sessionId}' (${captures.length} total captures)`,
+        writeFailures: writeSink.failures,
       };
 
       if (missionId) {
@@ -488,7 +541,8 @@ export async function cmosSessionCapture(
         // BEFORE the dedup SELECT/INSERT below so both reference the live column
         // name. Marker-gated fast no-op once applied; the later genesisColumns call
         // would also run it, but that is after this dedup query.
-        ensureAuthorNamespaceColumns(client);
+        // s86-m02b (fork f23): a half-applied rename must not be silent.
+        warnings.push(...(ensureAuthorNamespaceColumns(client).warnings ?? []));
 
         // Check for duplicate
         const existingResult = client.getOne<{ id: number }>(
@@ -537,7 +591,11 @@ export async function cmosSessionCapture(
             insertParams
           );
 
-          if (insertResult.success) {
+          // s86-m02b: routed through checkWrite rather than tested positively, so the DISCHARGE
+          // is attributable to THIS binding. `insertResult` is reused by the learning and
+          // constraint arms below; under a name-keyed rule their checkWrite calls silently
+          // satisfied this site too, and reverting this arm to the old lie left the gate green.
+          if (checkWrite(insertResult, writeSink, 'strategic_decisions.insert')) {
             resultData.decisionExtractionCount = 1;
             resultData.decisionAlreadyExtracted = false;
             if (evidenceArray && evidenceArray.length > 0) {
@@ -561,15 +619,23 @@ export async function cmosSessionCapture(
 
             // Sprint 66 m03 — write-path embedding hook
             if (newDecisionId !== undefined) {
-              await recordEmbedding(client, {
+              const embedResult = await recordEmbedding(client, {
                 type: 'decision',
                 id: newDecisionId,
                 inputText: decisionEmbeddingInput(content),
               });
+              warnings.push(...(embedResult.warnings ?? []));
             }
           } else {
+            // s86-m02b — THE FLAGSHIP FIX. This arm has existed since Sprint 20 and set
+            // count=0 + alreadyExtracted=false, which the formatter rendered as
+            // "Extraction skipped". Nothing was skipped: the INSERT errored and a strategic
+            // decision was LOST while the answer reported a clean, uneventful capture.
             resultData.decisionExtractionCount = 0;
             resultData.decisionAlreadyExtracted = false;
+            resultData.decisionExtractionFailed = `${insertResult.error?.code ?? 'DB_ERROR'}: ${
+              insertResult.error?.message ?? 'unknown'
+            }`;
           }
         }
       }
@@ -593,13 +659,24 @@ export async function cmosSessionCapture(
         }
 
         // s69-m04 — settle the author_* rename before the dedup SELECT/INSERT.
-        ensureAuthorNamespaceColumns(client);
+        // s86-m02b (fork f23): a half-applied rename must not be silent.
+        warnings.push(...(ensureAuthorNamespaceColumns(client).warnings ?? []));
 
         // Check for duplicate
         const existingLearning = client.getOne<{ id: number }>(
           'SELECT id FROM learnings WHERE content = ? AND author_session_id = ?',
           [content, sessionId]
         );
+
+        // s86-m02b (fork f10, read side): a FAILED dedup SELECT reads as "no duplicate" and
+        // falls through to the INSERT. Behaviour UNCHANGED — a duplicate learning is recoverable
+        // and detectable, unlike a lost write — but the operator is told.
+        if (!existingLearning.success) {
+          warnings.push(
+            `learning de-duplication check failed; a duplicate row may have been written: ` +
+              `${existingLearning.error?.code ?? 'DB_ERROR'} — ${existingLearning.error?.message ?? 'unknown'}`
+          );
+        }
 
         if (!existingLearning.success || !existingLearning.data) {
           const g = genesisColumns(client, 'learnings', getProjectId(client));
@@ -608,8 +685,11 @@ export async function cmosSessionCapture(
              VALUES (?, ?, 'active', ?, ?, ?, ?, ${g.placeholders})`,
             [content, null, sprintId, sessionId, missionId ?? null, now, ...g.values]
           );
-          resultData.learningExtracted = insertResult.success;
-          if (insertResult.success) {
+          // s86-m02b: `learningExtracted` used to be the INSERT's success flag, so `false` meant
+          // BOTH "a duplicate already existed" (the else arm below) and "the INSERT errored".
+          // The error case now has its own channel and the flag means only what it says.
+          resultData.learningExtracted = checkWrite(insertResult, writeSink, 'learnings.insert');
+          if (resultData.learningExtracted) {
             const lastId = insertResult.data?.lastInsertRowid;
             if (typeof lastId === 'number') {
               newlyInsertedLearningId = lastId;
@@ -619,11 +699,12 @@ export async function cmosSessionCapture(
 
             // Sprint 66 m03 — write-path embedding hook
             if (newlyInsertedLearningId !== undefined) {
-              await recordEmbedding(client, {
+              const embedResult = await recordEmbedding(client, {
                 type: 'learning',
                 id: newlyInsertedLearningId,
                 inputText: learningEmbeddingInput(content),
               });
+              warnings.push(...(embedResult.warnings ?? []));
             }
           }
         } else {
@@ -655,6 +736,14 @@ export async function cmosSessionCapture(
           [hash, 'active']
         );
 
+        // s86-m02b (fork f10, read side): same disclosure as the learning arm above.
+        if (!existingConstraint.success) {
+          warnings.push(
+            `constraint de-duplication check failed; a duplicate row may have been written: ` +
+              `${existingConstraint.error?.code ?? 'DB_ERROR'} — ${existingConstraint.error?.message ?? 'unknown'}`
+          );
+        }
+
         if (!existingConstraint.success || !existingConstraint.data) {
           const expiresAt = params.expiresAt ?? null;
           const g = genesisColumns(client, 'constraints', getProjectId(client));
@@ -663,7 +752,12 @@ export async function cmosSessionCapture(
              VALUES (?, 'active', ?, ?, ?, ?, ?, ${g.placeholders})`,
             [content, sessionId, sprintId, now, expiresAt, hash, ...g.values]
           );
-          resultData.constraintExtracted = insertResult.success;
+          // s86-m02b: same split as `learningExtracted` — `false` now means duplicate only.
+          resultData.constraintExtracted = checkWrite(
+            insertResult,
+            writeSink,
+            'constraints.insert'
+          );
         } else {
           resultData.constraintExtracted = false;
         }
@@ -681,6 +775,10 @@ export async function cmosSessionCapture(
           reaffirmedAt: now,
           excludeIds: newlyInsertedLearningId !== undefined ? [newlyInsertedLearningId] : undefined,
         });
+        // s86-m02b: a failed existence lookup classifies NOTHING, so the reaffirmed/missing
+        // lists above are INCOMPLETE rather than authoritative. That has to reach the answer, or
+        // the caller reads a partial corpus view as a complete one.
+        writeSink.failures.push(...reaffirm.writeFailures);
         if (reaffirm.explicitlyReaffirmedIds.length > 0) {
           resultData.explicitlyReaffirmedLearningIds = reaffirm.explicitlyReaffirmedIds;
         }
@@ -703,7 +801,6 @@ export async function cmosSessionCapture(
       //
       // Deliberately NOT on the next-step path: 96.4% of next_steps are born at session
       // complete when zero mission is in progress, so it would be pure noise.
-      const warnings: string[] = [];
       if (!missionId && (category === 'decision' || category === 'learning')) {
         const candidates = client.getMany<{ id: string; status: string }>(
           `SELECT id, status FROM missions
@@ -814,7 +911,12 @@ export function formatSessionCaptureForLLM(
   if (data.category === 'decision' && data.decisionExtractionCount !== undefined) {
     lines.push('');
 
-    if (data.decisionAlreadyExtracted) {
+    if (data.decisionExtractionFailed) {
+      // s86-m02b: the third state. This branch used to be unreachable-by-omission — a failed
+      // INSERT fell into the `else` below and was announced as "Extraction skipped".
+      lines.push(`**Decision Extraction**: FAILED — the decision was NOT stored.`);
+      lines.push(`  ${data.decisionExtractionFailed}`);
+    } else if (data.decisionAlreadyExtracted) {
       lines.push('**Decision Extraction**: Already exists in strategic decisions');
     } else if (data.decisionExtractionCount > 0) {
       lines.push(`**Decision Extraction**: Auto-extracted (${data.decisionExtractionCount})`);
@@ -836,6 +938,9 @@ export function formatSessionCaptureForLLM(
   if (data.sourceChunkIds?.length) {
     lines.push(`**Source Chunks**: ${data.sourceChunkIds.join(', ')}`);
   }
+
+  appendWriteFailures(lines, data.writeFailures);
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

@@ -12,6 +12,7 @@ import { z } from 'zod';
 import { ProjectGraphRegistry } from '../../intelligence/project-graph-registry';
 import type { CmosToolResult } from './types';
 import { createError, createSuccess, CmosErrors } from './errors';
+import { appendWarnings } from './format-warnings';
 
 /**
  * Result type for cmos_project_unregister.
@@ -136,6 +137,8 @@ export function formatProjectUnregisterForLLM(
   if (data.wasDefault) {
     lines.push('   Note: This was the default project. Default has been cleared.');
   }
+
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

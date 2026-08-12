@@ -14,6 +14,7 @@ import type { CmosToolResult, Mission, MissionStatus, Sprint } from './types';
 import { createError, createSuccess, CmosErrors } from './errors';
 import { getProjectId, tableHasColumn } from './genesis-columns';
 import { frameInlineIfForeign, frameTextIfForeign } from '../../intelligence/provenance-frame';
+import { appendWarnings } from './format-warnings';
 
 /**
  * Full mission details with parsed JSON fields.
@@ -389,6 +390,8 @@ export function formatMissionShowForLLM(result: CmosToolResult<MissionShowResult
   if (m.completedAt) {
     lines.push(`**Completed**: ${m.completedAt}`);
   }
+
+  appendWarnings(lines, result);
 
   return lines.join('\n').trim();
 }

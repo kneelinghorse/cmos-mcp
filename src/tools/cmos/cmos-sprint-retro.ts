@@ -14,6 +14,8 @@ import { withClient, type CmosDatabaseClient } from './client';
 import type { CmosToolResult } from './types';
 import { createError, createSuccess, CmosErrors } from './errors';
 import { buildUntaggedSessionAdvisory } from './untagged-advisory';
+import { appendWarnings } from './format-warnings';
+import { isParkedMissionStatus } from './terminal-status';
 
 /**
  * Mission summary in the retrospective.
@@ -71,9 +73,12 @@ export interface RetroSessionSummary {
  * KPIs computed for the retrospective.
  */
 export interface RetroKPIs {
+  /** s86-m08: EXCLUDES parked (Deferred/Dropped) work — the denominator completionRate uses. */
   totalMissions: number;
   completedMissions: number;
   blockedMissions: number;
+  /** s86-m08: Deferred + Dropped. Outside totalMissions, reported so it is not hidden. */
+  parkedMissions: number;
   completionRate: number;
   avgCycleTimeDays: number | null;
   totalDecisions: number;
@@ -173,6 +178,11 @@ export async function cmosSprintRetro(
       // Compute KPIs
       const completedMissions = missions.filter((m) => m.status === 'Completed');
       const blockedMissions = missions.filter((m) => m.status === 'Blocked');
+      // s86-m08: retro computes from a raw missions SELECT, NOT from sprint_summary, so the
+      // view fix does not reach it. Same rule, same source constant — a sprint is not scored
+      // against work it deliberately parked, and the parked count is reported beside it.
+      const parkedMissions = missions.filter((m) => isParkedMissionStatus(m.status));
+      const ownedMissions = missions.length - parkedMissions.length;
 
       const cycleTimes = completedMissions
         .filter((m) => m.startedAt && m.completedAt)
@@ -190,11 +200,12 @@ export async function cmosSprintRetro(
       const linkedSessions = sessions.filter((s) => s.linkedMissionIds.length > 0).length;
 
       const kpis: RetroKPIs = {
-        totalMissions: missions.length,
+        totalMissions: ownedMissions,
         completedMissions: completedMissions.length,
         blockedMissions: blockedMissions.length,
+        parkedMissions: parkedMissions.length,
         completionRate:
-          missions.length > 0 ? Math.round((completedMissions.length / missions.length) * 100) : 0,
+          ownedMissions > 0 ? Math.round((completedMissions.length / ownedMissions) * 100) : 0,
         avgCycleTimeDays,
         totalDecisions: decisions.length,
         totalLearnings: learnings.length,
@@ -478,6 +489,9 @@ export function formatSprintRetroForLLM(result: CmosToolResult<SprintRetroResult
   lines.push(
     `  Completion: ${data.kpis.completedMissions}/${data.kpis.totalMissions} (${data.kpis.completionRate}%)`
   );
+  if (data.kpis.parkedMissions > 0) {
+    lines.push(`  Parked (Deferred/Dropped, outside the rate above): ${data.kpis.parkedMissions}`);
+  }
   if (data.kpis.blockedMissions > 0) {
     lines.push(`  Blocked: ${data.kpis.blockedMissions}`);
   }
@@ -556,6 +570,8 @@ export function formatSprintRetroForLLM(result: CmosToolResult<SprintRetroResult
   lines.push('```');
   lines.push(data.commitSummary);
   lines.push('```');
+
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

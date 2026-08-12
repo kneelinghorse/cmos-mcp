@@ -125,7 +125,7 @@ The full walkthrough — install → config → init → first sprint/mission/se
 
 ## Tool surface
 
-cmos-mcp exposes 15 consolidated tools. Most use an `action` parameter to select the operation; `cmos_agent_onboard`, `cmos_status`, and `cmos_review` take only `projectRoot`.
+cmos-mcp exposes 15 consolidated tools. 12 use an `action` parameter to select the operation; `cmos_agent_onboard`, `cmos_status` and `cmos_review` take no `action`. [TOOL_REFERENCE.md](TOOL_REFERENCE.md) publishes one parameter table per action, so it says which parameters actually apply to a given call.
 
 | Tool                      | Purpose                                                                       |
 | ------------------------- | ----------------------------------------------------------------------------- |
@@ -190,9 +190,7 @@ CMOS_PROJECT_ROOT=/path/to/your/project
 # Optional — override the credential + registry directory. Default: ~/.config/cmos-mcp
 CMOS_CONFIG_DIR=/custom/path
 
-# Snapshot retention (defaults shown)
-CMOS_AUTO_SNAPSHOT=1
-CMOS_SNAPSHOT_RETENTION_DAYS=7
+# Snapshot retention (default shown)
 CMOS_MAX_SNAPSHOTS=50
 ```
 
@@ -211,22 +209,20 @@ Every tool returns a uniform envelope:
 }
 ```
 
-`code` is machine-readable, `message` is human-readable, `suggestion` is a concrete next step. Validation errors carry `valid_values`; state errors carry `current_state`.
+`code` is machine-readable, `message` is human-readable, `suggestion` is a concrete next step. Validation errors carry `validValues`; state errors carry `currentState`.
 
 ## Safety
 
-- **Soft deletes.** Records keep `deleted_at` timestamps; nothing is physically removed.
-- **Auto-snapshots.** Destructive ops snapshot first to `cmos.sqlite.bak-{timestamp}`.
 - **Append-only audit.** Session events, context snapshots, and mission history are immutable rows.
-- **Dry-run.** Mutating tools accept `dry_run: true` to preview without committing.
 - **Atomic credential writes.** `credentials.json` is written via temp-file + rename with 0600 permissions.
+- **Manual snapshots.** `cmos_db(action="snapshot")` copies the database on demand; `CMOS_MAX_SNAPSHOTS` caps how many are kept. There is no automatic snapshot before destructive operations, and no soft-delete net — `cmos_db(action="purge")` and `cmos_db(action="restore")` are genuinely destructive. See [SECURITY.md](SECURITY.md#backups--deletion--the-honest-reality).
+- **Dry-run where it exists.** `cmos_context(action="condense")` and `cmos_db(action="backfill")` accept `dryRun` to preview without committing. It is not a general property of mutating tools.
 
-## Known limits at v1.0
+## Known limits
 
 - Sync is checkpoint-driven, not continuous — manual `cmos_db(action="backfill")` flushes pending events to the dashboard.
-- Postgres mirror is one-way (SQLite is source of truth); pulling state down from a different machine requires a fresh sign-in plus a backfill.
+- SQLite is the source of truth and the Postgres mirror is a mirror. To bring state down, `cmos_db(action="clone")` bootstraps a fresh machine from dashboard state and `cmos_db(action="pull")` merges events since your last cursor.
 - Cross-user messaging on the dashboard is paid-tier; same-user (multi-device) messaging is free.
-- 28 evergreen learnings flagged in the staleness audit are scheduled for an institutional-rule sweep — they don't affect tool behavior.
 
 ## Documentation
 

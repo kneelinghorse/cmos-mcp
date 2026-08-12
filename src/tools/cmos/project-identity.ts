@@ -3,6 +3,7 @@
 
 import type { CmosDatabaseClient } from './client';
 import type { MigrationResult } from './schema-migrations';
+import { checkWrite } from './write-guard';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -237,18 +238,25 @@ export function ensureProjectIdentityRow(client: CmosDatabaseClient): MigrationR
     updated_at: now,
   };
 
+  const warnings: string[] = [];
   const insertResult = client.execute(
     `INSERT OR IGNORE INTO contexts (id, source_path, content, updated_at)
      VALUES ('project_identity', 'cmos/contexts/project-identity.json', ?, ?)`,
     [JSON.stringify(identity), now]
   );
 
-  const inserted = insertResult.success;
+  // s86-m02b: a failed seed was indistinguishable from "the row was already current" —
+  // `inserted` went false, `alreadyCurrent` went true and nothing named the DB error.
+  // The flags keep their meaning (reporting `alreadyCurrent: false` here would make the
+  // view handler claim it seeded a row that does not exist); the MigrationResult warnings
+  // channel (fork f23) carries the failure out.
+  const inserted = checkWrite(insertResult, warnings, 'contexts.project_identity seed');
   return {
     columnsAdded: [],
     indexesCreated: [],
     rowsUpdated: inserted ? 1 : 0,
     alreadyCurrent: !inserted,
+    warnings,
   };
 }
 
@@ -280,11 +288,17 @@ export function getProjectIdentity(client: CmosDatabaseClient): ProjectIdentityD
  *
  * @param client - Database client
  * @param updates - Partial fields to merge into the identity object
+ * @param warnings - s86-m02b sink. The boolean return says "no write happened" but cannot
+ *   say WHY — a missing row and an errored UPDATE both come back `false`. Callers that own
+ *   a warnings array should pass it so the DB error reaches the answer; the default keeps
+ *   every existing call site source-compatible. Same shape as `ensureColumn` in
+ *   schema-migrations.ts, the in-tree sink-parameter model for this mission.
  * @returns true if the row was updated, false if no change or not found
  */
 export function patchProjectIdentity(
   client: CmosDatabaseClient,
-  updates: Partial<ProjectIdentityData>
+  updates: Partial<ProjectIdentityData>,
+  warnings: string[] = []
 ): boolean {
   ensureProjectIdentityRow(client);
 
@@ -303,7 +317,7 @@ export function patchProjectIdentity(
     [JSON.stringify(merged), now]
   );
 
-  return result.success;
+  return checkWrite(result, warnings, 'project_identity patch (contexts.content)');
 }
 
 /**
@@ -415,5 +429,14 @@ export function applyProjectIdentityFieldUpdate(
     [JSON.stringify(obj), now]
   );
 
-  return { success: result.success, message: result.success ? undefined : result.error?.message };
+  // s86-m02b: `{success, message}` IS this function's warnings channel — the handler at
+  // cmos-context-project-identity.ts renders `message` straight into createError — so
+  // route the failure through checkWrite instead of hand-rolling the text, and never hand
+  // back a `success: false` with an undefined message (`result.error?.message` alone can be).
+  const writeWarnings: string[] = [];
+  if (!checkWrite(result, writeWarnings, `project_identity.${path}`)) {
+    return { success: false, message: writeWarnings[0] };
+  }
+
+  return { success: true };
 }

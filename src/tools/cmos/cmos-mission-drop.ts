@@ -12,6 +12,8 @@ import {
   VALID_STATE_TRANSITIONS,
 } from './errors';
 import { ensureMissionTimestamps } from './schema-migrations';
+import { appendWarnings } from './format-warnings';
+import { checkWrite } from './write-guard';
 
 /**
  * Result of dropping a mission.
@@ -59,6 +61,8 @@ export async function cmosMissionDrop(
 
   return withClientValidated(
     (client) => {
+      const warnings: string[] = [];
+
       const missionResult = client.getOne<Mission>(
         `SELECT id, status, name, domain_fields FROM missions WHERE id = ?`,
         [missionId]
@@ -159,18 +163,21 @@ export async function cmosMissionDrop(
         ]
       );
 
-      if (!eventResult.success) {
+      if (!checkWrite(eventResult, warnings, 'mission drop event logging')) {
         console.warn('Failed to log mission drop event:', eventResult.error);
       }
 
-      return createSuccess<MissionDropResult>({
-        missionId,
-        previousStatus: currentStatus,
-        currentStatus: targetStatus,
-        reason: params.reason ?? null,
-        message: `Mission '${missionId}' has been dropped`,
-        droppedAt: now,
-      });
+      return createSuccess<MissionDropResult>(
+        {
+          missionId,
+          previousStatus: currentStatus,
+          currentStatus: targetStatus,
+          reason: params.reason ?? null,
+          message: `Mission '${missionId}' has been dropped`,
+          droppedAt: now,
+        },
+        warnings
+      );
     },
     { projectRoot: params.projectRoot }
   );
@@ -211,13 +218,7 @@ export function formatMissionDropForLLM(result: CmosToolResult<MissionDropResult
 
   // Surface warnings (incl. the m05 collab-sync warnings the transition dispatcher
   // folds in: lock contention, a superseded conflict, or a non-fatal broker-sync error).
-  if (result.warnings && result.warnings.length > 0) {
-    lines.push('');
-    lines.push('Warnings:');
-    for (const warning of result.warnings) {
-      lines.push(`- ${warning}`);
-    }
-  }
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

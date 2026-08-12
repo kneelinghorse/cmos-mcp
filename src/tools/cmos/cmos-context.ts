@@ -10,7 +10,7 @@
 
 import { z } from 'zod';
 import { createError, CmosErrors } from './errors';
-import type { CmosToolResult } from './types';
+import type { ActionParamMap, CmosToolResult } from './types';
 import {
   cmosContextView,
   formatContextViewForLLM,
@@ -83,6 +83,59 @@ export const CMOS_CONTEXT_ACTIONS = [
 
 export type CmosContextAction = (typeof CMOS_CONTEXT_ACTIONS)[number];
 
+/**
+ * s86-m04 — which published parameter applies to which action (see action-params.ts).
+ *
+ * `evergreen` belongs to `constraints` ALONE. It reaches `reaffirmConstraint` through the
+ * constraints sub-router (cmos-context.ts:606) and nowhere else, yet the flat table published it
+ * as an unconditional cmos_context parameter — an agent reading TOOL_REFERENCE.md could not tell
+ * that `cmos_context(action="view", evergreen=true)` does nothing at all.
+ */
+export const CMOS_CONTEXT_ACTION_PARAMS: ActionParamMap<CmosContextAction, CmosContextParams> = {
+  view: ['action', 'contextType', 'sizeOnly', 'compact', 'projectRoot'],
+  update: ['action', 'contextType', 'mode', 'arrayUpdates', 'fieldUpdates', 'since', 'projectRoot'],
+  condense: ['action', 'contextType', 'strategy', 'targetSizePercent', 'dryRun', 'projectRoot'],
+  snapshot: ['action', 'contextType', 'source', 'sessionId', 'projectRoot'],
+  history: [
+    'action',
+    'contextType',
+    'since',
+    'sessionId',
+    'until',
+    'page',
+    'pageSize',
+    'projectRoot',
+  ],
+  next_steps: [
+    'action',
+    'nextStepAction',
+    'nextStepStatus',
+    'nextStepIds',
+    'carryToSprint',
+    'missionId',
+    'projectRoot',
+  ],
+  constraints: [
+    'action',
+    'constraintAction',
+    'constraintStatus',
+    'constraintIds',
+    'constraintId',
+    'evergreen',
+    'stalenessThresholdDays',
+    'projectRoot',
+  ],
+  search: [
+    'action',
+    'query',
+    'searchLimit',
+    'searchTypes',
+    'recencyWeight',
+    'statusFilter',
+    'projectRoot',
+  ],
+};
+
 export type CmosContextResult =
   | CmosContextViewResult
   | CmosContextUpdateResult
@@ -99,7 +152,8 @@ export const cmosContextSchema = z
   .object({
     action: z
       .enum(CMOS_CONTEXT_ACTIONS)
-      .describe('Context action: view | update | condense | snapshot | history | next_steps'),
+      // s86-m04: DERIVED. Listed 6 of 8 — omitted BOTH constraints and search.
+      .describe(`Context action: ${CMOS_CONTEXT_ACTIONS.join(' | ')}`),
     contextType: z
       .enum(['master_context', 'project_context', 'project_identity'])
       .optional()
@@ -109,10 +163,15 @@ export const cmosContextSchema = z
     compact: z.boolean().optional().describe('Return compact view for view action'),
     // update params
     mode: z.enum(['aggregate', 'manual']).optional().describe('Update mode for update action'),
+    // s86-m04: `decisions_made` and `learnings` DELETED. Dead since Sprint 51's blob reduction —
+    // ContextArrayUpdates (cmos-context-update.ts) accepts only constraints + context_notes,
+    // hasArrayUpdates tests only those two, and a caller passing decisions_made ALONE got
+    // INVALID_PARAMETER from an error whose own suggestion told them to pass decisions_made.
+    // Removed rather than honoured: strategic_decisions and learnings have their own tables and
+    // tools, and re-adding blob duplication on a shape with no provenance columns would undo a
+    // deliberate prior decision.
     arrayUpdates: z
       .object({
-        decisions_made: z.array(z.string()).optional(),
-        learnings: z.array(z.string()).optional(),
         constraints: z.array(z.string()).optional(),
         context_notes: z.array(z.string()).optional(),
       })
@@ -224,13 +283,28 @@ export const cmosContextSchema = z
     searchTypes: z
       .array(z.enum(['decision', 'learning', 'mission', 'session']))
       .optional()
-      .describe('Content types to search for search action'),
+      // s86-m03 corrected the JSON side of this ('default: all' → the real ['decision'],
+      // cmos-context-search.ts:89); s86-m04 states the same thing on the zod side so the two
+      // descriptions of one parameter say one thing.
+      .describe("Content types to search for search action (default: ['decision'])"),
     recencyWeight: z
       .number()
       .min(0)
       .max(1)
       .optional()
       .describe('Recency boost weight 0–1 for search action (default: 0.2)'),
+    // s86-m03: DELIBERATELY NOT AN ENUM, and m04's enum-tightening pass must not tighten it.
+    // The filter spans two tables whose live status vocabularies differ (this store: decisions
+    // active/archived/stale/superseded, learnings active/archived/superseded) and CMOS ITSELF
+    // writes an out-of-enum value at staleness-detection.ts:494-495 (`SET status = 'stale'`),
+    // which exists in 7 of 18 registered stores. A closed enum here would manufacture, in brand-new
+    // surface, the exact published-enum-forbids-a-value-the-server-writes defect this sprint fixes.
+    statusFilter: z
+      .array(z.string())
+      .optional()
+      .describe(
+        "Status values to include in search results (default: ['active']). Applies to decision and learning results ONLY — ignored for mission and session results. An empty array disables status filtering entirely rather than matching nothing."
+      ),
     projectRoot: z
       .string()
       .optional()
@@ -244,7 +318,7 @@ export const cmosContextToolDefinition = {
   name: 'cmos_context',
   description:
     'Consolidated context tool with action parameter support. ' +
-    'Actions: view, update, condense, snapshot, history, next_steps, search. ' +
+    `Actions: ${CMOS_CONTEXT_ACTIONS.join(', ')}. ` +
     'Use contextType=project_identity to view/update the Layer 0 project description. ' +
     'Use action=search to run FTS5 relevance-scored retrieval over decisions, learnings, and missions.',
   inputSchema: {
@@ -253,8 +327,7 @@ export const cmosContextToolDefinition = {
       action: {
         type: 'string',
         enum: [...CMOS_CONTEXT_ACTIONS],
-        description:
-          'Context action: view | update | condense | snapshot | history | next_steps | constraints',
+        description: `Context action: ${CMOS_CONTEXT_ACTIONS.join(' | ')}`,
       },
       contextType: {
         type: 'string',
@@ -270,6 +343,23 @@ export const cmosContextToolDefinition = {
       },
       arrayUpdates: {
         type: 'object',
+        // s86-m04: these two properties were declared NOWHERE on the published side, so the JSON
+        // half of this param said nothing at all while zod named four keys and the handler
+        // accepted two. Deliberately NO `additionalProperties: false`: the zod object is `strip`,
+        // and closing the published side would manufacture a fresh strict-parity divergence of
+        // exactly the kind Part A just removed.
+        properties: {
+          constraints: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Constraint strings to append',
+          },
+          context_notes: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Context notes to append',
+          },
+        },
         description: 'Array fields to append for update action',
       },
       fieldUpdates: {
@@ -310,9 +400,9 @@ export const cmosContextToolDefinition = {
       source: { type: 'string', description: 'Snapshot source label for snapshot action' },
       sessionId: { type: 'string', description: 'Session ID for snapshot/history actions' },
       until: { type: 'string', description: 'ISO date upper bound for history action' },
-      page: { type: 'number', minimum: 1, description: 'Page number for history action' },
+      page: { type: 'integer', minimum: 1, description: 'Page number for history action' },
       pageSize: {
-        type: 'number',
+        type: 'integer',
         minimum: 1,
         maximum: 100,
         description: 'Page size for history action',
@@ -329,7 +419,7 @@ export const cmosContextToolDefinition = {
       },
       nextStepIds: {
         type: 'array',
-        items: { type: 'number' },
+        items: { type: 'integer', minimum: 1 },
         description: 'Next-step IDs to act on for complete/carry/drop',
       },
       carryToSprint: {
@@ -348,7 +438,7 @@ export const cmosContextToolDefinition = {
       },
       constraintIds: {
         type: 'array',
-        items: { type: 'number' },
+        items: { type: 'integer', minimum: 1 },
         description: 'Constraint IDs to archive',
       },
       missionId: {
@@ -357,7 +447,7 @@ export const cmosContextToolDefinition = {
           'Filter next_steps to rows stamped with this mission (#487 mission -> row trail)',
       },
       constraintId: {
-        type: 'number',
+        type: 'integer',
         minimum: 1,
         description:
           'Constraint ID to reaffirm (bumps last_reviewed_at without changing status; resets its staleness clock)',
@@ -368,7 +458,8 @@ export const cmosContextToolDefinition = {
           's84-m05: on reaffirm, set/clear the durable evergreen flag (true = never trip staleness review/count, for institutional rules). Omit to leave unchanged.',
       },
       stalenessThresholdDays: {
-        type: 'number',
+        type: 'integer',
+        minimum: 1,
         description: 'Staleness threshold in days for review (default: 30)',
       },
       query: {
@@ -376,7 +467,7 @@ export const cmosContextToolDefinition = {
         description: 'Search query string for search action',
       },
       searchLimit: {
-        type: 'number',
+        type: 'integer',
         minimum: 1,
         maximum: 50,
         description: 'Max results for search action (default: 5)',
@@ -384,13 +475,19 @@ export const cmosContextToolDefinition = {
       searchTypes: {
         type: 'array',
         items: { type: 'string', enum: ['decision', 'learning', 'mission', 'session'] },
-        description: 'Content types to search (default: all)',
+        description: "Content types to search (default: ['decision'])",
       },
       recencyWeight: {
         type: 'number',
         minimum: 0,
         maximum: 1,
         description: 'Recency boost weight 0–1 for search action (default: 0.2)',
+      },
+      statusFilter: {
+        type: 'array',
+        items: { type: 'string' },
+        description:
+          "Status values to include in search results (default: ['active']). Applies to decision and learning results ONLY — ignored for mission and session results. An empty array disables status filtering entirely rather than matching nothing.",
       },
       projectRoot: {
         type: 'string',
@@ -458,6 +555,11 @@ export async function cmosContext(
         limit: params.searchLimit,
         types: params.searchTypes as RankedResultType[] | undefined,
         recencyWeight: params.recencyWeight,
+        // s86-m03: ContextSearchParams.statusFilter has been functional since it was added
+        // (defaulted to ['active'] at cmos-context-search.ts:94, applied at
+        // fts5-retriever.ts:711-730/:744-762) but this router declared no way to set it and did
+        // not forward it — so search could NEVER see anything but status='active'.
+        statusFilter: params.statusFilter,
         projectRoot: params.projectRoot,
       });
     case 'condense':

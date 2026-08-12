@@ -501,6 +501,10 @@ export type {
 // Bundled session-opener digest (Sprint 64 m03)
 export { cmosReview, cmosReviewToolDefinition, formatReviewForLLM } from './cmos-review';
 
+// s86-m04: the per-action applicability contract, read by the TOOL_REFERENCE renderer from the
+// COMPILED barrel (scripts/generate-tool-reference.js) and by its freshness gate from src.
+export { CMOS_ACTION_PARAMS } from './action-params';
+
 export type {
   CmosReviewParams,
   CmosReviewResult,

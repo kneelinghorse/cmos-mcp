@@ -62,25 +62,23 @@
 This project uses CMOS for mission-based development workflow.
 
 **For contributors**:
-- Mission tracking: See `cmos/missions/backlog.yaml`
-- Project history: Stored in `cmos/db/cmos.sqlite`
-- Session logs: See `cmos/SESSIONS.jsonl`
+- Mission tracking, project history and session logs all live in `cmos/db/cmos.sqlite`
 
 **For AI agents**:
 - Application code guidance: See `agents.md` (this project root)
 - CMOS operations guidance: See `cmos/tiers/build.md`
 - Build session prompts: See `cmos/docs/build-session-prompt.md`
 
-**CMOS commands** (from project root):
-```bash
+**CMOS operations** (via the CMOS MCP tools, from an agent session):
+```
 # View current mission status
-./cmos/cli.py db show current
+cmos_mission(action="status")
 
 # View sprint progress
-./cmos/cli.py db show backlog
+cmos_sprint(action="show", sprintId="<id>")
 
 # Validate system integrity
-./cmos/cli.py validate health
+cmos_db(action="health")
 ```
 
 ---

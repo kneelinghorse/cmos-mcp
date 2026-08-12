@@ -230,7 +230,7 @@ CREATE TABLE IF NOT EXISTS learnings (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   content TEXT NOT NULL,
   category TEXT,            -- technical | process | agent-behavior | tooling
-  status TEXT NOT NULL DEFAULT 'active',  -- active | archived | superseded
+  status TEXT NOT NULL DEFAULT 'active',  -- active | archived | superseded | stale (staleness-detection.ts writes 'stale'; no CHECK constraint)
   sprint_id TEXT,
   author_session_id TEXT,  -- s69-m04: renamed from session_id (project-scoped session of origin)
   mission_id TEXT,
@@ -412,10 +412,11 @@ SELECT
   s.focus,
   s.start_date,
   s.end_date,
-  COUNT(m.id) AS total_missions,
+  COUNT(CASE WHEN m.id IS NOT NULL AND UPPER(COALESCE(m.status, '')) NOT IN ('DEFERRED', 'DROPPED') THEN 1 END) AS total_missions,
   COUNT(CASE WHEN m.status = 'Completed' THEN 1 END) AS completed_missions,
   COUNT(CASE WHEN m.status = 'Blocked' THEN 1 END) AS blocked_missions,
   COUNT(CASE WHEN m.status IN ('Current', 'In Progress') THEN 1 END) AS active_missions,
+  COUNT(CASE WHEN m.id IS NOT NULL AND UPPER(COALESCE(m.status, '')) IN ('DEFERRED', 'DROPPED') THEN 1 END) AS parked_missions,
   (
     SELECT COUNT(DISTINCT sd.id)
     FROM strategic_decisions sd

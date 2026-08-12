@@ -42,6 +42,27 @@ import path from 'path';
 import { ensureDir } from '../utils/fs';
 
 /**
+ * s86-m01 — write the one diagnostic this module emits (the registration-collision
+ * refusal in {@link ProjectGraphRegistry.register}) straight to fd 2 rather than
+ * through the global console object.
+ *
+ * This site has its OWN rationale, distinct from the checkpoint modules: it is
+ * genuinely reachable from the fire-and-forget checkpoint IIFE, and the chain is
+ * short — checkpoint-backfill.ts `await ProjectGraphRegistry.create()` →
+ * `create()` runs `maybeBackfill()` and `maybeIdentityBackfill()`, each of which
+ * calls `register()`, which reaches the refusal below. Both backfills are
+ * marker-gated (one-shot per registry file), so the reach is real but rare — which
+ * is exactly the profile of a late log that shows up as an intermittent CI exit 1
+ * rather than a reproducible failure. A plan-time critic asserted this site is not
+ * on the detached path; that assertion is refuted by the chain above.
+ *
+ * Guarded by tests/tools/cmos/detached-log-gate.test.ts Arm A.
+ */
+function log(line: string): void {
+  process.stderr.write(line + '\n');
+}
+
+/**
  * Override the default `~/.config/cmos-mcp` config directory. When set (and no
  * explicit `configDir` option is passed), the registry reads/writes here instead
  * of the user's home-config path. Used by Jest globalSetup to keep test runs from
@@ -276,7 +297,7 @@ export class ProjectGraphRegistry {
       // a legitimate move (incumbent path no longer resolves the id).
       const incumbentIdentity = readStoreIdentity(incumbent.store_path);
       if (incumbentIdentity?.project_id === input.project_id) {
-        console.error(
+        log(
           `[CMOS] project-graph collision refused: project_id '${input.project_id}' is held by ` +
             `live store '${incumbent.store_path}'; ignoring conflicting registration from ` +
             `'${resolvedPath}'. Re-key one of the two projects (metadata.project_id) to resolve.`

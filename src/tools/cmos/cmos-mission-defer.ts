@@ -13,6 +13,8 @@ import {
 } from './errors';
 import { ensureMissionTimestamps } from './schema-migrations';
 import { sanitizeContentField } from '../../intelligence/content-sanitizer';
+import { appendWarnings } from './format-warnings';
+import { checkWrite } from './write-guard';
 
 /**
  * Result of deferring a mission.
@@ -87,6 +89,8 @@ export async function cmosMissionDefer(
 
   return withClientValidated(
     (client) => {
+      const warnings: string[] = [];
+
       const missionResult = client.getOne<Mission>(
         `SELECT id, status, name, domain_fields FROM missions WHERE id = ?`,
         [missionId]
@@ -194,7 +198,7 @@ export async function cmosMissionDefer(
         ]
       );
 
-      if (!eventResult.success) {
+      if (!checkWrite(eventResult, warnings, 'mission defer event logging')) {
         console.warn('Failed to log mission defer event:', eventResult.error);
       }
 
@@ -208,7 +212,7 @@ export async function cmosMissionDefer(
           message: `Mission '${missionId}' has been deferred`,
           deferredAt: now,
         },
-        undefined,
+        warnings,
         inputSanitized
       );
     },
@@ -255,13 +259,7 @@ export function formatMissionDeferForLLM(result: CmosToolResult<MissionDeferResu
 
   // Surface warnings (incl. the m05 collab-sync warnings the transition dispatcher
   // folds in: lock contention, a superseded conflict, or a non-fatal broker-sync error).
-  if (result.warnings && result.warnings.length > 0) {
-    lines.push('');
-    lines.push('Warnings:');
-    for (const warning of result.warnings) {
-      lines.push(`- ${warning}`);
-    }
-  }
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

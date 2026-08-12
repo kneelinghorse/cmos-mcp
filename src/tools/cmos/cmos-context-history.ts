@@ -13,6 +13,7 @@ import { withClient } from './client';
 import type { CmosToolResult } from './types';
 import { createError, createSuccess } from './errors';
 import { tableHasColumn } from './genesis-columns';
+import { appendWarnings } from './format-warnings';
 
 /**
  * A single snapshot entry in the history.
@@ -345,6 +346,8 @@ export function formatContextHistoryForLLM(
     lines.push('');
     lines.push(`_More results available. Use page: ${data.page + 1} to see more._`);
   }
+
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

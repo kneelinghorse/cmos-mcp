@@ -23,6 +23,7 @@ import { applyPendingBlobMigrations } from './blob-migrations';
 import { getProjectId } from './genesis-columns';
 import { frameForeignText } from '../../intelligence/provenance-frame';
 import { isReadOnlyAgentSession } from './read-only-agent-guard';
+import { appendWarnings } from './format-warnings';
 
 /**
  * Parsed context content with type-safe structure.
@@ -213,7 +214,7 @@ export async function cmosContextView(
 
       // Get master_context if not filtered to project_context only
       if (!params.contextType || params.contextType === 'master_context') {
-        const masterResult = getContextById(client, 'master_context');
+        const masterResult = getContextById(client, 'master_context', warnings);
         if (masterResult) {
           masterContext = masterResult;
         }
@@ -221,7 +222,7 @@ export async function cmosContextView(
 
       // Get project_context if not filtered to master_context only
       if (!params.contextType || params.contextType === 'project_context') {
-        const projectResult = getContextById(client, 'project_context');
+        const projectResult = getContextById(client, 'project_context', warnings);
         if (projectResult) {
           projectContext = projectResult;
         }
@@ -262,9 +263,15 @@ export async function cmosContextView(
       // role (s78-m04): detectAndFlagStaleness UPDATEs decision/learning status — a store
       // write a read-only session must not perform. The view still renders; it simply does
       // not re-run staleness maintenance (that lands on the next non-review session).
+      //
+      // s86-m02b: an errored `UPDATE ... SET status='stale'` returns the same zero as a
+      // WHERE that matched nothing, so the counts below would report a clean staleness pass
+      // over a store where CMOS wrote no status at all. The read-only stand-in carries an
+      // empty `warnings` because it performs no write — there is nothing that can have failed.
       const stalenessResult = isReadOnlyAgentSession()
-        ? { totalStaleDecisions: 0, totalStaleLearnings: 0, threshold: 0 }
+        ? { totalStaleDecisions: 0, totalStaleLearnings: 0, threshold: 0, warnings: [] }
         : detectAndFlagStaleness(client);
+      warnings.push(...(stalenessResult.warnings ?? []));
       const staleness = {
         staleDecisions: stalenessResult.totalStaleDecisions,
         staleLearnings: stalenessResult.totalStaleLearnings,
@@ -374,8 +381,16 @@ export async function cmosContextView(
  * Applies any pending blob migrations before returning content.
  * Migrations are lazy, one-time, and self-healing — each project upgrades
  * automatically on the first read after a server update. See blob-migrations.ts.
+ *
+ * @param warnings - the handler's envelope sink. The migration's own writes (snapshot,
+ *   blob write-back, version bump) each report through it, so a HALF-applied migration
+ *   reaches the answer instead of being inferred from `migrated: true` (s86-m02b).
  */
-function getContextById(client: CmosDatabaseClient, contextId: string): ParsedContext | null {
+function getContextById(
+  client: CmosDatabaseClient,
+  contextId: string,
+  warnings: string[]
+): ParsedContext | null {
   const result = client.getOne<Context>(
     'SELECT id, source_path, content, updated_at FROM contexts WHERE id = ?',
     [contextId]
@@ -401,9 +416,10 @@ function getContextById(client: CmosDatabaseClient, contextId: string): ParsedCo
   // contexts/metadata (store writes). The view reads the pre-migration blob as-is;
   // the migration lands on the next non-review session.
   const migrationResult = isReadOnlyAgentSession()
-    ? { blob: parsedContent, migrated: false }
+    ? { blob: parsedContent, migrated: false, warnings: [] }
     : applyPendingBlobMigrations(client, contextId, ctx.content, parsedContent);
   parsedContent = migrationResult.blob;
+  warnings.push(...migrationResult.warnings);
 
   // Use post-migration content for size calculation when blob was pruned
   const contentForSize = migrationResult.migrated ? JSON.stringify(parsedContent) : ctx.content;
@@ -669,12 +685,11 @@ export function formatContextViewForLLM(result: CmosToolResult<CmosContextViewRe
     }
     lines.push(`Contexts found: ${data.contextCount}`);
 
-    if (result.warnings && result.warnings.length > 0) {
-      lines.push('');
-      for (const warning of result.warnings) {
-        lines.push(`⚠️ ${warning}`);
-      }
-    }
+    // s86-m02b: this formatter has THREE terminal returns (sizeOnly / compact / full) and the
+    // s86-m02 sweep — which asserts PRESENCE, not reachability — landed appendWarnings only in
+    // this one, so compact and full rendered nothing. Each branch now renders the channel, and
+    // because every branch returns, exactly one call runs per invocation.
+    appendWarnings(lines, result);
 
     return lines.join('\n');
   }
@@ -721,6 +736,8 @@ export function formatContextViewForLLM(result: CmosToolResult<CmosContextViewRe
         `Context size: ${data.contextSizes.totalSizeKb.toFixed(2)}KB (${data.contextSizes.totalSizeBytes} bytes)`
       );
     }
+
+    appendWarnings(lines, result);
 
     return lines.join('\n');
   }
@@ -809,6 +826,8 @@ export function formatContextViewForLLM(result: CmosToolResult<CmosContextViewRe
     lines.push('');
   }
   lines.push(`Total contexts: ${data.contextCount}`);
+
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

@@ -15,6 +15,7 @@ import { genesisColumns, getProjectId } from './genesis-columns';
 import { snapshotDedupPrunedFilter } from './schema-migrations';
 import type { CmosToolResult, Context } from './types';
 import { CmosErrors, createError, createSuccess, CMOS_ERROR_CODES } from './errors';
+import { appendWarnings } from './format-warnings';
 
 /**
  * Result of context snapshot operation.
@@ -254,6 +255,8 @@ export function formatContextSnapshotForLLM(
     '',
     data.message,
   ];
+
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

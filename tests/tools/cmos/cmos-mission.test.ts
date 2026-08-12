@@ -224,14 +224,17 @@ describe('cmos_mission', () => {
   });
 
   describe('CMOS_MISSION_ACTIONS', () => {
-    it('contains exactly 7 actions', () => {
-      expect(CMOS_MISSION_ACTIONS).toHaveLength(7);
+    it('contains exactly 8 actions', () => {
+      // s86-m08: 7 -> 8. `move` re-binds a mission to a different sprint — a CRUD field change,
+      // which is why it lives here and not among the six status transitions.
+      expect(CMOS_MISSION_ACTIONS).toHaveLength(8);
       expect([...CMOS_MISSION_ACTIONS]).toEqual([
         'list',
         'show',
         'status',
         'add',
         'update',
+        'move',
         'depends',
         'undepends',
       ]);

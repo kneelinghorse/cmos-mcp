@@ -25,6 +25,7 @@ import {
   resolveContextSizeSettings,
   type ContextSizeMetrics,
 } from './context-retention';
+import { appendWarnings } from './format-warnings';
 
 /**
  * Per-section condensation detail.
@@ -893,6 +894,8 @@ export function formatContextCondenseForLLM(
 
   lines.push('');
   lines.push(data.message);
+
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

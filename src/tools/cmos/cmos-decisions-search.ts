@@ -14,6 +14,7 @@ import { getProjectId } from './genesis-columns';
 import { frameForeignText } from '../../intelligence/provenance-frame';
 import { loadUnifiedDecisionRecords, type DecisionSource } from './decision-memory';
 import { HybridRetriever } from './fts5-retriever';
+import { appendWarnings } from './format-warnings';
 
 /**
  * Strategic decision search result.
@@ -362,6 +363,8 @@ export function formatDecisionsSearchForLLM(
     lines.push(`  Created: ${r.createdAt} | Relevance: ${r.relevance}`);
     lines.push('');
   }
+
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

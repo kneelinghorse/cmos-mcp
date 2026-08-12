@@ -21,6 +21,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import Database from 'better-sqlite3';
 import { connectStdioServer, textOf } from '../tests/e2e/stdio-harness';
 
 const REPO_ROOT = path.resolve(__dirname, '..');
@@ -29,6 +30,41 @@ const PKG = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'ut
   name: string;
   version: string;
 };
+
+/**
+ * The `sprint_summary` definition as it stood BEFORE s86-m08 — read verbatim from the live store
+ * on 2026-08-12, while that store was still un-migrated.
+ *
+ * Kept here as a FIXTURE, not as a spec: it exists so the real-store migration proof below can
+ * downgrade its tmpdir copy to a known pre-migration state on every run instead of depending on
+ * some store somewhere still being old. Nothing reads it as the current contract — the live
+ * definition is `SPRINT_SUMMARY_VIEW_SQL` in src/tools/cmos/schema.ts, and the whole point of the
+ * check is that the shipped dist replaces THIS with THAT.
+ *
+ * Its distinguishing property, and the one the assertion turns on: `total_missions` is a bare
+ * `COUNT(m.id)` with no status filter, so Deferred and Dropped missions sit in the denominator —
+ * the defect s86-m08 fixed — and there is no `parked_missions` column at all.
+ */
+const PRE_S86M08_SPRINT_SUMMARY_SQL = `CREATE VIEW sprint_summary AS
+SELECT
+  s.id AS sprint_id,
+  s.title,
+  s.status,
+  s.focus,
+  s.start_date,
+  s.end_date,
+  COUNT(m.id) AS total_missions,
+  COUNT(CASE WHEN m.status = 'Completed' THEN 1 END) AS completed_missions,
+  COUNT(CASE WHEN m.status = 'Blocked' THEN 1 END) AS blocked_missions,
+  COUNT(CASE WHEN m.status IN ('Current', 'In Progress') THEN 1 END) AS active_missions,
+  (
+    SELECT COUNT(DISTINCT sd.id)
+    FROM strategic_decisions sd
+    WHERE sd.sprint_id = s.id
+  ) AS decisions_count
+FROM sprints s
+LEFT JOIN missions m ON m.sprint_id = s.id
+GROUP BY s.id, s.title, s.status, s.focus, s.start_date, s.end_date`;
 
 const tmpDirs: string[] = [];
 function mkTmp(prefix: string): string {
@@ -603,6 +639,191 @@ async function main(): Promise<void> {
       `decisions=${JSON.stringify(m04Empty?.decisions)}`
     );
 
+    // --- s86-m02: the ENVELOPE warnings channel (CmosToolResult.warnings) has to be readable
+    //     in content[0].text, not just present in structuredContent. Before this mission 57 of
+    //     76 leaf formatters never rendered it, so a warning could ship fully populated and
+    //     stay invisible to every agent — which is exactly how s85-m04's own missionId advisory
+    //     shipped invisible in 2.5.0. Checking structuredContent.warnings ALONE is what let that
+    //     happen, so each check below asserts BOTH sides and the text side is the load-bearing one.
+    const m02Dir = mkTmp('cmos-verify-s86m02-');
+    await h.callOk('cmos_project', {
+      action: 'init',
+      projectRoot: m02Dir,
+      name: 's86-m02 verify',
+    });
+    await h.callOk('cmos_sprint', {
+      action: 'add',
+      sprintId: 'sp-open',
+      title: 'Open sprint',
+      focus: 'verify the warnings channel',
+      projectRoot: m02Dir,
+    });
+    await h.callOk('cmos_mission', {
+      action: 'add',
+      missionId: 'wm-1',
+      name: 'An open mission',
+      objective: 'exist, so the missionId advisory has something to name',
+      sprintId: 'sp-open',
+      projectRoot: m02Dir,
+    });
+    await h.callOk('cmos_mission_transition', {
+      action: 'start',
+      missionId: 'wm-1',
+      projectRoot: m02Dir,
+    });
+    await h.callOk('cmos_session', {
+      action: 'start',
+      type: 'planning',
+      title: 'verify m02',
+      projectRoot: m02Dir,
+    });
+
+    // DISPATCHER-rendered: index.ts calls formatSessionForLLM, which delegates to the
+    // formatSessionCaptureForLLM leaf. The advisory is built in cmos-session-capture.ts and
+    // handed to createSuccess; until s86-m02 the leaf never read result.warnings.
+    const m02Capture = await h.callOk('cmos_session', {
+      action: 'capture',
+      category: 'decision',
+      content: 'A decision captured with no missionId while a mission is open.',
+      projectRoot: m02Dir,
+    });
+    const m02CaptureWarnings = ((m02Capture as { structuredContent?: { warnings?: string[] } })
+      .structuredContent?.warnings ?? []) as string[];
+    const m02CaptureText = h.textOf(m02Capture);
+    check(
+      's86-m02: the s85-m04 missionId advisory is present in the envelope',
+      m02CaptureWarnings.some((w) => /without a missionId/.test(w)),
+      `warnings=${JSON.stringify(m02CaptureWarnings)}`
+    );
+    check(
+      's86-m02: ...and is now READABLE in content[0].text — invisible since 2.5.0 (dispatcher-rendered)',
+      /without a missionId/.test(m02CaptureText) && /Warnings:/.test(m02CaptureText),
+      m02CaptureText.slice(-400)
+    );
+    check(
+      's86-m02: the advisory renders EXACTLY once, not once per layer',
+      m02CaptureText.split('will not appear in').length - 1 === 1,
+      m02CaptureText.slice(-400)
+    );
+
+    // LEAF-rendered with NO dispatcher in the path: index.ts calls formatAgentOnboardForLLM
+    // directly (index.ts:727). The two paths can drop the render independently, so both are
+    // checked. Trigger is an orphaned sprint — deterministic and offline; the auth/sync warnings
+    // that would exercise cmos_review's envelope need a reachable dashboard, so they are not
+    // provable in this gate and are deliberately not asserted here rather than asserted vacuously.
+    await h.callOk('cmos_sprint', {
+      action: 'add',
+      sprintId: 'sp-orphan',
+      title: 'Sprint with no missions',
+      focus: 'trigger an orphan warning',
+      projectRoot: m02Dir,
+    });
+    const m02Onboard = await h.callOk('cmos_agent_onboard', { projectRoot: m02Dir });
+    const m02OnboardWarnings = ((m02Onboard as { structuredContent?: { warnings?: string[] } })
+      .structuredContent?.warnings ?? []) as string[];
+    const m02OnboardText = h.textOf(m02Onboard);
+    check(
+      's86-m02: cmos_agent_onboard carries an envelope warning (orphaned sprint)',
+      m02OnboardWarnings.some((w) => /orphaned sprint/.test(w)),
+      `warnings=${JSON.stringify(m02OnboardWarnings)}`
+    );
+    check(
+      's86-m02: ...readable in content[0].text via the shared helper (leaf-rendered, no dispatcher)',
+      m02OnboardWarnings.every((w) => m02OnboardText.includes(w)) &&
+        /\nWarnings:\n/.test(m02OnboardText),
+      `text tail=${m02OnboardText.slice(-300)}`
+    );
+    check(
+      's86-m02: each envelope warning renders exactly once on the onboard answer',
+      m02OnboardWarnings.every((w) => m02OnboardText.split(w).length - 1 === 1),
+      `text tail=${m02OnboardText.slice(-300)}`
+    );
+
+    // --- s86-m02b: a write the database REJECTED must reach the answer TEXT.
+    //
+    //     m02 made the envelope channel renderable; m02b routes real write failures into it and
+    //     into the structured `writeFailures` channel beside it. Both are asserted HERE, over
+    //     stdio against the BUILT dist, because handler-only testing is exactly what let
+    //     statusFilter, expiresAt and agentFeedback all ship dead. The failures are forced at the
+    //     DATABASE (a dangling FK, a RAISE trigger) rather than by stubbing anything, so this
+    //     also proves the SQL matches the store — a mock cannot do that.
+    const m02bDir = mkTmp('cmos-verify-s86m02b-');
+    await h.callOk('cmos_project', {
+      action: 'init',
+      projectRoot: m02bDir,
+      name: 's86-m02b verify',
+    });
+    await h.callOk('cmos_session', {
+      action: 'start',
+      type: 'planning',
+      title: 'verify m02b',
+      projectRoot: m02bDir,
+    });
+
+    const m02bDb = path.join(m02bDir, 'cmos', 'db', 'cmos.sqlite');
+    {
+      // `strategic_decisions.context_id` is NOT NULL DEFAULT 'master_context' with an FK to
+      // contexts(id). The capture INSERT never names the column, so every decision row takes
+      // that default — remove the parent row and the next decision INSERT fails the FK.
+      const db = new Database(m02bDb);
+      try {
+        db.pragma('foreign_keys = ON');
+        db.prepare(`DELETE FROM contexts WHERE id = 'master_context'`).run();
+        // A RAISE trigger fails the session_events insert without touching anything else,
+        // which is the Tier-2 (envelope) half of the same proof.
+        db.exec(
+          `CREATE TRIGGER verify_m02b_no_events BEFORE INSERT ON session_events
+           BEGIN SELECT RAISE(ABORT, 'verify-dist forced session_events failure'); END;`
+        );
+      } finally {
+        db.close();
+      }
+    }
+
+    const m02bCapture = await h.callOk('cmos_session', {
+      action: 'capture',
+      category: 'decision',
+      content: 's86-m02b — this decision INSERT is expected to fail its FK',
+      projectRoot: m02bDir,
+    });
+    const m02bCaptureText = h.textOf(m02bCapture);
+    const m02bCaptureData = (
+      m02bCapture as {
+        structuredContent?: {
+          data?: { decisionExtractionFailed?: string; writeFailures?: Array<{ op: string }> };
+        };
+      }
+    ).structuredContent?.data;
+
+    check(
+      's86-m02b: a rejected decision INSERT keeps success:true (disclosure, not abortion)',
+      m02bCapture.isError !== true,
+      `isError=${m02bCapture.isError}`
+    );
+    check(
+      's86-m02b: the structured channel names the failed write',
+      (m02bCaptureData?.writeFailures ?? []).some((f) => f.op === 'strategic_decisions.insert') &&
+        typeof m02bCaptureData?.decisionExtractionFailed === 'string',
+      `data=${JSON.stringify(m02bCaptureData?.writeFailures)}`
+    );
+    check(
+      's86-m02b: content[0].text says the decision was NOT stored, with the DB error',
+      /\*\*Decision Extraction\*\*: FAILED/.test(m02bCaptureText) &&
+        /Write failures/.test(m02bCaptureText) &&
+        /FOREIGN KEY|constraint/i.test(m02bCaptureText),
+      m02bCaptureText.slice(-500)
+    );
+    check(
+      's86-m02b: the "Extraction skipped" lie is gone from that answer',
+      !/Extraction skipped/.test(m02bCaptureText),
+      m02bCaptureText.slice(-500)
+    );
+    check(
+      's86-m02b: the Tier-2 envelope carries the session_events failure in the SAME answer',
+      /Warnings:/.test(m02bCaptureText) && /capture event logging failed/.test(m02bCaptureText),
+      m02bCaptureText.slice(-500)
+    );
+
     // Mode (i): from a REAL project cwd, a pin-only read (mission list, no projectRoot)
     // resolves to the sender and succeeds — scoped, not fanned out.
     const pinnedRead = await h.callTool('cmos_mission', { action: 'list' });
@@ -630,6 +851,669 @@ async function main(): Promise<void> {
     } finally {
       await h2.close();
     }
+
+    // --- s86-m03: the four newly-reachable params, VERIFIED OVER THE WIRE ---------------
+    //
+    // THIS SECTION EXISTS BECAUSE ITS ABSENCE IS WHAT LET THREE OF THEM SHIP DEAD. `statusFilter`,
+    // `expiresAt` and `agentFeedback` were all accepted by their handlers the whole time — every
+    // handler-level test was green. What none of them exercised was the consolidated router, which
+    // dropped the key on the way through. Driving the BUILT dist over stdio is the only check that
+    // covers declaration, dispatch, forwarding and persistence at once.
+    const distTools = await h.client.listTools();
+    const propsOf = (tool: string) =>
+      (distTools.tools.find((t) => t.name === tool)?.inputSchema?.properties ?? {}) as Record<
+        string,
+        { enum?: unknown[]; items?: { enum?: unknown[] } }
+      >;
+
+    const ctxProps = propsOf('cmos_context');
+    const sessProps = propsOf('cmos_session');
+    check('dist advertises cmos_context.statusFilter', ctxProps.statusFilter !== undefined);
+    check('dist advertises cmos_session.expiresAt', sessProps.expiresAt !== undefined);
+    check('dist advertises cmos_session.agentFeedback', sessProps.agentFeedback !== undefined);
+    // NO ENUM on either surface — the filter spans two tables whose live status vocabularies
+    // differ, and CMOS itself writes an out-of-enum 'stale'. A closed enum would manufacture, in
+    // brand-new surface, the published-enum-forbids-a-value-the-server-writes defect s86 fixes.
+    check(
+      'statusFilter is published WITHOUT an enum (fleet-wide status vocabularies differ)',
+      ctxProps.statusFilter?.enum === undefined && ctxProps.statusFilter?.items?.enum === undefined
+    );
+
+    const distDb = path.join(projectDir, 'cmos', 'db', 'cmos.sqlite');
+    const readDb = <T>(fn: (db: Database.Database) => T): T => {
+      const db = new Database(distDb, { readonly: true });
+      try {
+        return fn(db);
+      } finally {
+        db.close();
+      }
+    };
+    const writeDb = (fn: (db: Database.Database) => void): void => {
+      const db = new Database(distDb);
+      try {
+        fn(db);
+      } finally {
+        db.close();
+      }
+    };
+
+    await h.callOk('cmos_session', {
+      action: 'start',
+      title: 's86-m03 dist verification',
+      projectRoot: projectDir,
+    });
+
+    // (1) evergreen on reaffirm — the motivating defect. Read the COLUMN back, never the response:
+    // asserting on the response passes against this bug forever.
+    await h.callOk('cmos_session', {
+      action: 'capture',
+      category: 'learning',
+      content: 's86-m03 dist verification learning',
+      projectRoot: projectDir,
+    });
+    const learningId = readDb(
+      (db) =>
+        (
+          db
+            .prepare(`SELECT id FROM learnings WHERE content LIKE '%dist verification learning%'`)
+            .get() as { id: number } | undefined
+        )?.id
+    );
+    check('dist: a learning was captured to reaffirm', learningId !== undefined);
+    if (learningId !== undefined) {
+      await h.callOk('cmos_learnings', {
+        action: 'reaffirm',
+        learningId,
+        evergreen: true,
+        projectRoot: projectDir,
+      });
+      const ever = readDb(
+        (db) =>
+          (
+            db.prepare('SELECT evergreen FROM learnings WHERE id = ?').get(learningId) as {
+              evergreen: number;
+            }
+          ).evergreen
+      );
+      check('dist: cmos_learnings(reaffirm, evergreen=true) writes evergreen=1', ever === 1);
+    }
+
+    // (2) expiresAt — read constraints.expires_at back.
+    const EXPIRY = '2027-03-20T00:00:00.000Z';
+    await h.callOk('cmos_session', {
+      action: 'capture',
+      category: 'constraint',
+      content: 's86-m03 dist verification constraint',
+      expiresAt: EXPIRY,
+      projectRoot: projectDir,
+    });
+    const expiresAt = readDb(
+      (db) =>
+        (
+          db
+            .prepare(
+              `SELECT expires_at FROM constraints WHERE content LIKE '%dist verification constraint%'`
+            )
+            .get() as { expires_at: string | null } | undefined
+        )?.expires_at
+    );
+    check(
+      `dist: cmos_session(capture).expiresAt persists to constraints.expires_at`,
+      expiresAt === EXPIRY
+    );
+
+    // (3) statusFilter — a decision the ['active'] default cannot reach becomes reachable.
+    await h.callOk('cmos_session', {
+      action: 'capture',
+      category: 'decision',
+      content: 's86-m03 zzdistprobe decision for the status filter',
+      projectRoot: projectDir,
+    });
+    writeDb((db) =>
+      db
+        .prepare(
+          `UPDATE strategic_decisions SET status = 'superseded' WHERE decision_text LIKE '%zzdistprobe%'`
+        )
+        .run()
+    );
+    const countHits = (res: { structuredContent?: { data?: unknown } }): number =>
+      ((res.structuredContent?.data as { results?: unknown[] })?.results ?? []).length;
+    const defaultSearch = await h.callOk('cmos_context', {
+      action: 'search',
+      query: 'zzdistprobe',
+      searchTypes: ['decision'],
+      projectRoot: projectDir,
+    });
+    const filteredSearch = await h.callOk('cmos_context', {
+      action: 'search',
+      query: 'zzdistprobe',
+      searchTypes: ['decision'],
+      statusFilter: ['superseded'],
+      projectRoot: projectDir,
+    });
+    check(
+      'dist: the ["active"] default still hides a superseded decision',
+      countHits(defaultSearch) === 0,
+      `got ${countHits(defaultSearch)} hits`
+    );
+    check(
+      'dist: cmos_context(search).statusFilter=["superseded"] reaches it',
+      countHits(filteredSearch) > 0,
+      `got ${countHits(filteredSearch)} hits`
+    );
+
+    // (4) agentFeedback — the row must carry the REGISTERED tool name, not the retired one.
+    await h.callOk('cmos_session', {
+      action: 'complete',
+      summary: 's86-m03 dist verification close',
+      agentFeedback: 's86-m03 dist verification feedback',
+      projectRoot: projectDir,
+    });
+    const fbRows = readDb(
+      (db) =>
+        db
+          .prepare(
+            `SELECT tool_name FROM agent_feedback WHERE body LIKE '%dist verification feedback%'`
+          )
+          .all() as Array<{ tool_name: string }>
+    );
+    check('dist: cmos_session(complete).agentFeedback files exactly one row', fbRows.length === 1);
+    check(
+      "dist: that row's tool_name is the REGISTERED 'cmos_session' (not the retired cmos_session_complete)",
+      fbRows[0]?.tool_name === 'cmos_session',
+      `got ${fbRows[0]?.tool_name}`
+    );
+
+    // --- s86-m04 Part A: the published schema states what the server does ----------------
+    //
+    // ALL THREE OF THESE ARE WIRE-LEVEL CLAIMS, so they are checked at the wire. The published
+    // JSON inputSchema is the ONLY enforcement any consumer ever sees — the consolidated zod
+    // schemas are never parsed at runtime — so a parity fix that is green in a unit test but
+    // absent from `tools/list` would have fixed nothing that matters.
+    const m04Tools = await h.client.listTools();
+    const m04Props = (tool: string) =>
+      (m04Tools.tools.find((t) => t.name === tool)?.inputSchema?.properties ?? {}) as Record<
+        string,
+        { type?: string; enum?: string[]; items?: { type?: string } }
+      >;
+
+    check(
+      'dist: cmos_decisions.decisionId publishes integer (was number)',
+      m04Props('cmos_decisions').decisionId?.type === 'integer',
+      `got ${m04Props('cmos_decisions').decisionId?.type}`
+    );
+    check(
+      'dist: cmos_decisions.decisionIds items publish integer (array elements too)',
+      m04Props('cmos_decisions').decisionIds?.items?.type === 'integer',
+      `got ${m04Props('cmos_decisions').decisionIds?.items?.type}`
+    );
+    check(
+      'dist: cmos_context.recencyWeight STILL publishes number (a blanket replace would break it)',
+      m04Props('cmos_context').recencyWeight?.type === 'number',
+      `got ${m04Props('cmos_context').recencyWeight?.type}`
+    );
+    check(
+      "dist: cmos_learnings.status publishes 'stale' — the value the server has been writing",
+      (m04Props('cmos_learnings').status?.enum ?? []).includes('stale'),
+      `got [${m04Props('cmos_learnings').status?.enum}]`
+    );
+    check(
+      'dist: cmos_learnings.category publishes NO enum (the column has no CHECK)',
+      m04Props('cmos_learnings').category?.enum === undefined,
+      `got [${m04Props('cmos_learnings').category?.enum}]`
+    );
+
+    // PROBE BEFORE ENCODING (Process Hardening #5). Next-step #501 asserts "an MCP host validating
+    // against the published schema accepts pageSize=2.5 and the server then rejects it." Nothing in
+    // the server rejects it — the consolidated schemas are never parsed. Drive it and RECORD what
+    // actually happens, so the release notes describe an observation rather than an assumption.
+    const floatPage = await h.callTool('cmos_learnings', {
+      action: 'list',
+      pageSize: 2.5,
+      projectRoot: projectDir,
+    });
+    console.log(
+      `  … OBSERVED (s86-m04 CORRECTION 4 probe) cmos_learnings(list, pageSize=2.5): ` +
+        `isError=${floatPage.isError === true}; text="${textOf(floatPage).slice(0, 160).replace(/\n/g, ' ')}"`
+    );
+    check(
+      'dist: a non-integer pageSize is NOT rejected by the server (only client-side validation exists)',
+      floatPage.isError !== true,
+      "the server rejected it — #501's claim would then be true and the CHANGELOG must say so"
+    );
+
+    // REAL-STORE POSITIVE FIRE on a tmpdir COPY. The widened enum has to work against the live
+    // table's actual constraint set — NOT NULL project_id/stable_event_id/occurred_at/origin_seq
+    // plus an event_type CHECK — which the seeded fixture does not reproduce.
+    const liveDb = path.join(REPO_ROOT, 'cmos', 'db', 'cmos.sqlite');
+    if (fs.existsSync(liveDb)) {
+      const liveBefore = fs.statSync(liveDb);
+      const copyRoot = mkTmp('cmos-verify-m04-realstore-');
+      const copyDbDir = path.join(copyRoot, 'cmos', 'db');
+      fs.mkdirSync(copyDbDir, { recursive: true });
+      for (const suffix of ['', '-wal', '-shm']) {
+        if (fs.existsSync(`${liveDb}${suffix}`)) {
+          fs.copyFileSync(`${liveDb}${suffix}`, path.join(copyDbDir, `cmos.sqlite${suffix}`));
+        }
+      }
+      const copyDb = path.join(copyDbDir, 'cmos.sqlite');
+      const db = new Database(copyDb);
+      try {
+        const projectId = (
+          db.prepare(`SELECT value FROM metadata WHERE key = 'project_id'`).get() as
+            | { value: string }
+            | undefined
+        )?.value;
+        db.prepare(
+          `INSERT INTO learnings (content, status, created_at, evergreen, project_id,
+                                  stable_event_id, occurred_at, origin_seq, event_type, schema_version)
+           VALUES (?, 'stale', ?, 0, ?, ?, ?, ?, 'learning_captured', 1)`
+        ).run(
+          's86-m04 zzstaleprobe learning',
+          new Date().toISOString(),
+          projectId ?? 'cmos-mcp-pro',
+          'M04STALEPROBE00000000000000'.slice(0, 26),
+          Date.now(),
+          999999
+        );
+      } finally {
+        db.close();
+      }
+
+      const staleLearnings = await h.callOk('cmos_learnings', {
+        action: 'list',
+        status: 'stale',
+        projectRoot: copyRoot,
+      });
+      check(
+        "dist: cmos_learnings(list, status='stale') returns the real-store row the enum used to forbid",
+        textOf(staleLearnings).includes('zzstaleprobe'),
+        `text=${textOf(staleLearnings).slice(0, 160)}`
+      );
+
+      const staleDecisions = await h.callOk('cmos_decisions', {
+        action: 'list',
+        status: 'stale',
+        projectRoot: copyRoot,
+      });
+      const staleDecisionData = staleDecisions.structuredContent?.data as
+        | { decisions?: unknown[] }
+        | undefined;
+      check(
+        "dist: cmos_decisions(list, status='stale') returns the copy's pre-existing stale decision",
+        (staleDecisionData?.decisions ?? []).length >= 1,
+        `got ${(staleDecisionData?.decisions ?? []).length}`
+      );
+
+      // s86-m09: this compared the live store's size to ITSELF, two stat calls apart — it could
+      // not fail, so it was a green light about nothing. Compare against the reading taken
+      // BEFORE the fire, and on mtime as well as size (a same-size overwrite is still a write).
+      const liveAfter = fs.statSync(liveDb);
+      check(
+        'the LIVE store was not written to by the m04 fire',
+        liveAfter.size === liveBefore.size && liveAfter.mtimeMs === liveBefore.mtimeMs,
+        `before=${liveBefore.size}b@${liveBefore.mtimeMs} after=${liveAfter.size}b@${liveAfter.mtimeMs}`
+      );
+    }
+
+    // --- s86-m08 / m09: the move ACTION, the parked denominator, and the view migration -----
+    //
+    //     m08 added an action to an existing tool and changed two READ actions' numbers. m09
+    //     owns proving the SHIPPED artifact does both — over stdio, against the BUILT dist,
+    //     because a handler-only test proves the SQL compiles, not that the wire advertises it
+    //     or that it runs against a real store's columns.
+    {
+      const m08Props = (tool: string): Record<string, { enum?: string[] }> =>
+        ((tools.tools.find((t) => t.name === tool)?.inputSchema?.properties ?? {}) as Record<
+          string,
+          { enum?: string[] }
+        >) ?? {};
+
+      // (1) THE ACTION IS ON THE WIRE. A move implemented but unadvertised is a capability no
+      //     MCP host can reach — the exact shape of the three params that shipped dead.
+      const missionActions = m08Props('cmos_mission').action?.enum ?? [];
+      check(
+        "s86-m08: dist advertises cmos_mission(action='move') on the wire",
+        missionActions.includes('move'),
+        `got [${missionActions.join(',')}]`
+      );
+      check(
+        's86-m08: adding the move action did NOT add a 16th tool',
+        tools.tools.length === 15,
+        `got ${tools.tools.length}`
+      );
+
+      const m08Dir = mkTmp('cmos-verify-s86m08-');
+      await h.callOk('cmos_project', {
+        action: 'init',
+        projectRoot: m08Dir,
+        name: 's86-m08 verify',
+      });
+      for (const [sprintId, title] of [
+        ['sp-from', 'Origin sprint'],
+        ['sp-to', 'Destination sprint'],
+      ]) {
+        await h.callOk('cmos_sprint', {
+          action: 'add',
+          sprintId,
+          title,
+          focus: 'verify the move + the parked denominator',
+          projectRoot: m08Dir,
+        });
+      }
+      for (const [missionId, name] of [
+        ['mv-live', 'A mission that stays live'],
+        ['mv-parked', 'A mission that gets parked'],
+        ['mv-moved', 'A mission that gets moved'],
+      ]) {
+        await h.callOk('cmos_mission', {
+          action: 'add',
+          missionId,
+          name,
+          objective: 'exist so the denominator has something to count',
+          sprintId: 'sp-from',
+          projectRoot: m08Dir,
+        });
+      }
+
+      // (2) THE MOVE ACTUALLY MOVES — asserted on the COLUMN, not the answer. An answer-only
+      //     assertion passes against a handler that reports a move it never wrote.
+      await h.callOk('cmos_mission', {
+        action: 'move',
+        missionId: 'mv-moved',
+        toSprintId: 'sp-to',
+        reason: 'verify:dist — the supported re-bind',
+        projectRoot: m08Dir,
+      });
+      const m08Db = path.join(m08Dir, 'cmos', 'db', 'cmos.sqlite');
+      const readM08 = <T>(fn: (db: Database.Database) => T): T => {
+        const db = new Database(m08Db, { readonly: true });
+        try {
+          return fn(db);
+        } finally {
+          db.close();
+        }
+      };
+      check(
+        's86-m08: cmos_mission(move) rewrote missions.sprint_id to the destination',
+        readM08(
+          (db) =>
+            (
+              db.prepare(`SELECT sprint_id FROM missions WHERE id = 'mv-moved'`).get() as {
+                sprint_id: string;
+              }
+            ).sprint_id
+        ) === 'sp-to'
+      );
+
+      // (3) THE PARKED DENOMINATOR, on BOTH read actions. Deferring a mission must REMOVE it
+      //     from totalMissions and surface it as parkedMissions — the whole point is that a
+      //     sprint stops being punished in its own denominator for parking work honestly.
+      await h.callOk('cmos_mission_transition', {
+        action: 'defer',
+        missionId: 'mv-parked',
+        reason: 'verify:dist — park it so the denominator has something to exclude',
+        projectRoot: m08Dir,
+      });
+
+      const m08List = await h.callOk('cmos_sprint', { action: 'list', projectRoot: m08Dir });
+      const listRow = (
+        ((m08List.structuredContent?.data as { sprints?: Array<Record<string, unknown>> })
+          ?.sprints ?? []) as Array<Record<string, unknown>>
+      ).find((s) => s.id === 'sp-from');
+      check(
+        's86-m08: cmos_sprint(list) carries parkedMissions and EXCLUDES the parked row from totalMissions',
+        listRow?.totalMissions === 1 && listRow?.parkedMissions === 1,
+        `total=${String(listRow?.totalMissions)} parked=${String(listRow?.parkedMissions)} (expected 1/1)`
+      );
+
+      const m08Show = await h.callOk('cmos_sprint', {
+        action: 'show',
+        sprintId: 'sp-from',
+        projectRoot: m08Dir,
+      });
+      // The show payload is FLAT (cmos-sprint-show.ts:236-257) — the counts sit on `data`
+      // itself, not under a nested `sprint` key as the list rows do.
+      const showSprint = m08Show.structuredContent?.data as Record<string, unknown> | undefined;
+      check(
+        's86-m08: cmos_sprint(show) reports the SAME corrected pair — the two actions cannot drift',
+        showSprint?.totalMissions === 1 && showSprint?.parkedMissions === 1,
+        `total=${String(showSprint?.totalMissions)} parked=${String(showSprint?.parkedMissions)} (expected 1/1)`
+      );
+
+      // (4) The FOURTH newly-reachable param's ANSWER shape. The column write is asserted at
+      //     (1) in the m03 block above; this is the published response contract beside it —
+      //     a caller must be able to see whether the flag actually moved.
+      await h.callOk('cmos_session', {
+        action: 'start',
+        type: 'planning',
+        title: 'verify m08/m09',
+        projectRoot: m08Dir,
+      });
+      await h.callOk('cmos_session', {
+        action: 'capture',
+        category: 'learning',
+        content: 's86-m09 reaffirm answer-shape learning',
+        projectRoot: m08Dir,
+      });
+      const m08LearningId = readM08(
+        (db) =>
+          (
+            db
+              .prepare(`SELECT id FROM learnings WHERE content LIKE '%reaffirm answer-shape%'`)
+              .get() as { id: number } | undefined
+          )?.id
+      );
+      if (m08LearningId !== undefined) {
+        const reaffirmed = await h.callOk('cmos_learnings', {
+          action: 'reaffirm',
+          learningId: m08LearningId,
+          evergreen: true,
+          projectRoot: m08Dir,
+        });
+        const rd = reaffirmed.structuredContent?.data as
+          | { previousEvergreen?: boolean; newEvergreen?: boolean }
+          | undefined;
+        check(
+          's86-m03: cmos_learnings(reaffirm) reports previousEvergreen/newEvergreen so a caller sees the transition',
+          rd?.previousEvergreen === false && rd?.newEvergreen === true,
+          `previous=${String(rd?.previousEvergreen)} new=${String(rd?.newEvergreen)}`
+        );
+      }
+
+      // (5) REAL-STORE POSITIVE FIRE for the view MIGRATION (agents.md Process Hardening #4,
+      //     and m09 criterion 10). A tmpdir COPY of the live store still carries the OLD
+      //     sprint_summary definition; driving the SHIPPED dist over stdio must upgrade it.
+      //     A seeded fixture cannot prove this — it is created with the new view already.
+      const liveForView = path.join(REPO_ROOT, 'cmos', 'db', 'cmos.sqlite');
+      if (fs.existsSync(liveForView)) {
+        // Read BEFORE the fire — comparing an after-reading to another after-reading is a check
+        // that cannot fail, which is what the m04 block above shipped until this mission.
+        const liveViewBefore = fs.statSync(liveForView);
+        const viewRoot = mkTmp('cmos-verify-m09-viewmigration-');
+        const viewDbDir = path.join(viewRoot, 'cmos', 'db');
+        fs.mkdirSync(viewDbDir, { recursive: true });
+        for (const suffix of ['', '-wal', '-shm']) {
+          if (fs.existsSync(`${liveForView}${suffix}`)) {
+            fs.copyFileSync(
+              `${liveForView}${suffix}`,
+              path.join(viewDbDir, `cmos.sqlite${suffix}`)
+            );
+          }
+        }
+        const viewDb = path.join(viewDbDir, 'cmos.sqlite');
+        const viewSql = (): string | undefined => {
+          const db = new Database(viewDb, { readonly: true });
+          try {
+            return (
+              db.prepare(`SELECT sql FROM sqlite_master WHERE name = 'sprint_summary'`).get() as
+                | { sql: string }
+                | undefined
+            )?.sql;
+          } finally {
+            db.close();
+          }
+        };
+
+        // DOWNGRADE THE COPY DETERMINISTICALLY, rather than depending on the live store still
+        // being un-migrated.
+        //
+        // THIS IS A ONE-SHOT-PROOF BUG THE s86-m09 BUILD CRITIC CAUGHT IN THIS BLOCK. The first
+        // version derived the "was old" precondition from whatever DDL the live store happened to
+        // carry. That was true only until the live store got migrated — and s86-m09's OWN close
+        // migrates it, because `ensureSprintSummaryView` upgrades the view on the first
+        // cmos_sprint(list|show|analytics) against any writable store and criterion 21 requires
+        // exactly that read. So the gate would have gone green once and then RED FOREVER, on the
+        // repo's load-bearing release check, for a reason no future reader could have guessed.
+        //
+        // The proposition under test is "the SHIPPED dist upgrades a sprint_summary that lacks
+        // parked_missions". That does not need a store that is accidentally old — it needs one
+        // that is DEFINITELY old. So install the pre-s86-m08 definition on the COPY (never the
+        // live store) and prove the migration on every future run.
+        {
+          const db = new Database(viewDb);
+          try {
+            db.exec('DROP VIEW IF EXISTS sprint_summary');
+            db.exec(PRE_S86M08_SPRINT_SUMMARY_SQL);
+          } finally {
+            db.close();
+          }
+        }
+
+        const beforeSql = viewSql();
+        const wasOld = beforeSql !== undefined && !beforeSql.includes('parked_missions');
+        check(
+          's86-m09: the real-store COPY carries the OLD sprint_summary (no parked_missions) before the run',
+          wasOld,
+          `sql=${(beforeSql ?? 'MISSING').slice(0, 120)}`
+        );
+
+        await h.callOk('cmos_sprint', { action: 'analytics', projectRoot: viewRoot });
+        await h.callOk('cmos_sprint', { action: 'list', projectRoot: viewRoot });
+
+        let parkedReadable = false;
+        let parkedDetail = '';
+        try {
+          const db = new Database(viewDb, { readonly: true });
+          try {
+            db.prepare('SELECT parked_missions FROM sprint_summary LIMIT 1').get();
+            parkedReadable = true;
+          } finally {
+            db.close();
+          }
+        } catch (err) {
+          parkedDetail = String(err);
+        }
+        check(
+          's86-m09: after driving the BUILT dist, SELECT parked_missions FROM sprint_summary succeeds on that copy',
+          wasOld && parkedReadable,
+          parkedDetail
+        );
+
+        // …and the upgraded store still opens READ-ONLY through the same dist. The migration
+        // performs DROP VIEW / CREATE VIEW; a read-only open must not attempt it and must not
+        // throw. (This is the shipped client, required out of dist/ — not the source tree.)
+        let readonlyOk = false;
+        let readonlyDetail = '';
+        try {
+          const { CmosDatabaseClient } = require(
+            path.join(REPO_ROOT, 'dist', 'tools', 'cmos', 'client.js')
+          ) as {
+            CmosDatabaseClient: {
+              create: (o: {
+                dbPath: string;
+                readonly: boolean;
+              }) => Promise<{ success: boolean; data?: { close: () => void } }>;
+            };
+          };
+          const res = await CmosDatabaseClient.create({ dbPath: viewDb, readonly: true });
+          readonlyOk = res.success === true;
+          res.data?.close();
+        } catch (err) {
+          readonlyDetail = String(err);
+        }
+        check(
+          's86-m09: opening the same upgraded copy READ-ONLY through the shipped dist does not throw',
+          readonlyOk,
+          readonlyDetail
+        );
+
+        const liveViewAfter = fs.statSync(liveForView);
+        check(
+          's86-m09: the LIVE store was not written to by the view-migration fire',
+          liveViewAfter.size === liveViewBefore.size &&
+            liveViewAfter.mtimeMs === liveViewBefore.mtimeMs,
+          `before=${liveViewBefore.size}b@${liveViewBefore.mtimeMs} ` +
+            `after=${liveViewAfter.size}b@${liveViewAfter.mtimeMs}`
+        );
+      }
+    }
+
+    // --- s86-m04 Part B: ACTION_PARAMS, checked against the COMPILED barrel ---------------
+    //
+    // The renderer reads CMOS_ACTION_PARAMS from dist (scripts/generate-tool-reference.js), so a
+    // map that exists in src and not in the build would produce a TOOL_REFERENCE.md that silently
+    // reverted — except it cannot, because the renderer throws. This asserts the compiled side
+    // directly, and asserts the thing that must NOT have changed: the wire payload.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const distBarrel = require(path.join(REPO_ROOT, 'dist', 'tools', 'cmos', 'index.js')) as {
+      CMOS_ACTION_PARAMS?: Record<string, Record<string, readonly string[]>>;
+    };
+    const distMaps = distBarrel.CMOS_ACTION_PARAMS ?? {};
+    const wireActionBearing = m04Tools.tools.filter((t) =>
+      Array.isArray(
+        (t.inputSchema?.properties as { action?: { enum?: unknown[] } } | undefined)?.action?.enum
+      )
+    );
+    check(
+      'dist barrel exports CMOS_ACTION_PARAMS for exactly the action-bearing tools on the wire',
+      Object.keys(distMaps).sort().join(',') ===
+        wireActionBearing
+          .map((t) => t.name)
+          .sort()
+          .join(','),
+      `barrel=[${Object.keys(distMaps).sort()}] wire=[${wireActionBearing.map((t) => t.name).sort()}]`
+    );
+    check(
+      'every action advertised on the wire has an ACTION_PARAMS list in the compiled barrel',
+      wireActionBearing.every((t) => {
+        const actions = ((t.inputSchema?.properties as { action?: { enum?: string[] } }).action
+          ?.enum ?? []) as string[];
+        return actions.every((a) => Array.isArray(distMaps[t.name]?.[a]));
+      })
+    );
+    // THE PAYLOAD MUST NOT HAVE MOVED. ACTION_PARAMS is documentation input, so it lives beside
+    // the definitions rather than on them; putting it ON a definition would ship a non-MCP key to
+    // every host.
+    //
+    // CHECKED AT THE SOURCE OF THE LEAK, NOT AT THE CLIENT (build-time critic finding). The MCP
+    // SDK parses `tools/list` through a zod schema that STRIPS unknown keys, so asserting the
+    // absence of `actionParams` on `client.listTools()` output is unfalsifiable — it would hold
+    // even if every definition carried the key. The compiled definition objects are where such a
+    // key would exist, so that is where the negative is asserted.
+    const distDefs = (
+      require(path.join(REPO_ROOT, 'dist', 'tools', 'cmos', 'index.js')) as {
+        CMOS_TOOL_DEFINITIONS: Array<Record<string, unknown>>;
+      }
+    ).CMOS_TOOL_DEFINITIONS;
+    const MCP_TOOL_KEYS = new Set(['name', 'description', 'inputSchema', 'annotations', 'title']);
+    const strayKeys = distDefs.flatMap((d) =>
+      Object.keys(d)
+        .filter((k) => !MCP_TOOL_KEYS.has(k))
+        .map((k) => `${String(d.name)}.${k}`)
+    );
+    check(
+      'no compiled tool definition carries a non-MCP key (ACTION_PARAMS stayed beside them)',
+      strayKeys.length === 0,
+      `stray=[${strayKeys.join(', ')}]`
+    );
+    // …and the falsifiability of THAT check, demonstrated rather than asserted: the same rule run
+    // over a definition that DOES carry the key must report it.
+    check(
+      'that rule is falsifiable — it reports a planted non-MCP key',
+      Object.keys({ ...distDefs[0], actionParams: {} }).filter((k) => !MCP_TOOL_KEYS.has(k))
+        .length === 1
+    );
   } finally {
     await h.close();
     for (const dir of tmpDirs) {

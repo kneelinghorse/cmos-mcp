@@ -106,10 +106,16 @@ describe('self-capture guard (s80-m07)', () => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     });
 
-    /** Insert a decision with a controlled created_at, bypassing FK/genesis via raw sqlite. */
+    /**
+     * Insert a decision with a controlled created_at, bypassing genesis via raw sqlite.
+     *
+     * s86-m01: the `foreign_keys = OFF` pragma that used to be needed here is gone.
+     * seedCmosDb now writes the master_context row, so context_id takes its
+     * 'master_context' default and satisfies the FK; every other FK column is left
+     * NULL, which SQLite does not enforce.
+     */
     function insertDecision(createdAtIso: string): void {
       const db = new Database(path.join(root, 'cmos', 'db', 'cmos.sqlite'));
-      db.pragma('foreign_keys = OFF');
       db.prepare('INSERT INTO strategic_decisions (decision_text, created_at) VALUES (?, ?)').run(
         'd',
         createdAtIso

@@ -13,6 +13,7 @@ import { createError, createSuccess, CmosErrors } from './errors';
 import { ensureLearningsTable } from './schema-migrations';
 import { getProjectId } from './genesis-columns';
 import { frameForeignText } from '../../intelligence/provenance-frame';
+import { appendWarnings } from './format-warnings';
 
 /**
  * Learning search result.
@@ -285,6 +286,8 @@ export function formatLearningsSearchForLLM(
     lines.push(`  Created: ${r.createdAt} | Relevance: ${r.relevance}`);
     lines.push('');
   }
+
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

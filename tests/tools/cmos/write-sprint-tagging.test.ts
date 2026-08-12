@@ -67,16 +67,8 @@ async function makeStore(sprints: SprintSeed[], missions: MissionSeed[] = []): P
   const dbPath = seedCmosDb(root, { projectName: 'm03-fixture', projectId: 'm03-fixture' });
 
   const db = new Database(dbPath);
-  // strategic_decisions.context_id defaults to 'master_context' and FKs to contexts(id), so
-  // without these rows every decision INSERT fails the FK — and it fails QUIETLY (the handler
-  // still returns success:true with decisionExtractionCount 0). seedCmosDb only writes the
-  // project_identity context, so seed the two real ones here.
-  const insCtx = db.prepare(
-    `INSERT OR IGNORE INTO contexts (id, source_path, content, updated_at) VALUES (?, ?, '{}', '2026-01-01T00:00:00Z')`
-  );
-  insCtx.run('master_context', 'cmos/contexts/master-context.json');
-  insCtx.run('project_context', 'cmos/contexts/project-context.json');
-
+  // s86-m01: the local contexts workaround that used to sit here is gone — the WHY
+  // it documented now lives on seedCmosDb itself, which writes all three rows.
   const insSprint = db.prepare(
     `INSERT INTO sprints (id, title, focus, status, start_date, end_date)
      VALUES (?, ?, 'fixture', ?, ?, ?)`

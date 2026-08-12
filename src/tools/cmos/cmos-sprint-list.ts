@@ -12,6 +12,9 @@ import { z } from 'zod';
 import { withClient } from './client';
 import type { CmosToolResult } from './types';
 import { createError, createSuccess } from './errors';
+import { appendWarnings } from './format-warnings';
+import { ensureSprintSummaryView } from './schema-migrations';
+import { parkedColumn, withViewContext } from './sprint-summary-read';
 
 /**
  * Sprint list item with mission statistics.
@@ -46,6 +49,10 @@ export interface SprintListItem {
 
   /** Active missions (Current + In Progress) */
   activeMissions: number;
+
+  /** s86-m08: Deferred + Dropped missions — parked work, excluded from totalMissions and
+   *  reported here so it is neither counted against the sprint nor hidden from the reader. */
+  parkedMissions: number;
 
   /** Strategic decisions count */
   decisionsCount: number;
@@ -82,6 +89,12 @@ interface SprintSummaryRow {
   completed_missions: number;
   blocked_missions: number;
   active_missions: number;
+  /** s86-m08: Deferred + Dropped — the work this sprint owned and parked. Excluded from
+   *  total_missions so a sprint is not punished for parking honestly, surfaced here so it
+   *  is not hidden either. On a store whose view could not be upgraded the reader projects
+   *  `0 AS parked_missions` (see parkedColumn) and the answer carries a warning saying so —
+   *  the column is always present in the ROW, the zero is the part to distrust. */
+  parked_missions: number;
   decisions_count: number;
 }
 
@@ -155,14 +168,26 @@ export async function cmosSprintList(
 
   return withClient(
     (client) => {
+      // s86-m08: bring a pre-migration store's sprint_summary up to the current counting
+      // rule before reading it. No-op (zero writes) once current; never destroys a
+      // same-named base table; a read-only store surfaces a warning instead of throwing.
+      const viewMigration = ensureSprintSummaryView(client);
+
       // Build query dynamically based on filters
-      const { sql, countSql, queryParams } = buildQuery(params.status, limit);
+      const { sql, countSql, queryParams } = buildQuery(
+        params.status,
+        limit,
+        viewMigration.parkedAvailable
+      );
 
       // Get total count first
       const countResult = client.getOne<{ count: number }>(countSql, queryParams.slice(0, -1));
       if (!countResult.success || !countResult.data) {
         return createError<CmosSprintListResult>(
-          countResult.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to get sprint count' }
+          withViewContext(
+            countResult.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to get sprint count' },
+            viewMigration
+          )
         );
       }
       const totalCount = countResult.data.count;
@@ -171,21 +196,30 @@ export async function cmosSprintList(
       const sprintsResult = client.getMany<SprintSummaryRow>(sql, queryParams);
       if (!sprintsResult.success || !sprintsResult.data) {
         return createError<CmosSprintListResult>(
-          sprintsResult.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to get sprints' }
+          withViewContext(
+            sprintsResult.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to get sprints' },
+            viewMigration
+          )
         );
       }
 
       // Transform to output format
       const sprints = sprintsResult.data.map(parseSprintRow);
 
-      return createSuccess({
-        sprints,
-        totalCount,
-        filters: {
-          status: params.status ?? null,
-          limit,
+      return createSuccess(
+        {
+          sprints,
+          totalCount,
+          filters: {
+            status: params.status ?? null,
+            limit,
+          },
         },
-      });
+        // s86-m08: a store whose view could not be upgraded still answers — and says that its
+        // totals are the OLD rule. Swallowing this would leave the answer reporting parked work
+        // inside total_missions under a column name that promises otherwise.
+        viewMigration.warnings
+      );
     },
     { projectRoot: params.projectRoot }
   );
@@ -196,7 +230,8 @@ export async function cmosSprintList(
  */
 function buildQuery(
   status: string | undefined,
-  limit: number
+  limit: number,
+  parkedAvailable: boolean
 ): { sql: string; countSql: string; queryParams: unknown[] } {
   const conditions: string[] = [];
   const queryParams: unknown[] = [];
@@ -217,7 +252,7 @@ function buildQuery(
     SELECT
       sprint_id, title, status, focus, start_date, end_date,
       total_missions, completed_missions, blocked_missions,
-      active_missions, decisions_count
+      active_missions, ${parkedColumn(parkedAvailable)}, decisions_count
     FROM sprint_summary
     ${whereClause}
     ORDER BY
@@ -244,6 +279,7 @@ function parseSprintRow(row: SprintSummaryRow): SprintListItem {
     startDate: row.start_date,
     endDate: row.end_date,
     totalMissions: row.total_missions ?? 0,
+    parkedMissions: row.parked_missions ?? 0,
     completedMissions: row.completed_missions ?? 0,
     blockedMissions: row.blocked_missions ?? 0,
     activeMissions: row.active_missions ?? 0,
@@ -290,9 +326,11 @@ export function formatSprintListForLLM(result: CmosToolResult<CmosSprintListResu
   for (const s of data.sprints) {
     const statusIcon = getStatusIcon(s.status);
     const progress = s.totalMissions > 0 ? `${s.completedMissions}/${s.totalMissions}` : '0';
+    // s86-m08: parked work is stated, not folded into the denominator and not hidden.
+    const parked = s.parkedMissions > 0 ? ` (+${s.parkedMissions} parked)` : '';
 
     lines.push(`${statusIcon} **${s.id}**: ${s.title}`);
-    lines.push(`   Progress: ${progress} missions`);
+    lines.push(`   Progress: ${progress} missions${parked}`);
 
     if (s.activeMissions > 0) {
       lines.push(`   Active: ${s.activeMissions} | Blocked: ${s.blockedMissions}`);
@@ -309,6 +347,8 @@ export function formatSprintListForLLM(result: CmosToolResult<CmosSprintListResu
 
     lines.push('');
   }
+
+  appendWarnings(lines, result);
 
   return lines.join('\n').trim();
 }

@@ -10,11 +10,69 @@
  * @module tools/cmos/schema
  */
 
+import { PARKED_MISSION_STATUSES, statusInSql, statusNotInSql } from './terminal-status';
+
 /**
  * Current CMOS schema version identifier.
  * Update this when making breaking schema changes.
  */
 export const CMOS_SCHEMA_VERSION = '2.1';
+
+/**
+ * s86-m08 — the `sprint_summary` view, declared ONCE and interpolated into {@link CMOS_SCHEMA}.
+ *
+ * IT LIVES IN ITS OWN CONSTANT so the fresh-store path and the upgrade path cannot drift:
+ * `ensureSprintSummaryView` (schema-migrations.ts) compares a store's stored definition against
+ * THIS text and rewrites it when they differ. `CREATE VIEW IF NOT EXISTS` never updates an
+ * existing view, so without that migration every store created before this change would keep
+ * the old counting rule forever while new stores got the new one — two fleets, one column name.
+ *
+ * WHY total_missions EXCLUDES Deferred AND Dropped. The old `COUNT(m.id)` counted every row a
+ * sprint ever held, so a sprint was PUNISHED for parking work honestly: sprint-85 read 9 total /
+ * 5 completed = 56% while every mission it actually owned was Completed. Parked work is not
+ * hidden — it moves to its own `parked_missions` column, which is the whole reason this is a
+ * split rather than a filter. Blocked STAYS in the denominator (work the sprint owned and failed
+ * to land; `blocked_missions` already reports it separately), and so does Archived.
+ *
+ * THE THREE-PART GUARD IN EACH COUNT IS LOAD-BEARING — each clause fixes a case the obvious
+ * form gets wrong, verified empirically against {Completed, Deferred, NULL, 'deferred'} rows
+ * plus a mission-less sprint:
+ *
+ *   - `m.id IS NOT NULL` — without it the LEFT JOIN's phantom row for a sprint with ZERO
+ *     missions coalesces to '' and lands in total_missions, so an empty sprint reports 1.
+ *   - `COALESCE(m.status, '')` — without it a NULL status makes both `NOT IN` and `IN` yield
+ *     NULL, so the row vanishes from BOTH counts and the two no longer sum to COUNT(m.id).
+ *   - `UPPER(...)` — without it a case-drifted 'deferred' is counted as NON-parked, the exact
+ *     drift `statusNotInSql` (terminal-status.ts) exists to prevent.
+ *
+ * INVARIANT, asserted in tests against every sprint on a real store:
+ * `total_missions + parked_missions = COUNT(m.id)`.
+ *
+ * NOT CHANGED HERE, deliberately: completed_missions / blocked_missions / active_missions keep
+ * their case-SENSITIVE comparisons. Making them case-folded is a wider blast radius than this
+ * mission's, and mixing the two changes would make a moved number impossible to attribute.
+ */
+export const SPRINT_SUMMARY_VIEW_SQL = `CREATE VIEW IF NOT EXISTS sprint_summary AS
+SELECT
+  s.id AS sprint_id,
+  s.title,
+  s.status,
+  s.focus,
+  s.start_date,
+  s.end_date,
+  COUNT(CASE WHEN m.id IS NOT NULL AND ${statusNotInSql("COALESCE(m.status, '')", PARKED_MISSION_STATUSES)} THEN 1 END) AS total_missions,
+  COUNT(CASE WHEN m.status = 'Completed' THEN 1 END) AS completed_missions,
+  COUNT(CASE WHEN m.status = 'Blocked' THEN 1 END) AS blocked_missions,
+  COUNT(CASE WHEN m.status IN ('Current', 'In Progress') THEN 1 END) AS active_missions,
+  COUNT(CASE WHEN m.id IS NOT NULL AND ${statusInSql("COALESCE(m.status, '')", PARKED_MISSION_STATUSES)} THEN 1 END) AS parked_missions,
+  (
+    SELECT COUNT(DISTINCT sd.id)
+    FROM strategic_decisions sd
+    WHERE sd.sprint_id = s.id
+  ) AS decisions_count
+FROM sprints s
+LEFT JOIN missions m ON m.sprint_id = s.id
+GROUP BY s.id, s.title, s.status, s.focus, s.start_date, s.end_date;`;
 
 /**
  * Complete CMOS SQLite schema.
@@ -271,7 +329,7 @@ CREATE TABLE IF NOT EXISTS learnings (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   content TEXT NOT NULL,
   category TEXT,            -- technical | process | agent-behavior | tooling
-  status TEXT NOT NULL DEFAULT 'active',  -- active | archived | superseded
+  status TEXT NOT NULL DEFAULT 'active',  -- active | archived | superseded | stale (staleness-detection.ts writes 'stale'; no CHECK constraint)
   sprint_id TEXT,
   author_session_id TEXT,  -- s69-m04: renamed from session_id (project-scoped session of origin)
   mission_id TEXT,
@@ -445,26 +503,7 @@ SELECT m.id,
   LEFT JOIN sprints s ON s.id = m.sprint_id;
 
 -- Sprint summary view for retrospectives and analysis
-CREATE VIEW IF NOT EXISTS sprint_summary AS
-SELECT
-  s.id AS sprint_id,
-  s.title,
-  s.status,
-  s.focus,
-  s.start_date,
-  s.end_date,
-  COUNT(m.id) AS total_missions,
-  COUNT(CASE WHEN m.status = 'Completed' THEN 1 END) AS completed_missions,
-  COUNT(CASE WHEN m.status = 'Blocked' THEN 1 END) AS blocked_missions,
-  COUNT(CASE WHEN m.status IN ('Current', 'In Progress') THEN 1 END) AS active_missions,
-  (
-    SELECT COUNT(DISTINCT sd.id)
-    FROM strategic_decisions sd
-    WHERE sd.sprint_id = s.id
-  ) AS decisions_count
-FROM sprints s
-LEFT JOIN missions m ON m.sprint_id = s.id
-GROUP BY s.id, s.title, s.status, s.focus, s.start_date, s.end_date;
+${SPRINT_SUMMARY_VIEW_SQL}
 `;
 
 /**

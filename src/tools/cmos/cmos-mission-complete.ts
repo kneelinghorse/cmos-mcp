@@ -28,6 +28,8 @@ import {
 import { sanitizeContentField, sanitizeStringArray } from '../../intelligence/content-sanitizer';
 import { recordEmbedding, decisionEmbeddingInput } from '../../intelligence/embedding-pipeline';
 import { patchProjectIdentity, type ProjectIdentityData } from './project-identity';
+import { appendWarnings } from './format-warnings';
+import { checkWrite } from './write-guard';
 
 interface MissionCompletionRecord {
   id: string;
@@ -65,7 +67,9 @@ export interface MissionCompleteResult {
   /** Snapshot ID created for context aggregation */
   contextSnapshotId?: number | null;
 
-  /** Number of decisions captured with this completion */
+  /** Number of decisions this completion actually INSERTed. s86-m02b: this was `decisions.length`
+   *  — the number ATTEMPTED — so a rejected INSERT still counted. A decision the database refused
+   *  is excluded here and named on `warnings` instead. */
   decisionCount?: number;
 
   /** Total decisions captured for this mission's sprint */
@@ -329,12 +333,16 @@ export async function cmosMissionComplete(
       }
 
       // Decision capture soft gate
-      const decisionResult = await captureDecisions(client, {
-        missionId,
-        sprintId: mission.sprint_id,
-        decisions: cleanDecisions,
-        completedAt: now,
-      });
+      const decisionResult = await captureDecisions(
+        client,
+        {
+          missionId,
+          sprintId: mission.sprint_id,
+          decisions: cleanDecisions,
+          completedAt: now,
+        },
+        warnings
+      );
 
       if (decisionResult.warning) {
         warnings.push(decisionResult.warning);
@@ -373,6 +381,7 @@ export async function cmosMissionComplete(
         });
         if (fb.feedbackId !== null) feedbackId = fb.feedbackId;
         feedbackSanitized.push(...fb.sanitizedFields);
+        warnings.push(...fb.warnings);
       }
 
       return createSuccess<MissionCompleteResult>(
@@ -406,6 +415,7 @@ interface DecisionCaptureInput {
 }
 
 interface DecisionCaptureResult {
+  /** Rows the strategic_decisions INSERT actually landed — NOT `decisions.length` (s86-m02b). */
   decisionCount: number;
   sprintDecisionCount: number;
   warning?: string;
@@ -413,12 +423,15 @@ interface DecisionCaptureResult {
 
 async function captureDecisions(
   client: CmosDatabaseClient,
-  input: DecisionCaptureInput
+  input: DecisionCaptureInput,
+  warnings: string[]
 ): Promise<DecisionCaptureResult> {
   // Ensure mission_id column exists (defensive DDL for existing databases)
   ensureMissionIdColumn(client);
 
   const decisions = input.decisions?.filter((d) => d.trim().length > 0) ?? [];
+  // s86-m02b: rows the database ACCEPTED, not rows we meant to write. See the return below.
+  let insertedCount = 0;
 
   if (decisions.length > 0) {
     // Get project_domain from metadata
@@ -454,17 +467,26 @@ async function captureDecisions(
         ]
       );
 
+      // s86-m02b: the return value is the count. It used to be discarded, and `decisionCount`
+      // reported `decisions.length` — the number the code MEANT to insert — so a rejected INSERT
+      // still rendered as "Decisions captured: N" with the decision nowhere in the store. The DB
+      // error rides out on `warnings`, which formatMissionCompleteForLLM renders.
+      if (checkWrite(insertResult, warnings, 'strategic_decisions insert')) {
+        insertedCount++;
+      }
+
       // Sprint 66 m03 — write-path embedding hook
       if (insertResult.success) {
         const newId = insertResult.data?.lastInsertRowid;
         const numericId =
           typeof newId === 'bigint' ? Number(newId) : typeof newId === 'number' ? newId : null;
         if (numericId !== null) {
-          await recordEmbedding(client, {
+          const embedding = await recordEmbedding(client, {
             type: 'decision',
             id: numericId,
             inputText: decisionEmbeddingInput(trimmed),
           });
+          if (embedding.warnings) warnings.push(...embedding.warnings);
         }
       }
     }
@@ -481,11 +503,14 @@ async function captureDecisions(
   }
 
   const result: DecisionCaptureResult = {
-    decisionCount: decisions.length,
+    decisionCount: insertedCount,
     sprintDecisionCount,
   };
 
-  // Soft gate warning when no decisions provided
+  // Soft gate warning when no decisions provided. Deliberately keyed on what the CALLER supplied,
+  // not on `insertedCount`: this nudge is "you documented no architectural choices", and firing it
+  // when the agent supplied decisions the database then rejected would give misdirected advice for
+  // a failure `warnings` already names (s86-m02b).
   if (decisions.length === 0) {
     result.warning =
       'No decisions captured for this mission. Consider documenting architectural choices made during implementation.';
@@ -792,13 +817,7 @@ export function formatMissionCompleteForLLM(result: CmosToolResult<MissionComple
     lines.push(`Learnings captured: ${data.learningCount}`);
   }
 
-  if (result.warnings && result.warnings.length > 0) {
-    lines.push('');
-    lines.push('Warnings:');
-    for (const warning of result.warnings) {
-      lines.push(`- ${warning}`);
-    }
-  }
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

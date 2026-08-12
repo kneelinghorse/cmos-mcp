@@ -11,6 +11,8 @@ import { withClientValidated } from './client';
 import type { CmosToolResult } from './types';
 import { createError, createSuccess, CmosErrors, CMOS_ERROR_CODES } from './errors';
 import { ensureReviewTimestamps, ensureLearningsTable } from './schema-migrations';
+import { appendWarnings } from './format-warnings';
+import { checkWrite } from './write-guard';
 
 const VALID_LEARNING_STATUSES = ['active', 'archived', 'superseded'];
 
@@ -113,18 +115,23 @@ export async function cmosLearningsUpdate(
       if (!statusChanged && !evergreenChanged) {
         // Idempotent set still counts as a review touch — bump the timestamp so
         // a reviewer can use update(status=current) as a tacit "still valid" ping.
-        client.execute('UPDATE learnings SET last_reviewed_at = ? WHERE id = ?', [
-          nowIso,
-          params.learningId,
-        ]);
-        return createSuccess<CmosLearningsUpdateResult>({
-          learningId: params.learningId,
-          previousStatus,
-          newStatus,
-          previousEvergreen,
-          newEvergreen,
-          message: 'No changes needed',
-        });
+        const warnings: string[] = [];
+        const touchResult = client.execute(
+          'UPDATE learnings SET last_reviewed_at = ? WHERE id = ?',
+          [nowIso, params.learningId]
+        );
+        checkWrite(touchResult, warnings, 'learnings.last_reviewed_at touch');
+        return createSuccess<CmosLearningsUpdateResult>(
+          {
+            learningId: params.learningId,
+            previousStatus,
+            newStatus,
+            previousEvergreen,
+            newEvergreen,
+            message: 'No changes needed',
+          },
+          warnings
+        );
       }
 
       const updateResult = client.execute(
@@ -188,5 +195,7 @@ export function formatLearningsUpdateForLLM(
   } else if (d.newEvergreen) {
     lines.push(`**Evergreen**: true (unchanged)`);
   }
+  appendWarnings(lines, result);
+
   return lines.join('\n');
 }

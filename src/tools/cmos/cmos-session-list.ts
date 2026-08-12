@@ -14,6 +14,7 @@ import { createError, createSuccess } from './errors';
 import { VALID_SESSION_TYPES, type SessionType } from './cmos-session-start';
 import { getProjectId, tableHasColumn } from './genesis-columns';
 import { frameInlineIfForeign } from '../../intelligence/provenance-frame';
+import { appendWarnings } from './format-warnings';
 
 /**
  * Valid session statuses.
@@ -367,6 +368,8 @@ export function formatSessionListForLLM(result: CmosToolResult<CmosSessionListRe
       `*Page ${data.page} of ${Math.ceil(data.totalCount / data.pageSize)}. Use page parameter for more.*`
     );
   }
+
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

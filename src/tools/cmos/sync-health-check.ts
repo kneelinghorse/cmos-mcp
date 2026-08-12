@@ -119,25 +119,37 @@ export async function checkSyncHealth(
 
 /**
  * Format sync health check result for LLM readability.
+ *
+ * s86-m02 — THE ONE DECLARED STRUCTURAL EXCLUSION from the appendWarnings gate. This is the only
+ * `format*ForLLM` in src/tools/cmos whose parameter is not a `CmosToolResult`, so it has no
+ * ENVELOPE channel to render and `appendWarnings` cannot type-check against it. Rather than change
+ * the signature or bury it in an allowlist, tests/tools/cmos/formatter-warnings.test.ts prints it
+ * BY NAME as the exclusion — and the warnings loop below closes the live half of the defect:
+ * `SyncHealthCheckResult.warnings` has been populated and never rendered since it was declared.
  */
 export function formatSyncHealthForLLM(result: SyncHealthCheckResult): string {
+  const lines: string[] = [];
+
   if (!result.checked) {
-    return result.message;
+    lines.push(result.message);
+  } else if (result.allMatch) {
+    lines.push('Sync health: all tables match between SQLite and PG mirror');
+  } else {
+    lines.push(`Sync drift: ${result.mismatchedTables} table(s), total delta ${result.totalDelta}`);
+    for (const m of result.mismatches) {
+      const direction = m.delta > 0 ? 'SQLite ahead' : 'PG ahead';
+      lines.push(
+        `  ${m.table}: SQLite=${m.sqliteCount} PG=${m.pgCount} (${direction} by ${Math.abs(m.delta)})`
+      );
+    }
   }
 
-  if (result.allMatch) {
-    return 'Sync health: all tables match between SQLite and PG mirror';
-  }
-
-  const lines = [
-    `Sync drift: ${result.mismatchedTables} table(s), total delta ${result.totalDelta}`,
-  ];
-
-  for (const m of result.mismatches) {
-    const direction = m.delta > 0 ? 'SQLite ahead' : 'PG ahead';
-    lines.push(
-      `  ${m.table}: SQLite=${m.sqliteCount} PG=${m.pgCount} (${direction} by ${Math.abs(m.delta)})`
-    );
+  if (result.warnings && result.warnings.length > 0) {
+    lines.push('');
+    lines.push('Warnings:');
+    for (const warning of result.warnings) {
+      lines.push(`- ${warning}`);
+    }
   }
 
   return lines.join('\n');

@@ -14,6 +14,7 @@ import type { CmosToolResult, Mission, MissionStatus } from './types';
 import { createError, createSuccess, CmosErrors, VALID_MISSION_STATUSES } from './errors';
 import { getProjectId, tableHasColumn } from './genesis-columns';
 import { frameInlineIfForeign } from '../../intelligence/provenance-frame';
+import { appendWarnings } from './format-warnings';
 
 /**
  * Mission with parsed JSON fields for return to caller.
@@ -370,6 +371,8 @@ export function formatMissionListForLLM(result: CmosToolResult<CmosMissionListRe
     }
     lines.push('');
   }
+
+  appendWarnings(lines, result);
 
   return lines.join('\n').trim();
 }

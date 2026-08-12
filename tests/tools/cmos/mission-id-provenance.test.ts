@@ -44,13 +44,8 @@ async function makeStore(opts: { dropDecisionMissionId?: boolean } = {}): Promis
   const dbPath = seedCmosDb(root, { projectName: 'm04-fixture', projectId: 'm04-fixture' });
 
   const db = new Database(dbPath);
-  // strategic_decisions.context_id FKs to contexts(id) with a 'master_context' default.
-  const insCtx = db.prepare(
-    `INSERT OR IGNORE INTO contexts (id, source_path, content, updated_at) VALUES (?, ?, '{}', '2026-01-01T00:00:00Z')`
-  );
-  insCtx.run('master_context', 'cmos/contexts/master-context.json');
-  insCtx.run('project_context', 'cmos/contexts/project-context.json');
-
+  // s86-m01: the local master_context/project_context INSERT OR IGNORE that used to
+  // sit here is gone — seedCmosDb writes all three contexts rows itself now.
   db.prepare(
     `INSERT INTO sprints (id, title, focus, status, start_date) VALUES ('sp-1','S1','f','Active','2026-01-01')`
   ).run();

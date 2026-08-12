@@ -13,6 +13,7 @@ import type { CmosToolResult, Sprint } from './types';
 import { createError, createSuccess, CmosErrors, CMOS_ERROR_CODES } from './errors';
 import { isOpenStatus } from './terminal-status';
 import { buildDemotionWarning, writeSingleCurrentSprint } from './sprint-current-invariant';
+import { appendWarnings } from './format-warnings';
 
 /**
  * Fields that can be updated on a sprint.
@@ -286,13 +287,7 @@ export function formatSprintUpdateForLLM(result: CmosToolResult<SprintUpdateResu
 
   // Sprint 72 m02 (#790): render folded-in collab-sync warnings so a superseded
   // sprint_status push surfaces its restore hint to the operator.
-  if (result.warnings && result.warnings.length > 0) {
-    lines.push('');
-    lines.push('Warnings:');
-    for (const warning of result.warnings) {
-      lines.push(`- ${warning}`);
-    }
-  }
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

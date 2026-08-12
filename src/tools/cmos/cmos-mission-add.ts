@@ -19,6 +19,8 @@ import {
 } from '../../intelligence/content-sanitizer';
 import { ensureMissionTimestamps } from './schema-migrations';
 import { recordEmbedding, missionEmbeddingInput } from '../../intelligence/embedding-pipeline';
+import { appendWarnings } from './format-warnings';
+import { checkWrite } from './write-guard';
 
 /**
  * Result type for cmos_mission_add.
@@ -243,6 +245,8 @@ export async function cmosMissionAdd(
 
   return withClientAsync(
     async (client) => {
+      const warnings: string[] = [];
+
       // Verify sprint exists
       const sprintResult = client.getOne<Sprint>('SELECT id, title FROM sprints WHERE id = ?', [
         sprintId,
@@ -332,7 +336,7 @@ export async function cmosMissionAdd(
 
       // Log creation event
       const now = new Date().toISOString();
-      client.execute(
+      const eventResult = client.execute(
         `INSERT INTO session_events (ts, agent, mission, action, status, summary, raw_event)
          VALUES (?, 'mcp-tool', ?, 'create', ?, ?, ?)`,
         [
@@ -350,8 +354,10 @@ export async function cmosMissionAdd(
         ]
       );
 
+      checkWrite(eventResult, warnings, 'mission create event logging');
+
       // Sprint 66 m03 — write-path embedding hook
-      await recordEmbedding(client, {
+      const embedding = await recordEmbedding(client, {
         type: 'mission',
         id: missionId.trim(),
         inputText: missionEmbeddingInput({
@@ -361,6 +367,8 @@ export async function cmosMissionAdd(
           successCriteria: successCriteria ?? null,
         }),
       });
+
+      if (embedding.warnings) warnings.push(...embedding.warnings);
 
       // Build result with full mission details
       const mission: MissionAddResult['mission'] = {
@@ -389,7 +397,7 @@ export async function cmosMissionAdd(
           message: `Mission '${missionId}' created successfully in sprint '${sprintId}'`,
           mission,
         },
-        undefined,
+        warnings,
         sanitizedFields
       );
     },
@@ -436,6 +444,8 @@ export function formatMissionAddForLLM(result: CmosToolResult<MissionAddResult>)
   if (data.mission.deliverables && data.mission.deliverables.length > 0) {
     lines.push(`Deliverables: ${data.mission.deliverables.length} items`);
   }
+
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

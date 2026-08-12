@@ -65,6 +65,8 @@ import {
   emptyToNull,
   toProvenanceInt,
 } from './sync-merge';
+import { appendWarnings } from './format-warnings';
+import { checkWrite, countWrite } from './write-guard';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -137,7 +139,7 @@ export async function syncBootstrap(
 
       // Clone identity: stamp rows with the store's project_id, seeding it from the
       // snapshot for a fresh store; never clobber existing identity.
-      const projectId = ensureCloneIdentity(db, state, slug);
+      const projectId = ensureCloneIdentity(db, state, slug, warnings);
 
       const tally: BootstrapTally = { inserted: 0, duplicates: 0, failed: 0 };
       const insertedByType: Record<string, number> = {};
@@ -166,7 +168,7 @@ export async function syncBootstrap(
 
       // FK integrity: ensure context rows exist (decisions.context_id FK). /state
       // omits context bodies, so seed placeholders; always guarantee master_context.
-      const contextsEnsured = ensureContexts(db, state.contexts);
+      const contextsEnsured = ensureContexts(db, warnings, state.contexts);
       if (state.decisions && state.decisions.length > 0) {
         warnings.push(
           'Context bodies are not carried by GET /state (the mirror stores no content); ' +
@@ -314,7 +316,7 @@ export async function syncBootstrap(
       // incremental pull fetches only newer events. Never regress an existing cursor.
       const maxCursor = state.syncLog?.maxCursor ?? 0;
       const cursorSeeded = Math.max(readPullCursor(db, slug), maxCursor);
-      persistPullCursor(db, slug, cursorSeeded);
+      persistPullCursor(db, slug, cursorSeeded, warnings);
       if (state.syncLog?.maxCursor === undefined) {
         warnings.push(
           'GET /state did not return syncLog.maxCursor; the PULL cursor was left at ' +
@@ -361,35 +363,44 @@ function readMetadataValue(db: CmosDatabaseClient, key: string): string | null {
   return row.success && row.data?.value ? row.data.value : null;
 }
 
-function setIfEmpty(db: CmosDatabaseClient, key: string, value: string): void {
+function setIfEmpty(db: CmosDatabaseClient, key: string, value: string, warnings: string[]): void {
   if (!value) return;
   if (readMetadataValue(db, key)) return;
-  db.execute(`INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)`, [key, value]);
+  checkWrite(
+    db.execute(`INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)`, [key, value]),
+    warnings,
+    `clone identity metadata.${key}`
+  );
 }
 
 /**
  * Resolve the project_id to stamp on cloned rows, seeding the store's dashboard
  * linkage when absent. Prefers the store's existing project_id (a clone targeting
  * its own store), else the snapshot's project.id. Never clobbers existing identity.
+ *
+ * A failed identity write is pushed into `warnings` (s86-m02b): the clone still reports
+ * the projectId it INTENDED to stamp, so an un-persisted dashboard_slug would otherwise
+ * read as a registered store that the follow-on `cmos_db pull` cannot resolve.
  */
 function ensureCloneIdentity(
   db: CmosDatabaseClient,
   state: SyncProjectStateResult,
-  slug: string
+  slug: string,
+  warnings: string[]
 ): string {
   const existing = readMetadataValue(db, 'project_id');
   const projectId = existing && existing.length > 0 ? existing : state.project.id;
-  setIfEmpty(db, 'project_id', projectId);
-  setIfEmpty(db, 'project_name', asString(state.project.name) ?? '');
-  setIfEmpty(db, 'dashboard_slug', slug);
-  setIfEmpty(db, 'dashboard_project_id', asString(state.project.id) ?? '');
+  setIfEmpty(db, 'project_id', projectId, warnings);
+  setIfEmpty(db, 'project_name', asString(state.project.name) ?? '', warnings);
+  setIfEmpty(db, 'dashboard_slug', slug, warnings);
+  setIfEmpty(db, 'dashboard_project_id', asString(state.project.id) ?? '', warnings);
   // Mark the clone as a collaborative store so its mutable edits route through the
   // m04 pull-before-push event path (and its pulls apply inbound transitions via
   // LWW) instead of the solo whole-DB file-sync. Default 'editor' — a clone, by
   // definition, received a shared project; author_user_id is dashboard-authoritative
   // so the value never misattributes authorship, and the gate only needs presence.
   // See cmos/docs/multiuser-collab-client.md §4 (Fork A). 'collab_role' = COLLAB_ROLE_KEY.
-  setIfEmpty(db, 'collab_role', 'editor');
+  setIfEmpty(db, 'collab_role', 'editor', warnings);
   return projectId;
 }
 
@@ -398,9 +409,16 @@ function ensureCloneIdentity(
  * 'master_context' (the strategic_decisions.context_id default + FK target). /state
  * carries no context body, so source_path/content are placeholders — the row exists
  * purely so decision/snapshot foreign keys hold. Returns the count newly created.
+ *
+ * `contextsEnsured` is REPORTED in the answer, so it must count rows that actually
+ * landed: countWrite separates an ON CONFLICT no-op (a legitimate zero — the row was
+ * already there) from an errored INSERT, and pushes the DB error into `warnings`
+ * (s86-m02b). A failed context insert is not cosmetic — decisions.context_id FKs onto
+ * it, so the decision inserts that follow fail too.
  */
 function ensureContexts(
   db: CmosDatabaseClient,
+  warnings: string[],
   contexts?: { id: string; updatedAt: string | null }[]
 ): number {
   const ids = new Set<string>(['master_context']);
@@ -415,7 +433,7 @@ function ensureContexts(
        ON CONFLICT(id) DO NOTHING`,
       [id, id]
     );
-    if (res.success && res.data && res.data.changes > 0) created++;
+    if (countWrite(res, warnings, `placeholder context insert (${id})`) > 0) created++;
   }
   return created;
 }
@@ -445,5 +463,7 @@ export function formatSyncBootstrapForLLM(result: CmosToolResult<SyncBootstrapRe
   if (d.warnings && d.warnings.length > 0) {
     lines.push('', ...d.warnings.map((w) => `⚠ ${w}`));
   }
+  appendWarnings(lines, result);
+
   return lines.join('\n');
 }

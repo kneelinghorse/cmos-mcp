@@ -48,7 +48,7 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "description": "Rotate grace window (default: 300s dashboard-side).",
           "maximum": 86400,
           "minimum": 1,
-          "type": "number",
+          "type": "integer",
         },
         "keyId": {
           "description": "Specific dashboard keyId to revoke. Omit to revoke the current project key for projectRoot.",
@@ -58,7 +58,7 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "description": "login_complete only: bound the poll window before returning status=pending (default 30s).",
           "maximum": 600,
           "minimum": 1,
-          "type": "number",
+          "type": "integer",
         },
         "mineOnly": {
           "description": "list only: default true. When true, filter to keys spawned by a local user-scoped credential.",
@@ -68,7 +68,7 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "description": "login_complete only: base poll interval (default 2s). Use the interval from login_init for best behavior.",
           "maximum": 60,
           "minimum": 1,
-          "type": "number",
+          "type": "integer",
         },
         "projectRoot": {
           "description": "Project root for rotate/revoke/reissue. Defaults to caller context.",
@@ -83,12 +83,12 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
     "name": "cmos_auth",
   },
   {
-    "description": "Consolidated context tool with action parameter support. Actions: view, update, condense, snapshot, history, next_steps, search. Use contextType=project_identity to view/update the Layer 0 project description. Use action=search to run FTS5 relevance-scored retrieval over decisions, learnings, and missions.",
+    "description": "Consolidated context tool with action parameter support. Actions: view, update, condense, snapshot, history, next_steps, constraints, search. Use contextType=project_identity to view/update the Layer 0 project description. Use action=search to run FTS5 relevance-scored retrieval over decisions, learnings, and missions.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "action": {
-          "description": "Context action: view | update | condense | snapshot | history | next_steps | constraints",
+          "description": "Context action: view | update | condense | snapshot | history | next_steps | constraints | search",
           "enum": [
             "view",
             "update",
@@ -103,6 +103,22 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
         },
         "arrayUpdates": {
           "description": "Array fields to append for update action",
+          "properties": {
+            "constraints": {
+              "description": "Constraint strings to append",
+              "items": {
+                "type": "string",
+              },
+              "type": "array",
+            },
+            "context_notes": {
+              "description": "Context notes to append",
+              "items": {
+                "type": "string",
+              },
+              "type": "array",
+            },
+          },
           "type": "object",
         },
         "carryToSprint": {
@@ -126,12 +142,13 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
         "constraintId": {
           "description": "Constraint ID to reaffirm (bumps last_reviewed_at without changing status; resets its staleness clock)",
           "minimum": 1,
-          "type": "number",
+          "type": "integer",
         },
         "constraintIds": {
           "description": "Constraint IDs to archive",
           "items": {
-            "type": "number",
+            "minimum": 1,
+            "type": "integer",
           },
           "type": "array",
         },
@@ -214,7 +231,8 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
         "nextStepIds": {
           "description": "Next-step IDs to act on for complete/carry/drop",
           "items": {
-            "type": "number",
+            "minimum": 1,
+            "type": "integer",
           },
           "type": "array",
         },
@@ -231,13 +249,13 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
         "page": {
           "description": "Page number for history action",
           "minimum": 1,
-          "type": "number",
+          "type": "integer",
         },
         "pageSize": {
           "description": "Page size for history action",
           "maximum": 100,
           "minimum": 1,
-          "type": "number",
+          "type": "integer",
         },
         "projectRoot": {
           "description": "Project root directory to search for CMOS database (defaults to cwd)",
@@ -257,10 +275,10 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "description": "Max results for search action (default: 5)",
           "maximum": 50,
           "minimum": 1,
-          "type": "number",
+          "type": "integer",
         },
         "searchTypes": {
-          "description": "Content types to search (default: all)",
+          "description": "Content types to search (default: ['decision'])",
           "items": {
             "enum": [
               "decision",
@@ -290,7 +308,15 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
         },
         "stalenessThresholdDays": {
           "description": "Staleness threshold in days for review (default: 30)",
-          "type": "number",
+          "minimum": 1,
+          "type": "integer",
+        },
+        "statusFilter": {
+          "description": "Status values to include in search results (default: ['active']). Applies to decision and learning results ONLY — ignored for mission and session results. An empty array disables status filtering entirely rather than matching nothing.",
+          "items": {
+            "type": "string",
+          },
+          "type": "array",
         },
         "strategy": {
           "description": "Condensation strategy for condense action",
@@ -340,7 +366,7 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "type": "string",
         },
         "confirm": {
-          "description": "Confirmation flag for restore action",
+          "description": "Confirmation flag for restore/purge actions",
           "type": "boolean",
         },
         "dryRun": {
@@ -358,7 +384,7 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
         "limit": {
           "description": "Per-page event limit for pull action (default 500, broker caps at 1000)",
           "minimum": 1,
-          "type": "number",
+          "type": "integer",
         },
         "listOnly": {
           "description": "List snapshots instead of creating one",
@@ -367,12 +393,12 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
         "maxPages": {
           "description": "Safety bound on the pull pagination loop (default 1000)",
           "minimum": 1,
-          "type": "number",
+          "type": "integer",
         },
         "maxSnapshots": {
           "description": "Max snapshots to list",
           "minimum": 1,
-          "type": "number",
+          "type": "integer",
         },
         "projectRoot": {
           "description": "Project root directory to search for CMOS database (defaults to cwd)",
@@ -404,7 +430,7 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "type": "boolean",
         },
         "action": {
-          "description": "Decisions action: list | search | update",
+          "description": "Decisions action: list | search | update | review | batch_update",
           "enum": [
             "list",
             "search",
@@ -417,13 +443,13 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
         "decisionId": {
           "description": "Decision ID for update action",
           "minimum": 1,
-          "type": "number",
+          "type": "integer",
         },
         "decisionIds": {
           "description": "Array of decision IDs for batch_update action (max 100)",
           "items": {
             "minimum": 1,
-            "type": "number",
+            "type": "integer",
           },
           "type": "array",
         },
@@ -439,7 +465,7 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "description": "Maximum results for search action",
           "maximum": 100,
           "minimum": 1,
-          "type": "number",
+          "type": "integer",
         },
         "missionId": {
           "description": "Filter to rows stamped with this mission (#487 mission -> row trail)",
@@ -448,13 +474,13 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
         "page": {
           "description": "Page number for list action",
           "minimum": 1,
-          "type": "number",
+          "type": "integer",
         },
         "pageSize": {
           "description": "Page size for list action",
           "maximum": 100,
           "minimum": 1,
-          "type": "number",
+          "type": "integer",
         },
         "projectRoot": {
           "description": "Project root directory to search for CMOS database (defaults to cwd)",
@@ -485,7 +511,7 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
         "supersededBy": {
           "description": "ID of the decision that supersedes this one (for update action)",
           "minimum": 1,
-          "type": "number",
+          "type": "integer",
         },
         "until": {
           "description": "ISO date upper bound for list action",
@@ -516,13 +542,14 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
         },
         "feedbackId": {
           "description": "Target feedback row ID (required for triage/resolve/archive)",
-          "type": "number",
+          "minimum": 1,
+          "type": "integer",
         },
         "limit": {
           "description": "Max entries to return on list (default 50, max 200)",
           "maximum": 200,
           "minimum": 1,
-          "type": "number",
+          "type": "integer",
         },
         "projectRoot": {
           "description": "Project root directory to search for CMOS database (defaults to cwd)",
@@ -556,7 +583,7 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
     "name": "cmos_feedback",
   },
   {
-    "description": "Consolidated learnings tool with action parameter support. Actions: list, search, update. Use list to browse learnings with category/sprint/status filters. Use search to find learnings by keyword. Use update to change status (active, archived, superseded). Use reaffirm to mark an evergreen learning as still valid (bumps last_reviewed_at without changing status).",
+    "description": "Consolidated learnings tool with action parameter support. Actions: list, search, update, reaffirm. Use list to browse learnings with category/sprint/status filters. Use search to find learnings by keyword. Use update to change status (active, archived, superseded). Use reaffirm to mark an evergreen learning as still valid (bumps last_reviewed_at without changing status).",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -575,29 +602,23 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "type": "string",
         },
         "category": {
-          "description": "Filter by category",
-          "enum": [
-            "technical",
-            "process",
-            "agent-behavior",
-            "tooling",
-          ],
+          "description": "Filter by category. Commonly: technical | process | agent-behavior | tooling",
           "type": "string",
         },
         "evergreen": {
-          "description": "Toggle institutional-rule flag for the learning. true = exclude from staleness signal; false = clear flag (Sprint 61 m03).",
+          "description": "Toggle institutional-rule flag for the learning. Applies to the update and reaffirm actions. true = exclude from staleness signal; false = clear flag; omitted = leave unchanged.",
           "type": "boolean",
         },
         "learningId": {
-          "description": "Learning ID for update action",
+          "description": "Learning ID for update/reaffirm actions",
           "minimum": 1,
-          "type": "number",
+          "type": "integer",
         },
         "limit": {
-          "description": "Maximum results for search action",
+          "description": "Maximum results for search action, or the across-project cap for list action",
           "maximum": 50,
           "minimum": 1,
-          "type": "number",
+          "type": "integer",
         },
         "missionId": {
           "description": "Filter to rows stamped with this mission (#487 mission -> row trail)",
@@ -606,13 +627,13 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
         "page": {
           "description": "Page number for list action",
           "minimum": 1,
-          "type": "number",
+          "type": "integer",
         },
         "pageSize": {
           "description": "Page size for list action",
           "maximum": 100,
           "minimum": 1,
-          "type": "number",
+          "type": "integer",
         },
         "projectRoot": {
           "description": "Project root directory to search for CMOS database (defaults to cwd)",
@@ -636,6 +657,7 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
             "active",
             "archived",
             "superseded",
+            "stale",
           ],
           "type": "string",
         },
@@ -698,7 +720,7 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "description": "Max messages to return (default 20)",
           "maximum": 100,
           "minimum": 1,
-          "type": "number",
+          "type": "integer",
         },
         "messageId": {
           "description": "UUID of the message to respond to (respond) or acknowledge (ack)",
@@ -711,7 +733,7 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
         "offset": {
           "description": "Pagination offset for list (SQL-side, dashboard m05). Omit for page 0.",
           "minimum": 0,
-          "type": "number",
+          "type": "integer",
         },
         "projectRoot": {
           "description": "Project root directory to search for CMOS database (defaults to cwd)",
@@ -778,7 +800,7 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
     "name": "cmos_message",
   },
   {
-    "description": "Consolidated mission tool with action parameter support. Actions: list, show, status, add, update, depends, undepends. Routes to the existing mission handlers without changing mission business logic.",
+    "description": "Consolidated mission tool with action parameter support. Actions: list, show, status, add, update, move, depends, undepends. Routes to the existing mission handlers without changing mission business logic.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -787,13 +809,14 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "type": "boolean",
         },
         "action": {
-          "description": "Mission action: list | show | status | add | update | depends | undepends",
+          "description": "Mission action: list | show | status | add | update | move | depends | undepends",
           "enum": [
             "list",
             "show",
             "status",
             "add",
             "update",
+            "move",
             "depends",
             "undepends",
           ],
@@ -877,7 +900,7 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "type": "object",
         },
         "fromId": {
-          "description": "Dependent mission ID for depends action",
+          "description": "Dependent mission ID for depends/undepends actions",
           "type": "string",
         },
         "includeBlocked": {
@@ -885,13 +908,13 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "type": "boolean",
         },
         "limit": {
-          "description": "Maximum missions to return for list action",
+          "description": "Maximum missions to return for list action, or across-project cap for status action",
           "maximum": 100,
           "minimum": 1,
-          "type": "number",
+          "type": "integer",
         },
         "missionId": {
-          "description": "Mission ID for show/add/update actions",
+          "description": "Mission ID for show/add/update/move actions",
           "type": "string",
         },
         "name": {
@@ -914,7 +937,11 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "description": "Maximum queued missions for status action",
           "maximum": 50,
           "minimum": 1,
-          "type": "number",
+          "type": "integer",
+        },
+        "reason": {
+          "description": "Reason recorded on the breadcrumb for move action",
+          "type": "string",
         },
         "referenceDocs": {
           "description": "Reference docs for add action",
@@ -928,7 +955,7 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "type": "string",
         },
         "status": {
-          "description": "Status filter for list action",
+          "description": "Status filter for list action, or initial status for add action",
           "type": "string",
         },
         "successCriteria": {
@@ -939,7 +966,11 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "type": "array",
         },
         "toId": {
-          "description": "Dependency mission ID for depends action",
+          "description": "Dependency mission ID for depends/undepends actions",
+          "type": "string",
+        },
+        "toSprintId": {
+          "description": "Destination sprint ID for move action",
           "type": "string",
         },
         "type": {
@@ -1058,12 +1089,72 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
         "initialMissions": {
           "description": "Initial missions for init action",
           "items": {
+            "additionalProperties": false,
+            "properties": {
+              "deliverables": {
+                "description": "Deliverables",
+                "items": {
+                  "type": "string",
+                },
+                "type": "array",
+              },
+              "id": {
+                "description": "Mission ID",
+                "type": "string",
+              },
+              "name": {
+                "description": "Mission name",
+                "type": "string",
+              },
+              "objective": {
+                "description": "Mission objective",
+                "type": "string",
+              },
+              "sprintId": {
+                "description": "Owning sprint ID",
+                "type": "string",
+              },
+              "status": {
+                "description": "Initial mission status",
+                "enum": [
+                  "Queued",
+                  "Current",
+                ],
+                "type": "string",
+              },
+              "successCriteria": {
+                "description": "Success criteria",
+                "items": {
+                  "type": "string",
+                },
+                "type": "array",
+              },
+            },
             "type": "object",
           },
           "type": "array",
         },
         "initialSprint": {
+          "additionalProperties": false,
           "description": "Initial sprint config for init action",
+          "properties": {
+            "focus": {
+              "description": "Sprint focus",
+              "type": "string",
+            },
+            "id": {
+              "description": "Sprint ID",
+              "type": "string",
+            },
+            "status": {
+              "description": "Sprint status",
+              "type": "string",
+            },
+            "title": {
+              "description": "Sprint title",
+              "type": "string",
+            },
+          },
           "type": "object",
         },
         "instances": {
@@ -1107,7 +1198,7 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "type": "string",
         },
         "prune": {
-          "description": "Prune invalid entries for validate action",
+          "description": "Prune invalid entries for validate action, or for list action when validate is set",
           "type": "boolean",
         },
         "setAsDefault": {
@@ -1171,12 +1262,17 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "description": "Agent identifier for start/capture/complete actions",
           "type": "string",
         },
+        "agentFeedback": {
+          "description": "Optional free-text UX feedback logged to the agent_feedback channel at session close. Use it to flag rough edges you hit while working. Reviewed via cmos_feedback(action="list").",
+          "maxLength": 2000,
+          "type": "string",
+        },
         "autoRefreshMasterContext": {
           "description": "Auto-refresh master context on start",
           "type": "boolean",
         },
         "category": {
-          "description": "Capture category for capture action",
+          "description": "Capture category for capture action, or category filter for search action",
           "enum": [
             "decision",
             "learning",
@@ -1230,11 +1326,15 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           },
           "type": "array",
         },
+        "expiresAt": {
+          "description": "Optional expiry date for constraint captures (ISO 8601, e.g. "2026-03-20T00:00:00Z"). Applies to capture(category="constraint") and to constraints materialized from that capture at session complete.",
+          "type": "string",
+        },
         "limit": {
           "description": "Maximum sessions to return for search action (1-100, default: 20)",
           "maximum": 100,
           "minimum": 1,
-          "type": "number",
+          "type": "integer",
         },
         "missionId": {
           "description": "Associated mission ID. On capture, stamps the decision/learning/next-step row; on complete, stamps the decisions[] and nextSteps[] rows this call materializes.",
@@ -1250,13 +1350,13 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
         "page": {
           "description": "Page number for list action",
           "minimum": 1,
-          "type": "number",
+          "type": "integer",
         },
         "pageSize": {
           "description": "Page size for list action",
           "maximum": 100,
           "minimum": 1,
-          "type": "number",
+          "type": "integer",
         },
         "projectRoot": {
           "description": "Project root directory to search for CMOS database (defaults to cwd)",
@@ -1275,7 +1375,7 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "type": "string",
         },
         "sprintId": {
-          "description": "Sprint ID filter for list action",
+          "description": "Sprint ID filter for list action, or the sprint to tag for start action",
           "type": "string",
         },
         "status": {
@@ -1296,7 +1396,7 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "type": "string",
         },
         "type": {
-          "description": "Session type for list/start actions",
+          "description": "Session type for list/start/search actions",
           "enum": [
             "onboarding",
             "planning",
@@ -1325,7 +1425,7 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
       "additionalProperties": false,
       "properties": {
         "action": {
-          "description": "Sprint action: list | show | add | update | complete",
+          "description": "Sprint action: list | show | add | update | complete | retro | carry_forward | analytics",
           "enum": [
             "list",
             "show",
@@ -1388,10 +1488,10 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "type": "boolean",
         },
         "limit": {
-          "description": "Maximum sprints to return for list action",
+          "description": "Maximum sprints to return for list/analytics actions",
           "maximum": 100,
           "minimum": 1,
-          "type": "number",
+          "type": "integer",
         },
         "projectRoot": {
           "description": "Project root directory to search for CMOS database (defaults to cwd)",
@@ -1402,7 +1502,7 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "type": "boolean",
         },
         "sprintId": {
-          "description": "Sprint ID for show/add/update/complete actions",
+          "description": "Sprint ID for show/add/update/complete/retro/carry_forward actions",
           "type": "string",
         },
         "startDate": {

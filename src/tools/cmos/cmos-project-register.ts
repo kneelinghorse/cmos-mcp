@@ -13,6 +13,7 @@ import { ProjectGraphRegistry, readStoreIdentity } from '../../intelligence/proj
 import { CmosDetector } from '../../intelligence/cmos-detector';
 import type { CmosToolResult } from './types';
 import { createError, createSuccess, CmosErrors } from './errors';
+import { appendWarnings } from './format-warnings';
 
 /**
  * Result type for cmos_project_register.
@@ -184,6 +185,8 @@ export function formatProjectRegisterForLLM(result: CmosToolResult<ProjectRegist
     `   Name: ${data.name}`,
     `   Default: ${data.isDefault ? 'Yes' : 'No'}`,
   ];
+
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

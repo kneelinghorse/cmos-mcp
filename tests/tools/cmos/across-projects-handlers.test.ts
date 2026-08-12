@@ -134,7 +134,7 @@ describe('acrossProjects handlers (Sprint 79 m05)', () => {
       { projectId: 'proj-b', root: b },
     ]);
 
-    const result = await missionStatusAcrossProjects({ registry });
+    const result = await missionStatusAcrossProjects({}, { registry });
     expect(result.success).toBe(true);
     const data = result.data!;
     // Only active (In Progress/Current) — the Completed row is excluded.
@@ -162,7 +162,7 @@ describe('acrossProjects handlers (Sprint 79 m05)', () => {
       { projectId: 'bad', root: bad },
     ]);
 
-    const result = await missionStatusAcrossProjects({ registry });
+    const result = await missionStatusAcrossProjects({}, { registry });
     expect(result.success).toBe(true);
     const data = result.data!;
     expect(data.missions.map((m) => m.id)).toEqual(['g1']); // the good store's row survives
@@ -189,7 +189,7 @@ describe('acrossProjects handlers (Sprint 79 m05)', () => {
       { projectId: 'proj-b', root: b },
     ]);
 
-    const result = await cmosLearningsListAcrossProjects({ category: 'technical', registry });
+    const result = await cmosLearningsListAcrossProjects({ category: 'technical' }, { registry });
     expect(result.success).toBe(true);
     const data = result.data!;
     // Only the 'technical' rows, newest-first, each attributed.
@@ -202,7 +202,7 @@ describe('acrossProjects handlers (Sprint 79 m05)', () => {
 
   it('cmosLearningsListAcrossProjects requires category (the tag)', async () => {
     const registry = await registryWith([]);
-    const result = await cmosLearningsListAcrossProjects({ registry });
+    const result = await cmosLearningsListAcrossProjects({}, { registry });
     expect(result.success).toBe(false);
     expect(result.error?.code).toBe('MISSING_PARAMETER');
   });

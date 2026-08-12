@@ -10,7 +10,7 @@
 
 import { z } from 'zod';
 import { createError, CmosErrors } from './errors';
-import type { CmosToolResult } from './types';
+import type { ActionParamMap, CmosToolResult } from './types';
 import {
   cmosDbHealth,
   formatHealthForLLM,
@@ -67,6 +67,19 @@ export const CMOS_DB_ACTIONS = [
 
 export type CmosDbAction = (typeof CMOS_DB_ACTIONS)[number];
 
+/** s86-m04 — which published parameter applies to which action (see action-params.ts). */
+export const CMOS_DB_ACTION_PARAMS: ActionParamMap<CmosDbAction, CmosDbParams> = {
+  health: ['action', 'projectRoot'],
+  snapshot: ['action', 'listOnly', 'maxSnapshots', 'projectRoot'],
+  restore: ['action', 'snapshotId', 'confirm', 'projectRoot'],
+  backfill: ['action', 'force', 'dryRun', 'projectRoot'],
+  reconcile: ['action', 'projectRoot'],
+  purge: ['action', 'confirm', 'expectedSlug', 'projectRoot'],
+  identify_orphans: ['action', 'projectRoot'],
+  pull: ['action', 'slug', 'limit', 'maxPages', 'projectRoot'],
+  clone: ['action', 'slug', 'projectRoot'],
+};
+
 export type CmosDbResult =
   | CmosDbHealthResult
   | CmosDbSnapshotResult
@@ -115,7 +128,7 @@ export const cmosDbSchema = z
     confirm: z
       .boolean()
       .optional()
-      .describe('Confirmation flag for restore action (required for restore)'),
+      .describe('Confirmation flag for restore/purge actions (required for restore)'),
     // backfill params
     force: z
       .boolean()
@@ -154,9 +167,9 @@ export const cmosDbToolDefinition = {
           'Database action: health | snapshot | restore | backfill | reconcile | purge | identify_orphans | pull | clone',
       },
       listOnly: { type: 'boolean', description: 'List snapshots instead of creating one' },
-      maxSnapshots: { type: 'number', minimum: 1, description: 'Max snapshots to list' },
+      maxSnapshots: { type: 'integer', minimum: 1, description: 'Max snapshots to list' },
       snapshotId: { type: 'string', description: 'Snapshot ID for restore action' },
-      confirm: { type: 'boolean', description: 'Confirmation flag for restore action' },
+      confirm: { type: 'boolean', description: 'Confirmation flag for restore/purge actions' },
       force: { type: 'boolean', description: 'Force full backfill, ignoring cursor' },
       dryRun: { type: 'boolean', description: 'Preview backfill without pushing' },
       expectedSlug: {
@@ -169,12 +182,12 @@ export const cmosDbToolDefinition = {
           'Dashboard slug to pull/clone (for pull and clone actions; defaults to the registered slug)',
       },
       limit: {
-        type: 'number',
+        type: 'integer',
         minimum: 1,
         description: 'Per-page event limit for pull action (default 500, broker caps at 1000)',
       },
       maxPages: {
-        type: 'number',
+        type: 'integer',
         minimum: 1,
         description: 'Safety bound on the pull pagination loop (default 1000)',
       },

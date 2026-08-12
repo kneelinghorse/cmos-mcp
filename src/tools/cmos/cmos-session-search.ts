@@ -20,6 +20,7 @@ import {
 import { VALID_CAPTURE_CATEGORIES, type CaptureCategory } from './cmos-session-capture';
 import { getProjectId, tableHasColumn } from './genesis-columns';
 import { frameInlineIfForeign } from '../../intelligence/provenance-frame';
+import { appendWarnings } from './format-warnings';
 
 // Re-export for convenience
 export { VALID_SESSION_TYPES };
@@ -523,6 +524,8 @@ export function formatSessionSearchForLLM(result: CmosToolResult<CmosSessionSear
     }
     lines.push('');
   }
+
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

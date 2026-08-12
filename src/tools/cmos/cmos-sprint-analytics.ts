@@ -11,6 +11,9 @@
 import { withClient, type CmosDatabaseClient } from './client';
 import type { CmosToolResult } from './types';
 import { createSuccess } from './errors';
+import { appendWarnings } from './format-warnings';
+import { ensureSprintSummaryView } from './schema-migrations';
+import { parkedColumn } from './sprint-summary-read';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -21,6 +24,9 @@ export interface SprintDataPoint {
   totalMissions: number;
   completedMissions: number;
   blockedMissions: number;
+  /** s86-m08: Deferred + Dropped — outside totalMissions, reported so three sibling read
+   *  surfaces (list, show, analytics) cannot disagree about whether parked work is visible. */
+  parkedMissions: number;
   completionRate: number;
   avgCycleTimeDays: number | null;
   decisionsCount: number;
@@ -45,6 +51,9 @@ export interface SprintAnalyticsResult {
     totalSprints: number;
     completedSprints: number;
     totalMissions: number;
+    /** s86-m08: Deferred + Dropped across the window — outside totalMissions, stated so the
+     *  TEXT answer discloses what the denominator excluded. */
+    totalParked: number;
     totalCompleted: number;
     overallCompletionRate: number;
     avgVelocity: number;
@@ -65,6 +74,22 @@ export interface SprintAnalyticsResult {
 
   /** Human-readable trend highlights */
   highlights: string[];
+
+  /**
+   * s86-m05 — the window these numbers actually describe. Every aggregate, trend and highlight
+   * above is computed over exactly these sprints; without this field an operator reading
+   * "across recent sprints" has no way to tell WHICH sprints, which is how the inverted-window
+   * defect stayed invisible for as long as it did.
+   */
+  window: {
+    /** The `limit` the caller passed, or null for an unbounded read. */
+    requestedLimit: number | null;
+    /** Sprints actually analyzed (≤ requestedLimit; fewer when the store holds fewer). */
+    sprintCount: number;
+    /** Oldest and newest sprint in the analyzed window; null when it is empty. */
+    oldestSprintId: string | null;
+    newestSprintId: string | null;
+  };
 }
 
 export interface CmosSprintAnalyticsParams {
@@ -81,44 +106,91 @@ export async function cmosSprintAnalytics(
 ): Promise<CmosToolResult<SprintAnalyticsResult>> {
   return withClient(
     (client) => {
-      const sprints = getSprintDataPoints(client, params.limit);
+      // s86-m08: upgrade a pre-migration store's view before reading it (see
+      // ensureSprintSummaryView — zero writes once current, never touches a base table).
+      const viewMigration = ensureSprintSummaryView(client);
+
+      const { sprints, error: readError } = getSprintDataPoints(
+        client,
+        params.limit,
+        viewMigration.parkedAvailable
+      );
+
+      // An unreadable store and an empty one are different facts. Say which one this is.
+      const advisories = [...(viewMigration.warnings ?? [])];
+      if (readError) {
+        advisories.push(
+          `sprint_summary could not be read (${readError}); no sprint data is included below — this is NOT a report that the store has no sprints.`
+        );
+      }
 
       if (sprints.length === 0) {
-        return createSuccess<SprintAnalyticsResult>({
-          sprints: [],
-          aggregates: {
-            totalSprints: 0,
-            completedSprints: 0,
-            totalMissions: 0,
-            totalCompleted: 0,
-            overallCompletionRate: 0,
-            avgVelocity: 0,
-            avgCycleTimeDays: null,
-            totalDecisions: 0,
-            totalLearnings: 0,
-            totalSessions: 0,
-            totalLinkedSessions: 0,
+        return createSuccess<SprintAnalyticsResult>(
+          {
+            sprints: [],
+            aggregates: {
+              totalSprints: 0,
+              completedSprints: 0,
+              totalMissions: 0,
+              totalParked: 0,
+              totalCompleted: 0,
+              overallCompletionRate: 0,
+              avgVelocity: 0,
+              avgCycleTimeDays: null,
+              totalDecisions: 0,
+              totalLearnings: 0,
+              totalSessions: 0,
+              totalLinkedSessions: 0,
+            },
+            trends: {
+              velocity: { direction: 'stable', changePercent: 0 },
+              completionRate: { direction: 'stable', changePercent: 0 },
+              decisionsPerSprint: { direction: 'stable', changePercent: 0 },
+              cycleTime: null,
+            },
+            highlights: [
+              readError
+                ? 'Sprint data could not be read on this store — see warnings. This is not a finding that there are no sprints.'
+                : 'No completed sprints found for analysis.',
+            ],
+            window: {
+              requestedLimit: params.limit && params.limit > 0 ? params.limit : null,
+              sprintCount: 0,
+              oldestSprintId: null,
+              newestSprintId: null,
+            },
           },
-          trends: {
-            velocity: { direction: 'stable', changePercent: 0 },
-            completionRate: { direction: 'stable', changePercent: 0 },
-            decisionsPerSprint: { direction: 'stable', changePercent: 0 },
-            cycleTime: null,
-          },
-          highlights: ['No completed sprints found for analysis.'],
-        });
+          advisories
+        );
       }
 
       const aggregates = computeAggregates(sprints);
       const trends = computeTrends(sprints);
       const highlights = generateHighlights(sprints, aggregates, trends);
 
-      return createSuccess<SprintAnalyticsResult>({
-        sprints,
-        aggregates,
-        trends,
-        highlights,
-      });
+      return createSuccess<SprintAnalyticsResult>(
+        {
+          sprints,
+          aggregates,
+          trends,
+          highlights,
+          // `sprints` is oldest-first by construction (see getSprintDataPoints), so the ends of
+          // the array ARE the ends of the window.
+          //
+          // requestedLimit reports the bound that was APPLIED, not the number that was passed.
+          // `limitClause` is built with a truthiness test, so limit=0 (and any negative) produces
+          // NO LIMIT clause and the call is unbounded — echoing `0` back would make this field,
+          // whose entire purpose is to stop the answer misdescribing its own window, do exactly
+          // that. Non-positive limits report null, which is what actually happened.
+          window: {
+            requestedLimit: params.limit && params.limit > 0 ? params.limit : null,
+            sprintCount: sprints.length,
+            oldestSprintId: sprints[0].sprintId,
+            newestSprintId: sprints[sprints.length - 1].sprintId,
+          },
+        },
+        advisories
+      );
     },
     { projectRoot: params.projectRoot }
   );
@@ -133,23 +205,57 @@ interface SprintSummaryRow {
   total_missions: number;
   completed_missions: number;
   blocked_missions: number;
+  parked_missions: number;
   decisions_count: number;
 }
 
-function getSprintDataPoints(client: CmosDatabaseClient, limit?: number): SprintDataPoint[] {
-  // Get sprints with mission counts from the sprint_summary view
+function getSprintDataPoints(
+  client: CmosDatabaseClient,
+  limit: number | undefined,
+  parkedAvailable: boolean
+): { sprints: SprintDataPoint[]; error: string | null } {
+  // Get sprints with mission counts from the sprint_summary view.
+  //
+  // s86-m05 (next-step #514): this read used to be `ORDER BY sprint_id ASC ${limitClause}`, so
+  // `limit=N` returned the OLDEST N sprints while the highlights below called them "recent".
+  // Measured on the live store (77 sprints match the filter): limit=8 returned sprint-09..sprint-16
+  // and reported velocity trending DOWN 44%, where the unlimited call reports stable +8% — a
+  // wrong answer, not a stale one.
+  //
+  // The bound is applied to a DESC ordering INSIDE a subquery and oldest-first is restored
+  // OUTSIDE it, rather than flipping this ORDER BY to DESC. computeTrendDirection compares the
+  // first half of the array to the second, so an oldest-first array is what "trend" MEANS here;
+  // a bare DESC flip would silently invert every reported direction, which is worse than the
+  // bug it fixed. The subquery makes the ordering correct by construction, so a later refactor
+  // of the .map() below cannot undo it. With `limit` undefined, limitClause is '' and the outer
+  // ASC leaves the unlimited call byte-identical in ordering to its pre-fix behaviour.
+  //
+  // sprint_id is TEXT, so this ordering is LEXICOGRAPHIC. It is correct only while sprint
+  // numbers stay two-digit zero-padded (live range today: sprint-09..sprint-86); at sprint-100,
+  // 'sprint-100' sorts before 'sprint-99'. Deliberately NOT fixed here — a next-step row carries
+  // it, because widening the key touches every sprint-ordered read in the tree, not just this one.
   const limitClause = limit ? `LIMIT ${Math.floor(limit)}` : '';
   const sprintsResult = client.getMany<SprintSummaryRow>(
-    `SELECT sprint_id, title, status, total_missions, completed_missions, blocked_missions, decisions_count
-     FROM sprint_summary
-     WHERE status IN ('Completed', 'Active')
-     ORDER BY sprint_id ASC
-     ${limitClause}`
+    `SELECT * FROM (
+       SELECT sprint_id, title, status, total_missions, completed_missions, blocked_missions, ${parkedColumn(parkedAvailable)}, decisions_count
+       FROM sprint_summary
+       WHERE status IN ('Completed', 'Active')
+       ORDER BY sprint_id DESC
+       ${limitClause}
+     ) ORDER BY sprint_id ASC`
   );
 
-  if (!sprintsResult.success || !sprintsResult.data) return [];
+  // s86-m08 critic: this used to `return []`, and the caller then reported "No completed
+  // sprints found for analysis" — a confident assertion of ABSENCE built from a swallowed read
+  // failure. An empty store and an unreadable one are different facts and now stay different.
+  if (!sprintsResult.success || !sprintsResult.data) {
+    return {
+      sprints: [],
+      error: `${sprintsResult.error?.code ?? 'DB_ERROR'} — ${sprintsResult.error?.message ?? 'unknown'}`,
+    };
+  }
 
-  return sprintsResult.data.map((row) => {
+  const sprints = sprintsResult.data.map((row) => {
     const cycleTime = getAvgCycleTime(client, row.sprint_id);
     const learningsCount = getLearningsCount(client, row.sprint_id);
     const sessionsCount = getSessionsCount(client, row.sprint_id);
@@ -162,6 +268,7 @@ function getSprintDataPoints(client: CmosDatabaseClient, limit?: number): Sprint
       totalMissions: row.total_missions,
       completedMissions: row.completed_missions,
       blockedMissions: row.blocked_missions,
+      parkedMissions: row.parked_missions ?? 0,
       completionRate:
         row.total_missions > 0
           ? Math.round((row.completed_missions / row.total_missions) * 100)
@@ -173,6 +280,8 @@ function getSprintDataPoints(client: CmosDatabaseClient, limit?: number): Sprint
       linkedSessionsCount,
     };
   });
+
+  return { sprints, error: null };
 }
 
 function getAvgCycleTime(client: CmosDatabaseClient, sprintId: string): number | null {
@@ -229,6 +338,7 @@ function getLinkedSessionsCount(client: CmosDatabaseClient, sprintId: string): n
 function computeAggregates(sprints: SprintDataPoint[]): SprintAnalyticsResult['aggregates'] {
   const completedSprints = sprints.filter((s) => s.status === 'Completed');
   const totalMissions = sprints.reduce((sum, s) => sum + s.totalMissions, 0);
+  const totalParked = sprints.reduce((sum, s) => sum + (s.parkedMissions ?? 0), 0);
   const totalCompleted = sprints.reduce((sum, s) => sum + s.completedMissions, 0);
   const totalDecisions = sprints.reduce((sum, s) => sum + s.decisionsCount, 0);
   const totalLearnings = sprints.reduce((sum, s) => sum + s.learningsCount, 0);
@@ -256,6 +366,7 @@ function computeAggregates(sprints: SprintDataPoint[]): SprintAnalyticsResult['a
     totalSprints: sprints.length,
     completedSprints: completedSprints.length,
     totalMissions,
+    totalParked,
     totalCompleted,
     overallCompletionRate:
       totalMissions > 0 ? Math.round((totalCompleted / totalMissions) * 100) : 0,
@@ -405,13 +516,29 @@ export function formatSprintAnalyticsForLLM(result: CmosToolResult<SprintAnalyti
   lines.push('**Cross-Sprint Analytics**');
   lines.push('');
 
+  // s86-m05 — name the window BEFORE the numbers it explains. Every figure below describes
+  // exactly these sprints, and a bounded call now says which ones rather than "recent".
+  if (d.window.sprintCount > 0) {
+    const bound =
+      d.window.requestedLimit !== null
+        ? `newest ${d.window.sprintCount} of the requested ${d.window.requestedLimit}`
+        : `all ${d.window.sprintCount}`;
+    lines.push(
+      `**Window**: ${bound} — ${d.window.oldestSprintId} → ${d.window.newestSprintId} (oldest → newest)`
+    );
+    lines.push('');
+  }
+
   // Aggregates
   lines.push('**Aggregates**');
   lines.push(
     `  Sprints: ${d.aggregates.totalSprints} (${d.aggregates.completedSprints} completed)`
   );
   lines.push(
-    `  Missions: ${d.aggregates.totalCompleted}/${d.aggregates.totalMissions} completed (${d.aggregates.overallCompletionRate}%)`
+    `  Missions: ${d.aggregates.totalCompleted}/${d.aggregates.totalMissions} completed (${d.aggregates.overallCompletionRate}%)` +
+      (d.aggregates.totalParked > 0
+        ? `, ${d.aggregates.totalParked} parked (Deferred/Dropped, outside the rate)`
+        : '')
   );
   lines.push(`  Avg velocity: ${d.aggregates.avgVelocity} missions/sprint`);
   if (d.aggregates.avgCycleTimeDays !== null) {
@@ -453,6 +580,8 @@ export function formatSprintAnalyticsForLLM(result: CmosToolResult<SprintAnalyti
       lines.push(`  - ${h}`);
     }
   }
+
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

@@ -38,7 +38,6 @@ cmos_project({
   projectRoot: "/path/to/your/project",
   projectName: "My Project",
   projectId: "my-project-id",  // optional, auto-generated if omitted
-  createDocs: true,            // optional, creates docs/ directory
   initialSprint: {             // optional
     id: "sprint-01",
     title: "Initial Sprint"
@@ -50,7 +49,7 @@ This creates:
 
 - `cmos/db/cmos.sqlite` - Initialized database with full schema
 - `cmos/tiers/build.md` - Build tier behavioral guide
-- `cmos/docs/` - Documentation (if createDocs=true)
+- `cmos/docs/` - Documentation (always copied)
 
 ### Option 2: Manual Setup
 

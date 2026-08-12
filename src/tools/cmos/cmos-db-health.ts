@@ -12,6 +12,7 @@ import { z } from 'zod';
 import { CmosDatabaseClient, withClient } from './client';
 import type { CmosToolResult, DbHealthResult } from './types';
 import { createSuccess } from './errors';
+import { appendWarnings } from './format-warnings';
 
 /**
  * Extended health result including last activity information.
@@ -283,6 +284,8 @@ export function formatHealthForLLM(result: CmosToolResult<CmosDbHealthResult>): 
   lines.push(`  - Mission: ${health.lastMissionActivity ?? 'No activity'}`);
   lines.push(`  - Session: ${health.lastSessionActivity ?? 'No activity'}`);
   lines.push(`  - Context: ${health.lastContextUpdate ?? 'Never updated'}`);
+
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

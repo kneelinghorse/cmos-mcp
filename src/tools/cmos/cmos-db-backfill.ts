@@ -27,6 +27,26 @@ import { DashboardClient } from './dashboard-client';
 import { createError, createSuccess, CmosErrors } from './errors';
 import type { CmosToolResult } from './types';
 import { migrateContentHash, computeContentHash } from './schema-migrations';
+import { appendWarnings } from './format-warnings';
+import { checkWrite } from './write-guard';
+
+/**
+ * s86-m01 — write diagnostics straight to fd 2 instead of through the global
+ * console object.
+ *
+ * `cmosDbBackfill` is reachable from the fire-and-forget checkpoint IIFE
+ * (checkpoint-backfill.ts's event-replay fallback arm), so its progress and
+ * failure lines can land after a Jest suite has torn down — where the patched
+ * console throws "Cannot log after tests are done" and turns a green run into a
+ * nonzero exit. `process.stderr` is not patched. Production behaviour is
+ * unchanged: these lines already went to fd 2, which is where a stdio MCP
+ * server's diagnostics belong (stdout carries JSON-RPC).
+ *
+ * Guarded by tests/tools/cmos/detached-log-gate.test.ts Arm A.
+ */
+function log(line: string): void {
+  process.stderr.write(line + '\n');
+}
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -74,13 +94,26 @@ export interface CmosDbBackfillParams {
   force?: boolean;
   /** Dry run: count events without pushing */
   dryRun?: boolean;
-  /** Per-request HTTP timeout in ms (default: 30_000). Override in tests for fast abort. */
+  /**
+   * Per-request HTTP timeout in ms (default: 30_000). Override in tests for fast abort.
+   * @internal Process-lifetime tuning knob with no operator use case — an agent cannot
+   * meaningfully choose a socket timeout for a push it does not observe, so it is deliberately
+   * not declared on the cmos_db inputSchema and the router does not forward it.
+   */
   perRequestTimeoutMs?: number;
-  /** Overall wall-clock timeout for the full push loop (ms, default: 120_000). */
+  /**
+   * Overall wall-clock timeout for the full push loop (ms, default: 120_000).
+   * @internal Same class as perRequestTimeoutMs — a process-lifetime tuning knob, not a caller
+   * decision. Stated explicitly because this property carries no test-hook language of its own:
+   * the grounds for the tag are the absence of an operator use case, not an inference from
+   * the sibling comment.
+   */
   overallTimeoutMs?: number;
   /**
    * Test hook: inject a replacement for Date.now() to make timeout checks deterministic.
    * Never set this in production code.
+   * @internal A Date.now injection point for deterministic timeout tests; publishing a clock
+   * override on the MCP boundary would let a caller falsify the push loop's own timing.
    */
   _getNow?: () => number;
 }
@@ -375,12 +408,12 @@ export async function cmosDbBackfill(
             `File-based sync failed (slug: ${slug}) — fell back to slower event-replay: ${fileSyncErr}. ` +
             'The dashboard mirror was still updated via event-replay, but this path is cursor-bound and slower; ' +
             'investigate the file-sync failure if it recurs.';
-          console.error(`[backfill] ${fileSyncFallbackWarning}`);
+          log(`[backfill] ${fileSyncFallbackWarning}`);
         }
       }
 
       // Ensure content_hash columns exist and are populated
-      migrateContentHash(db);
+      const contentHashMigration = migrateContentHash(db);
 
       const warnings: string[] = [];
       // s81-m01: surface the file-sync→event-replay fallback (captured above) so the
@@ -389,6 +422,13 @@ export async function cmosDbBackfill(
       if (fileSyncFallbackWarning) {
         warnings.push(fileSyncFallbackWarning);
       }
+      // s86-m02b (fork f23, consumer side): a half-applied content_hash migration would
+      // otherwise be invisible here — the dedup below keys on content_hash, so a failed
+      // backfill silently changes what "deduped" counts.
+      warnings.push(...(contentHashMigration.warnings ?? []));
+      // s86-m02b: the identity repair reports `repaired: true` off in-memory values; if the
+      // metadata write that persists them errored, say so instead of implying it stuck.
+      warnings.push(...identity.warnings);
       if (identity.repaired) {
         warnings.push(
           `Project metadata was empty — repaired from ${identity.repairSource} (id: ${identity.projectId}, name: ${identity.projectName})`
@@ -809,7 +849,7 @@ export async function cmosDbBackfill(
             const warningMsg =
               `Delta too large: ${breakdown[table]} ${table} records exceed threshold of ` +
               `${LARGE_DELTA_THRESHOLD}. Re-upload your SQLite file at ${uploadPath} instead.`;
-            console.error(`[backfill] ${warningMsg}`);
+            log(`[backfill] ${warningMsg}`);
             return createSuccess<CmosDbBackfillResult>({
               mode: 'backfill',
               dryRun: false,
@@ -859,7 +899,7 @@ export async function cmosDbBackfill(
         if (getNow() - wallClockStart > effectiveOverallTimeout) {
           timedOut = true;
           const remaining = totalEvents - pushed - failed;
-          console.error(
+          log(
             `[backfill] Overall timeout (${effectiveOverallTimeout}ms) exceeded. ` +
               `Aborted: ${pushed} pushed, ${failed} failed, ${remaining} remaining.`
           );
@@ -876,16 +916,14 @@ export async function cmosDbBackfill(
           latestTimestamp = event.timestamp;
         } else {
           failed++;
-          console.warn(`[backfill] Failed to push ${event.type}: ${result.error?.message}`);
+          log(`[backfill] Failed to push ${event.type}: ${result.error?.message}`);
         }
 
         // Progress logging every PROGRESS_LOG_INTERVAL events
         const processed = pushed + failed;
         if (processed % PROGRESS_LOG_INTERVAL === 0) {
           const remaining = totalEvents - processed;
-          console.error(
-            `[backfill] Progress: ${pushed} pushed, ${failed} failed, ${remaining} remaining`
-          );
+          log(`[backfill] Progress: ${pushed} pushed, ${failed} failed, ${remaining} remaining`);
         }
       }
 
@@ -893,9 +931,16 @@ export async function cmosDbBackfill(
       // A force=true run that times out early must not overwrite a previously-advanced
       // cursor with an earlier timestamp, or the next run re-processes the same events.
       if (latestTimestamp && (!previousCursor || latestTimestamp > previousCursor)) {
-        db.execute(`INSERT OR REPLACE INTO metadata (key, value) VALUES ('backfill_cursor', ?)`, [
-          latestTimestamp,
-        ]);
+        // s86-m02b: the `cursor` field returned below is read as "resume from here". A failed
+        // write means the next run resumes from the OLD cursor and replays these events —
+        // the answer must not report an advance the store never took.
+        checkWrite(
+          db.execute(`INSERT OR REPLACE INTO metadata (key, value) VALUES ('backfill_cursor', ?)`, [
+            latestTimestamp,
+          ]),
+          warnings,
+          'metadata.backfill_cursor advance'
+        );
       }
 
       const finalWarnings = warnings.length > 0 ? [...warnings] : [];
@@ -934,9 +979,16 @@ export interface ProjectIdentityResult extends ProjectIdentity {
   repaired: boolean;
   /** Source used for repair (if any) */
   repairSource: 'dashboard_slug' | 'directory' | 'master_context' | null;
+  /**
+   * s86-m02b — DB errors from the metadata writes that PERSIST a repair. `repaired: true`
+   * describes the in-memory identity this run pushes with; only an empty `warnings` says
+   * the store took it too.
+   */
+  warnings: string[];
 }
 
 function getProjectIdentity(db: CmosDatabaseClient): ProjectIdentityResult {
+  const warnings: string[] = [];
   const pidResult = db.getOne<MetadataRow>(`SELECT value FROM metadata WHERE key = 'project_id'`);
   const pnameResult = db.getOne<MetadataRow>(
     `SELECT value FROM metadata WHERE key = 'project_name'`
@@ -947,7 +999,7 @@ function getProjectIdentity(db: CmosDatabaseClient): ProjectIdentityResult {
 
   // If both are present, return as-is
   if (projectId && projectName) {
-    return { projectId, projectName, repaired: false, repairSource: null };
+    return { projectId, projectName, repaired: false, repairSource: null, warnings };
   }
 
   // s81-m02 defect-3: before deriving identity from the directory basename (which a
@@ -968,13 +1020,21 @@ function getProjectIdentity(db: CmosDatabaseClient): ProjectIdentityResult {
         .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
         .join(' ');
     }
-    db.execute(`INSERT OR REPLACE INTO metadata (key, value) VALUES ('project_id', ?)`, [
-      projectId,
-    ]);
-    db.execute(`INSERT OR REPLACE INTO metadata (key, value) VALUES ('project_name', ?)`, [
-      projectName,
-    ]);
-    return { projectId, projectName, repaired: true, repairSource: 'dashboard_slug' };
+    checkWrite(
+      db.execute(`INSERT OR REPLACE INTO metadata (key, value) VALUES ('project_id', ?)`, [
+        projectId,
+      ]),
+      warnings,
+      'metadata.project_id repair (from dashboard_slug)'
+    );
+    checkWrite(
+      db.execute(`INSERT OR REPLACE INTO metadata (key, value) VALUES ('project_name', ?)`, [
+        projectName,
+      ]),
+      warnings,
+      'metadata.project_name repair (from dashboard_slug)'
+    );
+    return { projectId, projectName, repaired: true, repairSource: 'dashboard_slug', warnings };
   }
 
   // Attempt repair from directory name (db path: {root}/cmos/db/cmos.sqlite)
@@ -994,14 +1054,22 @@ function getProjectIdentity(db: CmosDatabaseClient): ProjectIdentityResult {
     }
 
     // Persist the repair
-    db.execute(`INSERT OR REPLACE INTO metadata (key, value) VALUES ('project_id', ?)`, [
-      projectId,
-    ]);
-    db.execute(`INSERT OR REPLACE INTO metadata (key, value) VALUES ('project_name', ?)`, [
-      projectName,
-    ]);
+    checkWrite(
+      db.execute(`INSERT OR REPLACE INTO metadata (key, value) VALUES ('project_id', ?)`, [
+        projectId,
+      ]),
+      warnings,
+      'metadata.project_id repair (from directory)'
+    );
+    checkWrite(
+      db.execute(`INSERT OR REPLACE INTO metadata (key, value) VALUES ('project_name', ?)`, [
+        projectName,
+      ]),
+      warnings,
+      'metadata.project_name repair (from directory)'
+    );
 
-    return { projectId, projectName, repaired: true, repairSource: 'directory' };
+    return { projectId, projectName, repaired: true, repairSource: 'directory', warnings };
   }
 
   // Attempt repair from master_context
@@ -1017,14 +1085,22 @@ function getProjectIdentity(db: CmosDatabaseClient): ProjectIdentityResult {
         if (!projectName) projectName = ctxName;
         if (!projectId) projectId = ctxName.toLowerCase().replace(/\s+/g, '-');
 
-        db.execute(`INSERT OR REPLACE INTO metadata (key, value) VALUES ('project_id', ?)`, [
-          projectId,
-        ]);
-        db.execute(`INSERT OR REPLACE INTO metadata (key, value) VALUES ('project_name', ?)`, [
-          projectName,
-        ]);
+        checkWrite(
+          db.execute(`INSERT OR REPLACE INTO metadata (key, value) VALUES ('project_id', ?)`, [
+            projectId,
+          ]),
+          warnings,
+          'metadata.project_id repair (from master_context)'
+        );
+        checkWrite(
+          db.execute(`INSERT OR REPLACE INTO metadata (key, value) VALUES ('project_name', ?)`, [
+            projectName,
+          ]),
+          warnings,
+          'metadata.project_name repair (from master_context)'
+        );
 
-        return { projectId, projectName, repaired: true, repairSource: 'master_context' };
+        return { projectId, projectName, repaired: true, repairSource: 'master_context', warnings };
       }
     } catch {
       // JSON parse failure — fall through to fallback
@@ -1037,6 +1113,7 @@ function getProjectIdentity(db: CmosDatabaseClient): ProjectIdentityResult {
     projectName: projectName || 'Unknown',
     repaired: false,
     repairSource: null,
+    warnings,
   };
 }
 
@@ -1227,6 +1304,8 @@ export function formatReconciliationForLLM(result: CmosToolResult<Reconciliation
     lines.push(`Last sync: ${d.lastSyncAt}`);
   }
 
+  appendWarnings(lines, result);
+
   return lines.join('\n');
 }
 
@@ -1381,6 +1460,8 @@ export function formatPgOrphanReportForLLM(result: CmosToolResult<PgOrphanReport
   }
 
   lines.push(`Tables checked: ${d.tablesChecked.join(', ')}`);
+  appendWarnings(lines, result);
+
   return lines.join('\n');
 }
 
@@ -1450,6 +1531,8 @@ export function formatPurgeForLLM(result: CmosToolResult<PurgeResult>): string {
     'Run cmos_db(action="backfill", force=true) to re-sync all data.',
   ];
 
+  appendWarnings(lines, result);
+
   return lines.join('\n');
 }
 
@@ -1476,6 +1559,8 @@ export function formatBackfillForLLM(result: CmosToolResult<CmosDbBackfillResult
   if (d.cursor) {
     lines.push(`Current cursor: ${d.cursor}`);
   }
+
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

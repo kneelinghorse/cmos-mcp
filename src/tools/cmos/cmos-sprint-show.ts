@@ -12,6 +12,9 @@ import { withClient } from './client';
 import type { CmosToolResult, MissionStatus } from './types';
 import { createError, createSuccess, CmosErrors } from './errors';
 import { getSprintDecisionCounts } from './decision-memory';
+import { appendWarnings } from './format-warnings';
+import { ensureSprintSummaryView } from './schema-migrations';
+import { parkedColumn, withViewContext } from './sprint-summary-read';
 
 /**
  * Mission summary within a sprint.
@@ -64,6 +67,10 @@ export interface SprintShowResult {
   /** Active missions (Current + In Progress) */
   activeMissions: number;
 
+  /** s86-m08: Deferred + Dropped missions — parked work, excluded from totalMissions and
+   *  reported here so it is neither counted against the sprint nor hidden from the reader. */
+  parkedMissions: number;
+
   /** Strategic decisions count */
   decisionsCount: number;
 
@@ -91,6 +98,12 @@ interface SprintSummaryRow {
   completed_missions: number;
   blocked_missions: number;
   active_missions: number;
+  /** s86-m08: Deferred + Dropped — the work this sprint owned and parked. Excluded from
+   *  total_missions so a sprint is not punished for parking honestly, surfaced here so it
+   *  is not hidden either. On a store whose view could not be upgraded the reader projects
+   *  `0 AS parked_missions` (see parkedColumn) and the answer carries a warning saying so —
+   *  the column is always present in the ROW, the zero is the part to distrust. */
+  parked_missions: number;
   decisions_count: number;
 }
 
@@ -162,20 +175,30 @@ export async function cmosSprintShow(
 
   return withClient(
     (client) => {
+      // s86-m08: upgrade a pre-migration store's view before reading it (zero writes once
+      // current; a base table of the same name is left untouched).
+      const viewMigration = ensureSprintSummaryView(client);
+
       // Get sprint from sprint_summary view
       const sprintResult = client.getOne<SprintSummaryRow>(
         `SELECT
           sprint_id, title, status, focus, start_date, end_date,
           total_missions, completed_missions, blocked_missions,
-          active_missions, decisions_count
+          active_missions, ${parkedColumn(viewMigration.parkedAvailable)}, decisions_count
         FROM sprint_summary
         WHERE sprint_id = ?`,
         [sprintId]
       );
 
       if (!sprintResult.success) {
+        // Carry the migration's warning onto the ERROR too: on a store whose view could not be
+        // upgraded, that warning is the one fact explaining the failure, and createError has no
+        // warnings channel of its own.
         return createError<SprintShowResult>(
-          sprintResult.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to query sprint' }
+          withViewContext(
+            sprintResult.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to query sprint' },
+            viewMigration
+          )
         );
       }
 
@@ -222,6 +245,7 @@ export async function cmosSprintShow(
         completedMissions: sprint.completed_missions ?? 0,
         blockedMissions: sprint.blocked_missions ?? 0,
         activeMissions: sprint.active_missions ?? 0,
+        parkedMissions: sprint.parked_missions ?? 0,
         decisionsCount: decisionCounts.strategicDecisionsCount,
         sessionDecisionsCount: decisionCounts.sessionDecisionsCount,
         totalDecisionsCount: decisionCounts.totalDecisionsCount,
@@ -233,7 +257,7 @@ export async function cmosSprintShow(
         })),
       };
 
-      return createSuccess(result);
+      return createSuccess(result, viewMigration.warnings);
     },
     { projectRoot: params.projectRoot }
   );
@@ -290,6 +314,12 @@ export function formatSprintShowForLLM(result: CmosToolResult<SprintShowResult>)
   lines.push('**Progress**');
   lines.push(`   Completed: ${s.completedMissions}/${s.totalMissions} missions`);
 
+  if (s.parkedMissions > 0) {
+    // s86-m08: parked work is stated in its own line — it is outside the denominator above,
+    // and saying so is the difference between an honest number and a flattering one.
+    lines.push(`   Parked (Deferred/Dropped): ${s.parkedMissions}`);
+  }
+
   if (s.activeMissions > 0) {
     lines.push(`   Active: ${s.activeMissions}`);
   }
@@ -323,6 +353,8 @@ export function formatSprintShowForLLM(result: CmosToolResult<SprintShowResult>)
   } else {
     lines.push('**Missions**: None');
   }
+
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

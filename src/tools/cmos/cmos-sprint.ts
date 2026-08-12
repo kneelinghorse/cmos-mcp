@@ -10,7 +10,7 @@
 
 import { z } from 'zod';
 import { createError, CmosErrors } from './errors';
-import type { CmosToolResult } from './types';
+import type { ActionParamMap, CmosToolResult } from './types';
 import {
   cmosSprintAdd,
   formatSprintAddForLLM,
@@ -76,6 +76,30 @@ export const CMOS_SPRINT_ACTIONS = [
 
 export type CmosSprintAction = (typeof CMOS_SPRINT_ACTIONS)[number];
 
+/** s86-m04 — which published parameter applies to which action (see action-params.ts). */
+export const CMOS_SPRINT_ACTION_PARAMS: ActionParamMap<CmosSprintAction, CmosSprintParams> = {
+  list: ['action', 'status', 'limit', 'projectRoot'],
+  show: ['action', 'sprintId', 'projectRoot'],
+  add: ['action', 'sprintId', 'title', 'focus', 'status', 'startDate', 'endDate', 'projectRoot'],
+  update: ['action', 'sprintId', 'fields', 'projectRoot'],
+  // `forceComplete` is retained and forwarded but is a NO-OP since decision #841 demoted the
+  // build-freshness gate to advisory. It applies to this action in the sense the contract means —
+  // the router accepts and forwards it — and the fact that it now changes nothing belongs in its
+  // description, not in a silent omission here.
+  complete: [
+    'action',
+    'sprintId',
+    'summary',
+    'condensation',
+    'targetSizePercent',
+    'forceComplete',
+    'projectRoot',
+  ],
+  retro: ['action', 'sprintId', 'projectRoot'],
+  carry_forward: ['action', 'sprintId', 'targetAddress', 'send', 'projectRoot'],
+  analytics: ['action', 'limit', 'projectRoot'],
+};
+
 export type CmosSprintResult =
   | CmosSprintListResult
   | SprintShowResult
@@ -104,8 +128,14 @@ export const cmosSprintSchema = z
   .object({
     action: z
       .enum(CMOS_SPRINT_ACTIONS)
-      .describe('Sprint action: list | show | add | update | complete'),
-    sprintId: z.string().optional().describe('Sprint ID for show/add/update/complete actions'),
+      // s86-m04: DERIVED, not hand-written. This string listed 5 of the 8 members and had
+      // shipped that way, so an agent reading it could not learn that retro, carry_forward or
+      // analytics exist.
+      .describe(`Sprint action: ${CMOS_SPRINT_ACTIONS.join(' | ')}`),
+    sprintId: z
+      .string()
+      .optional()
+      .describe('Sprint ID for show/add/update/complete/retro/carry_forward actions'),
     title: z.string().optional().describe('Sprint title for add action'),
     focus: z.string().optional().describe('Strategic focus or theme for add action'),
     status: z.string().optional().describe('Filter or sprint status depending on action'),
@@ -117,7 +147,7 @@ export const cmosSprintSchema = z
       .positive()
       .max(100)
       .optional()
-      .describe('Maximum sprints to return for list action'),
+      .describe('Maximum sprints to return for list/analytics actions'),
     fields: cmosSprintFieldsSchema.optional().describe('Fields payload for update action'),
     summary: z.string().optional().describe('Closeout summary for complete action'),
     condensation: z
@@ -172,11 +202,11 @@ export const cmosSprintToolDefinition = {
       action: {
         type: 'string',
         enum: [...CMOS_SPRINT_ACTIONS],
-        description: 'Sprint action: list | show | add | update | complete',
+        description: `Sprint action: ${CMOS_SPRINT_ACTIONS.join(' | ')}`,
       },
       sprintId: {
         type: 'string',
-        description: 'Sprint ID for show/add/update/complete actions',
+        description: 'Sprint ID for show/add/update/complete/retro/carry_forward actions',
       },
       title: {
         type: 'string',
@@ -199,10 +229,10 @@ export const cmosSprintToolDefinition = {
         description: 'Sprint end date for add action',
       },
       limit: {
-        type: 'number',
+        type: 'integer',
         minimum: 1,
         maximum: 100,
-        description: 'Maximum sprints to return for list action',
+        description: 'Maximum sprints to return for list/analytics actions',
       },
       fields: {
         type: 'object',

@@ -2,7 +2,217 @@
 
 All notable changes to cmos-mcp are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## 2.6.0 — 2026-08-12
+
+Sprint 86 "Say Only What You Know" — the honest-surface release. Sprint 85 made the durable
+**record** honest; this release makes the **surface** honest: a shipped string, count or schema
+that confidently asserts something that is not so. The **15-tool contract holds** —
+`cmos_mission` gains a `move` action, which is a new action on an existing tool, not a 16th tool.
+
+Nothing that worked was taken away. The two `### Removed` entries below are unreachable or
+ignored surface, which is why this is a MINOR and not a MAJOR.
+
+### Changed
+
+- **Counts and success flags returned by write actions are now computed from what the database
+  did, rather than from what the handler intended (s86 m02).** The one operators have been
+  reading is `cmos_sprint(action="complete").nextStepsReconciled`: it now reports the rows the
+  bulk `UPDATE` actually changed. That number can differ from the intended count for **two
+  different reasons, and they are not the same news**. Either the statement errored — which is
+  now surfaced as a `writeFailures` entry carrying the database's own error code — or a target
+  row was simply no longer `pending` when the statement ran, which is a benign `WHERE`-miss and
+  produces **no** `writeFailures` entry. A lower number is not by itself evidence that anything
+  went wrong; read `writeFailures` to tell the two apart.
+- **`cmos_sprint(action="list")` and `cmos_sprint(action="show")` now report `totalMissions`
+  EXCLUDING Deferred and Dropped missions, accompanied by a new `parkedMissions` count
+  (s86 m08).** This is a corrected count on two **read** actions, and it is a separate risk
+  from the write-side change above: the numbers move on every store, for every sprint that ever
+  deferred or dropped a mission, with no call-site change on the consumer's part. A sprint that
+  completed all its live work while parking some now reads as complete instead of being
+  permanently punished in its own denominator. Both actions read the `sprint_summary` view
+  directly, so a store gets the new numbers as soon as the view migration runs. Where the view
+  cannot be upgraded (a read-only store, or a same-named base table already occupying the name),
+  both actions report `parkedMissions: 0` and carry the migration's reason rather than failing.
+- **33 published numeric declarations tighten from `"type": "number"` to `"type": "integer"`
+  (s86 m04).** CLIENT-SIDE VALIDATION ONLY — no server behaviour changes, and no call that was
+  correct before is rejected now. 30 scalar parameters plus 3 array item types (`nextStepIds`,
+  `constraintIds`, `decisionIds`). Three parameters deliberately remain `number` because they
+  are genuinely non-integer: `cmos_sprint.targetSizePercent`, `cmos_context.targetSizePercent`
+  and `cmos_context.recencyWeight`.
+- **SEPARATE, and a different risk class: three input schemas change their accepted value sets
+  (s86 m04), and one of them WIDENS.** `cmos_learnings.status`'s **published** enum widens from
+  `['active','archived','superseded']` to include **`'stale'`** — the server has been writing
+  that value itself (`src/tools/cmos/staleness-detection.ts:519`,
+  `UPDATE learnings SET status = 'stale'`), and 246 such rows exist
+  across 7 of the 18 stores measured, so the published contract had been forbidding callers from
+  naming a value the server writes. `cmos_decisions` never had this asymmetry, which is the
+  evidence the enum was the wrong side rather than the data. With the set corrected,
+  `cmos_learnings.status` and `cmos_decisions.status` tighten from a bare string to that
+  four-member enum, so a value outside it is now a validation error instead of a silent no-match.
+  `cmos_learnings.category` goes the **other** way: its published enum is **dropped entirely**
+  and its input stays a free string, because the column is `TEXT` with no `CHECK` constraint and
+  a closed set claimed an enforcement the server does not perform — the fleet already carries an
+  out-of-set value. The four canonical categories are documented as guidance, not as a contract.
+- **Every leaf formatter now renders the envelope `warnings` channel (s86 m02).**
+  `CmosToolResult.warnings` ships inside `structuredContent`, but an agent reads
+  `content[0].text` — so a warning no formatter rendered was present in the payload and
+  unreadable in practice. Measured before the fix, across 76 leaf formatters: **14 rendered the
+  envelope channel, 57 rendered nothing at all, a further 4 rendered only a data-level
+  `warnings` field of their own** (a different channel), and 1 takes no result at all. So 61
+  leaves were silent on the envelope channel. **Consumer-visible consequence: advisories that
+  have been shipping invisible since 2.5.0 — including s85-m04's `missionId` advisory — appear
+  in the text channel for the first time.** Answers get longer; nothing else about them changes.
+- **Separately: the write actions that can partially fail now render a data-level
+  `writeFailures` block (s86 m02b).** This is a **different channel** from the envelope
+  `warnings` above — it is `result.data.writeFailures`, not an envelope field — and it is
+  carried by the seven actions whose writes can fail row-wise while the answer still succeeds:
+  `cmos_sprint(complete)`, `cmos_session(capture)`, `cmos_session(complete)`,
+  `cmos_context(next_steps)`, `cmos_context(constraints)`, `cmos_decisions(batch_update)` and
+  `cmos_project(update)`. An empty list renders nothing, deliberately: a `WHERE` that matched no
+  rows is a legitimate outcome, not a failure. Other actions do not carry this field.
+- **`cmos_message(action="list").unreadCount` is renamed to `unreadCountUserWide`, joined by a
+  new view-scoped `unreadInThisView` (s86 m07).** The dashboard's unread number is USER-WIDE
+  across every project you own, while the rows returned beside it are scoped to the calling
+  credential, tab and filters — under one name they produced a header that read
+  `0 total, 7 unread` against an empty pending inbox, a badge that names no project and can
+  never clear. `unreadInThisView` counts the returned rows with status `pending`. **Consumer
+  risk: a JSON key disappears — anything reading `unreadCount` off this result now gets
+  `undefined`.** A non-fatal warning also names the scope mismatch whenever the resolved
+  credential is not project-scoped.
+- **The exported TypeScript type `ResolveAddressResult` is corrected to the wire shape
+  (s86 m07).** `resolved` changes from `boolean` to an object
+  (`{userId?, username?, displayName?, projectId?, projectName?, projectSlug?}`), and the
+  never-populated top-level `projectName` / `agentId` members are gone. The endpoint has always
+  returned an object here; the declaration described a response it does not send. **Consumer
+  risk: a TypeScript compile break for anyone importing the type** — a different risk class
+  from the rename above, which no TS consumer sees at compile time.
+- **`cmos_message(action="send")` may now return non-fatal `warnings`, and
+  `cmos_message(action="directory")` rows gain `createdAt`, `ownerDisplayName`, `ambiguousWith`
+  and a correctly-populated `isOwner` (s86 m07).** A send whose target shares a slug prefix with
+  another project under the same owner — the `cmos://derek/cmos-mcp` vs
+  `cmos://derek/cmos-mcp-pro` case — now says so in the rendered answer and carries
+  `targetProjectId` / `targetProjectName` for the project it actually reached. **The send is
+  never blocked by this check.** Directory rows carry the ambiguity annotation and, for the
+  first time, a real ownership signal: the public directory route never returns `isOwner`, so
+  every row (including your own) was previously framed as foreign. `createdAt` is the
+  REGISTRATION date and is labelled as such — it is not an activity or freshness signal.
+  **Consumer risk: additive only.**
+- **`cmos_auth(action="reissue").revokedKeyIds` reports the keyIds the dashboard actually
+  revoked** instead of always `[]`, and names them in the rendered answer rather than only in
+  `structuredContent`. A success answer previously asserted "nothing was revoked" while the
+  dashboard had revoked N keys. A companion **`revokedKeyIdsReported`** boolean distinguishes
+  "the dashboard reported an empty list" from "the dashboard reported no list at all" — the
+  response body is not validated, so an absent field must not be rendered as an empty one.
+- **Attribution failures are two distinct errors, not one wrong cause.** The single
+  `DEVICE_CODE_REQUIRED` message asserted that the device-code flow "must be run", which is
+  false whenever the credential store already holds a user-scoped key — the credentials existed
+  and worked, they simply were not the ones selected. `DEVICE_CODE_REQUIRED` is now returned
+  only for a store with zero user-scoped keys (and names the store's path); a resolved
+  credential that cannot be attributed (caller-supplied override, legacy
+  `CMOS_DASHBOARD_API_KEY`, or the user+password fallback) returns the new
+  **`CREDENTIAL_NOT_ATTRIBUTABLE`** naming which arm supplied it.
+- **`cmos_auth(action="rotate")` no longer passes a dashboard 401 through blind.** The generic
+  suggestion pointed every install at `CMOS_DASHBOARD_USER`/`CMOS_DASHBOARD_PASSWORD`; rotate
+  now names the local row's keyId, states that it authenticates with the project-scoped
+  credential resolved for that root, and points at `reissue`. The error **code is unchanged**
+  (`DASHBOARD_AUTH_FAILED`) and rotate's credential selection is deliberately untouched.
+- **The `DASHBOARD_AUTH_FAILED` suggestion no longer names only the password fallback.**
+  Device code has been the default bootstrap since 2.x; the suggestion now covers the arms that
+  exist without asserting which one authenticated.
+- **Startup project-key recovery: `skipped-no-parent-key-id` is replaced by
+  `skipped-no-user-scoped-key` and `skipped-unattributable-credential`, both logged at
+  `[WARN]`** (previously one status at `[INFO]`). Its message also no longer claims that
+  `/reissue` on the next startup will recover the key — startup recovery skips outright whenever
+  a local row exists. Consumers matching the old status string must update.
+
+### Added
+
+- **`cmos_mission(action="move", missionId, toSprintId)` — a supported sprint re-bind
+  (s86 m08).** `missions.sprint_id` carried two facts in one column ("which sprint created
+  this" and "which sprint owns its execution"), and until now the only way to correct it was
+  raw SQL against durable state. The move refuses a terminal mission and refuses a closed
+  destination sprint, and it distinguishes a destination that does not exist from one that is
+  closed — the two need different corrective actions. A new **action on an existing tool**: the
+  15-tool contract is unchanged.
+- **`sprint_summary.parked_missions`** — the view now carries the Deferred/Dropped count
+  alongside the corrected `total_missions`. Applied by a lazy migration on first read.
+- **Three parameters that the handlers supported but the tool schema never published, and the
+  router never forwarded (s86 m03): `cmos_context.statusFilter`, `cmos_session.expiresAt` and
+  `cmos_session.agentFeedback`.** Stated precisely, because it is easy to describe wrongly: at
+  2.5.0 none of these three appeared on the tool it belongs to. `agentFeedback` was published
+  only on `cmos_agent_onboard` and `cmos_mission_transition`; `statusFilter` only on
+  `cmos_project`; `expiresAt` appeared in no shipped artifact at all. The behaviour existed in
+  the handlers and there was no way for a caller to reach it. 2.6.0 publishes all three on the
+  right tools and wires the router through to them. **Consumer risk: additive.** These are new
+  parameters, not repairs to a contract you could already have depended on — the input schemas
+  are strict, so a 2.5.0 client passing them got a validation error rather than a silent no-op.
+- **`cmos_learnings(action="reaffirm").evergreen` is live**, and the answer carries
+  `previousEvergreen` / `newEvergreen` so a caller can see whether the flag actually moved.
+- **Per-action parameter tables in `TOOL_REFERENCE.md`.** The generated reference now shows
+  which parameters belong to which action, rather than one flat table per tool.
+
+### Fixed
+
+- **`cmos_auth(action="reissue")` now works in the state it exists for (s86 m06).** Reissue is
+  the documented lost-key recovery path, and it succeeded only when the local project-key row
+  was **absent** — the one state it is not needed in. Client resolution returns a
+  project-scoped credential whenever a local row merely EXISTS (the local store has no
+  revocation or expiry concept), so a present-but-revoked row short-circuited resolution,
+  the mint could not be attributed to a parent credential, and the call failed. Reissue now
+  resolves through a new user-scoped entry point (`DashboardClient.fromEnvForUser`, arms
+  3 → 4 → 5). **Arm order and `keySource` values are unchanged for every other caller** — both
+  entry points share one copy of the chain.
+- **A reissue that cannot attribute the mint no longer destroys the local project-key row.**
+  The row was removed _before_ the handler discovered the credential problem, so an operator
+  asking for a repair was left with no project key at all — strictly worse off than before the
+  call. Classification now precedes every write. **Scope, stated precisely:** this covers the
+  credential-attribution failures, which are the ones an operator reaches when already broken.
+  A reissue that gets past attribution and then fails dashboard-side (the mint 500s or 401s)
+  still clears the row first — unchanged from previous releases, and load-bearing, because the
+  underlying recovery call is a no-op while a row is present. Restoring the row on a
+  dashboard-side failure is tracked as follow-up hardening.
+- **The reissue error suggestion is rendered.** `cmos_auth`'s formatter dropped
+  `error.suggestion` entirely, and only the formatted text becomes `content[0].text` — so every
+  auth suggestion string was invisible in the channel agents read.
+- **`cmos_sprint(action="analytics", limit=N)` returned the OLDEST N sprints and called them
+  "recent" (s86 m05).** The bound was applied to an ascending ordering, so an operator asking
+  for the last 5 sprints got sprints 9–13 of an 86-sprint history, with trend directions
+  computed over them. The `LIMIT` now binds a descending ordering inside a subquery with
+  oldest-first restored outside it — the trend comparison depends on ascending input, so a bare
+  `ORDER BY` flip would have inverted every reported direction instead. The answer also echoes
+  the window it actually analysed.
+- **`cmos_message(action="send")` could deliver to the wrong project when two projects under
+  the same owner share a slug prefix (s86 m07)** — the `cmos://derek/cmos-mcp` vs
+  `cmos://derek/cmos-mcp-pro` case. Resolution is exact-match first, and an ambiguous address is
+  named in the answer with the project actually reached.
+- **Shipped documentation that contradicted the security document in the same tarball
+  (s86 m05).** `README.md` asserted three data-loss guarantees — a `deleted_at`-style soft
+  delete, automatic pre-destructive snapshots, and blanket dry-run support — that `SECURITY.md`
+  in the same published package explicitly refuted, and that contradiction shipped in 2.3.0,
+  2.4.0 and 2.5.0. **`SECURITY.md` was the correct document**; `README.md` and
+  `docs/getting-started.md` were moved toward it, never the reverse, and each claim was verified
+  at source (no table has a `deleted_at` column; `CMOS_AUTO_SNAPSHOT` is read by nothing in the
+  tree). A gate now resolves every code-shaped identifier in the shipped prose against `src/`,
+  the seed schema, and `package.json` scripts and `files[]`.
+- **`cmos-seed/README.md`'s Quick Start named a command the server rejects** — the seed's own
+  recommended first call.
+
+### Removed
+
+Both entries are surface that was unreachable or ignored. Neither is a working capability, which
+is why 2.6.0 is a MINOR.
+
+- **`cmos_context(action="update").arrayUpdates.decisions_made` and `.learnings` (s86 m04).**
+  Dead since Sprint 51's context-blob reduction: the handler's `hasArrayUpdates` check tested
+  only the two surviving keys, so a caller passing `decisions_made` **alone** received
+  `INVALID_PARAMETER` — from an error whose own suggestion told them to pass `decisions_made`.
+  `arrayUpdates.constraints` and `arrayUpdates.context_notes` are unaffected.
+- **`CMOS_ERROR_CODES.BUILD_STALE` and the `errors.buildStale` factory (s86 m05).** Unreachable
+  since the s74 review retired the enforced build-freshness gate — no caller, and no test
+  enumerated the constant. Its `suggestion:` string also told operators to "pass
+  `forceComplete: true` to override", a parameter the same package documents as a no-op. The
+  live, unrelated `buildStaleAdvisory` in `cmos_sprint(action="complete")` is untouched:
+  build-freshness remains advisory and never blocks a close.
 
 ## 2.5.0 — 2026-08-10
 

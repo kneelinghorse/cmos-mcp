@@ -13,6 +13,7 @@ import {
   type RankedResult,
   type RankedResultType,
 } from './fts5-retriever';
+import { appendWarnings } from './format-warnings';
 
 export type { RankedResultType } from './fts5-retriever';
 
@@ -169,6 +170,8 @@ export function formatContextSearchForLLM(result: CmosToolResult<ContextSearchRe
     );
     lines.push('');
   });
+
+  appendWarnings(lines, result);
 
   return lines.join('\n').trimEnd();
 }

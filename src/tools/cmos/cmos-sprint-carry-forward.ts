@@ -15,6 +15,7 @@ import type { CmosToolResult } from './types';
 import { createError, createSuccess, CmosErrors } from './errors';
 import { DashboardClient } from './dashboard-client';
 import { getLocalSenderProjectId } from './sender-identity';
+import { appendWarnings } from './format-warnings';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -406,6 +407,8 @@ export function formatSprintCarryForwardForLLM(
       lines.push(`  ${r.item.type}: ${r.error}`);
     }
   }
+
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

@@ -25,6 +25,7 @@ import { getProjectIdentity } from './project-identity';
 import { DashboardClient, resolveDashboardBaseUrl } from './dashboard-client';
 import { computeAuthState } from '../../auth/auth-state';
 import type { AuthTier } from '../../auth/auth-state';
+import { appendWarnings } from './format-warnings';
 
 /**
  * Public status payload. The five top-level fields are FROZEN — adding,
@@ -44,12 +45,18 @@ export interface CmosStatusResult {
   last_delivery_observed_at: string | null;
 }
 
-export const cmosStatusSchema = z.object({
-  projectRoot: z
-    .string()
-    .optional()
-    .describe('Project root directory to search for CMOS database (defaults to cwd)'),
-});
+export const cmosStatusSchema = z
+  .object({
+    projectRoot: z
+      .string()
+      .optional()
+      .describe('Project root directory to search for CMOS database (defaults to cwd)'),
+  })
+  // s86-m04: `.strict()` so the zod schema states what the published inputSchema has always
+  // stated (additionalProperties: false), matching the other 12 tools. INERT AT RUNTIME — the
+  // consolidated schemas are never parsed (src/index.ts casts every case), so this rejects
+  // nothing previously accepted; it aligns the two declarations.
+  .strict();
 
 export type CmosStatusParams = z.infer<typeof cmosStatusSchema>;
 
@@ -153,7 +160,7 @@ export function formatStatusForLLM(result: CmosToolResult<CmosStatusResult>): st
   }
 
   const s = result.data;
-  return [
+  const lines = [
     'CMOS Status',
     '',
     `cmos_address:              ${s.cmos_address}`,
@@ -164,7 +171,9 @@ export function formatStatusForLLM(result: CmosToolResult<CmosStatusResult>): st
     s.auth_tier === 'none'
       ? '\nNo dashboard credentials configured. Run cmos_auth(action="login") to bootstrap, or sign up at https://cmos.aquex.ai/register.'
       : '',
-  ]
-    .filter(Boolean)
-    .join('\n');
+  ].filter(Boolean);
+
+  appendWarnings(lines, result);
+
+  return lines.join('\n');
 }

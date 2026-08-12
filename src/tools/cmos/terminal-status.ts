@@ -95,3 +95,25 @@ export function isTerminalStatus(
   const upper = status.toUpperCase();
   return statuses.some((s) => s.toUpperCase() === upper);
 }
+
+/**
+ * s86-m08 — the statuses `sprint_summary` counts as PARKED rather than as work the sprint owned.
+ *
+ * A mission the sprint deliberately set down (Deferred) or abandoned (Dropped) is neither a
+ * success nor a failure of that sprint's execution, and counting it in the denominator punished
+ * a sprint for parking work honestly. It is excluded from `total_missions` and reported in
+ * `parked_missions` — visible, just not counted against.
+ *
+ * DELIBERATELY NOT `MISSION_TERMINAL_STATUSES`: that set also contains Completed and Failed,
+ * which ARE outcomes the sprint owns. Two sets, two questions.
+ */
+export const PARKED_MISSION_STATUSES = ['Deferred', 'Dropped'] as const;
+
+/**
+ * JS-side twin of the `parked_missions` predicate in the view. Case-folded, and a NULL/absent
+ * status is NOT parked — matching the SQL, where `COALESCE(m.status,'')` lands an unknown status
+ * in `total_missions` rather than letting it vanish from both counts.
+ */
+export function isParkedMissionStatus(status: string | null | undefined): boolean {
+  return isTerminalStatus(status, PARKED_MISSION_STATUSES);
+}

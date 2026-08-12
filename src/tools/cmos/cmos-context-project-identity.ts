@@ -10,6 +10,7 @@ import {
   ensureProjectIdentityRow,
   type ProjectIdentityData,
 } from './project-identity';
+import { appendWarnings } from './format-warnings';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -57,10 +58,17 @@ export async function cmosContextViewProjectIdentity(
         });
       }
 
-      return createSuccess<ProjectIdentityViewResult>({
-        projectIdentity: identity,
-        seeded: !migration.alreadyCurrent,
-      });
+      // s86-m02b: `seeded` is derived from `alreadyCurrent`, which a FAILED seed INSERT sets
+      // exactly the way a genuinely-present row does — so `seeded: false` would report "the
+      // row already existed" off a write that never landed. The migration's warnings channel
+      // carries the DB error onto the envelope (rendered by appendWarnings below).
+      return createSuccess<ProjectIdentityViewResult>(
+        {
+          projectIdentity: identity,
+          seeded: !migration.alreadyCurrent,
+        },
+        migration.warnings
+      );
     },
     { projectRoot: params.projectRoot }
   );
@@ -195,6 +203,8 @@ export function formatProjectIdentityViewForLLM(
     `*Updated: ${projectIdentity.updated_at ? new Date(projectIdentity.updated_at).toLocaleString() : 'unknown'}*`
   );
 
+  appendWarnings(lines, result);
+
   return lines.join('\n');
 }
 
@@ -215,13 +225,7 @@ export function formatProjectIdentityUpdateForLLM(
 
   // Sprint 72 m03 (#790): render folded-in collab-sync warnings so a superseded
   // project_identity push surfaces its restore hint to the operator.
-  if (result.warnings && result.warnings.length > 0) {
-    lines.push('');
-    lines.push('Warnings:');
-    for (const warning of result.warnings) {
-      lines.push(`- ${warning}`);
-    }
-  }
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

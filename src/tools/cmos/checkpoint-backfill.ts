@@ -25,9 +25,43 @@ import {
 import { createSuccess } from './errors';
 import { resolveAndPersistOwner } from './owner-resolution';
 import { backfillUnknownCmosAddress } from './project-identity';
+import { checkWrite } from './write-guard';
 import { captureRegisterResponse } from '../../auth/project-key-capture';
-import { CredentialStore } from '../../intelligence/credential-store';
+import { CredentialStore, type KeySource } from '../../intelligence/credential-store';
 import { ProjectGraphRegistry } from '../../intelligence/project-graph-registry';
+
+/**
+ * s86-m01 — write diagnostics straight to fd 2 instead of through the console
+ * object.
+ *
+ * This module's work happens inside a fire-and-forget async IIFE
+ * (`triggerCheckpointBackfill`) that deliberately outlives its caller. Under Jest
+ * that body can still be in flight when a suite finishes, and Jest replaces the
+ * global console object at teardown, so a late error write through it throws
+ * "Cannot log after tests are done" — which surfaces as a nonzero exit AFTER a
+ * fully green run (the CI flake root-caused in decision #970 and re-diagnosed in
+ * s86-m01). `process.stderr` is not patched, so the same line lands without
+ * arming that trap.
+ *
+ * Production behaviour is byte-identical: a stdio MCP server's error logging
+ * already writes to fd 2, and stdout is reserved for the JSON-RPC channel.
+ * In-tree precedent: `warnLegacyAuth` (dashboard-client.ts) already writes this way.
+ *
+ * The structural gate tests/tools/cmos/detached-log-gate.test.ts (Arm A) keeps
+ * this module — and the other two on this path — free of console calls.
+ */
+function log(line: string): void {
+  process.stderr.write(line + '\n');
+}
+
+/**
+ * s86-m01 — kill switch for the fire-and-forget checkpoint sync.
+ *
+ * Set to the exact string `'off'` to disable it; any other value (including
+ * `'on'`) leaves normal behaviour untouched. Exported so tests reference the name
+ * rather than re-spelling the literal.
+ */
+export const CMOS_CHECKPOINT_SYNC_ENV = 'CMOS_CHECKPOINT_SYNC';
 
 // ─── Sprint 70 m04: device-code credential gate ──────────────────────────────
 
@@ -63,6 +97,14 @@ interface CheckResult {
   expectedSlug: string | null;
   /** s81-m03 — the store's stable metadata.project_id (registry key for last_synced_at). */
   projectId: string | null;
+  /**
+   * s86-m02b — DB errors from the registration-state writes below. This path has no CMOS
+   * answer to attach to (it is the fire-and-forget checkpoint), so its reporting channel is
+   * this module's `log` to fd 2 — the same channel that already carries "Registration
+   * failed" and "File sync failed". Without it, a failed `dashboard_registered` write is
+   * followed by an "Auto-registered project ..." line asserting a row that was never stored.
+   */
+  warnings: string[];
 }
 
 function deriveProjectSlug(projectName: string): string {
@@ -77,9 +119,17 @@ function deriveProjectSlug(projectName: string): string {
  */
 async function checkAndRegister(
   projectRoot: string | undefined,
-  dashClient: DashboardClient
+  dashClient: DashboardClient,
+  // s86-m06 — which resolution arm supplied `dashClient`. Threaded in because the
+  // honest capture-failure log depends on it: `captureRegisterResponse` receives a
+  // bare parentKeyId and structurally cannot know WHY it is absent, but its caller
+  // can. Deriving the reason here rather than guessing there is the whole point.
+  keySource: KeySource
 ): Promise<CheckResult | null> {
   let captured: CheckResult | null = null;
+  // s86-m02b — declared out here so pushes made after `captured` is built still reach the
+  // caller: the same array instance is handed to the CheckResult below.
+  const warnings: string[] = [];
 
   try {
     await withClientAsync(
@@ -89,6 +139,7 @@ async function checkAndRegister(
           projectSlug: null,
           expectedSlug: null,
           projectId: null,
+          warnings,
         };
 
         const nameResult = client.getOne<{ value: string }>(
@@ -109,10 +160,15 @@ async function checkAndRegister(
         // dashboard relays see the canonical address for sender attribution.
         // s81-m02: capture whether the reconcile POSITIVELY confirmed the incumbent this
         // cycle — only then may the expectedSlug guard be relaxed (below).
+        // s86-m02b: the reconcile's own `metadata.owner` / `dashboard_slug` /
+        // `dashboard_project_id` writes report through the same sink as the registration
+        // writes below. A failed owner write leaves the store minting `cmos://unknown/*`
+        // addresses while the push proceeds under a slug this cycle believed it persisted.
         let incumbentConfirmed = false;
         try {
           const ownerResult = await resolveAndPersistOwner(client, dashClient);
           incumbentConfirmed = ownerResult.incumbentConfirmed;
+          warnings.push(...(ownerResult.warnings ?? []));
           backfillUnknownCmosAddress(client);
         } catch {
           // best-effort — never block the registration/sync flow
@@ -158,18 +214,30 @@ async function checkAndRegister(
 
         if (result.success && result.data) {
           // Store registration state in metadata
-          client.execute(
-            `INSERT OR REPLACE INTO metadata (key, value) VALUES ('dashboard_registered', 'true')`
+          checkWrite(
+            client.execute(
+              `INSERT OR REPLACE INTO metadata (key, value) VALUES ('dashboard_registered', 'true')`
+            ),
+            warnings,
+            'metadata.dashboard_registered'
           );
-          client.execute(
-            `INSERT OR REPLACE INTO metadata (key, value) VALUES ('dashboard_slug', ?)`,
-            [result.data.slug]
+          checkWrite(
+            client.execute(
+              `INSERT OR REPLACE INTO metadata (key, value) VALUES ('dashboard_slug', ?)`,
+              [result.data.slug]
+            ),
+            warnings,
+            'metadata.dashboard_slug'
           );
-          client.execute(
-            `INSERT OR REPLACE INTO metadata (key, value) VALUES ('dashboard_project_id', ?)`,
-            [result.data.projectId]
+          checkWrite(
+            client.execute(
+              `INSERT OR REPLACE INTO metadata (key, value) VALUES ('dashboard_project_id', ?)`,
+              [result.data.projectId]
+            ),
+            warnings,
+            'metadata.dashboard_project_id'
           );
-          console.error(
+          log(
             `[CHECKPOINT] Auto-registered project "${projectName}" as "${result.data.slug}"` +
               (result.data.reregistered ? ' (re-registration)' : '')
           );
@@ -186,21 +254,31 @@ async function checkAndRegister(
                 parentKeyId: dashClient.authenticatingKeyId,
               });
               if (captureStatus === 'captured') {
-                console.error(
+                log(
                   `[CHECKPOINT] Captured project-scoped key for "${result.data.slug}" (keyId=${result.data.keyId})`
                 );
               } else if (captureStatus === 'missing-parent-key-id') {
-                console.error(
-                  `[CHECKPOINT] Skipping project-key capture: client has no authenticatingKeyId (dashboard auto-issued key left orphaned locally; /reissue on next startup will recover).`
+                // s86-m06 — the old line asserted "/reissue on next startup will
+                // recover", which is false in exactly the state that emits it:
+                // startup recovery returns `skipped-already-present` whenever a
+                // local row exists, and where no row exists the reason for the
+                // missing attribution is unchanged by a restart. Derived from
+                // keySource so each arm gets the recovery that applies to it.
+                log(
+                  `[CHECKPOINT] Skipping project-key capture: the dashboard minted a project key but this client (keySource=${keySource}) carries no user-scoped parent to attribute it to, so it is left orphaned locally. ${
+                    keySource === 'project-scoped'
+                      ? 'A local project-key row already exists for this root, so startup recovery will skip it — run cmos_auth(action="reissue", projectRoot=…) to replace the row.'
+                      : 'Startup recovery will hit the same wall — run cmos_auth(action="login_init") + login_complete so a device-code user key is available, then cmos_auth(action="reissue", projectRoot=…).'
+                  }`
                 );
               }
             } catch (err) {
               const msg = err instanceof Error ? err.message : String(err);
-              console.error(`[CHECKPOINT] Project-key capture failed: ${msg}`);
+              log(`[CHECKPOINT] Project-key capture failed: ${msg}`);
             }
           }
         } else if (!result.success) {
-          console.error(`[CHECKPOINT] Registration failed: ${result.error?.message ?? 'unknown'}`);
+          log(`[CHECKPOINT] Registration failed: ${result.error?.message ?? 'unknown'}`);
         }
 
         return createSuccess(undefined);
@@ -212,6 +290,36 @@ async function checkAndRegister(
   }
 
   return captured;
+}
+
+/**
+ * s86-m01 — the most recently started checkpoint sync, held so a test that does
+ * NOT own the call site can still drain it deterministically.
+ *
+ * `triggerCheckpointBackfill` already returns its promise, but the two production
+ * call sites (cmos-sprint.ts, cmos-session.ts) deliberately drop it — that
+ * non-blocking shape is the point, and awaiting it would be a user-visible
+ * latency regression on every sprint/session complete. A test that drives
+ * `cmos_sprint(action='complete')` therefore has no handle on the async work it
+ * just started, and the detached body outlives the test: it re-resolves dashboard
+ * credentials from `process.env` mid-flight, so an `afterEach` that restores
+ * those vars flips the in-flight run onto a different code path and its log lands
+ * after teardown. `__drainCheckpointBackfill` gives those tests the handle.
+ */
+let inFlightCheckpoint: Promise<void> | null = null;
+
+/**
+ * Await the most recently triggered checkpoint sync (resolves immediately when
+ * none has run). TEST-ONLY — the leading underscores mark it as not part of the
+ * tool surface.
+ *
+ * Call it in an `afterEach` BEFORE restoring/deleting dashboard credential env
+ * vars. Draining afterwards reproduces the bug instead of fixing it: the detached
+ * body reads those vars as it runs, so tearing them down first is what pushes it
+ * onto the no-credential fallback whose failure line arrives post-teardown.
+ */
+export function __drainCheckpointBackfill(): Promise<void> {
+  return inFlightCheckpoint ?? Promise.resolve();
 }
 
 /**
@@ -228,7 +336,9 @@ async function checkAndRegister(
  * errors into a stderr log, so the returned promise always resolves and never
  * rejects). Tests `await` it for a deterministic drain: the device-code gate
  * does a real CredentialStore fs read, which heuristic event-loop ticking can
- * miss under full-suite load, leaking the async into the next test.
+ * miss under full-suite load, leaking the async into the next test. Tests that
+ * cannot reach the returned promise (because a production call site dropped it)
+ * use {@link __drainCheckpointBackfill} instead.
  *
  * @param options.projectRoot - Project root for sync
  * @param options.force - true for full sync (sprint complete), false for incremental (session complete)
@@ -237,6 +347,23 @@ export function triggerCheckpointBackfill(options: {
   projectRoot?: string;
   force: boolean;
 }): Promise<void> {
+  // s86-m01 — defense in depth, read BEFORE any other gate.
+  //
+  // 'off' disables the sync outright; ANY other value, INCLUDING 'on', runs
+  // normally. The asymmetry is deliberate: tests/jest-global-setup.ts sets it to
+  // 'off' only when the var is ABSENT, so `CMOS_CHECKPOINT_SYNC=on npm test` puts
+  // the real behaviour back for a whole run — which is what keeps this mission's
+  // own flake evidence falsifiable. With the switch silently forced off, "zero
+  // 'Cannot log after tests are done'" would prove nothing about whether the
+  // underlying late-log was actually fixed.
+  //
+  // This is the LAST line of defense, not the fix. The fix is that this module
+  // and cmos-db-backfill no longer write through the global console object at all
+  // (see `log` above), plus the deterministic drain below.
+  if (process.env[CMOS_CHECKPOINT_SYNC_ENV] === 'off') {
+    return Promise.resolve();
+  }
+
   // Sprint 62 m02: URL has a baked default (DEFAULT_DASHBOARD_URL), so the gate is
   // credentials-only. Without any credential there's nothing to push, so skip
   // silently — users without an account run local-only and that's fine.
@@ -246,8 +373,10 @@ export function triggerCheckpointBackfill(options: {
 
   // Fire and forget — never block the caller. The promise is RETURNED so tests
   // can await a deterministic drain; production callers ignore it, and the
-  // trailing .catch means it always resolves (never rejects).
-  return (async () => {
+  // trailing .catch means it always resolves (never rejects). s86-m01 also parks
+  // it in module scope so a test whose call site dropped the handle can drain it
+  // via __drainCheckpointBackfill.
+  const inFlight = (async () => {
     // Sprint 70 m04: device-code-only auth (default since Sprint 57) populates the
     // CredentialStore with a user-scoped key but NOT the env vars above, so the old
     // env-only gate silently dropped those users' checkpoint sync (#303/#701).
@@ -271,7 +400,13 @@ export function triggerCheckpointBackfill(options: {
     const dashClient = dashResult.data.client;
 
     // Auto-register on first checkpoint, read slug for file sync
-    const info = await checkAndRegister(options.projectRoot, dashClient);
+    const info = await checkAndRegister(options.projectRoot, dashClient, dashResult.data.keySource);
+
+    // s86-m02b: a registration-state write that errored must be said out loud on the same
+    // channel as the "Auto-registered project ..." line it would otherwise contradict.
+    for (const warning of info?.warnings ?? []) {
+      log(`[CHECKPOINT] ${warning}`);
+    }
 
     if (info?.projectSlug) {
       // Primary path: file-based sync via POST /api/sync/sqlite-backfill
@@ -285,7 +420,7 @@ export function triggerCheckpointBackfill(options: {
         const countSummary = Object.entries(d.counts)
           .map(([k, v]) => `${k}:${v}`)
           .join(', ');
-        console.error(
+        log(
           `[CHECKPOINT] File sync: ${info.projectSlug} (${d.durationMs}ms)` +
             (countSummary ? ` — ${countSummary}` : '') +
             (d.errors.length > 0 ? ` — ${d.errors.length} error(s)` : '')
@@ -312,7 +447,7 @@ export function triggerCheckpointBackfill(options: {
         // is acceptable for a fire-and-forget path (idempotent, self-healing on the
         // next boundary), but the gap is intentional and documented so a future
         // silent-lag investigation starts here, not from scratch.
-        console.error(
+        log(
           `[CHECKPOINT] File sync failed (no event-replay fallback on this path): ${result.error?.message ?? 'unknown'}`
         );
       }
@@ -327,16 +462,19 @@ export function triggerCheckpointBackfill(options: {
       if (result.success && result.data) {
         const d = result.data;
         if (d.pushed > 0 || d.failed > 0) {
-          console.error(
+          log(
             `[CHECKPOINT] Backfill: ${d.pushed} pushed, ${d.failed} failed` +
               (d.deduped > 0 ? `, ${d.deduped} deduped` : '')
           );
         }
       } else if (!result.success) {
-        console.error(`[CHECKPOINT] Backfill failed: ${result.error?.message ?? 'unknown'}`);
+        log(`[CHECKPOINT] Backfill failed: ${result.error?.message ?? 'unknown'}`);
       }
     }
   })().catch((error: unknown) => {
-    console.error(`[CHECKPOINT] Sync error: ${error instanceof Error ? error.message : 'unknown'}`);
+    log(`[CHECKPOINT] Sync error: ${error instanceof Error ? error.message : 'unknown'}`);
   });
+
+  inFlightCheckpoint = inFlight;
+  return inFlight;
 }

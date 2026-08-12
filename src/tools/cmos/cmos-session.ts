@@ -10,7 +10,7 @@
 
 import { z } from 'zod';
 import { createError, CmosErrors, VALID_SESSION_TYPES } from './errors';
-import type { CmosToolResult } from './types';
+import type { ActionParamMap, CmosToolResult } from './types';
 import {
   cmosSessionList,
   formatSessionListForLLM,
@@ -48,6 +48,46 @@ export const CMOS_SESSION_ACTIONS = ['list', 'start', 'capture', 'complete', 'se
 
 export type CmosSessionAction = (typeof CMOS_SESSION_ACTIONS)[number];
 
+/** s86-m04 — which published parameter applies to which action (see action-params.ts). */
+export const CMOS_SESSION_ACTION_PARAMS: ActionParamMap<CmosSessionAction, CmosSessionParams> = {
+  list: ['action', 'status', 'type', 'sprintId', 'page', 'pageSize', 'projectRoot'],
+  start: [
+    'action',
+    'type',
+    'sprintId',
+    'title',
+    'agent',
+    'autoRefreshMasterContext',
+    'projectRoot',
+  ],
+  capture: [
+    'action',
+    'agent',
+    'sessionId',
+    'category',
+    'content',
+    'context',
+    'expiresAt',
+    'missionId',
+    'evidence',
+    'citesLearningIds',
+    'projectRoot',
+  ],
+  complete: [
+    'action',
+    'agent',
+    'sessionId',
+    'missionId',
+    'citesLearningIds',
+    'summary',
+    'nextSteps',
+    'decisions',
+    'agentFeedback',
+    'projectRoot',
+  ],
+  search: ['action', 'query', 'since', 'until', 'limit', 'type', 'category', 'projectRoot'],
+};
+
 export type CmosSessionResult =
   | CmosSessionListResult
   | CmosSessionStartResult
@@ -82,8 +122,11 @@ export const cmosSessionSchema = z
     type: z
       .enum(VALID_SESSION_TYPES)
       .optional()
-      .describe('Session type filter for list, or type for start action'),
-    sprintId: z.string().optional().describe('Sprint ID filter for list action'),
+      .describe('Session type for list/start/search actions'),
+    sprintId: z
+      .string()
+      .optional()
+      .describe('Sprint ID filter for list action, or the sprint to tag for start action'),
     page: z.number().int().positive().optional().describe('Page number for list action'),
     pageSize: z.number().int().positive().max(100).optional().describe('Page size for list action'),
     // start params
@@ -101,12 +144,20 @@ export const cmosSessionSchema = z
     category: z
       .enum(VALID_CAPTURE_CATEGORIES)
       .optional()
-      .describe('Capture category for capture action (required for capture)'),
+      .describe(
+        'Capture category for capture action, or category filter for search action (required for capture)'
+      ),
     content: z
       .string()
       .optional()
       .describe('Capture content for capture action (required for capture)'),
     context: z.string().optional().describe('Additional context for capture action'),
+    expiresAt: z
+      .string()
+      .optional()
+      .describe(
+        'Optional expiry date for constraint captures (ISO 8601, e.g. "2026-03-20T00:00:00Z"). Applies to capture(category="constraint") and to constraints materialized from that capture at session complete.'
+      ),
     missionId: z
       .string()
       .optional()
@@ -134,6 +185,13 @@ export const cmosSessionSchema = z
       .optional()
       .describe(
         'Decisions captured at session close; each entry is inserted into strategic_decisions'
+      ),
+    agentFeedback: z
+      .string()
+      .max(2000)
+      .optional()
+      .describe(
+        'Optional free-text UX feedback logged to the agent_feedback channel at session close. Use it to flag rough edges you hit while working. Reviewed via cmos_feedback(action="list").'
       ),
     projectRoot: z
       .string()
@@ -171,7 +229,7 @@ export const cmosSessionToolDefinition = {
         description: 'Filter sessions started before this ISO date (search action)',
       },
       limit: {
-        type: 'number',
+        type: 'integer',
         minimum: 1,
         maximum: 100,
         description: 'Maximum sessions to return for search action (1-100, default: 20)',
@@ -184,12 +242,15 @@ export const cmosSessionToolDefinition = {
       type: {
         type: 'string',
         enum: [...VALID_SESSION_TYPES],
-        description: 'Session type for list/start actions',
+        description: 'Session type for list/start/search actions',
       },
-      sprintId: { type: 'string', description: 'Sprint ID filter for list action' },
-      page: { type: 'number', minimum: 1, description: 'Page number for list action' },
+      sprintId: {
+        type: 'string',
+        description: 'Sprint ID filter for list action, or the sprint to tag for start action',
+      },
+      page: { type: 'integer', minimum: 1, description: 'Page number for list action' },
       pageSize: {
-        type: 'number',
+        type: 'integer',
         minimum: 1,
         maximum: 100,
         description: 'Page size for list action',
@@ -204,10 +265,15 @@ export const cmosSessionToolDefinition = {
       category: {
         type: 'string',
         enum: [...VALID_CAPTURE_CATEGORIES],
-        description: 'Capture category for capture action',
+        description: 'Capture category for capture action, or category filter for search action',
       },
       content: { type: 'string', description: 'Capture content for capture action' },
       context: { type: 'string', description: 'Additional context for capture action' },
+      expiresAt: {
+        type: 'string',
+        description:
+          'Optional expiry date for constraint captures (ISO 8601, e.g. "2026-03-20T00:00:00Z"). Applies to capture(category="constraint") and to constraints materialized from that capture at session complete.',
+      },
       missionId: {
         type: 'string',
         description:
@@ -242,6 +308,12 @@ export const cmosSessionToolDefinition = {
         items: { type: 'string' },
         description:
           'Decisions captured at session close; each entry is inserted into strategic_decisions',
+      },
+      agentFeedback: {
+        type: 'string',
+        maxLength: 2000,
+        description:
+          'Optional free-text UX feedback logged to the agent_feedback channel at session close. Use it to flag rough edges you hit while working. Reviewed via cmos_feedback(action="list").',
       },
       projectRoot: {
         type: 'string',
@@ -294,6 +366,10 @@ export async function cmosSession(
         category: params.category ?? ('context' as CmosSessionCaptureParams['category']),
         content: params.content ?? '',
         context: params.context,
+        // s86-m03: declared on the DEPRECATED standalone cmos_session_capture definition
+        // (cmos-session-capture.ts:186/:275) — which is not a published surface — but never on
+        // this router, so no agent could set it and both constraint write paths saw undefined.
+        expiresAt: params.expiresAt,
         missionId: params.missionId,
         evidence: params.evidence,
         agent: params.agent,
@@ -312,6 +388,11 @@ export async function cmosSession(
         // returning null. That is the s80-m07 shape. The real-store positive fire drives this
         // router, not the handler, and fails if this line is removed.
         missionId: params.missionId,
+        // s86-m03: cmos-feedback.ts documents three writable surfaces for the agent_feedback
+        // channel; only two were reachable. cmos-session-complete.ts declares and records
+        // `agentFeedback`, but the string appeared ZERO times in this router — no schema key and
+        // no forward — so `cmos_session(action="complete", agentFeedback=…)` was silently dropped.
+        agentFeedback: params.agentFeedback,
         agent: params.agent,
         citesLearningIds: params.citesLearningIds,
         projectRoot: params.projectRoot,

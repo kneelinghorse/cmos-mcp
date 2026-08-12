@@ -75,6 +75,7 @@ import {
   MUTABLE_STATUS_EVENT_TYPES,
   inboundMutableFieldsForEventType,
 } from './sync-mutable';
+import { appendWarnings } from './format-warnings';
 
 // ─── Event-type partitions (decision #728 genesis-vs-transition split) ─────────
 
@@ -235,7 +236,7 @@ export async function syncPull(params: SyncPullParams): Promise<CmosToolResult<S
         received += page.events.length;
 
         for (const event of page.events) {
-          mergeEvent(db, event, tally, insertedByType, collab);
+          mergeEvent(db, event, tally, insertedByType, collab, warnings);
         }
 
         // Advance + persist the cursor after each page so an interrupted multi-page
@@ -243,8 +244,11 @@ export async function syncPull(params: SyncPullParams): Promise<CmosToolResult<S
         // individual events in the page were skipped/failed (per-event isolation): the
         // cursor is the broker's cmos_sync_log.id, and ON CONFLICT(natural key) makes a
         // re-pull idempotent, so advancing past an isolated failure never double-applies.
+        // s86-m02b: `warnings` is this result's rendered channel (formatSyncPullForLLM), so a
+        // cursor write that ERRORED says so instead of the answer reporting `toCursor` for a
+        // high-water mark that never landed and silently re-draining on the next pull.
         cursor = page.nextCursor;
-        persistPullCursor(db, slug, cursor);
+        persistPullCursor(db, slug, cursor, warnings);
 
         if (!page.hasMore) break;
         // Defensive: a hasMore=true page that returned nothing would loop forever.
@@ -318,7 +322,8 @@ function mergeEvent(
   event: PulledSyncEvent,
   tally: MergeTally,
   insertedByType: Record<string, number>,
-  collab: boolean
+  collab: boolean,
+  warnings: string[]
 ): void {
   const eventType = event.eventType;
 
@@ -327,7 +332,7 @@ function mergeEvent(
   // newer local value, so it can't clobber. See sync-mutable.ts. mutable_origin_seq /
   // status state are metadata-backed.
   if (collab && MUTABLE_STATUS_EVENT_TYPES.has(eventType)) {
-    applyInboundTransition(db, event, tally);
+    applyInboundTransition(db, event, tally, warnings);
     return;
   }
   // Everything else on the mutable surface stays deferred: a solo store's mutable
@@ -485,11 +490,17 @@ function mergeEvent(
  * sprint {sprintId,status}). Frozen-genesis ordering (named transitions) vs fresh
  * per-edit ordering both feed `incomingWins`. An unrecognized/unparseable event is
  * counted as deferred (not applied) so it surfaces rather than silently vanishing.
+ *
+ * s86-m02b: `warnings` is the pull's own rendered warnings array (emitted on the result,
+ * printed by formatSyncPullForLLM). It is passed into `applyInboundMutableStatus` because
+ * an ERRORED local UPDATE returns the same `'skipped'` as a benign LWW loss — without the
+ * sink, `transitionsSkipped` would report a database failure as a routine no-op.
  */
 function applyInboundTransition(
   db: CmosDatabaseClient,
   event: PulledSyncEvent,
-  tally: MergeTally
+  tally: MergeTally,
+  warnings: string[]
 ): void {
   const envelope = asRecord(event.payload);
   const data = envelope ? asRecord(envelope.data) : null;
@@ -505,13 +516,18 @@ function applyInboundTransition(
     tally.transitionsDeferred++;
     return;
   }
-  const outcome = applyInboundMutableStatus(db, fields.scope, {
-    entityId,
-    value,
-    occurredAt: toProvenanceInt(data.occurredAt),
-    originSeq: toProvenanceInt(data.originSeq),
-    authorUserId: asString(data.authorUserId),
-  });
+  const outcome = applyInboundMutableStatus(
+    db,
+    fields.scope,
+    {
+      entityId,
+      value,
+      occurredAt: toProvenanceInt(data.occurredAt),
+      originSeq: toProvenanceInt(data.originSeq),
+      authorUserId: asString(data.authorUserId),
+    },
+    warnings
+  );
   if (outcome === 'applied') {
     tally.transitionsApplied++;
   } else {
@@ -591,5 +607,7 @@ export function formatSyncPullForLLM(result: CmosToolResult<SyncPullResult>): st
   if (d.warnings && d.warnings.length > 0) {
     lines.push('', ...d.warnings.map((w) => `⚠ ${w}`));
   }
+  appendWarnings(lines, result);
+
   return lines.join('\n');
 }

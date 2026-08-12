@@ -29,13 +29,20 @@ function main() {
   }
 
   // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { CMOS_TOOL_DEFINITIONS } = require(DIST_BARREL);
+  const { CMOS_TOOL_DEFINITIONS, CMOS_ACTION_PARAMS } = require(DIST_BARREL);
   if (!Array.isArray(CMOS_TOOL_DEFINITIONS) || CMOS_TOOL_DEFINITIONS.length === 0) {
     console.error('[tool-reference] CMOS_TOOL_DEFINITIONS is empty or not an array.');
     process.exit(1);
   }
+  if (!CMOS_ACTION_PARAMS || typeof CMOS_ACTION_PARAMS !== 'object') {
+    console.error(
+      '[tool-reference] CMOS_ACTION_PARAMS is missing from the compiled barrel — the per-action ' +
+        'tables cannot be rendered (s86-m04).'
+    );
+    process.exit(1);
+  }
 
-  const markdown = renderToolReference(CMOS_TOOL_DEFINITIONS);
+  const markdown = renderToolReference(CMOS_TOOL_DEFINITIONS, CMOS_ACTION_PARAMS);
   fs.writeFileSync(OUTPUT_PATH, markdown, 'utf8');
   console.error(
     `[tool-reference] Wrote TOOL_REFERENCE.md (${CMOS_TOOL_DEFINITIONS.length} tools, ${markdown.length} bytes)`

@@ -26,11 +26,14 @@
  */
 
 import { describe, expect, it } from '@jest/globals';
-import { CMOS_TOOL_DEFINITIONS } from '../../src/tools/cmos';
+import { CMOS_ACTION_PARAMS, CMOS_TOOL_DEFINITIONS } from '../../src/tools/cmos';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { renderToolReference } = require('../../scripts/lib/render-tool-reference.js') as {
-  renderToolReference: (defs: unknown[]) => string;
+  renderToolReference: (
+    defs: unknown[],
+    actionParams?: Record<string, Record<string, readonly string[]>>
+  ) => string;
 };
 
 /**
@@ -141,7 +144,8 @@ const ADVERSARIAL_TOOL = {
       enumOnly: { enum: ['alpha', 'beta'], description: 'An enum with no declared type.' },
       // renderType's FALLBACK branch: neither type nor enum (returns 'object').
       untyped: { description: 'A property with neither type nor enum.' },
-      // A nested object — its sub-shape is not rendered, but it must not break the row.
+      // A nested object. s86-m04 (RF-05) renders its sub-shape as DOTTED ROWS, so the pipe in the
+      // child description is now a table cell of its own and must be escaped like any other.
       nested: {
         type: 'object',
         properties: {
@@ -149,29 +153,68 @@ const ADVERSARIAL_TOOL = {
         },
         description: 'A nested object.',
       },
-      // An action enum, so renderTool's action-list branch runs too.
+      // An array of objects — the `[].` dotted form, the other half of RF-05.
+      nestedItems: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: { id: { type: 'string', description: 'Item | id.' } },
+          required: ['id'],
+        },
+        description: 'An array of objects.',
+      },
+      // A nested param that publishes NO sub-shape — must render as ONE row, not throw.
+      opaqueObject: { type: 'object', description: 'An object with no declared properties.' },
+      // An action enum, so renderTool's per-action branch runs too.
       action: { enum: ['run', 'halt'], description: 'Adversarial action.' },
     },
     required: ['unionType'],
   },
 };
 
+/** s86-m04: the adversarial tool declares an action enum, so it needs a map like any other. */
+const ADVERSARIAL_ACTION_PARAMS = {
+  cmos_adversarial: {
+    run: [
+      'action',
+      'unionType',
+      'wideUnion',
+      'pipedDescription',
+      'multilineDescription',
+      'enumOnly',
+      'untyped',
+      'nested',
+      'nestedItems',
+      'opaqueObject',
+    ],
+    halt: ['action', 'untyped'],
+  },
+};
+
 describe('TOOL_REFERENCE render validity (s85-m01)', () => {
   it('renders every real tool row with the same cell count as its header', () => {
-    const markdown = renderToolReference(CMOS_TOOL_DEFINITIONS as unknown as unknown[]);
+    const markdown = renderToolReference(
+      CMOS_TOOL_DEFINITIONS as unknown as unknown[],
+      CMOS_ACTION_PARAMS
+    );
     const violations = findColumnCountViolations(markdown);
     expect(violations).toEqual([]);
   });
 
   it('renders a non-trivial number of body rows (the invariant must have something to check)', () => {
     // Guards against the invariant silently becoming vacuous if the walker or the renderer
-    // stops emitting tables. 15 tools × their params was 194 rows on 2026-08-10.
-    const markdown = renderToolReference(CMOS_TOOL_DEFINITIONS as unknown as unknown[]);
-    expect(countBodyRows(markdown)).toBeGreaterThanOrEqual(150);
+    // stops emitting tables. 15 tools × their params was 194 rows on 2026-08-10; s86-m04's
+    // per-action tables multiply that (a param applicable to N actions renders N rows), so the
+    // floor is raised to match the new shape rather than left at a number the old one cleared.
+    const markdown = renderToolReference(
+      CMOS_TOOL_DEFINITIONS as unknown as unknown[],
+      CMOS_ACTION_PARAMS
+    );
+    expect(countBodyRows(markdown)).toBeGreaterThanOrEqual(400);
   });
 
   it('survives an adversarial definition: unions, pipes, newlines, enums, untyped, nested', () => {
-    const markdown = renderToolReference([ADVERSARIAL_TOOL]);
+    const markdown = renderToolReference([ADVERSARIAL_TOOL], ADVERSARIAL_ACTION_PARAMS);
     const violations = findColumnCountViolations(markdown);
     expect(violations).toEqual([]);
   });
@@ -180,7 +223,7 @@ describe('TOOL_REFERENCE render validity (s85-m01)', () => {
     // Assert the ESCAPE, not just the column count — a renderer that fixed the count by
     // deleting the pipe (or by joining with ' or ') would pass the invariant while silently
     // discarding the JSON-Schema union convention.
-    const markdown = renderToolReference([ADVERSARIAL_TOOL]);
+    const markdown = renderToolReference([ADVERSARIAL_TOOL], ADVERSARIAL_ACTION_PARAMS);
     expect(markdown).toContain('| `unionType` | string \\| object | yes |');
     expect(markdown).toContain(
       '| `wideUnion` | string \\| number \\| boolean \\| object \\| array \\| null | no |'
@@ -188,7 +231,7 @@ describe('TOOL_REFERENCE render validity (s85-m01)', () => {
   });
 
   it('collapses newlines in a description so a cell can never break its row', () => {
-    const markdown = renderToolReference([ADVERSARIAL_TOOL]);
+    const markdown = renderToolReference([ADVERSARIAL_TOOL], ADVERSARIAL_ACTION_PARAMS);
     expect(markdown).toContain(
       '| `multilineDescription` | string | no | First line. Second line. Tabbed third. |'
     );

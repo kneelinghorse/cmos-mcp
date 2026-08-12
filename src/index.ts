@@ -1067,6 +1067,15 @@ async function initializeServer(): Promise<MissionProtocolContext> {
         console.error(`[INFO] Project key recovery: ${recovery.message}`);
       } else if (recovery.status === 'error') {
         console.error(`[WARN] Project key recovery: ${recovery.message}`);
+      } else if (
+        // s86-m06: both attribution-failure statuses are WARN, not INFO. In either
+        // one, auto-recovery is structurally impossible until the operator acts —
+        // that is not information. The single status they replaced was logged at
+        // INFO and named a cause ("run device code") that is false in one of them.
+        recovery.status === 'skipped-no-user-scoped-key' ||
+        recovery.status === 'skipped-unattributable-credential'
+      ) {
+        console.error(`[WARN] Project key recovery: ${recovery.status} — ${recovery.message}`);
       } else {
         console.error(`[INFO] Project key recovery: ${recovery.status} — ${recovery.message}`);
       }

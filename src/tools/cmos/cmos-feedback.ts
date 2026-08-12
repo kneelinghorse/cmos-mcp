@@ -5,26 +5,45 @@
  * cmos_feedback Tool
  *
  * Review/triage surface for the agent_feedback standing channel. Agents write
- * UX feedback via the `agentFeedback` parameter on cmos_session_complete,
- * cmos_mission_transition, and cmos_agent_onboard. The operator uses this
- * tool to read, triage, resolve, and archive those entries.
+ * UX feedback via the `agentFeedback` parameter on cmos_session(action="complete"),
+ * cmos_mission_transition(action="complete"), and cmos_agent_onboard. The operator
+ * uses this tool to read, triage, resolve, and archive those entries.
  *
  * @module tools/cmos/cmos-feedback
  */
 
 import { z } from 'zod';
 import { withClientValidated } from './client';
-import type { CmosToolResult } from './types';
+import type { ActionParamMap, CmosToolResult } from './types';
 import { createError, createSuccess, CMOS_ERROR_CODES } from './errors';
 import {
   ensureAgentFeedbackTable,
   AGENT_FEEDBACK_STATUSES,
   type AgentFeedbackStatus,
 } from './schema-migrations';
+import { appendWarnings } from './format-warnings';
 
 /** Valid actions on the cmos_feedback consolidated tool. */
 export const CMOS_FEEDBACK_ACTIONS = ['list', 'triage', 'resolve', 'archive'] as const;
 export type CmosFeedbackAction = (typeof CMOS_FEEDBACK_ACTIONS)[number];
+
+/**
+ * s86-m04 — which published parameter applies to which action (see action-params.ts).
+ *
+ * THE ONE FULLY HAND-AUDITED MAP, and the live proof that this is authored data. cmos_feedback is
+ * the only action-bearing tool that dispatches with inline `if (action === '…')` blocks instead of
+ * a switch, so the router walk reports no per-action branches for it and the generated first cut
+ * is the discriminant alone. Every list below was read off the handler body: `list` uses
+ * status/toolName/limit (cmos-feedback.ts:215-247); the three transitions require `feedbackId`
+ * (:285), and only `resolve` and `archive` consult `resolutionNote` (:323, :327) — `triage`
+ * ignores it.
+ */
+export const CMOS_FEEDBACK_ACTION_PARAMS: ActionParamMap<CmosFeedbackAction, CmosFeedbackParams> = {
+  list: ['action', 'status', 'toolName', 'limit', 'projectRoot'],
+  triage: ['action', 'feedbackId', 'projectRoot'],
+  resolve: ['action', 'feedbackId', 'resolutionNote', 'projectRoot'],
+  archive: ['action', 'feedbackId', 'resolutionNote', 'projectRoot'],
+};
 
 /** One agent_feedback row as returned by cmos_feedback(action="list"). */
 export interface AgentFeedbackEntry {
@@ -121,7 +140,8 @@ export const cmosFeedbackToolDefinition = {
         description: 'Feedback action: list | triage | resolve | archive',
       },
       feedbackId: {
-        type: 'number',
+        type: 'integer',
+        minimum: 1,
         description: 'Target feedback row ID (required for triage/resolve/archive)',
       },
       status: {
@@ -134,7 +154,7 @@ export const cmosFeedbackToolDefinition = {
         description: 'Filter by originating tool name on list',
       },
       limit: {
-        type: 'number',
+        type: 'integer',
         minimum: 1,
         maximum: 200,
         description: 'Max entries to return on list (default 50, max 200)',
@@ -335,6 +355,21 @@ export async function cmosFeedback(
 }
 
 export function formatFeedbackForLLM(
+  action: CmosFeedbackAction,
+  result: CmosToolResult<CmosFeedbackResult>
+): string {
+  const lines = [renderFeedbackBody(action, result)];
+
+  appendWarnings(lines, result);
+
+  return lines.join('\n');
+}
+
+/**
+ * The feedback answer itself. Split out of formatFeedbackForLLM in s86-m02 so the envelope
+ * warnings channel renders from one tail instead of once per branch.
+ */
+function renderFeedbackBody(
   action: CmosFeedbackAction,
   result: CmosToolResult<CmosFeedbackResult>
 ): string {

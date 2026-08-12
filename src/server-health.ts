@@ -103,7 +103,9 @@ export function initServerHealth(distDir?: string): void {
     );
   } else {
     console.error(
-      `[WARN] No build manifest found — staleness detection disabled. Run 'npm run build' to generate.`
+      // s86-m05: names both situations. `npm run build` exists only in a source checkout —
+      // scripts/ and the build toolchain are not in package.json files[].
+      `[WARN] No build manifest found — staleness detection disabled. Rebuild from source ('npm run build') or reinstall the package to generate one.`
     );
   }
 }

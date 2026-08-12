@@ -11,6 +11,8 @@ import { z } from 'zod';
 import { withClientValidated } from './client';
 import type { CmosToolResult } from './types';
 import { createError, createSuccess, CmosErrors, CMOS_ERROR_CODES } from './errors';
+import { appendWarnings } from './format-warnings';
+import { checkWrite } from './write-guard';
 
 /**
  * Valid dependency types.
@@ -137,6 +139,8 @@ export async function cmosMissionDepends(
 
   return withClientValidated(
     (client) => {
+      const warnings: string[] = [];
+
       // Verify fromId mission exists
       const fromResult = client.getOne<{ id: string }>('SELECT id FROM missions WHERE id = ?', [
         fromId.trim(),
@@ -210,7 +214,7 @@ export async function cmosMissionDepends(
 
       // Log creation event
       const now = new Date().toISOString();
-      client.execute(
+      const eventResult = client.execute(
         `INSERT INTO session_events (ts, agent, mission, action, status, summary, raw_event)
          VALUES (?, 'mcp-tool', ?, 'dependency', ?, ?, ?)`,
         [
@@ -226,6 +230,8 @@ export async function cmosMissionDepends(
           }),
         ]
       );
+
+      checkWrite(eventResult, warnings, 'mission dependency create event logging');
 
       // Build descriptive message based on type
       let description: string;
@@ -243,12 +249,15 @@ export async function cmosMissionDepends(
           description = `Dependency created: ${fromId} ${type} ${toId}`;
       }
 
-      return createSuccess({
-        fromId: fromId.trim(),
-        toId: toId.trim(),
-        type,
-        message: description,
-      });
+      return createSuccess(
+        {
+          fromId: fromId.trim(),
+          toId: toId.trim(),
+          type,
+          message: description,
+        },
+        warnings
+      );
     },
     { projectRoot: params.projectRoot }
   );
@@ -287,6 +296,8 @@ export function formatMissionDependsForLLM(result: CmosToolResult<MissionDepends
     '',
     data.message,
   ];
+
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

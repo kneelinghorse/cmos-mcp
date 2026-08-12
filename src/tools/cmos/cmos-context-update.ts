@@ -26,6 +26,7 @@ import {
   getContextRetentionPolicy,
   resolveContextSizeSettings,
 } from './context-retention';
+import { appendWarnings } from './format-warnings';
 
 /**
  * Capture item from session captures JSON.
@@ -494,8 +495,7 @@ function runManualUpdate(
     return createError<CmosContextUpdateResult>({
       code: CMOS_ERROR_CODES.INVALID_PARAMETER,
       message: 'Manual mode requires arrayUpdates and/or fieldUpdates.',
-      suggestion:
-        'Provide arrayUpdates (decisions_made/learnings/constraints/context_notes) or fieldUpdates.',
+      suggestion: 'Provide arrayUpdates (constraints/context_notes) or fieldUpdates.',
     });
   }
 
@@ -981,6 +981,8 @@ export function formatContextUpdateForLLM(result: CmosToolResult<CmosContextUpda
     lines.push('');
     lines.push(`**Fields updated**: ${data.fieldsUpdated.join(', ')}`);
   }
+
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }

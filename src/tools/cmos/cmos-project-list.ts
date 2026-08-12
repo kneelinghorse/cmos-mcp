@@ -13,6 +13,7 @@ import { z } from 'zod';
 import { ProjectGraphRegistry } from '../../intelligence/project-graph-registry';
 import type { CmosToolResult } from './types';
 import { createError, createSuccess } from './errors';
+import { appendWarnings } from './format-warnings';
 
 /**
  * Project summary for list output.
@@ -175,6 +176,8 @@ export function formatProjectListForLLM(result: CmosToolResult<ProjectListResult
       lines.push('Tip: Run cmos_project(action="prune") to remove missing entries.');
     }
   }
+
+  appendWarnings(lines, result);
 
   return lines.join('\n');
 }
