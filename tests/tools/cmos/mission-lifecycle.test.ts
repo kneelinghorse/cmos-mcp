@@ -60,7 +60,12 @@ interface TestDb {
 
 function createTestDb(): TestDb {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-lifecycle-test-'));
-  const dbPath = path.join(tempDir, 'cmos.sqlite');
+  // s87-m01: the standard `<root>/cmos/db/cmos.sqlite` layout, so the REAL handlers' projectRoot
+  // resolution finds this store. It used to sit at `<root>/cmos.sqlite`, which no handler could
+  // resolve — which is part of why the helpers below were hand-copied bodies instead of calls.
+  const dbDir = path.join(tempDir, 'cmos', 'db');
+  fs.mkdirSync(dbDir, { recursive: true });
+  const dbPath = path.join(dbDir, 'cmos.sqlite');
   const db = new Database(dbPath);
 
   // Create comprehensive schema
@@ -127,543 +132,59 @@ function cleanupTestDb(testDb: TestDb): void {
     fs.rmSync(testDb.tempDir, { recursive: true, force: true });
   }
 }
-
 /**
- * Helper to run tools with explicit database path (bypassing detection)
+ * s87-m01 — THE FOUR HELPERS NOW DELEGATE TO THE REAL HANDLERS.
+ *
+ * WHAT WAS HERE BEFORE. `callMissionStart`, `callMissionComplete`, `callMissionBlock` and
+ * `callMissionUnblock` were ~520 lines of HAND-COPIED handler bodies. This file imports the real
+ * `cmosMissionStart` / `cmosMissionComplete` / `cmosMissionBlock` / `cmosMissionUnblock` at the
+ * top and then never called them: all 65 tests asserted the behaviour of the copies.
+ *
+ * WHY THAT MATTERED, and it is the whole reason s87-m01 touched this file. Every one of those
+ * copies contained the line `VALID_STATE_TRANSITIONS[currentStatus]`, unguarded, exactly as the
+ * real handlers did. So the suite was green — over the copies — while the shipped handlers threw
+ * an unhandled TypeError on a mission row that exists in this repo's own store. 65 green tests
+ * sitting on the exact paths that ship a crash is not coverage; it is a coverage CLAIM, and it is
+ * why the defect survived s86-m08's attempt to fix it. Repointing them is the difference between
+ * testing the code and testing a photograph of the code.
+ *
+ * WHAT CHANGED MECHANICALLY. `createTestDb` now writes its store at the standard
+ * `<root>/cmos/db/cmos.sqlite` layout so the real handlers' `projectRoot` resolution finds it; the
+ * helpers keep their `(dbPath, params)` signatures so no call site moved. `runWithDb` is gone —
+ * it was dead, having imported `withClient` and then never used it.
  */
-async function runWithDb<T>(
-  dbPath: string,
-  toolFn: (params: Record<string, unknown>) => Promise<CmosToolResult<T>>,
-  params: Record<string, unknown>
-): Promise<CmosToolResult<T>> {
-  const { withClient } = await import('../../../src/tools/cmos/client');
-  // The tool functions use withClient internally, but we need to pass dbPath
-  // We'll call the tool directly with projectRoot set to undefined
-  // and rely on the tool to handle the database path
-  return toolFn(params);
+
+/** `<root>/cmos/db/cmos.sqlite` -> `<root>`, so the real handlers resolve the temp store. */
+function projectRootOf(dbPath: string): string {
+  return path.resolve(path.dirname(dbPath), '..', '..');
 }
 
-/**
- * Helper to call cmosMissionStart with explicit dbPath
- */
 async function callMissionStart(
   dbPath: string,
   params: { missionId: string; notes?: string }
 ): Promise<CmosToolResult<MissionStartResult>> {
-  const { withClient } = await import('../../../src/tools/cmos/client');
-  const { createError, createSuccess, CmosErrors, CMOS_ERROR_CODES, VALID_STATE_TRANSITIONS } =
-    await import('../../../src/tools/cmos/errors');
-
-  if (!params.missionId || params.missionId.trim() === '') {
-    return createError(CmosErrors.missingParameter('missionId'));
-  }
-
-  const missionId = params.missionId.trim();
-  const targetStatus: MissionStatus = 'In Progress';
-
-  return withClient(
-    (client) => {
-      const missionResult = client.getOne<{
-        id: string;
-        status: MissionStatus;
-        name: string;
-        sprint_id: string | null;
-      }>('SELECT id, status, name, sprint_id FROM missions WHERE id = ?', [missionId]);
-
-      if (!missionResult.success) {
-        return createError<MissionStartResult>(
-          missionResult.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to query mission' }
-        );
-      }
-
-      if (!missionResult.data) {
-        return createError<MissionStartResult>(CmosErrors.missionNotFound(missionId));
-      }
-
-      const mission = missionResult.data;
-      const currentStatus = mission.status;
-
-      if (currentStatus === targetStatus) {
-        return createError<MissionStartResult>({
-          code: CMOS_ERROR_CODES.MISSION_INVALID_STATE,
-          message: `Mission '${missionId}' is already In Progress`,
-          currentState: currentStatus,
-          suggestion:
-            'Use cmos_mission_transition(action="complete") to mark it done or cmos_mission_transition(action="block") if blocked',
-        });
-      }
-
-      // Special handling for blocked missions - redirect to unblock tool
-      if (currentStatus === 'Blocked') {
-        return createError<MissionStartResult>({
-          code: CMOS_ERROR_CODES.MISSION_INVALID_TRANSITION,
-          message: `Cannot start blocked mission '${missionId}'`,
-          currentState: currentStatus,
-          validTransitions: ['In Progress', 'Current'],
-          suggestion:
-            'Use cmos_mission_transition(action="unblock") to unblock this mission first. ' +
-            'Provide a resolution explaining how the blocker was resolved.',
-        });
-      }
-
-      const validTransitions = VALID_STATE_TRANSITIONS[currentStatus];
-      if (!validTransitions.includes(targetStatus)) {
-        return createError<MissionStartResult>(
-          CmosErrors.missionInvalidTransition(missionId, currentStatus, targetStatus)
-        );
-      }
-
-      const now = new Date().toISOString();
-      let shouldActivateSprint = false;
-      if (mission.sprint_id) {
-        const sprintResult = client.getOne<{ status: string | null }>(
-          'SELECT status FROM sprints WHERE id = ?',
-          [mission.sprint_id]
-        );
-        if (!sprintResult.success) {
-          return createError<MissionStartResult>(
-            sprintResult.error ?? {
-              code: 'DB_QUERY_FAILED',
-              message: `Failed to query sprint '${mission.sprint_id}'`,
-            }
-          );
-        }
-        shouldActivateSprint = sprintResult.data?.status === 'Planned';
-      }
-
-      client.execute('BEGIN IMMEDIATE', []);
-
-      if (shouldActivateSprint && mission.sprint_id) {
-        const activateSprintResult = client.execute(
-          `UPDATE sprints
-              SET status = 'Active',
-                  start_date = COALESCE(start_date, ?)
-            WHERE id = ?
-              AND status = 'Planned'`,
-          [now, mission.sprint_id]
-        );
-
-        if (!activateSprintResult.success) {
-          client.execute('ROLLBACK', []);
-          return createError<MissionStartResult>({
-            code: CMOS_ERROR_CODES.DB_QUERY_FAILED,
-            message: `Failed to activate sprint '${mission.sprint_id}'`,
-            suggestion: 'Retry mission start after fixing the sprint row.',
-          });
-        }
-      }
-
-      let updateQuery: string;
-      let updateParams: (string | null)[];
-
-      if (params.notes) {
-        updateQuery = `UPDATE missions SET status = ?, notes = COALESCE(notes || ' | ', '') || ? WHERE id = ?`;
-        updateParams = [targetStatus, `[Started] ${params.notes}`, missionId];
-      } else {
-        updateQuery = `UPDATE missions SET status = ? WHERE id = ?`;
-        updateParams = [targetStatus, missionId];
-      }
-
-      const updateResult = client.execute(updateQuery, updateParams);
-      if (!updateResult.success || updateResult.data?.changes === 0) {
-        client.execute('ROLLBACK', []);
-        return createError<MissionStartResult>({
-          code: CMOS_ERROR_CODES.DB_QUERY_FAILED,
-          message: `Failed to update mission '${missionId}'`,
-          suggestion: 'The mission may have been modified by another process',
-        });
-      }
-
-      const commitResult = client.execute('COMMIT', []);
-      if (!commitResult.success) {
-        client.execute('ROLLBACK', []);
-        return createError<MissionStartResult>({
-          code: CMOS_ERROR_CODES.DB_QUERY_FAILED,
-          message: `Failed to commit mission start '${missionId}'`,
-          suggestion: 'Retry mission start once the database transaction can be committed.',
-        });
-      }
-
-      // Log event
-      client.execute(
-        `INSERT INTO session_events (ts, agent, mission, action, status, summary, raw_event) VALUES (?, 'mcp-tool', ?, 'start', ?, ?, ?)`,
-        [
-          now,
-          missionId,
-          targetStatus,
-          params.notes ?? `Started mission ${missionId}`,
-          JSON.stringify({ tool: 'cmos_mission_start', missionId, previousStatus: currentStatus }),
-        ]
-      );
-
-      return createSuccess<MissionStartResult>({
-        missionId,
-        previousStatus: currentStatus,
-        currentStatus: targetStatus,
-        message: `Mission '${missionId}' is now In Progress`,
-        startedAt: now,
-      });
-    },
-    { dbPath }
-  );
+  return cmosMissionStart({ ...params, projectRoot: projectRootOf(dbPath) });
 }
 
-/**
- * Helper to call cmosMissionComplete with explicit dbPath
- */
 async function callMissionComplete(
   dbPath: string,
   params: { missionId: string; notes?: string }
 ): Promise<CmosToolResult<MissionCompleteResult>> {
-  const { withClient } = await import('../../../src/tools/cmos/client');
-  const { createError, createSuccess, CmosErrors, CMOS_ERROR_CODES, VALID_STATE_TRANSITIONS } =
-    await import('../../../src/tools/cmos/errors');
-
-  if (!params.missionId || params.missionId.trim() === '') {
-    return createError(CmosErrors.missingParameter('missionId'));
-  }
-
-  const missionId = params.missionId.trim();
-  const targetStatus: MissionStatus = 'Completed';
-
-  return withClient(
-    (client) => {
-      const missionResult = client.getOne<{ id: string; status: MissionStatus; name: string }>(
-        'SELECT id, status, name FROM missions WHERE id = ?',
-        [missionId]
-      );
-
-      if (!missionResult.success) {
-        return createError<MissionCompleteResult>(
-          missionResult.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to query mission' }
-        );
-      }
-
-      if (!missionResult.data) {
-        return createError<MissionCompleteResult>(CmosErrors.missionNotFound(missionId));
-      }
-
-      const mission = missionResult.data;
-      const currentStatus = mission.status;
-
-      if (currentStatus === targetStatus) {
-        return createError<MissionCompleteResult>({
-          code: CMOS_ERROR_CODES.MISSION_ALREADY_COMPLETED,
-          message: `Mission '${missionId}' is already Completed`,
-          currentState: currentStatus,
-          suggestion: 'This mission has already been completed. No action needed.',
-        });
-      }
-
-      const validTransitions = VALID_STATE_TRANSITIONS[currentStatus];
-      if (!validTransitions.includes(targetStatus)) {
-        return createError<MissionCompleteResult>(
-          CmosErrors.missionInvalidTransition(missionId, currentStatus, targetStatus)
-        );
-      }
-
-      const now = new Date().toISOString();
-      let updateQuery: string;
-      let updateParams: (string | null)[];
-
-      if (params.notes) {
-        updateQuery = `UPDATE missions SET status = ?, completed_at = ?, notes = COALESCE(notes || ' | ', '') || ? WHERE id = ?`;
-        updateParams = [targetStatus, now, `[Completed] ${params.notes}`, missionId];
-      } else {
-        updateQuery = `UPDATE missions SET status = ?, completed_at = ? WHERE id = ?`;
-        updateParams = [targetStatus, now, missionId];
-      }
-
-      const updateResult = client.execute(updateQuery, updateParams);
-      if (!updateResult.success || updateResult.data?.changes === 0) {
-        return createError<MissionCompleteResult>({
-          code: CMOS_ERROR_CODES.DB_QUERY_FAILED,
-          message: `Failed to update mission '${missionId}'`,
-          suggestion: 'The mission may have been modified by another process',
-        });
-      }
-
-      client.execute(
-        `INSERT INTO session_events (ts, agent, mission, action, status, summary, raw_event) VALUES (?, 'mcp-tool', ?, 'complete', ?, ?, ?)`,
-        [
-          now,
-          missionId,
-          targetStatus,
-          params.notes ?? `Completed mission ${missionId}`,
-          JSON.stringify({
-            tool: 'cmos_mission_complete',
-            missionId,
-            previousStatus: currentStatus,
-          }),
-        ]
-      );
-
-      return createSuccess<MissionCompleteResult>({
-        missionId,
-        previousStatus: currentStatus,
-        currentStatus: targetStatus,
-        message: `Mission '${missionId}' has been completed`,
-        completedAt: now,
-      });
-    },
-    { dbPath }
-  );
+  return cmosMissionComplete({ ...params, projectRoot: projectRootOf(dbPath) });
 }
 
-/**
- * Helper to call cmosMissionBlock with explicit dbPath
- */
 async function callMissionBlock(
   dbPath: string,
   params: { missionId: string; reason: string; blockers?: string[] }
 ): Promise<CmosToolResult<MissionBlockResult>> {
-  const { withClient } = await import('../../../src/tools/cmos/client');
-  const { createError, createSuccess, CmosErrors, CMOS_ERROR_CODES, VALID_STATE_TRANSITIONS } =
-    await import('../../../src/tools/cmos/errors');
-
-  if (!params.missionId || params.missionId.trim() === '') {
-    return createError(CmosErrors.missingParameter('missionId'));
-  }
-  if (!params.reason || params.reason.trim() === '') {
-    return createError(CmosErrors.missingParameter('reason'));
-  }
-
-  const missionId = params.missionId.trim();
-  const reason = params.reason.trim();
-  const targetStatus: MissionStatus = 'Blocked';
-
-  return withClient(
-    (client) => {
-      const missionResult = client.getOne<{
-        id: string;
-        status: MissionStatus;
-        name: string;
-        domain_fields: string | null;
-      }>('SELECT id, status, name, domain_fields FROM missions WHERE id = ?', [missionId]);
-
-      if (!missionResult.success) {
-        return createError<MissionBlockResult>(
-          missionResult.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to query mission' }
-        );
-      }
-
-      if (!missionResult.data) {
-        return createError<MissionBlockResult>(CmosErrors.missionNotFound(missionId));
-      }
-
-      const mission = missionResult.data;
-      const currentStatus = mission.status;
-
-      if (currentStatus === targetStatus) {
-        return createError<MissionBlockResult>({
-          code: CMOS_ERROR_CODES.MISSION_ALREADY_BLOCKED,
-          message: `Mission '${missionId}' is already Blocked`,
-          currentState: currentStatus,
-          suggestion:
-            'Use cmos_mission_transition(action="unblock") to unblock it first, or update the block reason',
-        });
-      }
-
-      const validTransitions = VALID_STATE_TRANSITIONS[currentStatus];
-      if (!validTransitions.includes(targetStatus)) {
-        return createError<MissionBlockResult>(
-          CmosErrors.missionInvalidTransition(missionId, currentStatus, targetStatus)
-        );
-      }
-
-      const now = new Date().toISOString();
-
-      let existingDomainFields: Record<string, unknown> = {};
-      if (mission.domain_fields) {
-        try {
-          existingDomainFields = JSON.parse(mission.domain_fields);
-        } catch {
-          existingDomainFields = {};
-        }
-      }
-
-      const updatedDomainFields = {
-        ...existingDomainFields,
-        blocker: reason,
-        blockedSince: now,
-        blockers: params.blockers ?? [],
-      };
-
-      const blockNote = params.blockers?.length
-        ? `[Blocked] ${reason}. Needs: ${params.blockers.join(', ')}`
-        : `[Blocked] ${reason}`;
-
-      const updateResult = client.execute(
-        `UPDATE missions SET status = ?, domain_fields = ?, notes = COALESCE(notes || ' | ', '') || ? WHERE id = ?`,
-        [targetStatus, JSON.stringify(updatedDomainFields), blockNote, missionId]
-      );
-
-      if (!updateResult.success || updateResult.data?.changes === 0) {
-        return createError<MissionBlockResult>({
-          code: CMOS_ERROR_CODES.DB_QUERY_FAILED,
-          message: `Failed to update mission '${missionId}'`,
-          suggestion: 'The mission may have been modified by another process',
-        });
-      }
-
-      client.execute(
-        `INSERT INTO session_events (ts, agent, mission, action, status, summary, raw_event) VALUES (?, 'mcp-tool', ?, 'block', ?, ?, ?)`,
-        [
-          now,
-          missionId,
-          targetStatus,
-          reason,
-          JSON.stringify({
-            tool: 'cmos_mission_block',
-            missionId,
-            previousStatus: currentStatus,
-            reason,
-            blockers: params.blockers,
-          }),
-        ]
-      );
-
-      return createSuccess<MissionBlockResult>({
-        missionId,
-        previousStatus: currentStatus,
-        currentStatus: targetStatus,
-        reason,
-        message: `Mission '${missionId}' has been blocked: ${reason}`,
-        blockedAt: now,
-      });
-    },
-    { dbPath }
-  );
+  return cmosMissionBlock({ ...params, projectRoot: projectRootOf(dbPath) });
 }
 
-/**
- * Helper to call cmosMissionUnblock with explicit dbPath
- */
 async function callMissionUnblock(
   dbPath: string,
   params: { missionId: string; resolution?: string; targetStatus?: 'In Progress' | 'Current' }
 ): Promise<CmosToolResult<MissionUnblockResult>> {
-  const { withClient } = await import('../../../src/tools/cmos/client');
-  const { createError, createSuccess, CmosErrors, CMOS_ERROR_CODES, VALID_STATE_TRANSITIONS } =
-    await import('../../../src/tools/cmos/errors');
-
-  if (!params.missionId || params.missionId.trim() === '') {
-    return createError(CmosErrors.missingParameter('missionId'));
-  }
-
-  const missionId = params.missionId.trim();
-  const targetStatus: MissionStatus = params.targetStatus ?? 'In Progress';
-
-  return withClient(
-    (client) => {
-      const missionResult = client.getOne<{
-        id: string;
-        status: MissionStatus;
-        name: string;
-        domain_fields: string | null;
-      }>('SELECT id, status, name, domain_fields FROM missions WHERE id = ?', [missionId]);
-
-      if (!missionResult.success) {
-        return createError<MissionUnblockResult>(
-          missionResult.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to query mission' }
-        );
-      }
-
-      if (!missionResult.data) {
-        return createError<MissionUnblockResult>(CmosErrors.missionNotFound(missionId));
-      }
-
-      const mission = missionResult.data;
-      const currentStatus = mission.status;
-
-      if (currentStatus !== 'Blocked') {
-        return createError<MissionUnblockResult>({
-          code: CMOS_ERROR_CODES.MISSION_INVALID_STATE,
-          message: `Mission '${missionId}' is not blocked (current status: ${currentStatus})`,
-          currentState: currentStatus,
-          suggestion:
-            currentStatus === 'Completed'
-              ? 'Cannot unblock a completed mission'
-              : 'Use cmos_mission_start to begin work on this mission',
-        });
-      }
-
-      const validTransitions = VALID_STATE_TRANSITIONS['Blocked'];
-      if (!validTransitions.includes(targetStatus)) {
-        return createError<MissionUnblockResult>(
-          CmosErrors.missionInvalidTransition(missionId, currentStatus, targetStatus)
-        );
-      }
-
-      const now = new Date().toISOString();
-
-      let existingDomainFields: Record<string, unknown> = {};
-      if (mission.domain_fields) {
-        try {
-          existingDomainFields = JSON.parse(mission.domain_fields);
-        } catch {
-          existingDomainFields = {};
-        }
-      }
-
-      const previousBlocker = existingDomainFields.blocker;
-      const previousBlockedSince = existingDomainFields.blockedSince;
-
-      const updatedDomainFields = {
-        ...existingDomainFields,
-        blocker: null,
-        blockedSince: null,
-        blockers: null,
-        unblockedAt: now,
-        previousBlocker,
-        previousBlockedSince,
-        resolution: params.resolution ?? null,
-      };
-
-      const unblockNote = params.resolution
-        ? `[Unblocked] ${params.resolution}`
-        : `[Unblocked] Blocker resolved`;
-
-      const updateResult = client.execute(
-        `UPDATE missions SET status = ?, domain_fields = ?, notes = COALESCE(notes || ' | ', '') || ? WHERE id = ?`,
-        [targetStatus, JSON.stringify(updatedDomainFields), unblockNote, missionId]
-      );
-
-      if (!updateResult.success || updateResult.data?.changes === 0) {
-        return createError<MissionUnblockResult>({
-          code: CMOS_ERROR_CODES.DB_QUERY_FAILED,
-          message: `Failed to update mission '${missionId}'`,
-          suggestion: 'The mission may have been modified by another process',
-        });
-      }
-
-      client.execute(
-        `INSERT INTO session_events (ts, agent, mission, action, status, summary, raw_event) VALUES (?, 'mcp-tool', ?, 'unblock', ?, ?, ?)`,
-        [
-          now,
-          missionId,
-          targetStatus,
-          params.resolution ?? `Unblocked mission ${missionId}`,
-          JSON.stringify({
-            tool: 'cmos_mission_unblock',
-            missionId,
-            previousStatus: currentStatus,
-            resolution: params.resolution,
-          }),
-        ]
-      );
-
-      return createSuccess<MissionUnblockResult>({
-        missionId,
-        previousStatus: currentStatus,
-        currentStatus: targetStatus,
-        resolution: params.resolution ?? null,
-        message: `Mission '${missionId}' has been unblocked`,
-        unblockedAt: now,
-      });
-    },
-    { dbPath }
-  );
+  return cmosMissionUnblock({ ...params, projectRoot: projectRootOf(dbPath) });
 }
 
 describe('cmos_mission_start', () => {
@@ -1257,13 +778,32 @@ describe('cmos_mission_unblock', () => {
       expect(result.error?.code).toBe(CMOS_ERROR_CODES.MISSION_NOT_FOUND);
     });
 
-    it('should return MISSION_INVALID_STATE for non-blocked mission', async () => {
+    /**
+     * s87-m01 — THIS ASSERTION USED TO PIN A TOOL THAT DOES NOT EXIST, and it was green.
+     *
+     * The deleted hand-copy emitted `'Use cmos_mission_start to begin work on this mission'`
+     * (old file, line 587). `cmos_mission_start` was retired in the 38→15 consolidation; the real
+     * handler has said `cmos_mission_transition(action="start")` for four sprints. So the copy was
+     * stale agent-facing prose AND the test held it in place — the exact class `s85-m01`'s gate
+     * sweeps `src/` for, living in `tests/`, where that gate does not look.
+     *
+     * WHAT IS ASSERTED NOW is the behaviour, not a string: `start` REFUSES from 'In Progress'
+     * (measured through the real router — 'In Progress' transitions to Completed/Blocked/Dropped/
+     * Deferred, never to itself), so the refusal must NOT prescribe it. That is the Tier-2 rule in
+     * `remedy-reachability.test.ts` stated as a unit assertion.
+     */
+    it('should return MISSION_INVALID_STATE for non-blocked mission, without prescribing start', async () => {
       const result = await callMissionUnblock(testDb.dbPath, { missionId: 'm-in-progress' });
 
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe(CMOS_ERROR_CODES.MISSION_INVALID_STATE);
       expect(result.error?.currentState).toBe('In Progress');
-      expect(result.error?.suggestion).toContain('cmos_mission_start');
+      // It says why there is nothing to do…
+      expect(result.error?.suggestion).toContain('already In Progress');
+      // …and does not prescribe a remedy that refuses from this state.
+      expect(result.error?.suggestion).not.toContain('action="start"');
+      // The retired name must not come back on any path.
+      expect(result.error?.suggestion).not.toContain('cmos_mission_start');
     });
 
     it('should return MISSION_INVALID_STATE for Queued mission', async () => {
@@ -1271,6 +811,9 @@ describe('cmos_mission_unblock', () => {
 
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe(CMOS_ERROR_CODES.MISSION_INVALID_STATE);
+      // Queued is the one state where `start` IS a valid transition, so it is still prescribed —
+      // under its CURRENT name. This is the positive half of the pair above.
+      expect(result.error?.suggestion).toContain('cmos_mission_transition(action="start"');
     });
 
     it('should return MISSION_INVALID_STATE for Completed mission', async () => {
@@ -1278,7 +821,11 @@ describe('cmos_mission_unblock', () => {
 
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe(CMOS_ERROR_CODES.MISSION_INVALID_STATE);
-      expect(result.error?.suggestion).toContain('Cannot unblock a completed mission');
+      // s87-m01: the old text was 'Cannot unblock a completed mission'. Accurate but incomplete —
+      // it left an operator believing the record was frozen. Only the STATUS is settled; the
+      // mission's other fields remain editable, and the refusal now says which is which.
+      expect(result.error?.suggestion).toContain('no blocker to clear');
+      expect(result.error?.suggestion).toContain('cmos_mission(action="update")');
     });
 
     it('should return MISSING_PARAMETER for empty mission ID', async () => {

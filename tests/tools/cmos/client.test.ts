@@ -654,4 +654,72 @@ describe('withClientAsync', () => {
     expect(result.success).toBe(true);
     expect(result.data?.id).toBe('m1');
   });
+
+  /**
+   * s87-m03 (#535) — A READ-ONLY CLIENT MUST NOT WRITE, AND `journal_mode = WAL` IS A WRITE.
+   *
+   * `ensureConnection` issued that pragma unconditionally. On a store that is not already in WAL
+   * mode, setting it rewrites the database header — so a client constructed with
+   * `readonly: true` failed to OPEN a delete-mode store at all, with
+   * `DB_CONNECTION_FAILED: attempt to write a readonly database`. It went unnoticed because on an
+   * already-WAL store the pragma is a no-op, and every store this project touches day to day is
+   * already WAL.
+   *
+   * HONEST SCOPE, stated so this is not read as a rescue: no `src/` site passes `readonly: true`
+   * to this client today — all eight read-only opens in the tree are raw `better-sqlite3` calls.
+   * The defect was LATENT. It is fixed here because the read/write distinction at the client
+   * layer is the signal SPLIT-THE-PATHS needs next sprint, and because a pragma that writes must
+   * not run on a connection that has declared it will not.
+   */
+  describe('s87-m03 (#535): read-only opens do not write', () => {
+    function deleteModeStore(): string {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-delmode-'));
+      const p = path.join(dir, 'cmos.sqlite');
+      const db = new Database(p);
+      // DELETE is SQLite's default; set it explicitly so the precondition is ESTABLISHED rather
+      // than inherited from whatever mode the driver happened to leave the file in.
+      db.pragma('journal_mode = DELETE');
+      db.exec(`CREATE TABLE missions (id TEXT PRIMARY KEY, name TEXT);
+               INSERT INTO missions (id, name) VALUES ('m1', 'One');`);
+      db.close();
+      return p;
+    }
+
+    it('opens a DELETE-mode store read-only and answers a SELECT', async () => {
+      const roPath = deleteModeStore();
+      // Precondition, asserted rather than assumed — if the store were already WAL this test
+      // would pass without exercising the guard at all.
+      const probe = new Database(roPath, { readonly: true });
+      expect(String(probe.pragma('journal_mode', { simple: true })).toLowerCase()).toBe('delete');
+      probe.close();
+
+      const created = await CmosDatabaseClient.create({ dbPath: roPath, readonly: true });
+      expect(created.success).toBe(true);
+      const client = created.data!;
+      try {
+        const row = client.getOne<{ id: string }>('SELECT id FROM missions');
+        expect(row.success).toBe(true);
+        expect(row.data?.id).toBe('m1');
+      } finally {
+        client.close();
+      }
+
+      // …and the store is STILL in delete mode: the read-only open changed nothing about it.
+      const after = new Database(roPath, { readonly: true });
+      expect(String(after.pragma('journal_mode', { simple: true })).toLowerCase()).toBe('delete');
+      after.close();
+    });
+
+    it('a WRITABLE client still upgrades a DELETE-mode store to WAL', async () => {
+      // The guard narrows WHEN the pragma runs; it must not stop it running where it should.
+      const rwPath = deleteModeStore();
+      const created = await CmosDatabaseClient.create({ dbPath: rwPath });
+      expect(created.success).toBe(true);
+      created.data!.close();
+
+      const after = new Database(rwPath, { readonly: true });
+      expect(String(after.pragma('journal_mode', { simple: true })).toLowerCase()).toBe('wal');
+      after.close();
+    });
+  });
 });

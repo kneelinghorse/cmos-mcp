@@ -82,6 +82,7 @@ import { describe, expect, it } from '@jest/globals';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as ts from 'typescript';
+import { CMOS_TOOL_DEFINITIONS } from '../../src/tools/cmos';
 
 const REPO_ROOT = path.resolve(__dirname, '../..');
 const r = (...p: string[]): string => path.join(REPO_ROOT, ...p);
@@ -121,17 +122,50 @@ const PRIVATE_TARGETS = ['agents.md', 'cmos/docs/build-session-prompt.md'];
 const presentPrivateTargets = PRIVATE_TARGETS.filter((p) => fs.existsSync(r(p)));
 const inPublicMirror = presentPrivateTargets.length === 0;
 
-const TARGETS = [...PUBLIC_TARGETS, ...presentPrivateTargets];
+/**
+ * s87-m04 — the seed's own documentation, swept for IDENTIFIER claims.
+ *
+ * These ship inside the `cmos-seed` files[] entry and are copied verbatim into every project by
+ * `cmos_project(action="init")`, so every identifier they name reaches a consumer as instruction.
+ * They are NOT in PRIVATE_TARGETS and must never be added there: `mirror-to-public.sh`'s
+ * PRIVATE_PATHS does not list `cmos-seed`, so they ship to the public mirror too — and a check
+ * gated on `inPublicMirror` would leave the public copies unchecked in the one repo an external
+ * consumer actually reads.
+ */
+const SEED_DOC_TARGETS = fs
+  .readdirSync(r('cmos-seed/docs'))
+  .filter((f) => f.endsWith('.md'))
+  .map((f) => `cmos-seed/docs/${f}`)
+  .sort();
+
+const TARGETS = [...PUBLIC_TARGETS, ...SEED_DOC_TARGETS, ...presentPrivateTargets];
 
 /** Excluded from the target set, each with the RULE that excludes it. Printed, never silent. */
 const EXCLUSIONS: Array<{ pathGlob: string; reason: string }> = [
   {
-    pathGlob: 'cmos-seed/docs/**',
+    // s87-m04 — NARROWED. This used to exclude cmos-seed/docs/** ENTIRELY, on the grounds that the
+    // whole directory carried stale stamps a gate could only green with an allowlist entry. That
+    // reasoning is right about the DATE stamps and wrong about everything else in those files, and
+    // the difference is whether an oracle exists.
+    //
+    // NOW IN SCOPE (an oracle exists): identifiers — a column, table or field name the seed docs
+    // teach can be checked against cmos-seed/db/schema.sql, which is generated from the same
+    // constant the tarball ships. Measured cost of the widening: exactly ONE new finding,
+    // sqlite-schema-reference.md documenting telemetry_events.event_data where the schema declares
+    // `payload`. A consumer following that doc gets `no such column`.
+    //
+    // STILL EXCLUDED (no oracle): the six **Last Updated** date stamps. The existing arm's oracle
+    // is "not older than the newest CHANGELOG release", and applying it here makes all six red
+    // with exactly one cheap remedy — bump the date. That is a claim the file was reviewed, made
+    // by the act of not reviewing it: this sprint's own defect class inside its own gate. #539
+    // carries them, re-scoped: the stamp is the OUTPUT of a per-file content review, not a
+    // substitute for one. They ship stale in this release, and the close says so.
+    pathGlob: 'cmos-seed/docs/** — DATE STAMPS ONLY',
     reason:
-      'Six files carrying stale version/date stamps (README.md:132-133, getting-started.md:151-152, ' +
-      'session-management-guide.md:168, sqlite-schema-reference.md:187, build-session-prompt.md:136, ' +
-      'agents-md-guide.md:252). s86-m09 defers them to Arc F sprint 2, so a gate red on them could ' +
-      'only be greened by an allowlist entry.',
+      'The six **Last Updated** stamps in cmos-seed/docs/** have NO ORACLE: the only cheap way to ' +
+      'green them is to bump a date on a document nobody re-read, which asserts a review by not ' +
+      'doing one. Identifier claims in those same files ARE checked (s87-m04) against the ' +
+      'generated seed schema. Carried by #539 as a per-file content review, not a stamp bump.',
   },
   {
     pathGlob: 'cmos/planning/**',
@@ -514,8 +548,10 @@ describe('shipped-prose truth (s86-m05 Instrument 3)', () => {
     );
 
     expect(EXCLUSIONS.every((e) => e.reason.length > 40)).toBe(true);
-    // The exclusions are DIRECTORY-scoped scope statements, never individual findings.
-    expect(TARGETS.some((t) => t.startsWith('cmos-seed/docs/'))).toBe(false);
+    // The exclusions are scope statements, never individual findings.
+    // s87-m04 INVERTED: cmos-seed/docs/** is now IN the target set for identifier claims. Only
+    // its date stamps stay out, and the exclusion entry above says so in those words.
+    expect(TARGETS.some((t) => t.startsWith('cmos-seed/docs/'))).toBe(true);
     expect(TARGETS.some((t) => t.startsWith('cmos/planning/'))).toBe(false);
   });
 
@@ -969,5 +1005,85 @@ describePrivate('build-session-prompt ↔ agents.md process-hardening parity (s8
     expect(seed).not.toMatch(/Process Hardening/);
     expect(seed).not.toMatch(/6-path/);
     expect(seed).not.toMatch(/5-path/);
+  });
+});
+
+/**
+ * s87-m04 — ARC F ITEM 3, THE HALF THAT HAS AN ORACLE.
+ *
+ * #1009's enumeration named the seed's stale version stamps as an Arc F item. Two of the ten are
+ * checkable against something the tarball itself ships, and those two are gated here. The six
+ * **Last Updated** date stamps are NOT, and are cut with their cost stated (#539): their only
+ * available oracle makes all six red with one cheap remedy — bump the date — which asserts that a
+ * document was reviewed by the act of not reviewing it.
+ *
+ * ALWAYS-RUNNING, NEVER `inPublicMirror`-GATED, AND THAT IS THE TRAP THIS AVOIDS. The existing
+ * **Last Updated** arm below is declared `(inPublicMirror ? it.skip : it)` and loops
+ * `PRIVATE_TARGETS`, which is correct for documents the mirror deletes. `cmos-seed/**` is NOT in
+ * `mirror-to-public.sh`'s PRIVATE_PATHS — it ships to the public repo — so appending these files
+ * to that arm would have left the public stamps unchecked in the one repo an external consumer
+ * reads. Separate `it`, no skip, no PRIVATE_TARGETS entry.
+ */
+describe('s87-m04: the seed ships stamps that describe the seed (Arc F item 3, gateable half)', () => {
+  /** The schema version the SHIPPED seed actually seeds. Read from the generated file, not typed. */
+  function seededSchemaVersion(): string {
+    const sql = fs.readFileSync(r('cmos-seed/db/schema.sql'), 'utf8');
+    const m = sql.match(
+      /INSERT OR IGNORE INTO metadata \(key, value\) VALUES \('schema_version', '([^']+)'\)/
+    );
+    if (!m) throw new Error('cmos-seed/db/schema.sql seeds no schema_version — the oracle is gone');
+    return m[1];
+  }
+
+  function stampsIn(rel: string, label: string): Array<{ rel: string; value: string }> {
+    const content = fs.readFileSync(r(rel), 'utf8');
+    const re = new RegExp(`\\*\\*${label}\\*\\*:\\s*([^\\n]+)`, 'g');
+    const out: Array<{ rel: string; value: string }> = [];
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(content)) !== null) out.push({ rel, value: m[1].trim() });
+    return out;
+  }
+
+  /** Every shipped seed markdown file, root README included. */
+  const SEED_MD = ['cmos-seed/README.md', ...SEED_DOC_TARGETS];
+
+  it('every **Schema Version** stamp in the shipped seed names the version the seed seeds', () => {
+    const expected = seededSchemaVersion();
+    // Non-vacuity: if nobody stamps a schema version, this arm has nothing to protect and should
+    // say so rather than pass. RED baseline at HEAD 1a54a79: THREE stamps read "2.0" against a
+    // seed that seeds "2.1" — cmos-seed/README.md, docs/README.md, docs/getting-started.md.
+    const stamps = SEED_MD.flatMap((rel) => stampsIn(rel, 'Schema Version'));
+    expect(stamps.length).toBeGreaterThanOrEqual(3);
+
+    const wrong = stamps
+      .filter((st) => !st.value.startsWith(expected))
+      .map((st) => `${st.rel} stamps "Schema Version: ${st.value}" but the seed seeds ${expected}`);
+    expect(wrong).toEqual([]);
+  });
+
+  it('the **Tool Count** stamp equals the number of tools actually registered', () => {
+    // GREEN AT BASELINE (15 = 15), and it ships as a REGRESSION FLOOR: it fires the moment a
+    // sixteenth tool registers and nobody updates the seed's front page. That is the only thing
+    // that makes it a gate rather than a decoration — and it is the one stamp in the set that was
+    // already a working claim, which #539's coordinate range omitted.
+    const stamps = SEED_MD.flatMap((rel) => stampsIn(rel, 'Tool Count'));
+    expect(stamps.length).toBeGreaterThanOrEqual(1);
+
+    const wrong = stamps
+      .filter((st) => !st.value.startsWith(String(CMOS_TOOL_DEFINITIONS.length)))
+      .map(
+        (st) =>
+          `${st.rel} stamps "Tool Count: ${st.value}" but ${CMOS_TOOL_DEFINITIONS.length} tools ` +
+          `are registered`
+      );
+    expect(wrong).toEqual([]);
+  });
+
+  it('this arm is not gated on the public mirror, and the seed is not a PRIVATE_TARGET', () => {
+    // The trap, asserted rather than intended. cmos-seed/** ships to the public repo, so gating
+    // these checks on `inPublicMirror` would leave the public copies unchecked.
+    expect(PRIVATE_TARGETS).toHaveLength(2);
+    expect(PRIVATE_TARGETS.some((t) => t.startsWith('cmos-seed'))).toBe(false);
+    for (const rel of SEED_MD) expect(fs.existsSync(r(rel))).toBe(true);
   });
 });

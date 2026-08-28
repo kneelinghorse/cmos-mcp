@@ -110,6 +110,34 @@ export const VALID_STATE_TRANSITIONS: Record<MissionStatus, MissionStatus[]> = {
 };
 
 /**
+ * s87-m01 — the ONE guarded read of {@link VALID_STATE_TRANSITIONS}. Every dynamic lookup in the
+ * mission-transition family goes through here so the next handler cannot reintroduce the crash.
+ *
+ * WHY A HELPER AND NOT SIX `?? []` FALLBACKS. s86-m08 added exactly one `?? []`, at
+ * `cmos-mission-update.ts`, and recorded in #1004 that the crash was fixed. It was not: the throw
+ * simply moved into `missionInvalidTransition`, the factory that handler calls, and the other five
+ * handlers were never touched. Six scattered fallbacks are six chances to forget the seventh
+ * (D-4, #1023).
+ *
+ * WHY `hasOwnProperty` AND NOT A BARE INDEX. Modelled on `cmos-mission-move.ts`, which found this
+ * first: a bare index falls through to `Object.prototype`, so a mission stored with status
+ * `'constructor'` resolves to a truthy function and passes a fail-loud guard, while `'toString'`
+ * is refused as "a terminal status" — which is not true of anything. Statuses come from the STORE,
+ * and the store already proves unvalidated ones land there: this repo's own store holds mission
+ * B1.1 at status `'Archived'`, which is not a member of {@link VALID_MISSION_STATUSES}.
+ *
+ * Returns `undefined` — never `[]` — for an unrecognized status, because the two are different
+ * claims. `[]` means "recognized, and terminal"; `undefined` means "not recognized, so whether it
+ * can be worked is unknown". Collapsing them is how a refusal comes to say `Mission is in terminal
+ * state 'Archived'` about a status the state machine has never heard of.
+ */
+export function transitionsFrom(currentStatus: string): MissionStatus[] | undefined {
+  return Object.prototype.hasOwnProperty.call(VALID_STATE_TRANSITIONS, currentStatus)
+    ? (VALID_STATE_TRANSITIONS[currentStatus as MissionStatus] as MissionStatus[])
+    : undefined;
+}
+
+/**
  * Valid session types matching cmos/docs/archive/session-management-guide.md.
  */
 export const VALID_SESSION_TYPES = [
@@ -206,12 +234,36 @@ export const CmosErrors = {
     };
   },
 
+  /**
+   * s87-m01 — a status this map has never heard of gets its OWN refusal, not a guess.
+   *
+   * `missionInvalidTransition` below answers "you cannot go from A to B". That is a claim about a
+   * state machine that knows A. When the stored status is not a key at all, the honest answer is a
+   * different one, and it is the one `cmos-mission-move.ts` already gives.
+   */
+  missionUnrecognizedStatus(missionId: string, currentStatus: string): CmosToolError {
+    return {
+      code: CMOS_ERROR_CODES.MISSION_INVALID_STATE,
+      message: `Mission '${missionId}' has unrecognized status '${currentStatus}', so whether it can still be worked is unknown — refusing to guess.`,
+      currentState: currentStatus,
+      validValues: Object.keys(VALID_STATE_TRANSITIONS),
+      suggestion: `Set a recognized status first — cmos_mission(action="update", missionId="${missionId}", fields={"status":"Queued"}) — then retry. If that update also refuses, the row's status is outside VALID_MISSION_STATUSES entirely and needs a store-level repair; do not drop the mission to work around it, since Dropped is terminal.`,
+    };
+  },
+
   missionInvalidTransition(
     missionId: string,
     currentStatus: MissionStatus,
     targetStatus: MissionStatus
   ): CmosToolError {
-    const validTransitions = VALID_STATE_TRANSITIONS[currentStatus];
+    // s87-m01: TOTAL, not partial. `currentStatus` is typed `MissionStatus` and is not one —
+    // it is read from the store. Before this guard the next line threw
+    // `Cannot read properties of undefined (reading 'length')` for every caller, and the MCP
+    // boundary turned that into "This is an internal error … retry the call": a loop with no exit.
+    const validTransitions = transitionsFrom(currentStatus);
+    if (validTransitions === undefined) {
+      return CmosErrors.missionUnrecognizedStatus(missionId, currentStatus);
+    }
     return {
       code: CMOS_ERROR_CODES.MISSION_INVALID_TRANSITION,
       message: `Cannot transition mission '${missionId}' from '${currentStatus}' to '${targetStatus}'`,
@@ -220,7 +272,12 @@ export const CmosErrors = {
       suggestion:
         validTransitions.length > 0
           ? `Valid transitions from '${currentStatus}': ${validTransitions.join(', ')}`
-          : `Mission is in terminal state '${currentStatus}' and cannot be changed`,
+          : // s87-m01: the old text read "Mission is in terminal state 'X' and cannot be CHANGED",
+            // which is measurably false — a Completed mission's `name` updates and reads back
+            // changed, because `cmos_mission(action="update")` only validates a transition when
+            // `fields.status` is the field being written. Say only what is true: the STATUS is
+            // settled. Everything else about the mission is still editable.
+            `'${currentStatus}' is a terminal status: no status transition out of it is permitted. Other fields can still be edited with cmos_mission(action="update").`,
     };
   },
 

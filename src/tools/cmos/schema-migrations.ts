@@ -150,15 +150,32 @@ export interface MigrationResult {
    *
    * 19 of the 22 exported functions can return a non-empty `warnings`
    * (`computeContentHash` and `snapshotDedupPrunedFilter` return no MigrationResult;
-   * `ensureRenamedColumn` never populates the field — it throws). Those 19 have 42 call
-   * sites in src/, in three groups (A+B+C = 42); group D names the two helpers with no
-   * src/ call site at all:
+   * `ensureRenamedColumn` never populates the field — it throws).
    *
-   *  A. SPLICED — 6 sites already carry the warnings onto a rendered answer:
-   *     cmos-sprint-complete.ts (×2, pre-BEGIN firehose + author-namespace ensures),
-   *     cmos-session-capture.ts (×2, the author-namespace ensure before each dedup
-   *     SELECT), cmos-session-complete.ts (×1, same), cmos-db-backfill.ts (×1,
-   *     `migrateContentHash`).
+   * s87-m03 — THE COUNT WAS WRONG AND IS RE-DERIVED. This block said 42 call sites with A=6 and a
+   * remainder of 29+7. Re-derived mechanically at build time (walk `src/`, skip comment lines,
+   * match each MigrationResult-returning export): **45 call sites across 16 functions** — four of
+   * the twenty have no `src/` caller at all. A reach map that miscounts its own reach is exactly
+   * the class this arc is named for, so the number is corrected here rather than carried.
+   *
+   * WHERE THE THREE MISSING SITES WERE, named so the correction is checkable:
+   *   - `cmos-mission-move.ts` — `ensureMissionTimestamps`, added by s86-m08 after this prose
+   *     was last written;
+   *   - `cmos-learnings-reaffirm.ts` — `ensureLearningsTable`, present all along and simply
+   *     omitted by the prose;
+   *   - `cmos-sprint-complete.ts` — `ensureLearningsTable`, added by s87-m02 THIS SPRINT, and
+   *     spliced by s87-m03 rather than left to become a forty-sixth unspliced site.
+   *
+   * HONEST LIMIT ON THIS CORRECTION: the TOTAL and group A were re-derived. The B-vs-C split
+   * below (reachable-but-unspliced vs no-warnings-channel) was NOT re-verified this sprint and is
+   * carried forward from s86 with that caveat stated. Do not quote the B and C figures as
+   * measured; quote 45 and 7, which are.
+   *
+   *  A. SPLICED — 7 sites carry the warnings onto a rendered answer:
+   *     cmos-sprint-complete.ts (×3, the pre-BEGIN firehose + author-namespace ensures and
+   *     s87-m03's `ensureLearningsTable` inside the archival), cmos-session-capture.ts (×2, the
+   *     author-namespace ensure before each dedup SELECT), cmos-session-complete.ts (×1, same),
+   *     cmos-db-backfill.ts (×1, `migrateContentHash`).
    *
    *  B. UNSPLICED BUT REACHABLE — 29 sites DISCARD the MigrationResult inside a handler
    *     whose answer DOES render a warnings channel. These are WORK, not structure: a
@@ -1791,10 +1808,22 @@ function occurredAtExpr(client: CmosDatabaseClient, table: FirehoseTable): strin
  * Resolve a non-empty project_id for the backfill: metadata `project_id` →
  * `dashboard_slug` → `project_name` → `'unknown-project'`. Mirrors
  * genesis-columns.getProjectId (inlined here to avoid a circular import, since
- * genesis-columns imports ensureFirehoseEventColumns from this module). Real
- * stores always carry a non-empty project_id, so the fallback only fires on
- * misconfigured/partial stores (e.g. test fixtures) — keeping the NOT NULL
- * backfill from failing there while never overriding a real id.
+ * genesis-columns imports ensureFirehoseEventColumns from this module).
+ *
+ * s87-m04 — THE OLD RATIONALE HERE WAS FALSE AND IS REPLACED. It claimed real stores invariably
+ * record an identity, so the fallback only ever fired on misconfigured or test stores. Measured
+ * read-only across every CMOS store on this machine: 45 stores, 33 resolving via a recorded
+ * identity, 12 collapsing to the fallback label, 1 unclassifiable read-only. The fallback fires
+ * on twelve, and it has already fired in production — derekn.com's store carries 217 rows
+ * stamped with the label across six tables.
+ *
+ * WHAT IS UNCHANGED: the fallback itself. Ruling #736 — fall back and warn rather than throw —
+ * is REAFFIRMED by decision #1017 (D-8); only its premise is amended. The fallback still keeps
+ * the NOT NULL backfill from failing on a store with no identity, and still never overrides a
+ * recorded id. Sprint-87 ships NO identity write: it corrects the disclosure, the label and the
+ * seed. The full amendment, with the original premise quoted verbatim, is in #1017 — it is
+ * deliberately not quoted here, because a shipped-prose gate sweeps this tree for that sentence
+ * and a gate a comment can trip is a gate someone will weaken.
  */
 function resolveProjectId(client: CmosDatabaseClient): string {
   const read = (key: string): string => {

@@ -21,7 +21,7 @@ import { z } from 'zod';
 import { withClientAsync } from './client';
 import type { CmosToolResult } from './types';
 import { createSuccess } from './errors';
-import { getProjectIdentity } from './project-identity';
+import { getProjectIdentity, deriveProjectSlug } from './project-identity';
 import { DashboardClient, resolveDashboardBaseUrl } from './dashboard-client';
 import { computeAuthState } from '../../auth/auth-state';
 import type { AuthTier } from '../../auth/auth-state';
@@ -91,7 +91,19 @@ function normalizeCmosAddress(raw: string | undefined | null): string {
   return trimmed;
 }
 
-async function resolveLastSyncAt(projectRoot?: string): Promise<string | null> {
+/**
+ * s87-m03 — `last_sync_at` is documented as belonging to THIS project, so it must be asked for
+ * as this project's.
+ *
+ * MEASURED DEFECT: calling `getSyncStatus` with no argument hits `/api/sync/status` unscoped and
+ * returns a PLATFORM-WIDE timestamp. `cmos_status`'s five-field payload is described as "for the
+ * current project", and the number it published was 32 days optimistic — `2026-07-11` against
+ * this project's true `2026-06-09`. One argument, and the field starts describing its own row.
+ */
+async function resolveLastSyncAt(
+  projectSlug: string | null,
+  projectRoot?: string
+): Promise<string | null> {
   // Build a dashboard client opportunistically. If we can't authenticate
   // (no credentials / unreachable / 4xx), the status payload returns null
   // for last_sync_at without surfacing an error.
@@ -101,7 +113,11 @@ async function resolveLastSyncAt(projectRoot?: string): Promise<string | null> {
   }
 
   try {
-    const statusResult = await clientResult.data.client.getSyncStatus();
+    // `?? undefined` rather than `?? ''`: an empty slug would be sent as `?projectSlug=` and ask
+    // the dashboard to scope to nothing. An identity-less store falls back to the unscoped call
+    // deliberately — the honest degradation — rather than to a scoped call for a project that
+    // has no name.
+    const statusResult = await clientResult.data.client.getSyncStatus(projectSlug ?? undefined);
     if (statusResult.success && statusResult.data) {
       return statusResult.data.lastSyncAt ?? null;
     }
@@ -129,7 +145,10 @@ export async function cmosStatus(
 
       const authState = await computeAuthState({ projectRoot: params.projectRoot });
 
-      const last_sync_at = await resolveLastSyncAt(params.projectRoot);
+      // s87-m03: the slug is derived the same way every other caller derives it — from the
+      // project name — so the four getSyncStatus sites agree about what "this project" means.
+      const projectSlug = identity?.project_name ? deriveProjectSlug(identity.project_name) : null;
+      const last_sync_at = await resolveLastSyncAt(projectSlug, params.projectRoot);
 
       const result: CmosStatusResult = {
         cmos_address,

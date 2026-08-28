@@ -819,14 +819,51 @@ async function handleReissue(
   // force a fresh key even when something is present, so drop any existing
   // row first. This is the first destructive step and it now runs only after
   // attribution succeeded.
+  //
+  // s87-m07 (#527) — SNAPSHOT BEFORE THE DELETE, AND RESTORE ON EVERY NON-SUCCESS EXIT.
+  //
+  // Measured live: force a 500 on the mint and `getProjectKey` afterwards returns `null` — the
+  // operator's only project key is gone, and reissue offered nothing in its place. A reissue that
+  // gets past attribution and then fails dashboard-side used to DESTROY the credential it was
+  // asked to replace.
+  //
+  // THE DELETE IS LOAD-BEARING, so the fix is not "move it later": `recoverProjectKey` returns
+  // `no-op-already-present` while a row exists, so without the delete a reissue would silently
+  // decline to reissue. Snapshot-and-re-upsert keeps the forcing behaviour and makes it
+  // reversible.
+  // Captured into a local because the closure below loses the narrowing the `!params.projectRoot`
+  // guard at the top of this function established.
+  const reissueRoot: string = params.projectRoot;
+  const snapshot = await store.getProjectKey(reissueRoot);
+
+  /**
+   * Put the original row back. IDEMPOTENT, and a no-op when there was nothing to save — the
+   * absent-row reissue path is legitimate (covered at reissue-resolution.test.ts) and must not be
+   * handed a fabricated key.
+   */
+  const restoreSnapshot = async (): Promise<void> => {
+    if (!snapshot) return;
+    await store.upsertProjectKey(reissueRoot, snapshot);
+  };
+
   await store.removeProjectKey(params.projectRoot);
 
-  const recovery = await recoverProjectKey({
-    projectRoot: params.projectRoot,
-    projectId,
-    client: resolved.client,
-    store,
-  });
+  // WRAPPED, because the three named arms are not the only way out. `store.upsertProjectKey`
+  // inside `recoverProjectKey` can THROW after the delete, and `cmosAuth`'s dispatcher has no
+  // try/catch anywhere — so an exception would escape with the row already gone. A per-arm fix
+  // that leaves the exception path open is a fix that still loses the key.
+  let recovery: Awaited<ReturnType<typeof recoverProjectKey>>;
+  try {
+    recovery = await recoverProjectKey({
+      projectRoot: params.projectRoot,
+      projectId,
+      client: resolved.client,
+      store,
+    });
+  } catch (err) {
+    await restoreSnapshot();
+    throw err;
+  }
 
   if (recovery.kind === 'recovered') {
     return createSuccess<CmosAuthResult>({
@@ -845,6 +882,8 @@ async function handleReissue(
     // Unreachable — classifyAttribution already passed. Reported as an internal
     // inconsistency rather than reusing the DEVICE_CODE_REQUIRED wording, which
     // would name a cause we have just proven false.
+    // s87-m07 (#527): restore first. THREE arms need this, not the two the next-step names.
+    await restoreSnapshot();
     return createError<CmosAuthResult>(
       CmosErrors.dashboardError(
         'internal inconsistency: attribution classified as usable, but the recovery path found no parent keyId'
@@ -852,9 +891,22 @@ async function handleReissue(
     );
   }
   if (recovery.kind === 'reissue-failed') {
-    return createError<CmosAuthResult>(CmosErrors.dashboardError(recovery.error));
+    // s87-m07 (#527) — THE LIVE ONE. This is the arm a forced 500 lands on, and the arm that
+    // measured `persisted: null` before this restore existed.
+    await restoreSnapshot();
+    // s87-m07 — and the message no longer stutters. `recovery.error` is already the
+    // dashboard-client's own message, which carries its own `Dashboard error:` prefix; wrapping it
+    // again produced the measured "Dashboard error: Dashboard error: Server error 500: upstream
+    // exploded". Stripping one leading prefix matches the plain form the startup runner uses for
+    // the same condition, so the two surfaces read the same way.
+    return createError<CmosAuthResult>(
+      CmosErrors.dashboardError(recovery.error.replace(/^Dashboard error:\s*/, ''))
+    );
   }
   // 'no-op-already-present' can't happen — we removed the existing row above.
+  // s87-m07 (#527): restored anyway. It is unreachable through the type system, which is exactly
+  // why it must not be the one exit that silently keeps the key deleted if it ever is reached.
+  await restoreSnapshot();
   return createError<CmosAuthResult>(
     CmosErrors.dashboardError('reissue recovery returned an unexpected state')
   );

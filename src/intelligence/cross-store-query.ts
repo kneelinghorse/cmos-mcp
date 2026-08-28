@@ -73,6 +73,25 @@ export interface CrossStoreQueryOptions {
   concurrency?: number;
   /** Injectable registry (tests); defaults to the singleton via `create()`. */
   registry?: ProjectGraphRegistry;
+
+  /**
+   * s87-m03 (#529) — an optional extra read, run ON THE CONNECTION THIS FAN-OUT ALREADY OPENS.
+   *
+   * WHY IT EXISTS. `cmos_review`'s drift signal derived store silence from a file mtime that
+   * THIS fan-out creates: opening a WAL database makes SQLite write the `-wal` sidecar, and the
+   * drift computation then read that sidecar's mtime as evidence of freshness. The instrument
+   * fabricated its own evidence. The only honest signal is the content the reason string already
+   * claims to describe, and the cheapest place to read it is the connection that is open anyway.
+   *
+   * WHY IT IS A CALLBACK AND NOT A SECOND QUERY. Decision #1016 (superseding #671 in part)
+   * replaced a syntax fence with a COST fence: no new store opens, no new connections, no
+   * network. A probe that runs inside the existing per-store task satisfies that by
+   * construction; one that opens its own connection could not.
+   *
+   * Its return value is collected by `project_id` into {@link CrossStoreQueryResult.probes}. A
+   * probe that THROWS is recorded in `probeErrors`, never in `errors` — see there for why.
+   */
+  perStoreProbe?: (db: Database.Database) => number | null;
 }
 
 /** A per-store failure, isolated from the rest of the query. */
@@ -82,10 +101,35 @@ export interface CrossStoreError {
   error: string;
 }
 
+/** s87-m03 — one store's {@link CrossStoreQueryOptions.perStoreProbe} result. */
+export interface CrossStoreProbe {
+  projectId: string;
+  /** Whatever the probe returned; `null` means "the probe ran and found nothing to report". */
+  value: number | null;
+}
+
 /** The fan-out result: merged rows + isolated errors + latency instrumentation. */
 export interface CrossStoreQueryResult<T extends CrossStoreRow = CrossStoreRow> {
   results: T[];
   errors: CrossStoreError[];
+
+  /**
+   * s87-m03 — per-store probe values, present only for stores whose query SUCCEEDED and whose
+   * probe did not throw. Empty when no `perStoreProbe` was supplied.
+   */
+  probes: CrossStoreProbe[];
+
+  /**
+   * s87-m03 — probe failures, KEPT STRICTLY APART FROM {@link errors}, and that separation is
+   * load-bearing rather than tidy.
+   *
+   * `errors` is what `deriveDrift` reads to classify a store `unmigrated` or `unreadable`. If a
+   * probe throw landed there, an optional extra read failing would silently reclassify a store
+   * the fan-out read perfectly well as one it could not read — a new false signal introduced by
+   * the fix for a false signal. The probe is additive: it can degrade the drift verdict to
+   * "unknown", never the store's reachability.
+   */
+  probeErrors: CrossStoreError[];
   metadata: {
     storesQueried: number;
     storesSucceeded: number;
@@ -247,6 +291,8 @@ export async function queryAcrossStores<T extends CrossStoreRow = CrossStoreRow>
 
   const overallStart = clock();
   const errors: CrossStoreError[] = [];
+  const probes: CrossStoreProbe[] = [];
+  const probeErrors: CrossStoreError[] = [];
   const perStoreMs: number[] = [];
   const cappedFlags: boolean[] = [];
 
@@ -260,6 +306,26 @@ export async function queryAcrossStores<T extends CrossStoreRow = CrossStoreRow>
       const raw = db.prepare(wrapped).all(...params, limit + 1) as T[];
       const capped = raw.length > limit;
       cappedFlags.push(capped);
+
+      // s87-m03 (#529) — the optional probe, on THIS connection, inside its OWN try/catch. The
+      // inner catch is the whole point: a probe throw must not reach the outer handler, because
+      // that one records into `errors` and would reclassify a perfectly readable store as
+      // unreadable on the strength of an optional extra read failing.
+      if (options.perStoreProbe) {
+        try {
+          probes.push({ projectId: store.project_id, value: options.perStoreProbe(db) });
+        } catch (probeErr) {
+          probeErrors.push({
+            projectId: store.project_id,
+            storePath: store.store_path,
+            error: probeErr instanceof Error ? probeErr.message : String(probeErr),
+          });
+        }
+      }
+
+      // Measured AFTER the probe, so the recorded per-store latency includes it. A probe whose
+      // cost is invisible to the p95 the cost fence is judged against would make that fence
+      // unfalsifiable (#1016 requires the per-store cost to be measured, not asserted).
       perStoreMs.push(clock() - start);
       return capped ? raw.slice(0, limit) : raw;
     } catch (err) {
@@ -308,6 +374,8 @@ export async function queryAcrossStores<T extends CrossStoreRow = CrossStoreRow>
   return {
     results,
     errors,
+    probes,
+    probeErrors,
     metadata: {
       storesQueried: stores.length,
       storesSucceeded: stores.length - errors.length,

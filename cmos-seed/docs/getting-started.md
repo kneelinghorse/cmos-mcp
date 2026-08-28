@@ -149,4 +149,4 @@ This keeps your project's strategic memory up-to-date. Run periodically or at sp
 ---
 
 **Last Updated**: 2025-12-29
-**Schema Version**: 2.0
+**Schema Version**: 2.1

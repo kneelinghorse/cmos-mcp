@@ -63,16 +63,41 @@ async function main(): Promise<void> {
         `Registered: slug=${data.slug} projectId=${data.projectId} keyId=${data.keyId} reregistered=${data.reregistered ?? false}\n`
       );
 
-      client.execute(
-        `INSERT OR REPLACE INTO metadata (key, value) VALUES ('dashboard_registered', 'true')`
-      );
-      client.execute(`INSERT OR REPLACE INTO metadata (key, value) VALUES ('dashboard_slug', ?)`, [
-        data.slug,
-      ]);
-      client.execute(
-        `INSERT OR REPLACE INTO metadata (key, value) VALUES ('dashboard_project_id', ?)`,
-        [data.projectId]
-      );
+      // s87-m03 (#524) — these three writes used to be issued and DISCARDED. Each returns a
+      // CmosToolResult whose `.success` nobody read, so a failed metadata write left the script
+      // printing "Registered: …" over a store that had recorded none of it — the registration
+      // would appear to have happened and would not have. Say which one failed, and exit non-zero.
+      const metadataWrites: Array<[string, string, unknown[]]> = [
+        [
+          'dashboard_registered',
+          `INSERT OR REPLACE INTO metadata (key, value) VALUES ('dashboard_registered', 'true')`,
+          [],
+        ],
+        [
+          'dashboard_slug',
+          `INSERT OR REPLACE INTO metadata (key, value) VALUES ('dashboard_slug', ?)`,
+          [data.slug],
+        ],
+        [
+          'dashboard_project_id',
+          `INSERT OR REPLACE INTO metadata (key, value) VALUES ('dashboard_project_id', ?)`,
+          [data.projectId],
+        ],
+      ];
+      const failedWrites: string[] = [];
+      for (const [key, sql, params] of metadataWrites) {
+        const writeResult = client.execute(sql, params as never[]);
+        if (!writeResult.success) {
+          failedWrites.push(`${key}: ${writeResult.error?.message ?? 'unknown error'}`);
+        }
+      }
+      if (failedWrites.length > 0) {
+        process.stderr.write(
+          `Registration reached the dashboard but the local store did NOT record it — ` +
+            `${failedWrites.join('; ')}. This project will not resolve as registered.\n`
+        );
+        process.exitCode = 1;
+      }
 
       const captureStatus = await captureRegisterResponse({
         projectRoot,

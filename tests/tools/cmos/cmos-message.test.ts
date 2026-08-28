@@ -2295,7 +2295,13 @@ describe('s86-m07 send: ambiguous target advisory', () => {
   it('warns on the prefix sibling, exactly once in the rendered text, and still SENDS', async () => {
     const client = mockClient();
     client.listDirectory.mockResolvedValue(createSuccess(COLLIDING_DIRECTORY));
-    client.sendMessage.mockResolvedValue(createSuccess({ id: 'msg-collide', status: 'pending' }));
+    client.sendMessage.mockResolvedValue(
+      createSuccess({
+        messageId: 'msg-collide',
+        status: 'pending',
+        deliveredAt: '2026-08-28T00:00:00Z',
+      })
+    );
 
     const result = await sendTo('cmos://derek/cmos-mcp');
 
@@ -2314,7 +2320,13 @@ describe('s86-m07 send: ambiguous target advisory', () => {
   it('says nothing about ambiguity when the target has no prefix sibling', async () => {
     const client = mockClient();
     client.listDirectory.mockResolvedValue(createSuccess(COLLIDING_DIRECTORY));
-    client.sendMessage.mockResolvedValue(createSuccess({ id: 'msg-clean', status: 'pending' }));
+    client.sendMessage.mockResolvedValue(
+      createSuccess({
+        messageId: 'msg-clean',
+        status: 'pending',
+        deliveredAt: '2026-08-28T00:00:00Z',
+      })
+    );
 
     const result = await sendTo('cmos://derek/cmos-dashboard');
 
@@ -2336,7 +2348,13 @@ describe('s86-m07 send: ambiguous target advisory', () => {
         },
       })
     );
-    client.sendMessage.mockResolvedValue(createSuccess({ id: 'msg-alias', status: 'pending' }));
+    client.sendMessage.mockResolvedValue(
+      createSuccess({
+        messageId: 'msg-alias',
+        status: 'pending',
+        deliveredAt: '2026-08-28T00:00:00Z',
+      })
+    );
 
     const result = await sendTo('cmos://derek/cmos-mcp-pro');
 
@@ -2349,7 +2367,13 @@ describe('s86-m07 send: ambiguous target advisory', () => {
   it('omits targetProjectId/targetProjectName when the resolve body lacks them', async () => {
     const client = mockClient();
     client.resolveAddress.mockResolvedValue(createSuccess({ success: true, resolved: {} }));
-    client.sendMessage.mockResolvedValue(createSuccess({ id: 'msg-lean', status: 'pending' }));
+    client.sendMessage.mockResolvedValue(
+      createSuccess({
+        messageId: 'msg-lean',
+        status: 'pending',
+        deliveredAt: '2026-08-28T00:00:00Z',
+      })
+    );
 
     const result = await sendTo('cmos://derek/cmos-dashboard');
 
@@ -2362,7 +2386,13 @@ describe('s86-m07 send: ambiguous target advisory', () => {
   it('a directory lookup failure loses no receipt and invents no claim', async () => {
     const client = mockClient();
     client.listDirectory.mockRejectedValue(new Error('dashboard unreachable'));
-    client.sendMessage.mockResolvedValue(createSuccess({ id: 'msg-degraded', status: 'pending' }));
+    client.sendMessage.mockResolvedValue(
+      createSuccess({
+        messageId: 'msg-degraded',
+        status: 'pending',
+        deliveredAt: '2026-08-28T00:00:00Z',
+      })
+    );
 
     const result = await sendTo('cmos://derek/cmos-mcp');
 

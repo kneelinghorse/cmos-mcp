@@ -202,7 +202,8 @@ describe('E2E: discover → resolve → send → verify', () => {
     // Step 2: Send a message (resolveAddress and auto-detect happen internally)
     client.sendMessage.mockResolvedValueOnce(
       createSuccess({
-        id: 'msg-e2e-001',
+        messageId: 'msg-e2e-001',
+        deliveredAt: '2026-08-28T00:00:00Z',
         type: 'backlog_request',
         summary: 'Add sync status endpoint',
         status: 'pending',
@@ -333,7 +334,8 @@ describe('same-owner cross-project send', () => {
     const client = mockClient();
     client.sendMessage.mockResolvedValueOnce(
       createSuccess({
-        id: 'msg-cross-001',
+        messageId: 'msg-cross-001',
+        deliveredAt: '2026-08-28T00:00:00Z',
         type: 'status_update',
         summary: 'Phase 2 events ready',
         status: 'pending',
@@ -425,7 +427,8 @@ describe('regression: Sprint 29 send pattern', () => {
     const client = mockClient();
     client.sendMessage.mockResolvedValueOnce(
       createSuccess({
-        id: 'msg-s29-compat',
+        messageId: 'msg-s29-compat',
+        deliveredAt: '2026-08-28T00:00:00Z',
         type: 'info_push',
         summary: 'Answers to Phase 2 open questions',
         status: 'pending',

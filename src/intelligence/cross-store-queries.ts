@@ -24,6 +24,18 @@ type NamedQueryOpts = Pick<
   'limit' | 'concurrency' | 'projectFilter' | 'registry'
 >;
 
+/**
+ * s87-m03 — `perStoreProbe` is added to the ONE named query that forwards it, and to no other.
+ *
+ * Found by this mission's build-time adversarial critic. The first version widened the shared
+ * `NamedQueryOpts` above, which let all four named queries ACCEPT a `perStoreProbe` while only
+ * `activeMissionsAcrossProjects` passed it on — three surfaces that take a parameter and silently
+ * drop it. That is this sprint's own defect class, introduced by the fix for it. Typing it here
+ * instead means a caller that supplies a probe to `decisionsAcrossProjects` gets a compile error
+ * rather than silence.
+ */
+type ProbeableQueryOpts = NamedQueryOpts & Pick<CrossStoreQueryOptions, 'perStoreProbe'>;
+
 export interface PortfolioDecisionRow extends CrossStoreRow {
   id: number;
   decision_text: string;
@@ -69,7 +81,7 @@ export interface PortfolioMissionRow extends CrossStoreRow {
  * (status = 'In Progress' OR 'Current').
  */
 export function activeMissionsAcrossProjects(
-  opts: NamedQueryOpts = {}
+  opts: ProbeableQueryOpts = {}
 ): Promise<CrossStoreQueryResult<PortfolioMissionRow>> {
   return queryAcrossStores<PortfolioMissionRow>({
     sql: `SELECT project_id, id, name, status, occurred_at, origin_seq
@@ -80,6 +92,10 @@ export function activeMissionsAcrossProjects(
     concurrency: opts.concurrency,
     projectFilter: opts.projectFilter,
     registry: opts.registry,
+    // s87-m03: forwarded so `cmos_review` can derive store freshness from CONTENT on the
+    // connection this fan-out already holds, instead of from a `-wal` mtime this fan-out itself
+    // created. Optional and undefined by default — every other caller is unaffected.
+    perStoreProbe: opts.perStoreProbe,
   });
 }
 

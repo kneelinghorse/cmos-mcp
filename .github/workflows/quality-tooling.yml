@@ -25,6 +25,11 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          # s87-m08: unknown-project-disclosure.test.ts's CUT-7 gate diffs a PINNED COMMIT RANGE
+          # (m04's own two commits) rather than the working tree, so it needs real history. The
+          # default depth-1 checkout has neither SHA and the gate dies on a raw git error.
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -67,6 +72,11 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          # s87-m08: unknown-project-disclosure.test.ts's CUT-7 gate diffs a PINNED COMMIT RANGE
+          # (m04's own two commits) rather than the working tree, so it needs real history. The
+          # default depth-1 checkout has neither SHA and the gate dies on a raw git error.
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v4

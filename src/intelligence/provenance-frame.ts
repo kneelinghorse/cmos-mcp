@@ -42,6 +42,33 @@ export function isForeignProject(
   return rowProjectId != null && (localProjectId == null || rowProjectId !== localProjectId);
 }
 
+/**
+ * s87-m04 — the fallback identifier `getProjectId` stamps when a store has no recorded identity.
+ * Not a project. Twelve of the 45 CMOS stores on this machine resolve to it.
+ */
+export const UNRECORDED_PROJECT_ID = 'unknown-project';
+
+/**
+ * s87-m04 — THE PROVENANCE TAG FOR ONE ROW. Changes the LABEL; NEVER the FENCE.
+ *
+ * `proj:unknown-project` named a project that does not exist, on the prompt-injection defence
+ * surface. That is worse than unhelpful: an agent that repeatedly sees a fence attributed to a
+ * project it can never find learns to discount the fence. Nine of `derekn.com`'s fourteen own
+ * sessions render this way.
+ *
+ * THE FENCE IS UNCHANGED, and the distinction is load-bearing. A row carrying the literal is
+ * still FOREIGN and still gets the untrusted framing — because a pull-merged genuinely foreign
+ * row from any of the twelve collapsing stores ALSO carries the literal, so de-fencing on it
+ * would de-fence foreign content. The standing bias is stated twice in this codebase
+ * ("fence-more, never fence-less"), and s87-m04's criterion 5 asserts BOTH halves: no rendered
+ * surface says `proj:unknown-project`, AND the same rows are still wrapped.
+ *
+ * All this does is stop the tag claiming an attribution nobody has.
+ */
+export function provenanceTag(rowProjectId: string | null | undefined): string {
+  return rowProjectId === UNRECORDED_PROJECT_ID ? 'unattributed' : `proj:${rowProjectId}`;
+}
+
 function normalizeSource(source: string | null | undefined): string {
   const s = (source ?? '').trim();
   return s.length > 0 ? s : 'unknown source';
@@ -118,7 +145,7 @@ export function frameInlineIfForeign(
   localProjectId: string | null | undefined
 ): string {
   return isForeignProject(rowProjectId, localProjectId)
-    ? frameForeignInline(text, `proj:${rowProjectId}`)
+    ? frameForeignInline(text, provenanceTag(rowProjectId))
     : text;
 }
 
@@ -128,7 +155,7 @@ export function frameTextIfForeign(
   localProjectId: string | null | undefined
 ): string {
   return isForeignProject(rowProjectId, localProjectId)
-    ? frameForeignText(text, `proj:${rowProjectId}`)
+    ? frameForeignText(text, provenanceTag(rowProjectId))
     : text;
 }
 

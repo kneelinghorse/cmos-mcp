@@ -111,6 +111,38 @@ export const cmosMissionUnblockToolDefinition = {
 } as const;
 
 /**
+ * s87-m01 — the remedy `unblock` offers when the mission is not blocked, derived from the status
+ * it is actually answering rather than prescribed uniformly.
+ *
+ * Each arm was checked by EXECUTING the remedy from the state it is offered in
+ * (`tests/tools/cmos/remedy-reachability.test.ts`, TIER 2). Where the remedy only works after
+ * another step, the string says so — a conditional remedy stated as unconditional is the same
+ * defect as a remedy that crashes, one notch quieter.
+ */
+function unblockNotBlockedSuggestion(missionId: string, currentStatus: string): string {
+  const startCall = `cmos_mission_transition(action="start", missionId="${missionId}")`;
+  const requeueCall = `cmos_mission(action="update", missionId="${missionId}", fields={"status":"Queued"})`;
+  switch (currentStatus) {
+    case 'Queued':
+    case 'Current':
+      // `start` is a valid transition from both — the one case where the old text was right.
+      return `The mission is not blocked, so there is no blocker to clear. Use ${startCall} to begin work on it.`;
+    case 'In Progress':
+      return `The mission is already In Progress — there is no blocker to clear and nothing to restart.`;
+    case 'Completed':
+      return `A completed mission has no blocker to clear; its status is settled. Other fields can still be edited with cmos_mission(action="update").`;
+    case 'Dropped':
+      return `Dropped is a terminal status: no status transition out of it is permitted, so there is nothing to unblock and it cannot be restarted.`;
+    case 'Deferred':
+      return `Deferred work is parked, not blocked. It cannot start directly — re-queue it first with ${requeueCall}, and only then ${startCall}.`;
+    default:
+      // Not a key of VALID_STATE_TRANSITIONS at all. Say that, rather than prescribing a
+      // transition against a state machine that has never heard of this status.
+      return `Mission '${missionId}' has unrecognized status '${currentStatus}', so whether it can still be worked is unknown — it is not blocked, and refusing to guess. Set a recognized status first with ${requeueCall}, then retry.`;
+  }
+}
+
+/**
  * Execute the cmos_mission_unblock tool.
  *
  * Transitions a mission from Blocked to In Progress (default) or Current.
@@ -159,14 +191,19 @@ export async function cmosMissionUnblock(
 
       // Check if mission is blocked
       if (currentStatus !== 'Blocked') {
+        // s87-m01, TIER 2 (disclosed remedies). The old text prescribed
+        // `cmos_mission_transition(action="start")` for EVERY non-Completed status. Measured
+        // against the real router: `start` REFUSES from 'In Progress' (already there),
+        // from 'Dropped' (terminal, empty transition list) and from 'Deferred' (which reaches
+        // Queued/Current/Dropped, never 'In Progress' directly). Three of the six states it was
+        // offered in. A remedy prescribed where it cannot run is the defect this sprint is named
+        // for, so the string is now derived from the status it is answering — and where a remedy
+        // is genuinely conditional, it says so rather than being quietly dropped.
         return createError<MissionUnblockResult>({
           code: CMOS_ERROR_CODES.MISSION_INVALID_STATE,
           message: `Mission '${missionId}' is not blocked (current status: ${currentStatus})`,
           currentState: currentStatus,
-          suggestion:
-            currentStatus === 'Completed'
-              ? 'Cannot unblock a completed mission'
-              : 'Use cmos_mission_transition(action="start") to begin work on this mission',
+          suggestion: unblockNotBlockedSuggestion(missionId, currentStatus),
         });
       }
 

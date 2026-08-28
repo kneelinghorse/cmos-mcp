@@ -175,7 +175,15 @@ describe('cmos_review', () => {
       expect(digest).toHaveProperty('workQueue');
       expect(digest).toHaveProperty('recentDecisions');
       expect(digest).toHaveProperty('freshness');
-      expect(digest).toHaveProperty('warnings');
+      // s87-m06 — INVERTED. `warnings` was a DATA-level field assigned `[]` exactly once and
+      // never written, with a renderer that could only print an empty list and a size-trim stage
+      // that sliced a list that could not have content. Asserting its PRESENCE was asserting that
+      // a promise the payload never kept was still being made.
+      //
+      // The ENVELOPE channel is untouched and is where warnings actually travel:
+      // `createSuccess(digest, reviewWarnings)` carries them on the result, and
+      // `appendWarnings` renders them. Two objects; only the dead one is gone.
+      expect(digest).not.toHaveProperty('warnings');
       expect(digest).toHaveProperty('digestSizeBytes');
     });
 

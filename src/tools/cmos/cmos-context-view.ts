@@ -21,7 +21,7 @@ import {
 import { detectAndFlagStaleness } from './staleness-detection';
 import { applyPendingBlobMigrations } from './blob-migrations';
 import { getProjectId } from './genesis-columns';
-import { frameForeignText } from '../../intelligence/provenance-frame';
+import { frameForeignText, provenanceTag } from '../../intelligence/provenance-frame';
 import { isReadOnlyAgentSession } from './read-only-agent-guard';
 import { appendWarnings } from './format-warnings';
 
@@ -462,7 +462,10 @@ function frameIfForeign(
 ): string {
   const isForeign =
     rowProjectId != null && (localProjectId == null || rowProjectId !== localProjectId);
-  return isForeign ? frameForeignText(text, `proj:${rowProjectId}`) : text;
+  // s87-m04: through the SHARED tag constructor. This site built its own `proj:${…}` string, so
+  // it would otherwise have kept naming a project that does not exist after the two constructors
+  // in provenance-frame.ts stopped. The FENCE is untouched — only what the tag says.
+  return isForeign ? frameForeignText(text, provenanceTag(rowProjectId)) : text;
 }
 
 function buildAggregatedView(

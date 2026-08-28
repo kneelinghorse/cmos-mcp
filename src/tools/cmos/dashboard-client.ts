@@ -114,6 +114,37 @@ export interface DashboardUserIdentity {
   username: string | null;
 }
 
+/**
+ * s87-m05 — THE SEND RESPONSE IS A DIFFERENT SHAPE FROM A LISTED MESSAGE, and conflating them is
+ * what produced `ID: undefined` on every successful send.
+ *
+ * `sendMessage` was typed as returning {@link DashboardMessage}, whose `id` is required and IS
+ * returned by the list/get routes. The SEND route returns `messageId`. Because the declared type
+ * promised `id`, every send mock in the suite was written to satisfy the DECLARATION rather than
+ * the WIRE — so the tests stayed green against a shape production has never produced, while the
+ * shipped renderer printed `ID: undefined`.
+ *
+ * Verified rather than assumed: `git log -S messageId` puts the key in the FIRST commit of the
+ * messaging API, and a live send (message `2f64af65`) returns it.
+ *
+ * `id` is kept as an optional tolerance for a deployed instance older than this checkout; it is
+ * read only through `?? `, never depended on.
+ */
+export interface DashboardSendResponse {
+  /** What the send route returns. */
+  messageId?: string;
+  /** Tolerance for a pre-cutover deployment. Never assumed present. */
+  id?: string;
+  status?: string;
+  deliveredAt?: string;
+  /** Dashboard-reported delivery/routing status, when the deploy exposes an ACK surface. */
+  deliveryStatus?: string;
+  /** Echoed back so the client can warn on an attribution mismatch. */
+  senderAddress?: string;
+  /** s57-m04 identity ACK, consumed by whoami/onboard's legacy-key warning. */
+  deliveryAck?: { identitySource?: 'api-key' | 'request-body' | 'none' };
+}
+
 export interface DashboardMessage {
   id: string;
   type: string;
@@ -250,7 +281,17 @@ export interface ListMessagesParams {
 
 export interface ListMessagesResult {
   messages: DashboardMessage[];
+  /**
+   * s87-m05 — USER-WIDE. This is what `/api/messages` returns unscoped: every unread message
+   * across every project this user owns. It was rendered on a PROJECT-scoped digest as though it
+   * were this project's, telling an agent to review messages it can never clear from here.
+   */
   unreadCount: number;
+  /** s87-m05 — this project's unread count, when the dashboard scopes the query. Optional so a
+   *  pre-cutover dashboard still parses; absence means "not scoped", never zero. */
+  unreadCountScoped?: number;
+  /** s87-m05 — which of the two counts above the dashboard actually applied. */
+  unreadScope?: 'project' | 'user';
   totalCount: number;
   /** s84-m02: page size the dashboard actually returned (dashboard m05). Absent on a
    *  pre-cutover dashboard that does not echo it — callers treat absence as unknown. */
@@ -312,13 +353,23 @@ export interface ResolveAddressResult {
 /**
  * A project entry from the dashboard directory.
  *
- * s86-m07 — NO `description` member. GET /api/projects/directory/public returns exactly
- * `{id, name, slug, owner, ownerDisplayName, cmosAddress, createdAt}` and no description for
- * any row (measured 2026-08-10, 37 rows), so the field and its renderer were permanently inert.
- * `isOwner` is likewise never populated by that route — only GET /api/projects/me returns it,
- * which is why `cmos_message(directory)` joins the two (cmos-message.ts handleDirectory).
- * `createdAt` is the REGISTRATION date; it is not an activity or freshness signal and must not
- * be rendered as one.
+ * s86-m07 — NO `description` member. Measured 2026-08-10 over 37 rows, GET
+ * /api/projects/directory/public carried no description for any row, so the field and its
+ * renderer were permanently inert. `createdAt` is the REGISTRATION date; it is not an activity or
+ * freshness signal and must not be rendered as one.
+ *
+ * s87-m05 — TWO CLAIMS IN THIS BLOCK WERE REFUTED AGAINST THE LIVE API AND ARE CORRECTED.
+ * It enumerated the payload as an exhaustive shape and stated that `isOwner` could never be
+ * populated by that route. The route DOES return `isOwner`. (The original sentences are
+ * paraphrased rather than quoted, so a grep for the refuted wording finds no live copy of it.) A live probe of the deployed dashboard settles it; the shape sentence was
+ * written from a measurement of the payload as it stood in August and hardened into a claim about
+ * what the route can never do.
+ *
+ * THE JOIN STAYS, AND THAT IS A DELIBERATE CALL, NOT AN OVERSIGHT. `cmos_message(directory)` still
+ * calls GET /api/projects/me and merges. Dropping it now that the directory route carries
+ * `isOwner` would be a LATENCY optimisation, not a truth fix — the join is correct today and its
+ * degraded path already warns honestly. Rule 3: touch only what is wrong. What was wrong was the
+ * sentence.
  */
 export interface DirectoryProject {
   id: string;
@@ -774,9 +825,14 @@ export class DashboardClient {
   private cachedIdentity: DashboardUserIdentity | null = null;
   /**
    * Dashboard-side keyId of the user-scoped credential authenticating this client,
-   * when known. Set by `fromEnvForProject()` whenever it picks a user-scoped key
-   * out of the credential store. Used by `registerProject()` to stamp `parentKeyId`
-   * on the auto-issued project-scoped key captured into the local store.
+   * when known. Used by `registerProject()` to stamp `parentKeyId` on the auto-issued
+   * project-scoped key captured into the local store.
+   *
+   * s87-m07 — SET BY BOTH ENTRY POINTS, not just `fromEnvForProject`. Since s86-m06 there is
+   * exactly ONE `setAuthenticatingKeyId` call in this file, and it lives in the shared private
+   * user-scoped resolution chain that `fromEnvForProject` AND `fromEnvForUser` both reach.
+   * Crediting one of them was true when written and stopped being true when the chain was
+   * extracted.
    */
   private _authenticatingKeyId: string | undefined;
   /** Buffer before expiry to trigger re-auth (30 seconds) */
@@ -1206,9 +1262,11 @@ export class DashboardClient {
 
   /**
    * `keyId` of the user-scoped credential that authenticated this client, if known.
-   * Sprint 57 m02 — populated by `fromEnvForProject()` when a user-scoped key is
-   * picked from the credential store. Callers capturing the auto-issued register
-   * response stamp this into `parentKeyId` on the resulting project-scoped record.
+   * Sprint 57 m02 — populated when a user-scoped key is picked from the credential store, by
+   * EITHER `fromEnvForProject()` or `fromEnvForUser()`: s86-m06 extracted the pick into one
+   * shared private chain with a single setter call, reachable from both. Callers capturing the
+   * auto-issued register response stamp this into `parentKeyId` on the resulting project-scoped
+   * record. (s87-m07 corrected the single-entry-point claim.)
    */
   get authenticatingKeyId(): string | undefined {
     return this._authenticatingKeyId;
@@ -1222,7 +1280,7 @@ export class DashboardClient {
   /**
    * Send a message to a target address.
    */
-  async sendMessage(params: SendMessageParams): Promise<CmosToolResult<DashboardMessage>> {
+  async sendMessage(params: SendMessageParams): Promise<CmosToolResult<DashboardSendResponse>> {
     const body: Record<string, unknown> = {
       targetAddress: params.targetAddress,
       type: params.type,
@@ -1242,7 +1300,7 @@ export class DashboardClient {
     if (params.senderAddress) {
       body.senderAddress = params.senderAddress;
     }
-    const result = await this.request<DashboardMessage>('POST', '/api/messages', body);
+    const result = await this.request<DashboardSendResponse>('POST', '/api/messages', body);
 
     if (
       result.success &&

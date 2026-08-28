@@ -390,7 +390,9 @@ describe('cmos_message(list) — one scope per number (s86-m07 C4)', () => {
     ['user-scoped', true],
     ['legacy-env', true],
     ['password-fallback', true],
-    ['none', true],
+    // s87-m07 (#530): `'none'` is gone from KeySource — no producer emitted it. `null` is the
+    // shape a caller with no resolved keySource actually presents.
+    [null, true],
     ['project-scoped', false],
   ] as Array<[KeySource, boolean]>)(
     'inbox scope warning with a %s credential fires: %s',

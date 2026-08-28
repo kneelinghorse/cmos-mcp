@@ -41,6 +41,7 @@ import {
   CmosErrors,
   CMOS_ERROR_CODES,
   VALID_STATE_TRANSITIONS,
+  transitionsFrom,
 } from './errors';
 import { ensureMissionTimestamps } from './schema-migrations';
 import { sanitizeContentField } from '../../intelligence/content-sanitizer';
@@ -191,10 +192,10 @@ export async function cmosMissionMove(
       // fail-loud rule below silently bypassed — while 'toString' was refused as "a terminal
       // status", which is not true of anything. Statuses come from the store, and the store
       // already proves unvalidated ones land there.
-      const known = Object.prototype.hasOwnProperty.call(VALID_STATE_TRANSITIONS, currentStatus);
-      const validTransitions = known
-        ? (VALID_STATE_TRANSITIONS[currentStatus] as MissionStatus[])
-        : undefined;
+      // s87-m01: this file found the rule first; the hasOwnProperty read it inlined is now the
+      // SHARED `transitionsFrom` in errors.ts, used by all six mission-transition sites. Same
+      // behaviour, one implementation — so the next handler cannot reintroduce the bare index.
+      const validTransitions = transitionsFrom(currentStatus);
 
       if (validTransitions === undefined) {
         return createError<MissionMoveResult>({

@@ -440,3 +440,19 @@ export function applyProjectIdentityFieldUpdate(
 
   return { success: true };
 }
+
+/**
+ * s87-m03 — the ONE derivation of a project's dashboard slug.
+ *
+ * It existed three times, spelled identically by hand: `cmos-db-backfill.ts` had it as a private
+ * helper, `cmos-agent-onboard.ts` inlined it inside `fetchSyncHealth`, and the third site had no
+ * slug at all and simply asked the dashboard for everything. Three copies of one rule is how the
+ * four `getSyncStatus` call sites came to disagree about what "this project" meant — one of them
+ * scoped, three of them platform-wide, all of them describing their answer as this project's.
+ *
+ * Hoisted here rather than into either caller because the slug IS an identity fact, and this
+ * module is where identity facts are derived.
+ */
+export function deriveProjectSlug(projectName: string): string {
+  return projectName.toLowerCase().replace(/\s+/g, '-');
+}

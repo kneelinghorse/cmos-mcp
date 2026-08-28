@@ -177,7 +177,14 @@ function findOrphanedSprints(client: CmosDatabaseClient): OrphanedSprint[] {
 function findOrphanedMissions(client: CmosDatabaseClient, staleDays: number): OrphanedMission[] {
   const missions: OrphanedMission[] = [];
 
-  // Missions with no sprint
+  // Missions with no sprint.
+  //
+  // s87-m01 BEHAVIOUR CHANGE, recorded at the consuming site because the edit was made elsewhere:
+  // `MISSION_TERMINAL_STATUSES` no longer contains 'Failed' (#839 assigns it to the SPRINT domain,
+  // and it was never a key of VALID_STATE_TRANSITIONS). This predicate is the only live consumer
+  // of that set, so a sprint-less mission stored as 'Failed' is now REPORTED AS ORPHANED where it
+  // previously was not. That is a widening of the predicate, not a bug fix. It is unwitnessed:
+  // zero 'Failed' mission rows exist in this store or the fleet enumeration.
   const noSprintResult = client.getMany<MissionRow>(
     `SELECT id, name, status, started_at
      FROM missions

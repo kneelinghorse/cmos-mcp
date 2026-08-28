@@ -133,7 +133,18 @@ const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 // ─── Result Types ────────────────────────────────────────────────────────────
 
 export interface MessageSendResult {
-  messageId: string;
+  /**
+   * s87-m05 — OPTIONAL. The send SUCCEEDS and the receipt is what was wrong: this field read
+   * the wrong key — one the dashboard has never returned on the send route — so the rendered
+   * answer said "Message sent successfully" and then "ID: undefined". The send was real; the
+   * receipt was the lie.
+   *
+   * Omitted rather than emitted empty when absent, and the envelope carries a warning naming the
+   * absence and pointing at `cmos_message(action="list", tab="sent")`. NOT a hard failure — the
+   * message landed, and refusing would be a worse answer than the one being fixed. NOT silence
+   * either: silence about a missing receipt is the same defect one notch quieter.
+   */
+  messageId?: string;
   targetAddress: string;
   status: string;
   summary: string;
@@ -529,9 +540,41 @@ function resolvedFromContext(context: SenderContext | undefined): MessageWhoamiR
   };
 }
 
+/**
+ * s87-m05 (#1015) — THE PARAMETER IS RENAMED BECAUSE THE OLD NAME LIED, and the rename is half
+ * the fix rather than cosmetics.
+ *
+ * This took `relaxedContext`, and the caller passed the variable of that name — which is assigned
+ * ONLY inside `if (!strictContext)`. So on the SUCCESS path it was always `undefined`, while
+ * `resolvedContext` a few lines up held the very resolution these guards ask about. Two
+ * consequences, in opposite directions:
+ *
+ *   FALSE POSITIVE — the "No MCP roots were advertised and no local CMOS database was resolved"
+ *   warning fired alongside a fully resolved payload. Pre-proven nine times over in this repo's
+ *   own signed-off artifact: cmos/docs/attribution-rebuild-verification.md carries it beside a
+ *   resolved root, dashboard project id and address on nine rows.
+ *
+ *   TRUE NEGATIVE — the "Healed stale cmos_address" notice reads `.healed` off the same
+ *   undefined, so it has been SILENTLY DROPPED on every strict-success path since sprint-53.
+ *   `resolveSenderContext`'s accept() sets `healed` on any accepted candidate regardless of
+ *   `requireSenderIdentity`, and validateProject heals by default — so a store whose
+ *   `cmos://unknown/*` address is healed and then accepted by STRICT resolution should have
+ *   reported it, and never did.
+ *
+ * Passing `resolvedContext` fixes both. Renaming the parameter is what stops the `.healed` read
+ * below referring to a name that no longer describes what it holds — the half-fix #1015
+ * explicitly warns against.
+ *
+ * TWO QUALIFICATIONS, carried from #1015 so this is not overclaimed: it is a SPRINT-53 defect
+ * (1f45f7e, 2026-04-16, never edited) present byte-for-byte in the v1.0.1 dist, so it does NOT
+ * distinguish binaries and is not evidence of drift; and it fires ONLY when the client advertises
+ * no roots, because src/index.ts early-returns for whoami passing `mcpRoots: advertisedRoots`.
+ * The related "forward mcpRoots at :1390" hardening is a production NO-OP and is DROPPED — #546
+ * records the CLI/MCP roots split as intentional. Do not revive it.
+ */
 function buildWhoamiWarnings(
   strictError: SenderResolutionError | undefined,
-  relaxedContext: SenderContext | undefined,
+  resolvedContext: SenderContext | undefined,
   cwd: string,
   serverInstallRoot: string,
   envCmosProjectRoot: string | null,
@@ -551,15 +594,15 @@ function buildWhoamiWarnings(
     );
   }
 
-  if ((!mcpRoots || mcpRoots.length === 0) && !relaxedContext?.projectRoot) {
+  if ((!mcpRoots || mcpRoots.length === 0) && !resolvedContext?.projectRoot) {
     warnings.push(
       'No MCP roots were advertised and no local CMOS database was resolved; diagnosis is limited to cwd/registry inspection.'
     );
   }
 
-  if (relaxedContext?.healed) {
+  if (resolvedContext?.healed) {
     warnings.push(
-      `Healed stale cmos_address from ${relaxedContext.healed.previous} to ${relaxedContext.healed.next}.`
+      `Healed stale cmos_address from ${resolvedContext.healed.previous} to ${resolvedContext.healed.next}.`
     );
   }
 
@@ -664,7 +707,10 @@ export async function getWhoamiDiagnostics(
 
   const warnings = buildWhoamiWarnings(
     strictError,
-    relaxedContext,
+    // s87-m05 (#1015) — THE ONE ARGUMENT. This passed `relaxedContext`, which is assigned only
+    // inside `if (!strictContext)` above, so on every successful resolution it was `undefined`
+    // while `resolvedContext` held the answer.
+    resolvedContext,
     cwd,
     serverInstallRoot,
     envCmosProjectRoot,
@@ -718,11 +764,22 @@ function slugOfProject(project: DirectoryProject): string {
  * not pick the dead address for lack of an activity timestamp; they picked it because two
  * addresses were indistinguishable and the dead one looked MORE correct (npm package
  * @aquex/cmos-mcp, repo kneelinghorse/cmos-mcp, tool prefix cmos_*). Dormancy is also
- * unbuildable here: no dashboard endpoint carries last-activity, /api/projects/{id}/identity
- * reports status "active_development" for the dormant project, `createdAt` is the REGISTRATION
- * date (it would flag every healthy long-lived project), and a sent-history approximation is
- * sender-scoped and silent on first contact. This predicate needs nothing from the dashboard
- * and fires on exactly the case that bit us.
+ * unbuildable at the time: /api/projects/{id}/identity reported status "active_development" for
+ * the dormant project, `createdAt` is the REGISTRATION date (it would flag every healthy
+ * long-lived project), and a sent-history approximation is sender-scoped and silent on first
+ * contact. This predicate needs nothing from the dashboard and fires on exactly the case that
+ * bit us.
+ *
+ * s87-m05 — ONE CLAUSE HERE EXPIRED, AND THE RULING DID NOT. The clause "no dashboard endpoint
+ * carries last-activity" is no longer true: `lastActivityAt` now exists. THE FORK STAYS CLOSED
+ * ANYWAY, on the ground that never depended on buildability — #1011 item 8: the sender did not
+ * pick a dead address for want of an activity timestamp, they picked it because two addresses
+ * were INDISTINGUISHABLE and the dead one looked more correct. A dormancy signal would not have
+ * changed that.
+ *
+ * The expired clause is REPLACED rather than deleted, deliberately. Removing a refutation without
+ * putting the surviving reason in its place is how a settled fork gets re-opened two sprints
+ * later by someone who reads only that the stated objection is gone.
  */
 function isPrefixSibling(a: string, b: string): boolean {
   if (!a || !b || a === b) return false;
@@ -992,8 +1049,20 @@ async function handleSend(
   }
 
   const response = result.data!;
+  // s87-m05 — TOLERANT READ, and the fallback is deliberate rather than leftover.
+  //
+  // `messageId` is what the route returns, proven three ways: the dashboard route source, its own
+  // e2e assertions, and `git log -S` placing the key in the FIRST commit of the messaging API.
+  // The `??` arm costs one token and covers the one residue nobody has closed — UA-8, whether the
+  // DEPLOYED dashboard matches this checkout byte-for-byte, which was never verified.
+  //
+  // NOTE FOR A FUTURE SWEEP: fork f1 REQUIRES this fallback, while m05's criterion 1 asks for a
+  // grep of `response.id` across src/ to return zero. Those cannot both hold. f1 governs while
+  // UA-8 is open; the criterion's INTENT — that no site treats `.id` as the answer — is satisfied,
+  // because `messageId` is read first and `.id` is only ever a fallback. Cut the fallback when a
+  // live 201 from the deployed instance confirms the key, not before.
+  const messageId = response.messageId ?? response.id;
   const out: MessageSendResult = {
-    messageId: response.id,
     targetAddress,
     status: response.status ?? 'pending',
     summary: params.summary,
@@ -1002,6 +1071,7 @@ async function handleSend(
   };
   // Echo the address we sent — useful for callers that want to verify attribution
   // without opening the DB themselves. Only included when we actually sent one.
+  if (messageId) out.messageId = messageId;
   if (senderAddress) out.senderAddress = senderAddress;
   // Forward dashboard-reported routing/delivery status when present. Absence here
   // is expected today and does not imply failure; see DashboardMessage.deliveryStatus.
@@ -1019,6 +1089,17 @@ async function handleSend(
   // is rendered by formatSendForLLM via appendWarnings. It NEVER blocks: the send above has
   // already succeeded and no branch below can turn it into success:false.
   const warnings = await buildTargetAmbiguityWarnings(client, targetAddress, resolved);
+
+  // s87-m05 — SAY SO WHEN THE RECEIPT IS MISSING. The send succeeded; only the id is absent.
+  // Neither of the two easy answers is right: hard-failing would turn a delivered message into an
+  // error, and staying silent is the same defect one notch quieter than printing `ID: undefined`.
+  // The warning names the absence and points at the surface that can still find the message.
+  if (!out.messageId) {
+    warnings.push(
+      'Message sent, but the dashboard returned no message id, so this receipt carries none. ' +
+        'The send itself succeeded — confirm it with cmos_message(action="list", tab="sent").'
+    );
+  }
   return createSuccess<MessageSendResult>(out, warnings);
 }
 
@@ -1340,11 +1421,17 @@ async function handleDirectory(
   const projects = result.data!.projects;
   const warnings: string[] = [];
 
-  // s86-m07: GET /api/projects/directory/public NEVER returns isOwner, so before this the
-  // ternary below framed every row — including the operator's own project — as trust:'foreign',
-  // and the one signal that says "this address is yours" was always absent. /api/projects/me is
-  // the only route that carries it. This second call belongs to the discovery-only `directory`
-  // action, where doubling latency is acceptable; it must NOT be added to the send path.
+  // s86-m07: before this join the ternary below framed every row — including the operator's own
+  // project — as trust:'foreign', because the one signal that says "this address is yours" was
+  // absent from the payload being read. This second call belongs to the discovery-only
+  // `directory` action, where doubling latency is acceptable; it must NOT be added to the send
+  // path.
+  //
+  // s87-m05 — THE ORIGINAL WORDING WAS REFUTED. It said the directory route "NEVER returns
+  // isOwner" and that /api/projects/me "is the only route that carries it". Measured against the
+  // deployed dashboard, the directory route does return it. The join is KEPT regardless: it is
+  // correct today, and dropping it would be a latency optimisation rather than a truth fix. Only
+  // the claim about what the route can never do is removed.
   const mine = await client.getMyProjects();
   let ownedIds: Set<string> | null = null;
   if (mine.success && mine.data) {
@@ -1452,7 +1539,8 @@ function formatSendForLLM(result: CmosToolResult<MessageSendResult>): string {
   const d = result.data!;
   const lines = [
     `Message sent successfully`,
-    `  ID: ${d.messageId}`,
+    // s87-m05 — rendered ONLY when present. It used to print `ID: undefined` on every send.
+    ...(d.messageId ? [`  ID: ${d.messageId}`] : []),
     `  To: ${d.targetAddress}`,
     `  Summary: ${d.summary}`,
     `  Type: ${d.verb}/${d.object}`,

@@ -291,6 +291,18 @@ describe('cmos_mission(action="move") — s86-m08 Part A', () => {
       code: CMOS_ERROR_CODES.MISSION_INVALID_STATE,
     },
     {
+      // s87-m01 — this row's LABEL was audited and left alone, deliberately. The sprint-87 plan
+      // listed it for re-labelling on the strength of a record claim (C4) that adding an
+      // `Archived` arm would convert this file's guards to fail-open; that claim is false —
+      // `cmos-mission-move.ts` uses `hasOwnProperty` and is fail-loud — so the label is accurate
+      // and changing it would be a cosmetic edit made to satisfy a plan line. Declined, with the
+      // reason recorded here rather than in a commit message.
+      //
+      // WHAT DID CHANGE: the guard behind this row is no longer inlined in
+      // `cmos-mission-move.ts`. It is now the SHARED `transitionsFrom` in `errors.ts` that all six
+      // mission-transition sites call. This row staying green is therefore evidence about the
+      // shared helper, not about a local guard — which is the only regression the refactor could
+      // have introduced here.
       label: "(g) mission status 'Archived' is not a known mission status",
       missionId: 'm-archived',
       toSprintId: 'sprint-open',

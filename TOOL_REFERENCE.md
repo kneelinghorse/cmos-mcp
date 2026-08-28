@@ -176,7 +176,7 @@ Consolidated mission state-machine tool with action parameter support. Actions: 
 
 ## cmos_sprint
 
-Consolidated sprint tool with action parameter support. Actions: list, show, add, update, complete, retro, carry_forward, analytics. Use retro to auto-generate a sprint retrospective report with KPIs, decisions, learnings, and git commit summary. Use carry_forward to detect sync gaps and blocked missions and send backlog_request messages to a target project. Use analytics to compute cross-sprint trend KPIs: velocity, completion rate, decision volume, cycle time.
+Consolidated sprint tool with action parameter support. Actions: list, show, add, update, complete, retro, carry_forward, analytics. Use complete to close a sprint: it also ARCHIVES that sprint's active decisions and learnings (evergreen learnings are kept active), names every archived id in its result, and takes a pre-close database snapshot you can restore from. Use retro to auto-generate a sprint retrospective report with KPIs, decisions, learnings, and git commit summary. Use carry_forward to detect sync gaps and blocked missions and send backlog_request messages to a target project. Use analytics to compute cross-sprint trend KPIs: velocity, completion rate, decision volume, cycle time.
 
 **Actions:** `list`, `show`, `add`, `update`, `complete`, `retro`, `carry_forward`, `analytics`
 

@@ -48,6 +48,14 @@ export const CMOS_PROJECT_ID_ENV = 'CMOS_PROJECT_ID';
  *
  * Priority: explicit param > CMOS_PROJECT_ROOT env var > process.cwd()
  *
+ * s87-m04 — THIS SENTENCE IS TRUE AND IS DELIBERATELY LEFT ALONE. A sweep that corrected the
+ * other resolution-order claims in this file would be tempted to "fix" it too, because it names
+ * an env step the ENHANCED resolver does not have. But this function is not that resolver: the
+ * line below really does read `process.env[CMOS_PROJECT_ROOT_ENV]`. The claim describes THIS
+ * function's behaviour exactly. `resolveProjectRootEnhanced` dropped its env step in sprint-53
+ * m02; the two resolvers genuinely differ, and deleting a true statement to make a directory
+ * uniform is its own kind of dishonesty.
+ *
  * @deprecated Use resolveProjectRootEnhanced() for full 5-step resolution
  * with auto-discovery and registry fallback. This synchronous version
  * is kept for backward compatibility but doesn't support the registry.
@@ -138,12 +146,19 @@ export class CmosDatabaseClient {
   /**
    * Create a new CmosDatabaseClient
    *
-   * Uses 5-step resolution priority:
+   * Resolution priority, s87-m04 — CORRECTED. This block listed a `CMOS_PROJECT_ROOT`
+   * environment step that `resolveProjectRootEnhanced` has not had since sprint-53 m02, which
+   * removed it deliberately (see that function's docblock: the env var is still read at
+   * `src/index.ts` for .env bootstrap, and is never consulted during resolution). An operator who
+   * set the variable expecting it to steer resolution was reading a step that does not run.
    * 1. Explicit dbPath option
    * 2. Explicit projectRoot option
-   * 3. CMOS_PROJECT_ROOT environment variable
-   * 4. Auto-discover from cwd
-   * 5. Registry fallback (default project)
+   * 3. Auto-discover from cwd
+   * 4. Registry fallback (default project)
+   * 5. Error with actionable guidance
+   *
+   * NOTE the deliberate difference from {@link resolveProjectRoot} above, which DOES read the env
+   * var and whose docblock correctly says so. Two resolvers, two behaviours, two true sentences.
    *
    * @param options - Client options
    * @returns CmosToolResult with the client or an error
@@ -162,7 +177,16 @@ export class CmosDatabaseClient {
         if (options.projectRoot) {
           projectRoot = options.projectRoot;
         } else {
-          // Use enhanced resolution (env → auto-discover → registry → error)
+          // Use enhanced resolution (auto-discover → registry → error). s87-m04: this comment
+          // used to name an `env` step first. There is none — sprint-53 m02 removed it.
+          //
+          // s87-m04 / D-9, recorded where it is reachable: this arm passes
+          // `autoRegister: true`, so resolution here can MINT a project-graph registry row —
+          // including for a read action, before any action-taxonomy check runs. That makes the
+          // read-only agent guard's "No database was opened and no row/credential was mutated"
+          // not literally true on this path. NOT fixed this sprint: it is an input to
+          // SPLIT-THE-PATHS (Arc F sprint 2), which must decide the same question for the
+          // explicit-projectRoot arm, and fixing one half now would prejudge the other.
           try {
             const resolution = await resolveProjectRootEnhanced(undefined, {
               autoRegister: true,
@@ -289,8 +313,28 @@ export class CmosDatabaseClient {
       // Enable foreign keys for referential integrity
       this.db.pragma('foreign_keys = ON');
 
-      // Enable WAL mode for better concurrent access
-      this.db.pragma('journal_mode = WAL');
+      // Enable WAL mode for better concurrent access.
+      //
+      // s87-m03 (#535) — GUARDED, because `journal_mode = WAL` IS A WRITE. On a store that is
+      // not already in WAL mode, setting it rewrites the database header, so issuing it
+      // unconditionally made `CmosDatabaseClient.create({ readonly: true })` fail outright with
+      // `DB_CONNECTION_FAILED: attempt to write a readonly database` — a read-only client that
+      // could not open a delete-mode store at all. Read the mode first and only set it when the
+      // connection is writable AND the mode actually differs; on an already-WAL store the write
+      // never happens either way, which is why this went unnoticed.
+      //
+      // HONEST SCOPE, so this is not read as a bigger rescue than it is: NO `src/` site currently
+      // passes `readonly: true` to this client — all eight read-only opens in the tree are raw
+      // `better-sqlite3` calls. This fix is therefore LATENT, not live. It exists because the
+      // read/write distinction at the client layer is the signal SPLIT-THE-PATHS needs next
+      // sprint, and because a pragma that writes should not run on a connection that declares
+      // it will not write.
+      const currentJournalMode = String(
+        (this.db.pragma('journal_mode', { simple: true }) as string | undefined) ?? ''
+      ).toLowerCase();
+      if (!this.options.readonly && currentJournalMode !== 'wal') {
+        this.db.pragma('journal_mode = WAL');
+      }
 
       // Load sqlite-vec extension so vec0 virtual tables created by
       // ensureVectorStorage (and queried by the hybrid retriever) are available.

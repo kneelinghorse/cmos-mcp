@@ -43,6 +43,7 @@ import {
   getProjectIdentity as getProjectIdentityData,
   backfillUnknownCmosAddress,
   type ProjectIdentityData,
+  deriveProjectSlug,
 } from './project-identity';
 import { ProjectGraphRegistry } from '../../intelligence/project-graph-registry';
 import { SERVER_INSTALL_ROOT } from '../../intelligence/sender-context';
@@ -392,8 +393,23 @@ export interface SyncHealthMismatch {
  * Messaging summary for onboarding payload.
  */
 export interface MessagingSummary {
-  /** Number of unread/pending messages */
-  unreadCount: number;
+  /**
+   * s87-m05 — THIS PROJECT'S unread count, or `null` when the dashboard did not scope the query.
+   *
+   * The field this replaces was `unreadCount`, and it carried the USER-WIDE number on a digest
+   * whose every other field is project-scoped. An agent opening a session was told to review N
+   * unread messages, where N counted messages belonging to other projects it cannot clear from
+   * here. `null` means "not scoped" and is rendered as unknown — never as zero, which would be a
+   * different claim.
+   */
+  unreadCountScoped: number | null;
+
+  /** s87-m05 — the user-wide number, kept and LABELLED rather than dropped: it is real, it is
+   *  just not this project's. */
+  unreadCountUserWide: number;
+
+  /** s87-m05 — which scope the dashboard applied, so the renderer never has to guess. */
+  unreadScope: 'project' | 'user';
 
   /** Up to 5 most recent pending messages */
   recentMessages: RecentMessageSummary[];
@@ -630,8 +646,10 @@ export async function cmosAgentOnboard(
       // Fetch messaging context and sync health (non-blocking — gracefully degrades)
       // Skip syncHealth fetch if tier config hides it (avoids unnecessary network calls)
       const [messaging, syncHealth] = await Promise.all([
-        fetchMessagingContext(warnings),
-        hiddenFields.has('syncHealth') ? Promise.resolve(null) : fetchSyncHealth(client, warnings),
+        fetchMessagingContext(warnings, tierRoot),
+        hiddenFields.has('syncHealth')
+          ? Promise.resolve(null)
+          : fetchSyncHealth(client, warnings, tierRoot),
       ]);
 
       // Server health (build staleness). The server-stale signal tracks THIS
@@ -1419,15 +1437,42 @@ function getContextSizes(client: CmosDatabaseClient): CmosAgentOnboardResult['co
  * Non-blocking: if dashboard is unreachable or not configured,
  * returns null and adds a warning.
  */
-async function fetchMessagingContext(warnings: string[]): Promise<MessagingSummary | null> {
-  const clientResult = DashboardClient.fromEnv();
-  if (!clientResult.success) {
-    // Dashboard not configured — this is normal, don't warn
+async function fetchMessagingContext(
+  warnings: string[],
+  /** s87-m05 — the project this digest is about. See the resolver swap below. */
+  projectRoot: string
+): Promise<MessagingSummary | null> {
+  // s87-m05 — `fromEnvForProject(root)`, NOT `fromEnv()`, and this is the change that makes the
+  // block exist at all. `fromEnv()` reads only the legacy env arms, so on a device-code install
+  // it errors and returns `null` with an explicit "don't warn" comment — MEASURED LIVE:
+  // `.data.messaging === null`. The messaging block does not render today. Swapping the resolver
+  // REVIVES a silently dead block; it does not correct a wrong number that was on screen.
+  //
+  // Cited to #580, which scheduled the per-call-site migration of PRE-EXISTING `fromEnv` sites.
+  // NOT #832 — that is scoped to NEW code paths and explicitly reserves `fromEnv` as the
+  // resolver's env fallback, so citing it here would read it wider than it reaches.
+  const clientResult = await DashboardClient.fromEnvForProject(projectRoot);
+  if (!clientResult.success || !clientResult.data) {
+    // s87-m05 — WARN rather than returning a silent null. "The dashboard is not configured" and
+    // "the dashboard could not be reached" are different facts, and a digest that shows neither
+    // messaging block nor explanation is indistinguishable from a project with no messages.
+    // WORDED TO NAME ITS ACTUAL CAUSE, and that is what lets it reach a reader.
+    // `cmos_review` runs `filterReviewWarnings`, which keeps a warning only if its lowercased
+    // text contains one of `auth`, `sync`, `cmos_auth`, `credential`, `attribution`, `whoami` —
+    // everything else is dropped before any human sees it. A message about the block being
+    // "omitted" matches none of them and would vanish: the sprint's own defect class inside the
+    // sprint's own fix. The word `credential` is not bolted on to pass the filter — it is what
+    // actually failed. `fromEnvForProject` returns an error precisely when no credential resolves
+    // for this project, so naming that is both more specific and more true than "not configured".
+    warnings.push(
+      'Messaging block omitted: no dashboard credential resolved for this project ' +
+        `(${clientResult.error?.message ?? 'not configured'}). Unread counts are unknown, not zero.`
+    );
     return null;
   }
 
   try {
-    const client = clientResult.data!;
+    const client = clientResult.data.client;
     const result = await client.listMessages({
       tab: 'inbox',
       status: 'pending',
@@ -1439,8 +1484,12 @@ async function fetchMessagingContext(warnings: string[]): Promise<MessagingSumma
       return null;
     }
 
+    const listed = result.data!;
+    const scoped = listed.unreadCountScoped;
     return {
-      unreadCount: result.data!.unreadCount,
+      unreadCountScoped: scoped ?? null,
+      unreadCountUserWide: listed.unreadCount,
+      unreadScope: listed.unreadScope ?? (scoped === undefined ? 'user' : 'project'),
       recentMessages: result.data!.messages.map((msg: DashboardMessage) => ({
         id: msg.id,
         type: msg.type,
@@ -1488,34 +1537,44 @@ const PROJECT_STATE_TO_SQLITE: Record<string, string> = {
  */
 async function fetchSyncHealth(
   db: CmosDatabaseClient,
-  warnings: string[]
+  warnings: string[],
+  /** s87-m05 — the project this sync health is about. */
+  projectRoot: string
 ): Promise<SyncHealthSummary | null> {
-  const clientResult = DashboardClient.fromEnv();
-  if (!clientResult.success) {
+  // s87-m05, Treaty 1 — this is m05's single line inside m03's function, re-derived after m03
+  // landed and moved it. Same root cause and same standing rule (#580) as the other two
+  // `fromEnv()` sites in this mission; splitting it away would have shipped two of three
+  // identical fixes.
+  const clientResult = await DashboardClient.fromEnvForProject(projectRoot);
+  if (!clientResult.success || !clientResult.data) {
     return null;
   }
 
   try {
-    const client = clientResult.data!;
+    const client = clientResult.data.client;
 
-    // Resolve project slug from metadata
+    // Resolve project slug from metadata. s87-m03: through the SHARED `deriveProjectSlug`, which
+    // this function used to spell by hand — three hand-copies of one rule is how the four
+    // getSyncStatus call sites came to disagree about what "this project" means.
     const nameResult = db.getOne<{ value: string }>(
       `SELECT value FROM metadata WHERE key = 'project_name'`
     );
     const projectName = nameResult.success && nameResult.data ? nameResult.data.value : null;
+    const slug = projectName ? deriveProjectSlug(projectName) : null;
 
     // Try project-scoped endpoint first
-    if (projectName) {
-      const slug = projectName.toLowerCase().replace(/\s+/g, '-');
+    if (slug) {
       const stateResult = await client.getSyncProjectState(slug);
 
       if (stateResult.success && stateResult.data) {
-        return buildSyncHealthFromProjectState(db, stateResult.data, client);
+        return buildSyncHealthFromProjectState(db, stateResult.data, client, slug);
       }
     }
 
-    // Fallback to global endpoint
-    return buildSyncHealthFromGlobalStatus(db, client, warnings);
+    // Fallback to the sync-status endpoint. s87-m03: this is a DIFFERENT endpoint from the
+    // project-state one that just failed (`/api/sync/status` vs `/api/sync/projects/{slug}/state`),
+    // so passing the slug here is a real scoped attempt and not a pointless retry.
+    return buildSyncHealthFromGlobalStatus(db, client, warnings, slug);
   } catch {
     warnings.push('Sync health unavailable: unexpected error during fetch');
     return null;
@@ -1526,7 +1585,9 @@ async function fetchSyncHealth(
 async function buildSyncHealthFromProjectState(
   db: CmosDatabaseClient,
   projectState: import('./dashboard-client').SyncProjectStateResult,
-  client: DashboardClient
+  client: DashboardClient,
+  /** s87-m03 — the project this summary is about. See the getSyncStatus call below. */
+  projectSlug: string | null
 ): Promise<SyncHealthSummary> {
   const mismatches: SyncHealthMismatch[] = [];
 
@@ -1547,11 +1608,15 @@ async function buildSyncHealthFromProjectState(
     }
   }
 
-  // Get sync log stats from global endpoint
+  // s87-m03 — SCOPED. This was the worst of the four sites, because the numbers it fetched sat
+  // BESIDE correct ones: the mismatches above are computed per project from project state, and
+  // `failedEntries` / `lastSyncAt` were then fetched PLATFORM-WIDE and rendered in the same
+  // block, on the session opener, as though all four described this project. NAMED CONSEQUENCE:
+  // these two numbers CHANGE VALUE on every install once scoped — they were never this project's.
   let failedEntries = 0;
   let lastSyncAt: string | null = null;
   try {
-    const statusResult = await client.getSyncStatus();
+    const statusResult = await client.getSyncStatus(projectSlug ?? undefined);
     if (statusResult.success && statusResult.data) {
       failedEntries = statusResult.data.failedSyncLogEntries;
       lastSyncAt = statusResult.data.lastSyncAt;
@@ -1573,9 +1638,23 @@ async function buildSyncHealthFromProjectState(
 async function buildSyncHealthFromGlobalStatus(
   db: CmosDatabaseClient,
   client: DashboardClient,
-  warnings: string[]
+  warnings: string[],
+  /**
+   * s87-m03 — scope it when we have it. `null` only when the store carries no `project_name`,
+   * in which case an unscoped call is the honest degradation: there is no project to ask about.
+   * The warning below says which of the two happened, because the comparison this function makes
+   * — this project's SQLite counts against the returned pg counts — is only meaningful scoped.
+   */
+  projectSlug: string | null
 ): Promise<SyncHealthSummary | null> {
-  const statusResult = await client.getSyncStatus();
+  const statusResult = await client.getSyncStatus(projectSlug ?? undefined);
+  if (projectSlug === null) {
+    warnings.push(
+      'Sync health is PLATFORM-WIDE, not project-scoped: this store carries no project_name, so ' +
+        "the counts below compare this project's local rows against every project's dashboard " +
+        "rows. Treat the mismatches as unclassified rather than as this project's drift."
+    );
+  }
 
   if (!statusResult.success || !statusResult.data) {
     warnings.push(`Sync health unavailable: ${statusResult.error?.message ?? 'unknown error'}`);
@@ -2000,9 +2079,12 @@ function generateSuggestedActions(state: {
   }
 
   // If there are unread messages, suggest checking inbox
-  if (state.messaging && state.messaging.unreadCount > 0) {
+  // s87-m05 — gated on THIS PROJECT'S count. It used to fire on the user-wide number, so a
+  // project with an empty inbox was told to go clear messages that belong to other projects.
+  // A `null` scoped count is UNKNOWN, and an unknown count is not a reason to prescribe an action.
+  if (state.messaging && (state.messaging.unreadCountScoped ?? 0) > 0) {
     actions.push({
-      action: `Review ${state.messaging.unreadCount} unread message(s) in inbox`,
+      action: `Review ${state.messaging.unreadCountScoped} unread message(s) for this project`,
       command: 'cmos_message(action="list", status="pending")',
       priority: 2,
     });
@@ -2223,7 +2305,16 @@ export function formatAgentOnboardForLLM(result: CmosToolResult<CmosAgentOnboard
   // Messaging
   if (data.messaging) {
     lines.push('');
-    lines.push(`**Messaging**: ${data.messaging.unreadCount} unread`);
+    // s87-m05 — THE RENDERED ANSWER NAMES ITS SCOPE. This printed the user-wide count as
+    // `**Messaging**: 7 unread` inside a project-scoped digest. Measured live, the truthful
+    // project-scoped number was 0.
+    const m = data.messaging;
+    lines.push(
+      m.unreadScope === 'project' && m.unreadCountScoped !== null
+        ? `**Messaging**: ${m.unreadCountScoped} unread for this project`
+        : `**Messaging**: unread count for this project is unknown — the dashboard returned an ` +
+            `unscoped total of ${m.unreadCountUserWide} across all your projects`
+    );
     if (data.messaging.recentMessages.length > 0) {
       for (const msg of data.messaging.recentMessages) {
         // s78-m05: inbound message summaries are untrusted foreign content — frame them.

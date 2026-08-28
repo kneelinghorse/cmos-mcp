@@ -77,6 +77,20 @@ describe('cmos_review portfolio section (Sprint 79 m06)', () => {
     return root;
   }
 
+  /**
+   * s87-m03 — REALISTIC `occurred_at` STAMPS, and the reason is a finding about this fixture.
+   *
+   * These missions used to carry `occurred_at: 100` / `200` — chosen as MERGE-ORDER KEYS, with no
+   * intent that they be dates. They are Unix milliseconds, so they meant 1970, and nothing read
+   * them as time until the drift signal became content-derived; then every store in this fixture
+   * classified as 56 years silent. Production `occurred_at` is a real `Date.now()` stamp, so the
+   * fixture was the thing that was unrealistic. The offsets below preserve the exact relative
+   * ordering the k-way merge assertions depend on (b-cur newest, then a-ip, then a-done) while
+   * being actual recent timestamps.
+   */
+  const STAMP_BASE = Date.now();
+  const stamp = (rank: number): number => STAMP_BASE - (1000 - rank);
+
   async function registryWith(entries: Array<{ projectId: string; root: string }>) {
     const reg = await ProjectGraphRegistry.create({ configDir });
     for (const e of entries)
@@ -86,11 +100,11 @@ describe('cmos_review portfolio section (Sprint 79 m06)', () => {
 
   it('builds an always-on portfolio: reconciled counts, projectId attribution, ≤4KB', async () => {
     const a = makePortfolioStore('proj-a', [
-      { id: 'a-ip', name: 'A active', status: 'In Progress', occurred_at: 100 },
-      { id: 'a-done', name: 'A done', status: 'Completed', occurred_at: 90 },
+      { id: 'a-ip', name: 'A active', status: 'In Progress', occurred_at: stamp(100) },
+      { id: 'a-done', name: 'A done', status: 'Completed', occurred_at: stamp(90) },
     ]);
     const b = makePortfolioStore('proj-b', [
-      { id: 'b-cur', name: 'B current', status: 'Current', occurred_at: 200 },
+      { id: 'b-cur', name: 'B current', status: 'Current', occurred_at: stamp(200) },
     ]);
     const bad = makePortfolioStore('proj-bad', [], { broken: true });
     const registry = await registryWith([
@@ -128,7 +142,7 @@ describe('cmos_review portfolio section (Sprint 79 m06)', () => {
 
   it('degrades to portfolio=null on a single-project registry', async () => {
     const only = makePortfolioStore('solo', [
-      { id: 's-ip', name: 'solo active', status: 'In Progress', occurred_at: 100 },
+      { id: 's-ip', name: 'solo active', status: 'In Progress', occurred_at: stamp(100) },
     ]);
     const registry = await registryWith([{ projectId: 'solo', root: only }]);
 

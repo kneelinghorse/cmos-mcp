@@ -34,6 +34,27 @@ export interface NextStepRecord {
   carriedToSprint: string | null;
 }
 
+/**
+ * s87-m06 — WHICH statuses a next-step transition may move OUT of. Exactly two, and no others.
+ *
+ * It was `status = 'pending'` at all three write sites, so a row CARRIED to a later sprint could
+ * never afterwards be completed, dropped, or re-carried by id. That is not hypothetical: rows
+ * #486, #492 and #493 are stamped `carried_to_sprint='sprint-86'`, were still open at sprint-87,
+ * and were frozen — they could only age.
+ *
+ * `'completed'` IS DELIBERATELY NOT ADMITTED. `write-disclosure-next-steps.test.ts` CRITERION 8
+ * seeds a completed row and asserts that transitioning it reports `affected: 0` with no write
+ * failure and no warning; admitting it breaks all five of that test's assertions. If that test
+ * needs editing to accommodate a change here, the change is wrong — not the test.
+ *
+ * DO NOT COPY THIS TO `cmos-sprint-complete.ts`. Its predicate looks identical and has the
+ * OPPOSITE short-count semantics: it re-SELECTs its id set under the same predicate inside the
+ * same transaction, so a short count THERE really does imply an error and is warned about. Same
+ * SQL fragment, different call-site judgement — `write-disclosure-next-steps.test.ts` says so in
+ * a docblock.
+ */
+const TRANSITIONABLE_STATUS = "status IN ('pending','carried')";
+
 export interface NextStepsResult {
   /** The sub-action that was performed */
   nextStepAction: string;
@@ -48,6 +69,20 @@ export interface NextStepsResult {
    *  matched no pending row is NOT a failure — the statement ran, its WHERE matched nothing —
    *  and produces no entry. */
   writeFailures?: WriteFailure[];
+  /**
+   * s87-m06 — WHICH requested ids the transition did not match.
+   *
+   * `affected` says HOW MANY rows moved. Asking for 12 and getting 10 told an operator that two
+   * ids did nothing and gave them no way to find out which two. These ids are not failures and
+   * are deliberately NOT reported as such: the statement ran and its WHERE matched nothing, which
+   * is an ordinary outcome for an id that is already completed, already dropped, or does not
+   * exist. `writeFailures` means the database REJECTED something, and conflating the two would
+   * tell an operator a write failed when none did — the "say only what you know" violation this
+   * fix exists to close, committed inside the fix.
+   *
+   * Absent on `list`, which writes nothing. Empty when every requested id matched.
+   */
+  unmatchedIds?: number[];
   /** Message */
   message: string;
 }
@@ -184,22 +219,28 @@ function transitionNextSteps(
   const writeSink = { failures: [] as WriteFailure[] };
   const op = targetStatus === 'completed' ? 'next_steps.complete' : 'next_steps.drop';
   let affected = 0;
+  const unmatchedIds: number[] = [];
 
   for (const id of ids) {
     const result = client.execute(
-      `UPDATE next_steps SET status = ?, resolved_at = ? WHERE id = ? AND status = 'pending'`,
+      `UPDATE next_steps SET status = ?, resolved_at = ? WHERE id = ? AND ${TRANSITIONABLE_STATUS}`,
       [targetStatus, now, id]
     );
     // s86-m02b: the ids come from the TOOL CALL and were never re-selected, so `changes: 0` on a
-    // statement that RAN means "no pending row with that id" — legitimate, and countWrite records
-    // nothing for it. Only an errored statement reaches writeSink.
-    affected += countWrite(result, writeSink, `${op} #${id}`);
+    // statement that RAN means "no transitionable row with that id" — legitimate, and countWrite
+    // records nothing for it. Only an errored statement reaches writeSink.
+    // s87-m06: that zero is now NAMED rather than merely not-counted. It is the value countWrite
+    // already returns; nothing new is computed.
+    const changed = countWrite(result, writeSink, `${op} #${id}`);
+    if (changed === 0) unmatchedIds.push(id);
+    affected += changed;
   }
 
   return createSuccess<NextStepsResult>({
     nextStepAction: targetStatus === 'completed' ? 'complete' : 'drop',
     affected,
     writeFailures: writeSink.failures,
+    unmatchedIds,
     message: `${affected} next-step(s) marked as ${targetStatus}`,
   });
 }
@@ -216,7 +257,7 @@ function carryNextSteps(
   if (!ids || ids.length === 0) {
     // Carry all pending
     const result = client.execute(
-      `UPDATE next_steps SET status = 'carried', resolved_at = ?, carried_to_sprint = ? WHERE status = 'pending'`,
+      `UPDATE next_steps SET status = 'carried', resolved_at = ?, carried_to_sprint = ? WHERE ${TRANSITIONABLE_STATUS}`,
       [now, targetSprint]
     );
     const affected = countWrite(result, writeSink, 'next_steps.carry (all pending)');
@@ -231,20 +272,24 @@ function carryNextSteps(
   }
 
   let affected = 0;
+  const unmatchedIds: number[] = [];
   for (const id of ids) {
     const result = client.execute(
-      `UPDATE next_steps SET status = 'carried', resolved_at = ?, carried_to_sprint = ? WHERE id = ? AND status = 'pending'`,
+      `UPDATE next_steps SET status = 'carried', resolved_at = ?, carried_to_sprint = ? WHERE id = ? AND ${TRANSITIONABLE_STATUS}`,
       [now, targetSprint, id]
     );
-    // Caller-supplied id: a zero from a WHERE that matched no pending row is ordinary and is
-    // recorded nowhere. Only an errored statement becomes a writeFailures entry.
-    affected += countWrite(result, writeSink, `next_steps.carry #${id}`);
+    // Caller-supplied id: a zero from a WHERE that matched no transitionable row is ordinary and
+    // is not a write failure. s87-m06 names it instead of discarding it.
+    const changed = countWrite(result, writeSink, `next_steps.carry #${id}`);
+    if (changed === 0) unmatchedIds.push(id);
+    affected += changed;
   }
 
   return createSuccess<NextStepsResult>({
     nextStepAction: 'carry',
     affected,
     writeFailures: writeSink.failures,
+    unmatchedIds,
     message: targetSprint
       ? `${affected} next-step(s) carried to ${targetSprint}`
       : `${affected} next-step(s) marked as carried`,
@@ -256,6 +301,27 @@ function carryNextSteps(
  */
 export function formatNextStepsForLLM(result: CmosToolResult<NextStepsResult>): string {
   const lines = [renderNextStepsBody(result)];
+
+  // s87-m06 — the unmatched ids, on a NEUTRAL line, and the neutrality is the whole design.
+  //
+  // It carries neither the WRITE-FAILURE heading nor the WARNINGS heading nor the
+  // `next_steps.<op> #<id>` write-failure format, because an id that matched no transitionable
+  // row is NOT a failure: the statement ran and its WHERE matched nothing. Announcing it as a
+  // write failure would tell an operator the database rejected something it did not — which is
+  // precisely the "say only what you know" violation this whole sprint is closing, committed
+  // inside the fix for it. `write-disclosure-next-steps.test.ts` CRITERION 8 names that
+  // temptation in as many words and must keep passing UNMODIFIED; a plain extra line trips none
+  // of its five assertions.
+  //
+  // Placed BEFORE the two envelope channels so an operator reads what happened before reading
+  // what went wrong — and so a reader can tell at a glance that it is neither of those things.
+  const unmatched = result.data?.unmatchedIds ?? [];
+  if (unmatched.length > 0) {
+    lines.push('');
+    lines.push(
+      `Not matched (already resolved, or no such id): ${unmatched.map((id) => `#${id}`).join(', ')}`
+    );
+  }
 
   appendWriteFailures(lines, result.data?.writeFailures);
   appendWarnings(lines, result);

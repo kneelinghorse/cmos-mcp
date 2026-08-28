@@ -364,6 +364,29 @@ export function safeCount(
 }
 
 /**
+ * s87-m03 (#524) — the `--strict` decision, as a function so it can be TESTED without spawning
+ * the script.
+ *
+ * A criterion of the form "the flag exits 1 when it should" is a tautology if the only way to
+ * check it is to run the flag on a fleet that never triggers it. This repo's fleet currently
+ * yields ZERO unreliable stores, so the flag exits 0 before and after the change and proves
+ * nothing on its own. Extracting the rule lets a constructed fixture drive it directly.
+ */
+export function evaluateStrict(unreliable: ReadonlyArray<{ projectRoot: string }>): {
+  ok: boolean;
+  message?: string;
+} {
+  if (unreliable.length === 0) return { ok: true };
+  return {
+    ok: false,
+    message:
+      `--strict: ${unreliable.length} store(s) returned UNRELIABLE counts, so the published ` +
+      `share does not describe every registered store. Refusing to exit 0 on a partial ` +
+      `measurement. Stores: ${unreliable.map((u) => u.projectRoot).join(', ')}`,
+  };
+}
+
+/**
  * Read durable write counts from one store's append-only domain tables. A missing
  * table counts 0 (and is recorded in `diag.absentTables`) so a foreign/partial
  * store never throws; a table that exists but cannot be queried is recorded in
@@ -917,6 +940,22 @@ async function main(): Promise<void> {
     );
   }
 
+  // s87-m03 (#524) — `--strict` turns the WARNING above into an EXIT CODE.
+  //
+  // WHY IT IS NEEDED. The measurement cadence at every sprint close runs this script and quotes
+  // its share figure into the master plan. An UNRELIABLE store is one whose count query ERRORED
+  // on a table that EXISTS — not an absent table, which is a genuine zero — so its rows are
+  // missing from the denominator entirely. Today that is a line on stderr in a script whose exit
+  // code says success, which means a published share can be silently partial. `--strict` lets the
+  // close refuse a number it cannot stand behind.
+  //
+  // MEASURED TODAY, so the flag is not sold as catching something it has never seen: the current
+  // fleet yields `unreliable.length === 0`. `--strict` therefore exits 0 on it before and after
+  // this change, and the arm that proves the flag BITES is a constructed fixture in
+  // `tests/scripts/measure-cross-store-baseline.test.ts` — without that fixture the criterion
+  // would be a tautology.
+  const strict = process.argv.includes('--strict');
+
   const coverage = report.mutableWriteShare.coverage;
   process.stdout.write(
     `Baseline measured: N=${report.stores.queried}/${report.stores.registered} queried ` +
@@ -929,6 +968,14 @@ async function main(): Promise<void> {
       `fan-in p95 ${report.fanInLatency.aggregateP95Ms}ms (${report.fanInLatency.status}).\n` +
       `Report: ${path.relative(process.cwd(), REPORT_PATH)}\n`
   );
+
+  if (strict) {
+    const verdict = evaluateStrict(report.stores.unreliable);
+    if (!verdict.ok) {
+      process.stderr.write(`${verdict.message}\n`);
+      process.exit(1);
+    }
+  }
 }
 
 if (require.main === module) {

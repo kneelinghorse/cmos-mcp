@@ -47,6 +47,19 @@ jest.mock('../../../src/tools/cmos/dashboard-client', () => {
           getMyProjects: mockGetMyProjects,
         },
       }),
+      // s87-m05 — carry_forward now resolves a PROJECT-scoped client. It already received
+      // `projectRoot` and threw it away, resolving a user-scoped client instead. Note the
+      // different envelope: `fromEnvForProject` resolves to `{ client, ... }`, where `fromEnv`
+      // resolves to the client itself.
+      fromEnvForProject: jest.fn().mockResolvedValue({
+        success: true,
+        data: {
+          client: {
+            sendMessage: mockSendMessage,
+            getMyProjects: mockGetMyProjects,
+          },
+        },
+      }),
     },
     __mockSendMessage: mockSendMessage,
     __mockGetMyProjects: mockGetMyProjects,

@@ -30,17 +30,25 @@ export const CMOS_CONFIG_DIR_ENV = 'CMOS_CONFIG_DIR';
 export const DEFAULT_CREDENTIALS_FILENAME = 'credentials.json';
 
 /**
- * Source reported by fromEnvForProject so callers can log which resolution
- * path fired. Sprint 58 m02 expanded the enum to separate the legacy arms
- * from the device-code arms — the onboard `authTier` field and the startup
- * WARN machinery both key off this value.
+ * Source reported by the dashboard-client resolvers — `fromEnvForProject` AND `fromEnvForUser`,
+ * both of which reach the same shared user-scoped pick since s86-m06 — so callers can log which
+ * resolution path fired. Sprint 58 m02 expanded the enum to separate the legacy arms from the
+ * device-code arms; the onboard `authTier` field and the startup WARN machinery both key off this
+ * value. (s87-m07 corrected the claim that only `fromEnvForProject` reports it.)
+ *
+ * s87-m07 (#530, the kept half) — `'none'` IS REMOVED. NO producer in `src/` ever emitted it:
+ * a resolver that finds no credential returns a FAILURE, it does not return a success carrying
+ * `keySource: 'none'`. Three test files nonetheless exercised the value as though it could occur,
+ * so the suite was asserting behaviour for a state the code cannot produce — a published union
+ * member with nothing behind it.
+ *
+ * WHAT IS DELIBERATELY NOT CHANGED HERE (CUT 5): the `explicit-override` addition and the arm-1
+ * relabel. Zero of the eleven production call sites pass an `apiKey` override, so arm 1's label
+ * is a LATENT TRAP rather than a live lie — and the call-site reachability gate shipped with this
+ * mission is what keeps it latent. The argument for relabelling is recorded and deferred rather
+ * than lost.
  */
-export type KeySource =
-  | 'project-scoped'
-  | 'user-scoped'
-  | 'legacy-env'
-  | 'password-fallback'
-  | 'none';
+export type KeySource = 'project-scoped' | 'user-scoped' | 'legacy-env' | 'password-fallback';
 
 /** A user-scoped key — minted per device via the device code flow. */
 export interface UserScopedKeyRecord {

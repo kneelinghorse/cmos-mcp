@@ -16,9 +16,24 @@ CREATE TABLE IF NOT EXISTS metadata (
 );
 
 -- Initialize standard metadata keys (no-op if already exists)
-INSERT OR IGNORE INTO metadata (key, value) VALUES ('project_id', '');
-INSERT OR IGNORE INTO metadata (key, value) VALUES ('project_name', '');
-INSERT OR IGNORE INTO metadata (key, value) VALUES ('tracelab_project_id', '');
+--
+-- s87-m04 -- THE THREE EMPTY-STRING IDENTITY ROWS ARE GONE, AND THIS CONSTANT IS THE ROOT CAUSE.
+-- cmos-seed/db/schema.sql is GENERATED from here (scripts/regenerate-seed-schema.ts imports
+-- CMOS_SCHEMA and writes it wholesale), and cmos-seed is inside package.json files[] -- so every
+-- published tarball manufactured a store carrying project_id='', project_name='' and
+-- tracelab_project_id='': rows that satisfy NOT NULL while being semantically absent. Twelve of
+-- the 45 CMOS stores on this machine resolve to the unknown-project literal, and this is where
+-- new instances came from.
+--
+-- DELETING THEM IS BEHAVIOUR-NEUTRAL, measured rather than assumed: genesis-columns.ts's read()
+-- returns '' for an ABSENT row, so absent and empty resolve identically; every writer is
+-- INSERT OR REPLACE (grep -rn "UPDATE metadata" src/ returns nothing), so cmos_project(init)
+-- overwrites regardless of whether the row exists. A store made from the corrected seed STILL
+-- resolves to unknown-project until an identity is set -- that is the point, and m04's
+-- anti-symptom gate asserts exactly it. What is removed is a false claim, not a behaviour.
+--
+-- project_name had to go too: it is a LIVE ARM of the same fallback chain, so pinning project_id
+-- alone would have left the second arm shipping in every tarball.
 INSERT OR IGNORE INTO metadata (key, value) VALUES ('created_at', datetime('now'));
 INSERT OR IGNORE INTO metadata (key, value) VALUES ('schema_version', '2.1');
 

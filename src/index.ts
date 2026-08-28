@@ -1074,6 +1074,11 @@ async function initializeServer(): Promise<MissionProtocolContext> {
         // INFO and named a cause ("run device code") that is false in one of them.
         recovery.status === 'skipped-no-user-scoped-key' ||
         recovery.status === 'skipped-unattributable-credential'
+        // s87-m07 — VERIFIED, NOT CHANGED. This mission's critic pass proposed adding `'error'`
+        // here, on the belief that the internal-inconsistency status fell through to [INFO]. It
+        // does not: `error` is already routed to [WARN] by the branch above, so the new producer
+        // this mission adds (the typed-unreachable null-client branch) is correctly logged. The
+        // check is recorded rather than the non-change being silent.
       ) {
         console.error(`[WARN] Project key recovery: ${recovery.status} — ${recovery.message}`);
       } else {

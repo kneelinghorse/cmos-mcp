@@ -4,8 +4,18 @@
 /**
  * s80-m06 — deriveDrift partitions every queried store into
  * reachable | silent | unmigrated | unreadable (summing to stores.length) and builds
- * the drift list. Tested as a pure function with an injected stat fn + fixed `now`, so
- * store-mtime freshness is deterministic (no real fs timing).
+ * the drift list. Tested as a pure function with an injected stat fn + fixed `now`.
+ *
+ * s87-m03 — THE FRESHNESS INPUT CHANGED, so every case here now supplies CONTENT STAMPS.
+ * Freshness used to come from the injected `statFn` (file mtime). It comes from the newest row
+ * stamp the portfolio fan-out's probe read, because the old signal was one the fan-out itself
+ * created: opening a WAL store makes SQLite write the `-wal` sidecar, and `storeMtimeMs` read
+ * that sidecar's mtime as evidence the store was alive.
+ *
+ * `statFn` is still injected and still load-bearing — for the `ageDays` shown beside an
+ * UN-MIGRATED store (whose rows cannot be read at all) and for the s81-m03 unsynced overlay,
+ * which compares local mtime against a persisted push timestamp. Both are file-vs-file
+ * comparisons, where a file timestamp is the right unit.
  *
  * @module tests/tools/cmos/cmos-review-drift
  */
@@ -18,6 +28,11 @@ const NOW = 1_000_000 * DAY; // arbitrary fixed "now" in ms
 
 function dbFile(root: string): string {
   return path.join(root, 'cmos', 'db', 'cmos.sqlite');
+}
+
+/** s87-m03 — the content signal `deriveDrift` now classifies on: project_id -> newest row stamp. */
+function stamps(entries: Record<string, number | null>): ReadonlyMap<string, number | null> {
+  return new Map(Object.entries(entries));
 }
 
 describe('deriveDrift (s80-m06 strict partition + drift)', () => {
@@ -38,7 +53,15 @@ describe('deriveDrift (s80-m06 strict partition + drift)', () => {
     };
     const statFn: StoreStatFn = (p) => (p in mtimes ? mtimes[p] : null);
 
-    const r = deriveDrift(stores, errors, statFn, NOW);
+    const r = deriveDrift(
+      stores,
+      errors,
+      statFn,
+      NOW,
+      // Only the two stores the fan-out READ get a stamp; `unmig`/`unread` failed, so their
+      // classification comes from `errors` and the probe never ran for them.
+      stamps({ fresh: NOW - 1 * DAY, silent: NOW - 40 * DAY })
+    );
     expect(r.reachable).toBe(1);
     expect(r.silent).toBe(1);
     expect(r.unmigrated).toBe(1);
@@ -66,23 +89,47 @@ describe('deriveDrift (s80-m06 strict partition + drift)', () => {
       { project_id: 'b', store_path: '/b', name: 'B' },
     ];
     const statFn: StoreStatFn = () => NOW - 2 * DAY;
-    const r = deriveDrift(stores, [], statFn, NOW);
+    const r = deriveDrift(stores, [], statFn, NOW, stamps({ a: NOW - 2 * DAY, b: NOW - 2 * DAY }));
     expect(r.reachable).toBe(2);
     expect(r.silent).toBe(0);
     expect(r.drift).toBeNull();
   });
 
-  it('uses the newer WAL-sidecar mtime (a write not yet checkpointed keeps a store fresh)', () => {
+  /**
+   * s87-m03 — THIS TEST IS THE INVERSION OF THE ONE IT REPLACES.
+   *
+   * It used to read: "uses the newer WAL-sidecar mtime (a write not yet checkpointed keeps a
+   * store fresh)", and it passed. That behaviour was the defect. A fresh `-wal` sidecar beside a
+   * stale base does not mean the store has new content — and in the portfolio path it usually
+   * means the OPPOSITE of what it was read as, because `cmos_review`'s own fan-out creates that
+   * sidecar microseconds before the drift computation stats it.
+   *
+   * The store below is the exact shape the old test described — stale base, fresh WAL — and its
+   * CONTENT is 40 days old. It is silent, and the sidecar is now irrelevant to saying so.
+   */
+  it('s87-m03: a fresh WAL sidecar over a stale base does NOT revive a store — content decides', () => {
     const stores = [{ project_id: 'w', store_path: '/w', name: 'W' }];
     const statFn: StoreStatFn = (p) => {
       if (p === dbFile('/w')) return NOW - 40 * DAY; // base looks stale
-      if (p === `${dbFile('/w')}-wal`) return NOW - 1 * DAY; // WAL is fresh
+      if (p === `${dbFile('/w')}-wal`) return NOW - 1 * DAY; // WAL looks fresh (the fan-out's own touch)
       return null;
     };
-    const r = deriveDrift(stores, [], statFn, NOW);
-    expect(r.reachable).toBe(1);
+    const r = deriveDrift(stores, [], statFn, NOW, stamps({ w: NOW - 40 * DAY }));
+    expect(r.reachable).toBe(0);
+    expect(r.silent).toBe(1);
+    expect(r.drift!.stale[0].reason).toBe('no new CMOS rows in 40d');
+  });
+
+  it('s87-m03: a store with no readable row stamps is freshness-UNKNOWN, not fresh and not silent', () => {
+    const stores = [{ project_id: 'q', store_path: '/q', name: 'Q' }];
+    // A fresh-looking file, which under the old signal would have been reported `reachable` with
+    // no drift item at all — the false negative FORK-1b refuses to reintroduce as a "fallback".
+    const statFn: StoreStatFn = () => NOW - 1 * DAY;
+    const r = deriveDrift(stores, [], statFn, NOW, stamps({ q: null }));
     expect(r.silent).toBe(0);
-    expect(r.drift).toBeNull();
+    expect(r.reachable).toBe(1);
+    expect(r.drift!.stale[0].reason).toContain('freshness unknown');
+    expect(r.reachable + r.silent + r.unmigrated + r.unreadable).toBe(stores.length);
   });
 
   // ── s81-m03: the "unsynced" (local-ahead-of-dashboard) overlay ──────────────
@@ -112,7 +159,14 @@ describe('deriveDrift (s80-m06 strict partition + drift)', () => {
     };
     const statFn: StoreStatFn = (p) => (p in mtimes ? mtimes[p] : null);
 
-    const r = deriveDrift(stores, [], statFn, NOW);
+    // All three are FRESH by content; the unsynced overlay is a separate, file-vs-file axis.
+    const r = deriveDrift(
+      stores,
+      [],
+      statFn,
+      NOW,
+      stamps({ ahead: NOW - 1 * DAY, synced: NOW - 1 * DAY, nullsync: NOW - 1 * DAY })
+    );
 
     // Partition unchanged — all three are fresh → reachable; unsynced is an OVERLAY item.
     expect(r.reachable).toBe(3);
@@ -132,7 +186,7 @@ describe('deriveDrift (s80-m06 strict partition + drift)', () => {
       { project_id: 'b', store_path: '/b', name: 'B' }, // last_synced_at absent → undefined
     ];
     const statFn: StoreStatFn = () => NOW - 1 * DAY; // both fresh
-    const r = deriveDrift(stores, [], statFn, NOW);
+    const r = deriveDrift(stores, [], statFn, NOW, stamps({ a: NOW - 1 * DAY, b: NOW - 1 * DAY }));
     expect(r.reachable).toBe(2);
     expect(r.drift).toBeNull();
   });
@@ -148,7 +202,13 @@ describe('deriveDrift (s80-m06 strict partition + drift)', () => {
       if (m && p.endsWith('cmos.sqlite')) return NOW - (30 + Number(m[1])) * DAY;
       return null;
     };
-    const r = deriveDrift(stores, [], statFn, NOW);
+    const r = deriveDrift(
+      stores,
+      [],
+      statFn,
+      NOW,
+      stamps(Object.fromEntries(stores.map((_, i) => [`p${i}`, NOW - (30 + i) * DAY])))
+    );
     expect(r.silent).toBe(12);
     expect(r.drift!.stale.length).toBe(8); // DRIFT_TOP_N
     expect(r.drift!.stale[0].projectId).toBe('p11'); // oldest (41d) first

@@ -287,7 +287,16 @@ export interface StartupProjectKeyRecoveryResult {
     | 'skipped-no-project'
     | 'skipped-not-registered'
     | 'skipped-already-present'
-    | 'skipped-unconfigured'
+    /*
+     * s87-m07 (#528, fork f-02) — `skipped-unconfigured` IS GONE. Its sole producer was the
+     * null-client early return, which has been replaced by classification: an empty store now
+     * lands on `skipped-no-user-scoped-key` naming the credentials path, and a store that HOLDS
+     * keys lands on `inconsistent-resolution`. With that producer gone the member had ZERO
+     * producers, and a published union member no code can emit is exactly the class this sprint
+     * closes — so it is removed rather than repointed. Repointing it would have been worse: it
+     * would file a genuine internal inconsistency under a word meaning "not configured", and
+     * unconfigured is the one thing a store holding keys is not.
+     */
     /**
      * s86-m06 — the single `skipped-no-parent-key-id` split in two, because it
      * named ONE cause ("run device code") for two states, and that cause is false
@@ -424,22 +433,45 @@ export async function runStartupProjectKeyRecovery(
 
   const clientFactory = options.clientFactory ?? defaultClientFactory;
   const resolved = await clientFactory(options.projectRoot);
-  if (!resolved) {
-    return {
-      checked: true,
-      status: 'skipped-unconfigured',
-      message: 'dashboard client unavailable — recovery deferred',
-    };
-  }
 
   // s86-m06 — classify BEFORE calling reissue, and say which of the two states we
   // are in. The old single status told the operator to bootstrap a device code and
   // promised the next reissue would then work — asserted even when the store already
   // held user-scoped keys, and even though startup recovery skips outright whenever a
   // local row exists.
-  const attribution = await classifyAttribution(resolved.client, resolved.keySource, store);
+  //
+  // s87-m07 (#528) — CLASSIFICATION IS HOISTED ABOVE THE NULL-CLIENT EARLY RETURN, which used to
+  // return `skipped-unconfigured` with the message "dashboard client unavailable — recovery
+  // deferred". That sentence was wrong TWICE: nothing is deferred (no later run retries it), and
+  // the real cause is knowable right here. `classifyAttribution` answers it — an empty store
+  // yields `no-user-scoped-key` naming the credentials path; a store that HOLDS keys yields
+  // `inconsistent-resolution`, which is a genuine internal inconsistency rather than a
+  // configuration gap.
+  //
+  // AND `skipped-unconfigured` IS DELETED RATHER THAN REPOINTED (fork f-02). Once every null
+  // path routes through classification the status has ZERO producers, so keeping it would have
+  // closed one unreachable status by minting another — in the sprint whose whole object is
+  // unreachable claims. Keeping it as the landing status for the non-empty-store case would have
+  // been worse: it would file a real internal inconsistency under a word meaning "not
+  // configured", and unconfigured is the one thing a store holding keys is not.
+  const attribution = await classifyAttribution(
+    resolved?.client ?? null,
+    resolved?.keySource ?? null,
+    store
+  );
   if (!attribution.ok) {
     return startupResultForAttributionFailure(attribution.failure);
+  }
+  if (!resolved) {
+    // Typed unreachable rather than assumed away: `classifyAttribution` cannot return ok for a
+    // null client, so this cannot be reached — but an inconsistency must fail loud, not fall
+    // through into a reissue with no client.
+    return {
+      checked: true,
+      status: 'error',
+      message:
+        'internal inconsistency: no dashboard client resolved, yet attribution classified as usable',
+    };
   }
 
   const result = await recoverProjectKey({

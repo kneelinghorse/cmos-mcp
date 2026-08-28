@@ -193,6 +193,14 @@ export const cmosSprintToolDefinition = {
   description:
     'Consolidated sprint tool with action parameter support. ' +
     'Actions: list, show, add, update, complete, retro, carry_forward, analytics. ' +
+    // s87-m02: `complete` ARCHIVES rows, and until now its published description never said so.
+    // This is the only client-visible surface where an operator can learn that closing a sprint
+    // demotes decisions and learnings — it regenerates into TOOL_REFERENCE.md and the definitions
+    // snapshot, both of which ship. The counterpart edit on cmosSprintCompleteToolDefinition is a
+    // consistency fix on an UNREGISTERED definition and reaches no MCP host.
+    "Use complete to close a sprint: it also ARCHIVES that sprint's active decisions and learnings " +
+    '(evergreen learnings are kept active), names every archived id in its result, and takes a ' +
+    'pre-close database snapshot you can restore from. ' +
     'Use retro to auto-generate a sprint retrospective report with KPIs, decisions, learnings, and git commit summary. ' +
     'Use carry_forward to detect sync gaps and blocked missions and send backlog_request messages to a target project. ' +
     'Use analytics to compute cross-sprint trend KPIs: velocity, completion rate, decision volume, cycle time.',

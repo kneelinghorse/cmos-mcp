@@ -154,5 +154,5 @@ See `docs/` for complete documentation:
 
 ---
 
-**Schema Version**: 2.0
+**Schema Version**: 2.1
 **Last Updated**: 2025-12-28

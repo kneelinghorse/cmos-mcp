@@ -235,22 +235,45 @@ describe('orphan-detection', () => {
       expect(noSprint).toHaveLength(0);
     });
 
-    it('should not flag Dropped/Deferred/Failed missions without sprint (terminal-status regression)', async () => {
+    it('should not flag Dropped/Deferred missions without sprint (terminal-status regression)', async () => {
       // Dropped/Deferred are the bug: the old NOT IN ('Completed','Archived') list
       // omitted them, so a dropped/deferred mission with no sprint was wrongly
       // reported as a live orphan. ('Archived' is not a valid mission status — the
-      // mission-terminal set is {Completed, Failed, Dropped, Deferred}.)
+      // mission-terminal set is {Completed, Dropped, Deferred}.)
       const db = new Database(dbPath);
       db.exec(`
         INSERT INTO missions (id, sprint_id, name, status) VALUES ('m-drop', NULL, 'Dropped Mission', 'Dropped');
         INSERT INTO missions (id, sprint_id, name, status) VALUES ('m-defer', NULL, 'Deferred Mission', 'Deferred');
-        INSERT INTO missions (id, sprint_id, name, status) VALUES ('m-fail', NULL, 'Failed Mission', 'Failed');
       `);
       db.close();
 
       const result = await runWithClient((client) => detectOrphans(client));
       const noSprint = result.orphanedMissions.filter((m) => m.reason === 'no_sprint');
       expect(noSprint).toHaveLength(0);
+    });
+
+    it('DOES flag a Failed mission without sprint — s87-m01 widened this predicate', async () => {
+      // BEHAVIOUR CHANGE, asserted rather than accommodated. Until s87-m01 'Failed' was a member
+      // of MISSION_TERMINAL_STATUSES, so this row was excluded here. #839 assigns 'Failed' to the
+      // SPRINT domain and forbids exactly that copy, and 'Failed' is not a key of
+      // VALID_STATE_TRANSITIONS — so the mission-terminal set was asserting a state the mission
+      // state machine has no entry for. Removing it widens THIS predicate, and the widening gets
+      // its own test so the change is visible rather than inferred from a deleted line.
+      //
+      // UNWITNESSED, not observed: zero 'Failed' mission rows exist in this repo's store
+      // (Archived 1, Completed 363, Dropped 7, In Progress 1, Queued 7) or in the fleet
+      // enumeration. It is reachable through the same unvalidated import/peer-merge paths that
+      // put mission B1.1 at status 'Archived'.
+      const db = new Database(dbPath);
+      db.exec(`
+        INSERT INTO missions (id, sprint_id, name, status) VALUES ('m-fail', NULL, 'Failed Mission', 'Failed');
+      `);
+      db.close();
+
+      const result = await runWithClient((client) => detectOrphans(client));
+      const noSprint = result.orphanedMissions.filter((m) => m.reason === 'no_sprint');
+      expect(noSprint).toHaveLength(1);
+      expect(noSprint[0].id).toBe('m-fail');
     });
 
     it('should not flag terminal missions with drifted-case status (lowercase "dropped")', async () => {

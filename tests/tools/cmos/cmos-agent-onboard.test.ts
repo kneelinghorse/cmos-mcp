@@ -937,6 +937,48 @@ describe('cmos_agent_onboard', () => {
   });
 
   describe('formatAgentOnboardForLLM', () => {
+    /**
+     * s87-m05 (#533) — THE DIGEST MUST NOT REPORT A USER-WIDE NUMBER AS THIS PROJECT'S.
+     *
+     * Asserted on the RENDERED ANSWER, not on `result.data`. The class this mission closes is
+     * "the answer is the defect", and a fix whose only proof reads the data object has moved the
+     * defect rather than closed it. The real onboard result is produced first and only its
+     * `messaging` field is substituted, so the rest of the render stays realistic.
+     */
+    async function renderWithMessaging(messaging: unknown): Promise<string> {
+      const result = await cmosAgentOnboardWithDb(dbPath);
+      expect(result.success).toBe(true);
+      (result.data as unknown as { messaging: unknown }).messaging = messaging;
+      return formatAgentOnboardForLLM(result);
+    }
+
+    it("s87-m05: renders the SCOPED count, and says it is this project's", async () => {
+      const out = await renderWithMessaging({
+        unreadCountScoped: 2,
+        unreadCountUserWide: 7,
+        unreadScope: 'project',
+        recentMessages: [],
+      });
+      expect(out).toContain('2 unread for this project');
+      // The number that is NOT this project's must not be the one on screen.
+      expect(out).not.toContain('**Messaging**: 7 unread');
+    });
+
+    it('s87-m05: an UNSCOPED response renders UNKNOWN, never the user-wide number as ours', async () => {
+      // THE MEASURED DEFECT: a live payload of `unreadCount: 7, unreadCountScoped: 0` rendered
+      // `**Messaging**: 7 unread` on a project whose truthful count was 0. Unknown is a different
+      // claim from zero, and it is the right one here.
+      const out = await renderWithMessaging({
+        unreadCountScoped: null,
+        unreadCountUserWide: 7,
+        unreadScope: 'user',
+        recentMessages: [],
+      });
+      expect(out).toContain('unknown');
+      expect(out).toContain('across all your projects');
+      expect(out).not.toContain('7 unread for this project');
+    });
+
     it('should format success result', async () => {
       const result = await cmosAgentOnboardWithDb(dbPath);
       const formatted = formatAgentOnboardForLLM(result);
@@ -1046,7 +1088,13 @@ describe('cmos_agent_onboard', () => {
 
         expect(result.success).toBe(true);
         expect(result.data?.messaging).not.toBeNull();
-        expect(result.data?.messaging?.unreadCount).toBe(1);
+        // s87-m05 — the digest carries the PROJECT-scoped count now. This mock's dashboard does
+        // not scope (it returns no `unreadCountScoped`), which is the pre-cutover shape, so the
+        // honest answer is "unknown for this project" beside the user-wide total — not a number
+        // presented as this project's.
+        expect(result.data?.messaging?.unreadScope).toBe('user');
+        expect(result.data?.messaging?.unreadCountScoped).toBeNull();
+        expect(result.data?.messaging?.unreadCountUserWide).toBe(1);
         expect(result.data?.messaging?.recentMessages).toHaveLength(1);
         expect(result.data?.messaging?.recentMessages[0].summary).toBe('Add dark mode');
         expect(result.data?.messaging?.recentMessages[0].from).toBe('cmos://birch/design-system');
@@ -1130,7 +1178,9 @@ describe('cmos_agent_onboard', () => {
             threshold: DEFAULT_STALENESS_THRESHOLD,
           },
           messaging: {
-            unreadCount: 2,
+            unreadCountScoped: 2,
+            unreadCountUserWide: 2,
+            unreadScope: 'project' as const,
             recentMessages: [
               {
                 id: 'msg-001',
@@ -1189,7 +1239,12 @@ describe('cmos_agent_onboard', () => {
             createdAt: '2026-03-09T00:00:00Z',
           },
         ],
+        // s87-m05 — a POST-CUTOVER dashboard response: it scopes, and says so. The suggested
+        // action is now gated on THIS PROJECT's count, because it used to fire on the user-wide
+        // number and told a project with an empty inbox to go clear other projects' messages.
         unreadCount: 3,
+        unreadCountScoped: 3,
+        unreadScope: 'project',
         totalCount: 3,
       };
 
@@ -1233,6 +1288,8 @@ describe('cmos_agent_onboard', () => {
         const inboxAction = actions.find((a) => a.action.includes('unread message'));
         expect(inboxAction).toBeDefined();
         expect(inboxAction?.command).toContain('cmos_message');
+        // …and it says whose messages they are.
+        expect(inboxAction?.action).toContain('for this project');
       } finally {
         global.fetch = originalFetch;
         process.env.CMOS_DASHBOARD_URL = originalUrl;

@@ -130,5 +130,5 @@ cmos_db(action="snapshot")                                    # Snapshot the dat
 ---
 
 **Last Updated**: 2025-12-29
-**Schema Version**: 2.0 (MCP-first)
+**Schema Version**: 2.1 (MCP-first)
 **Tool Count**: 15 consolidated tools

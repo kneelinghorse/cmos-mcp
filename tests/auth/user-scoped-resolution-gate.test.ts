@@ -142,3 +142,129 @@ describe('s86-m06 structural gate: user-scoped resolution for credential repair'
     }
   });
 });
+
+/**
+ * s87-m07 — TWO REACHABILITY GATES, both of which exist because the thing they guard is a LATENT
+ * TRAP rather than a live lie, and latency is exactly what a gate preserves.
+ */
+describe('s87-m07 — every published union member has a producer', () => {
+  const SRC_ROOT = path.join(REPO_ROOT, 'src');
+
+  function allSourceFiles(dir: string): string[] {
+    const out: string[] = [];
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) out.push(...allSourceFiles(full));
+      else if (entry.name.endsWith('.ts') && !entry.name.endsWith('.d.ts')) out.push(full);
+    }
+    return out;
+  }
+
+  const sources = allSourceFiles(SRC_ROOT).map((f) => ({
+    rel: path.relative(REPO_ROOT, f),
+    text: fs.readFileSync(f, 'utf8'),
+  }));
+
+  it('every KeySource member is emitted somewhere in src/', () => {
+    // The union is read from the source of truth rather than re-listed here, so a member added
+    // later is gated automatically instead of quietly escaping this test.
+    const storeSrc = fs.readFileSync(
+      path.join(REPO_ROOT, 'src', 'intelligence', 'credential-store.ts'),
+      'utf8'
+    );
+    const decl = storeSrc.match(/export type KeySource =([^;]+);/);
+    expect(decl).not.toBeNull();
+    const members = [...(decl as RegExpMatchArray)[1].matchAll(/'([a-z-]+)'/g)].map((m) => m[1]);
+    // Non-vacuity: a broken parse must not pass by finding no members to check.
+    expect(members.length).toBeGreaterThanOrEqual(4);
+
+    const withoutProducer = members.filter(
+      (member) =>
+        !sources.some(
+          (f) =>
+            f.rel !== 'src/intelligence/credential-store.ts' &&
+            new RegExp(`'${member}' as KeySource|keySource: '${member}'`).test(f.text)
+        )
+    );
+    // `'none'` was a member for four sprints with no producer anywhere in src/, while three test
+    // files exercised it as though it could occur. This is what stops the next one lasting as long.
+    expect(withoutProducer).toEqual([]);
+  });
+
+  it('every startup-recovery status has a producer in src/', () => {
+    const captureSrc = fs.readFileSync(
+      path.join(REPO_ROOT, 'src', 'auth', 'project-key-capture.ts'),
+      'utf8'
+    );
+    const decl = captureSrc.match(/status:\s*((?:\s*\|\s*'[a-z-]+'|\s*\/\*[\s\S]*?\*\/)+)/);
+    expect(decl).not.toBeNull();
+    const members = [...(decl as RegExpMatchArray)[1].matchAll(/'([a-z-]+)'/g)].map((m) => m[1]);
+    expect(members.length).toBeGreaterThanOrEqual(6);
+
+    const withoutProducer = members.filter(
+      (member) => !new RegExp(`status: '${member}'`).test(captureSrc)
+    );
+    // f-02's whole point: hoisting classification left `skipped-unconfigured` with zero
+    // producers, and closing one unreachable status by minting another would have been the
+    // sprint's own defect class. This asserts neither happened.
+    expect(withoutProducer).toEqual([]);
+  });
+});
+
+/**
+ * s87-m07 (#530, CUT 5) — THE GATE THAT KEEPS ARM 1's MISLABEL LATENT.
+ *
+ * `fromEnvForProject` arm 1 reports a keySource that would be wrong for an explicitly supplied
+ * `apiKey` override. It is NOT a live lie: zero of the eleven production call sites pass one, so
+ * the arm is unreachable and the label has never been rendered about a real call. CUT 5 therefore
+ * DEFERS the relabel and ships this instead — a gate that turns the next such caller into a red
+ * test rather than a silently wrong sentence.
+ *
+ * COUNTS CALL SITES, NOT MENTIONS, in the shape this file already uses: a docblock discussing
+ * `apiKey` must not trip it, and an actual override must.
+ */
+describe('s87-m07 (#530) — no caller passes an apiKey override to the resolvers', () => {
+  const SRC_ROOT = path.join(REPO_ROOT, 'src');
+  const SCRIPTS_ROOT = path.join(REPO_ROOT, 'scripts');
+
+  function walk(dir: string): string[] {
+    if (!fs.existsSync(dir)) return [];
+    const out: string[] = [];
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) out.push(...walk(full));
+      else if (entry.name.endsWith('.ts') && !entry.name.endsWith('.d.ts')) out.push(full);
+    }
+    return out;
+  }
+
+  it('counts the resolver call sites, and none of them supplies an apiKey', () => {
+    const files = [...walk(SRC_ROOT), ...walk(SCRIPTS_ROOT)];
+    const CALL = /\b(?:fromEnvForProject|fromEnvForUser)\s*\(/g;
+
+    let callSites = 0;
+    const offenders: string[] = [];
+    for (const file of files) {
+      const rel = path.relative(REPO_ROOT, file);
+      if (rel === 'src/tools/cmos/dashboard-client.ts') continue; // the definitions themselves
+      const lines = fs.readFileSync(file, 'utf8').split('\n');
+      for (let i = 0; i < lines.length; i += 1) {
+        const line = lines[i];
+        const trimmed = line.trim();
+        // Comments are excluded by rule: this mission's own prose discusses the override.
+        if (trimmed.startsWith('//') || trimmed.startsWith('*')) continue;
+        CALL.lastIndex = 0;
+        if (!CALL.test(line)) continue;
+        callSites += 1;
+        // The argument list can wrap; look at this line and the next three.
+        const window = lines.slice(i, i + 4).join(' ');
+        if (/\bapiKey\s*:/.test(window)) offenders.push(`${rel}:${i + 1}`);
+      }
+    }
+
+    // CORPUS FLOOR. Without it a broken matcher passes by finding nothing — the vacuous-gate
+    // failure this sprint is named against. Measured at build time: eleven production call sites.
+    expect(callSites).toBeGreaterThanOrEqual(8);
+    expect(offenders).toEqual([]);
+  });
+});

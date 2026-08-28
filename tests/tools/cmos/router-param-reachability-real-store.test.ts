@@ -363,13 +363,25 @@ describe('s86-m03 real-store fires: the four params reach the database (tmpdir c
     if (!live) return;
     const { projectRoot, dbPath } = copyLiveStore();
 
+    // ESTABLISH the baseline on the COPY; do not inherit it from the live store. The original
+    // form asserted that every existing agent_feedback row came from cmos_mission_transition
+    // "because the session surface was declared in the docs and unreachable in fact" — which was
+    // true only until s86-m03 made that surface reachable and somebody used it. The first real
+    // use (two rows, 2026-08-28) falsified it, so the test proving the feature works went red
+    // because the feature works. Same trap as the s86-m08 fire test fixed at 82584cb: a
+    // precondition read from a mutable tracked artifact instead of set by the test.
+    withDb(dbPath, (db) =>
+      db.prepare(`DELETE FROM agent_feedback WHERE tool_name = ?`).run('cmos_session')
+    );
     const before = withDb(dbPath, (db) =>
       db.prepare('SELECT tool_name, COUNT(*) AS n FROM agent_feedback GROUP BY tool_name').all()
     ) as Array<{ tool_name: string; n: number }>;
-    // Live baseline: every existing row came from cmos_mission_transition, because the session
-    // surface was declared in the docs and unreachable in fact.
-    expect(before.every((r) => r.tool_name === 'cmos_mission_transition')).toBe(true);
+    // The assertion that carries the weight: no cmos_session row exists on the copy BEFORE the
+    // fire, so the one found afterwards can only have come from the call below.
     expect(before.some((r) => r.tool_name === 'cmos_session')).toBe(false);
+    // And the copy is not empty — otherwise "no cmos_session rows" would pass on a blank table
+    // and prove nothing about a real store.
+    expect(before.length).toBeGreaterThan(0);
 
     const sid = 'PS-2099-01-01-903';
     seedActiveSession(dbPath, sid);

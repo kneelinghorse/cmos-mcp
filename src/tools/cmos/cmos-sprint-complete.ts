@@ -25,6 +25,7 @@ import { buildUntaggedSessionAdvisory } from './untagged-advisory';
 import { getProjectType } from './cmos-agent-onboard';
 import {
   ensureArchivalColumns,
+  ensureLearningsTable,
   ensureAuthorNamespaceColumns,
   ensureFirehoseEventColumns,
   snapshotDedupPrunedFilter,
@@ -74,7 +75,50 @@ export interface SprintKPIs {
 export interface SprintLifecycleTriggers {
   decisionsArchived: number;
   learningsArchived: number;
+
+  /**
+   * s87-m02 — the ids of the decisions this close archived, enumerated.
+   *
+   * The counts above come from the driver's `changes`. They say HOW MANY rows moved and never
+   * WHICH, so a close that demoted something it should not have left nothing to look up. This is
+   * not hypothetical: sprint-86's close reported `Archived: 37 decisions` and one of the 37 was
+   * the ratification of the arc the next sprint executes.
+   *
+   * `archivedDecisionIds.length === decisionsArchived` is asserted per table at write time; a
+   * mismatch pushes a named warning rather than being reconciled silently. The ids come from a
+   * pre-SELECT under the IDENTICAL predicate inside the same transaction — never from
+   * `RETURNING id`, which this codebase's client silently discards (`.run()` reports
+   * `{changes, lastInsertRowid}` and drops the rows, with no throw).
+   */
+  archivedDecisionIds: number[];
+
+  /**
+   * The ids of the learnings this close archived.
+   *
+   * NAMED ASYMMETRICALLY on purpose: the sprint-87 contract, the CHANGELOG bullet and s87-m08's
+   * criteria all say `learningIds`, and renaming it here for symmetry with
+   * `archivedDecisionIds` would leave three documents naming a field that does not exist. The
+   * asymmetry is recorded rather than silently corrected.
+   */
+  learningIds: number[];
+
   kpis: SprintKPIs;
+
+  /**
+   * s87-m02 — THE UNDO HANDLE. A full database snapshot taken immediately BEFORE the closeout's
+   * `BEGIN IMMEDIATE`, so every row this close archives reads `active` inside it.
+   *
+   * Distinct from {@link dbSnapshotId}, which is taken after the COMMIT and therefore captures
+   * the post-archival state — it is a backup, not a pre-image. Both are kept: the pre-close one
+   * makes the close reversible, the post-close one is the ordinary safety copy.
+   *
+   * `null` when the snapshot failed; the close still proceeds (it is non-critical, matching the
+   * post-close snapshot's own error handling) and the failure is surfaced as a warning, because
+   * refusing to close a sprint over a backup hiccup would be a worse trade than closing without
+   * one and saying so.
+   */
+  preCloseSnapshotId: string | null;
+
   dbSnapshotId: string | null;
 }
 
@@ -212,8 +256,18 @@ export type CmosSprintCompleteParams = z.infer<typeof cmosSprintCompleteSchema>;
  */
 export const cmosSprintCompleteToolDefinition = {
   name: 'cmos_sprint_complete',
+  // s87-m02 — THIS DEFINITION IS NOT REGISTERED, and the edit below is a consistency fix, not the
+  // client-visible one. `cmos_sprint_complete` is not among the 15 definitions the server
+  // publishes, and the definitions snapshot contains zero occurrences of that name — so no MCP
+  // host receives this string and it pins nothing. The surface an operator actually reads is
+  // `cmosSprintToolDefinition.description` in cmos-sprint.ts, which is where the archival
+  // disclosure had to land. Kept in sync anyway so the two do not drift, and labelled so the next
+  // reader does not mistake editing it for having fixed the published contract.
   description:
-    'Close out a sprint in one operation. Validates sprint readiness, marks the sprint Completed with endDate, snapshots both contexts, clears stale sprint-linked next steps, and optionally runs context condensation.',
+    'Close out a sprint in one operation. Validates sprint readiness, marks the sprint Completed with endDate, ' +
+    "ARCHIVES the sprint's active decisions and learnings (evergreen learnings are kept active) and names every " +
+    'archived id in the result, takes a pre-close database snapshot as an undo handle, snapshots both contexts, ' +
+    'clears stale sprint-linked next steps, and optionally runs context condensation.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -306,6 +360,57 @@ export async function cmosSprintComplete(
       // transaction-safe (no 12-step rebuild), but ensuring it pre-BEGIN keeps the
       // rename out of the closeout transaction and mirrors the firehose pattern.
       warnings.push(...(ensureAuthorNamespaceColumns(client).warnings ?? []));
+
+      // --- s87-m02: THE PRE-CLOSE SNAPSHOT. The undo handle for the store's most destructive
+      // write, and the reason this close is reversible at all.
+      //
+      // POSITION IS FORCED, NOT TASTE. It must be here — after the two pre-BEGIN `ensure*` calls
+      // and BEFORE `BEGIN IMMEDIATE` — for two independent reasons:
+      //   (1) BEFORE the archival, or it is not a pre-image. The existing snapshot below is taken
+      //       134 lines and one COMMIT later; it captures the post-archival state. When decision
+      //       #1009 had to be recovered from sprint-86's close, what saved it was an UNRELATED
+      //       snapshot that happened to land 108 seconds early.
+      //   (2) OUTSIDE the transaction. `cmosDbSnapshot` opens a SECOND connection to the same
+      //       file. Firing that against a held RESERVED lock is the one genuine hazard on this
+      //       path, so it must not sit anywhere between BEGIN IMMEDIATE and COMMIT.
+      //
+      // NON-CRITICAL, in the same shape as the post-close snapshot below: a backup failure warns
+      // and the close proceeds. Refusing to close a sprint because a copy failed would be a worse
+      // trade than closing without one and saying so — and the warning says so.
+      //
+      // GATED ON THE SPRINT EXISTING, and that gate is not an optimisation. The sprint's existence
+      // is validated INSIDE the transaction, after this point, so without the gate a typo'd
+      // sprintId would copy the whole store (514–928 ms on this 64 MB one) and consume a retention
+      // slot — pruning the operator's OLDEST real snapshot — before returning SPRINT_NOT_FOUND. A
+      // call that fails should not destroy a backup. The check only skips wasted work: the
+      // authoritative refusal still comes from the in-transaction validation below, unchanged.
+      let preCloseSnapshotId: string | null = null;
+      const sprintExists = client.getOne<{ id: string }>('SELECT id FROM sprints WHERE id = ?', [
+        sprintId,
+      ]);
+      const worthSnapshotting = sprintExists.success && sprintExists.data !== undefined;
+      try {
+        const preSnapshot = worthSnapshotting
+          ? await cmosDbSnapshot({ projectRoot: params.projectRoot })
+          : null;
+        if (!worthSnapshotting) {
+          // No warning: the close is about to refuse anyway, and warning about a backup we
+          // deliberately skipped for a call that cannot succeed would be noise.
+        } else if (preSnapshot?.success && preSnapshot.data?.createdSnapshot) {
+          preCloseSnapshotId = preSnapshot.data.createdSnapshot.id;
+        } else {
+          warnings.push(
+            'Pre-close database snapshot failed — this close is NOT reversible from a snapshot. ' +
+              'The decision/learning archival below still runs; its ids are enumerated in the result.'
+          );
+        }
+      } catch {
+        warnings.push(
+          'Pre-close database snapshot failed — this close is NOT reversible from a snapshot. ' +
+            'The decision/learning archival below still runs; its ids are enumerated in the result.'
+        );
+      }
+
       const beginResult = client.execute('BEGIN IMMEDIATE', []);
 
       if (!beginResult.success) {
@@ -473,12 +578,12 @@ export async function cmosSprintComplete(
       );
 
       // --- Lifecycle Trigger: Archive sprint-scoped decisions/learnings ---
+      // s87-m02: the function now carries its own warnings (the per-table `ids.length === changes`
+      // invariant and each arm's failure), spliced here in the same shape as the two pre-BEGIN
+      // `ensure*` calls above. It has no `warnings` array in scope of its own — it is a
+      // module-level function taking `(client, sprintId)`.
       const archiveResult = archiveSprintDecisionsAndLearnings(client, sprintId);
-      if (!archiveResult.success) {
-        warnings.push(
-          `Decision/learning archival partially failed: ${archiveResult.error ?? 'unknown'}`
-        );
-      }
+      warnings.push(...archiveResult.warnings);
 
       // --- Lifecycle Trigger: Compute sprint KPIs ---
       const kpis = computeSprintKPIs(client, sprintId, readiness);
@@ -610,6 +715,27 @@ export async function cmosSprintComplete(
         const snapshotResult = await cmosDbSnapshot({ projectRoot: params.projectRoot });
         if (snapshotResult.success && snapshotResult.data?.createdSnapshot) {
           dbSnapshotId = snapshotResult.data.createdSnapshot.id;
+
+          // s87-m02 — THE CLOSE MUST NOT SILENTLY DELETE ITS OWN UNDO HANDLE.
+          // Snapshot retention is count-capped (CMOS_MAX_SNAPSHOTS, default 50) and prunes oldest
+          // first. This close now takes TWO snapshots, so at a low cap this second one can prune
+          // the pre-close one created minutes earlier — the same close destroying the pre-image
+          // that makes it reversible. Found by m02's own build-time adversarial critic; it is
+          // reachable by configuration, not hypothetical.
+          // DISCLOSED, NOT OVERRIDDEN: raising the cap behind the operator's back would be this
+          // tool deciding it knows better than a setting they chose. Saying what happened is the
+          // honest half, and it names the setting so the remedy is obvious.
+          if (
+            preCloseSnapshotId &&
+            (snapshotResult.data.prunedSnapshotIds ?? []).includes(preCloseSnapshotId)
+          ) {
+            warnings.push(
+              `The pre-close snapshot '${preCloseSnapshotId}' was pruned by snapshot retention ` +
+                `during this close (CMOS_MAX_SNAPSHOTS=${snapshotResult.data.maxSnapshots}), so ` +
+                `THIS CLOSE IS NO LONGER REVERSIBLE FROM A SNAPSHOT. The archived ids are still ` +
+                `enumerated in the result. Raise CMOS_MAX_SNAPSHOTS to keep the undo handle.`
+            );
+          }
         } else {
           warnings.push('Auto database snapshot after sprint completion failed.');
         }
@@ -617,10 +743,18 @@ export async function cmosSprintComplete(
         warnings.push('Auto database snapshot after sprint completion failed.');
       }
 
+      // s87-m02 (FORK-4b) — EACH TABLE REPORTS ITS OWN OUTCOME. This line used to read
+      // `archiveResult.success ? archiveResult.decisionsArchived : 0` for BOTH counts, so a
+      // failure on the learnings arm reported `Archived: 0 decisions` about decisions that had
+      // been archived and COMMITTED. A count that a different table's failure can zero is not a
+      // report of what happened.
       const lifecycle: SprintLifecycleTriggers = {
-        decisionsArchived: archiveResult.success ? archiveResult.decisionsArchived : 0,
-        learningsArchived: archiveResult.success ? archiveResult.learningsArchived : 0,
+        decisionsArchived: archiveResult.decisions.count,
+        learningsArchived: archiveResult.learnings.count,
+        archivedDecisionIds: archiveResult.decisions.ids,
+        learningIds: archiveResult.learnings.ids,
         kpis,
+        preCloseSnapshotId,
         dbSnapshotId,
       };
 
@@ -1195,17 +1329,134 @@ async function applyOptionalCondensation(params: {
 }
 
 /**
- * Archive sprint-scoped decisions and learnings.
- * Sets status='archived' for all active decisions/learnings linked to the sprint
- * (directly via sprint_id, or indirectly via mission/session sprint linkage).
- * Decisions/learnings with status other than 'active' are left untouched.
+ * s87-m02 — THE SHARED ARCHIVE PREDICATE. One base constant, two derived ones.
+ *
+ * The decisions and learnings arms carried two hand-written copies of the same three-branch
+ * disjunction. They were identical, which is the problem: nothing made them stay identical, and
+ * an enumeration that does not use the EXACT predicate the UPDATE uses is not evidence about
+ * that UPDATE. Hoisted so the pre-SELECT and the UPDATE are the same string by construction.
+ *
+ * THE THREE BRANCHES ARE RATIFIED, NOT INCIDENTAL. #38 blesses the compound WHERE ("sprint_id OR
+ * mission_id-via-sprint OR session_id-via-sprint for comprehensive coverage") and #39 blesses the
+ * active-only filter. Do not simplify it: 4 decisions and 2 learnings in this store live ONLY on
+ * the session branch, and `sprint-close-archival-disclosure.test.ts` fences both halves.
+ */
+const ARCHIVE_WHERE = `status = 'active'
+       AND (sprint_id = ?
+         OR mission_id IN (SELECT id FROM missions WHERE sprint_id = ?)
+         OR author_session_id IN (SELECT id FROM sessions WHERE sprint_id = ?))`;
+
+const DECISIONS_WHERE = ARCHIVE_WHERE;
+
+/**
+ * The learnings arm adds ONE predicate: `evergreen = 0`.
+ *
+ * s87-m02 — this AMENDS #38's compound-WHERE coverage on the learnings arm only, and it is the
+ * single behaviour change in this function. An `evergreen = 1` learning is an institutional rule
+ * an operator flagged precisely so it would stop aging out of view; archiving it at every sprint
+ * close is the close overruling that flag. Measured before the change: all 29 active evergreen
+ * learnings in this store carry a `last_reviewed_at` LATER than their sprint's end_date — not one
+ * had ever been protected by its flag, because a human restored each of them by hand afterwards.
+ * The manual restore WAS the compensating control.
+ *
+ * The decisions arm gets no equivalent: `strategic_decisions` has no `evergreen` column at all,
+ * so that half is a schema migration rather than a predicate, and it is deliberately not shipped
+ * here (its next-step is minted with the cost stated).
+ */
+const LEARNINGS_WHERE = `${ARCHIVE_WHERE}\n       AND evergreen = 0`;
+
+/** The outcome of archiving ONE table. Reported independently of the other's fate. */
+interface ArchiveTableOutcome {
+  ok: boolean;
+  count: number;
+  ids: number[];
+  error?: string;
+}
+
+interface ArchiveOutcome {
+  decisions: ArchiveTableOutcome;
+  learnings: ArchiveTableOutcome;
+  warnings: string[];
+}
+
+/**
+ * Archive one table's sprint-scoped rows, and NAME them.
+ *
+ * WHY A PRE-SELECT AND NOT `RETURNING id`. Measured on better-sqlite3 12.6.0 through this
+ * codebase's own client: `CmosDatabaseClient.execute` calls `.run()`, which DISCARDS the rows a
+ * `RETURNING` clause produces and reports `{changes, lastInsertRowid}` — no throw, and the UPDATE
+ * still applies. A fix whose entire purpose is removing a silent write would have introduced one.
+ * The SELECT runs immediately before the UPDATE, under the identical predicate, inside the same
+ * `BEGIN IMMEDIATE`, so no row can enter or leave the set between them.
+ *
+ * THE INVARIANT, per table: `ids.length === changes`. If the enumeration and the count disagree,
+ * one of them is not describing the write — so the disagreement is surfaced as a named warning
+ * rather than reconciled by preferring whichever number is handier.
+ */
+function archiveOneTable(
+  client: CmosDatabaseClient,
+  table: 'strategic_decisions' | 'learnings',
+  where: string,
+  sprintId: string,
+  warnings: string[]
+): ArchiveTableOutcome {
+  const params = [sprintId, sprintId, sprintId];
+
+  const selectSql = `SELECT id FROM ${table} WHERE ${where}`;
+  const selected = client.getMany<{ id: number }>(selectSql, params);
+  if (!selected.success) {
+    const msg = selected.error?.message ?? `Failed to enumerate ${table}`;
+    return {
+      ok: false,
+      count: 0,
+      ids: [],
+      error: `${table}: ${msg} — SQL: ${selectSql.replace(/\s+/g, ' ')}`,
+    };
+  }
+  const ids = (selected.data ?? []).map((r) => r.id);
+
+  const updateSql = `UPDATE ${table} SET status = 'archived' WHERE ${where}`;
+  const updated = client.execute(updateSql, params);
+  if (!updated.success) {
+    const msg = updated.error?.message ?? `Failed to archive ${table}`;
+    return {
+      ok: false,
+      count: 0,
+      ids: [],
+      error: `${table}: ${msg} — SQL: ${updateSql.replace(/\s+/g, ' ')}`,
+    };
+  }
+  const count = updated.data?.changes ?? 0;
+
+  if (ids.length !== count) {
+    warnings.push(
+      `Sprint close archived ${count} row(s) in ${table} but enumerated ${ids.length}. ` +
+        `The reported ids may be incomplete; the pre-close snapshot holds the full pre-image.`
+    );
+  }
+
+  return { ok: true, count, ids };
+}
+
+/**
+ * Archive sprint-scoped decisions and learnings, naming every row moved.
+ *
+ * Sets status='archived' for active decisions/learnings linked to the sprint (directly via
+ * sprint_id, or indirectly via mission/session sprint linkage). Rows with status other than
+ * 'active' are left untouched, and `evergreen = 1` learnings are left active.
+ *
+ * s87-m02 — THE TWO TABLES REPORT INDEPENDENTLY (FORK-4b). The previous shape returned a single
+ * `success` boolean, and the caller read `success ? decisionsArchived : 0`. So a failure on the
+ * LEARNINGS arm zeroed the DECISIONS count — for decisions that had been archived AND, because
+ * the failure only warned, COMMITTED. The close reported `Archived: 0 decisions` about N rows it
+ * had just permanently demoted. That is a larger instance of this sprint's own defect class than
+ * the one the mission was opened for, and it lived inside the function the mission rewrites.
  */
 function archiveSprintDecisionsAndLearnings(
   client: CmosDatabaseClient,
   sprintId: string
-): { success: boolean; decisionsArchived: number; learningsArchived: number; error?: string } {
-  let decisionsArchived = 0;
-  let learningsArchived = 0;
+): ArchiveOutcome {
+  const warnings: string[] = [];
 
   // Sprint 52 m04: older DBs seeded before the session-of-origin column was added
   // will fail the archival UPDATE with `no such column` and silently archive zero
@@ -1214,47 +1465,34 @@ function archiveSprintDecisionsAndLearnings(
   // already settled the rename, and ensureArchivalColumns is now rename-aware.
   ensureArchivalColumns(client);
 
-  const decisionsSql = `UPDATE strategic_decisions SET status = 'archived'
-     WHERE status = 'active'
-       AND (sprint_id = ?
-         OR mission_id IN (SELECT id FROM missions WHERE sprint_id = ?)
-         OR author_session_id IN (SELECT id FROM sessions WHERE sprint_id = ?))`;
+  // s87-m02 — REQUIRED BY `LEARNINGS_WHERE`, and it is not defensive padding. `evergreen` is
+  // absent from `cmos-seed/db/schema.sql` entirely (`grep -n evergreen` returns nothing), so
+  // every store created from the published tarball lacks the column until some read path
+  // migrates it. Without this call the added predicate throws `no such column: evergreen`, the
+  // learnings arm early-returns, and the close archives ZERO learnings on a fleet store — worse
+  // than the defect being fixed. #519 is the precedent for an `ensure*` inside this transaction.
+  // s87-m03: its warnings are SPLICED, not discarded. This call site was added by s87-m02 three
+  // missions ago, and leaving its MigrationResult on the floor would have made sprint-87 add a
+  // forty-sixth unspliced migration call — in the sprint about surfaces that hide what they did.
+  warnings.push(...(ensureLearningsTable(client).warnings ?? []));
 
-  // s86-m02b: inverted to an early return on failure. Already correct — it names the DB message —
-  // but the no-silent-write gate requires the failure to be read negatively, and the early-return
-  // form is what the rest of this file uses.
-  const decisionResult = client.execute(decisionsSql, [sprintId, sprintId, sprintId]);
-  if (!decisionResult.success) {
-    const msg = decisionResult.error?.message ?? 'Failed to archive decisions';
-    return {
-      success: false,
-      decisionsArchived: 0,
-      learningsArchived: 0,
-      error: `strategic_decisions: ${msg} — SQL: ${decisionsSql.replace(/\s+/g, ' ')}`,
-    };
+  const decisions = archiveOneTable(
+    client,
+    'strategic_decisions',
+    DECISIONS_WHERE,
+    sprintId,
+    warnings
+  );
+  if (!decisions.ok && decisions.error) {
+    warnings.push(`Decision archival failed: ${decisions.error}`);
   }
-  decisionsArchived = decisionResult.data?.changes ?? 0;
 
-  const learningsSql = `UPDATE learnings SET status = 'archived'
-     WHERE status = 'active'
-       AND (sprint_id = ?
-         OR mission_id IN (SELECT id FROM missions WHERE sprint_id = ?)
-         OR author_session_id IN (SELECT id FROM sessions WHERE sprint_id = ?))`;
-
-  // s86-m02b: same inversion as the decisions branch above.
-  const learningResult = client.execute(learningsSql, [sprintId, sprintId, sprintId]);
-  if (!learningResult.success) {
-    const msg = learningResult.error?.message ?? 'Failed to archive learnings';
-    return {
-      success: false,
-      decisionsArchived,
-      learningsArchived: 0,
-      error: `learnings: ${msg} — SQL: ${learningsSql.replace(/\s+/g, ' ')}`,
-    };
+  const learnings = archiveOneTable(client, 'learnings', LEARNINGS_WHERE, sprintId, warnings);
+  if (!learnings.ok && learnings.error) {
+    warnings.push(`Learning archival failed: ${learnings.error}`);
   }
-  learningsArchived = learningResult.data?.changes ?? 0;
 
-  return { success: true, decisionsArchived, learningsArchived };
+  return { decisions, learnings, warnings };
 }
 
 /**
@@ -1387,6 +1625,27 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 /**
+ * s87-m02 — render an archived-id list, and say so when it is cut short.
+ *
+ * The close's rendered answer shares a session-opener budget, so an unbounded id list is not an
+ * option: sprint-86's close would have printed 47 ids. But a list truncated in SILENCE is this
+ * sprint's own defect class — a surface reporting a write while hiding which rows it touched —
+ * so the truncation is stated, with the remaining count, and the full list stays on the data
+ * object for any caller that wants it.
+ *
+ * An empty list renders nothing at all rather than `[]`: "0 decisions" already said it.
+ */
+const ARCHIVED_ID_RENDER_CAP = 30;
+
+function formatArchivedIds(ids: number[] | undefined): string {
+  if (!ids || ids.length === 0) return '';
+  const shown = ids.slice(0, ARCHIVED_ID_RENDER_CAP);
+  const remainder = ids.length - shown.length;
+  const body = shown.map((id) => `#${id}`).join(', ');
+  return remainder > 0 ? ` (${body}, +${remainder} more)` : ` (${body})`;
+}
+
+/**
  * Format sprint closeout results for LLM readability.
  */
 export function formatSprintCompleteForLLM(
@@ -1419,7 +1678,8 @@ export function formatSprintCompleteForLLM(
     `Readiness: ${data.readiness.completedMissions}/${data.readiness.totalMissions} completed, ${data.readiness.blockedMissions} blocked, ${data.readiness.openMissions} open, ${data.readiness.parkedMissions} parked (outside the total)`,
     '',
     `KPIs: completion rate ${(data.lifecycle.kpis.completionRate * 100).toFixed(0)}%, avg cycle time ${data.lifecycle.kpis.avgCycleTimeDays !== null ? `${data.lifecycle.kpis.avgCycleTimeDays}d` : 'N/A'}, ${data.lifecycle.kpis.decisionCount} decisions, ${data.lifecycle.kpis.learningCount} learnings`,
-    `Archived: ${data.lifecycle.decisionsArchived} decisions, ${data.lifecycle.learningsArchived} learnings`,
+    `Archived: ${data.lifecycle.decisionsArchived} decisions${formatArchivedIds(data.lifecycle.archivedDecisionIds)}, ${data.lifecycle.learningsArchived} learnings${formatArchivedIds(data.lifecycle.learningIds)}`,
+    `Pre-close snapshot (undo handle): ${data.lifecycle.preCloseSnapshotId ?? 'FAILED — this close is not reversible from a snapshot'}`,
     `DB snapshot: ${data.lifecycle.dbSnapshotId ?? 'failed'}`,
     '',
     `master_context: ${data.contexts.masterContext.beforeSize.sizeKb.toFixed(2)}KB → ${data.contexts.masterContext.afterSize.sizeKb.toFixed(2)}KB, cleared ${data.contexts.masterContext.nextStepsCleared} next step(s)`,

@@ -18,7 +18,7 @@ Quick reference for querying CMOS history using any SQLite client.
 | `context_snapshots`    | Historical context versions              | `context_id`, `content`, `created_at`, `content_hash`           |
 | `sessions`             | Universal session registry               | `id`, `type`, `sprint_id`, `started_at`, `status`               |
 | `session_events`       | Append-only session log                  | `ts`, `agent`, `mission`, `action`, `status`, `summary`         |
-| `telemetry_events`     | Runtime metrics and health signals       | `source_path`, `event_data`, `created_at`                       |
+| `telemetry_events`     | Runtime metrics and health signals       | `source_path`, `payload`, `created_at`                          |
 | `prompt_mappings`      | Prompt → behavior mapping                | `prompt`, `behavior`                                            |
 
 **Views**:

@@ -2,6 +2,123 @@
 
 All notable changes to cmos-mcp are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 2.7.0 — 2026-08-28
+
+Sprint 87 "Mean What You Say" — Arc F sprint 1. Sprint 86 closed the axis a mechanical gate can
+see: every identifier a surface names now exists. This one is the behavioural half — a surface
+that asserts something that is not so where no name-existence sweep can look. A remedy that names
+the wrong cause. A count that reports a write while hiding which rows it touched. An instrument
+that reads evidence it created.
+
+### Changed
+
+- **`cmos_sprint(action="complete")` names the ids it archived, and hands back an undo handle.**
+  The result gains `archivedDecisionIds`, `learningIds` and `preCloseSnapshotId`, and the rendered
+  close line prints the ids rather than only a count, truncating past 30 with an explicit
+  `+K more`. The archival was previously unnamed on the tool's published description, unitemised
+  in its return, and irreversible.
+- **`evergreen = 1` learnings are no longer archived at sprint close.** A behaviour change on a
+  ratified write: an institutional-rule learning an operator flagged is no longer demoted every
+  time a sprint ends. Decisions have no equivalent flag and are unaffected.
+- **`cmos_status.last_sync_at` and `cmos_agent_onboard`'s sync-health counts now describe THIS
+  project.** They were fetched unscoped and reported a platform-wide figure inside a
+  project-scoped payload, so **these numbers change value on every install**. On this machine
+  `last_sync_at` was 32 days optimistic.
+- **Portfolio drift reasons now read "no new CMOS rows in Nd" instead of "no CMOS write in Nd",
+  because the mechanism changed with the word.** Store freshness is derived from the newest row
+  stamp across six domain tables rather than from a file mtime — a signal `cmos_review`'s own
+  cross-store fan-out created by opening each store. Measured effect: silent stores 3 → 5, with
+  two previously-understated ages corrected (41d → 105d, 41d → 78d) and one store that had been
+  classified FRESH for months newly reported at 48d.
+- **`MISSION_TERMINAL_STATUSES` no longer contains `Failed`,** which widens a live
+  orphan-detection predicate: a sprint-less mission stored as `Failed` now reports as orphaned.
+  Unwitnessed — no such row exists in this store or across the fleet.
+- **Provenance tags stop naming `unknown-project`.** A row whose store records no identity now
+  renders as `unattributed` rather than `proj:unknown-project`, which named a project that does
+  not exist on the prompt-injection defence surface. **The untrusted fence is unchanged** — those
+  rows are still framed as foreign.
+- **`MessageSendResult.messageId` is now optional.** The dashboard's send route returns
+  `messageId`; this field read `id` and rendered `ID: undefined` on every successful send. When no
+  id comes back the line is omitted and an envelope warning names the absence.
+- **`cmos_agent_onboard`'s messaging block reports a project-scoped unread count**, replacing
+  `unreadCount` with `unreadCountScoped` / `unreadCountUserWide` / `unreadScope`.
+- **The next-steps transition accepts `carried` rows.** Rows carried to a later sprint could not
+  previously be completed, dropped or re-carried by id.
+- **`skipped-unconfigured` is gone from the startup key-recovery status union.**
+
+### Added
+
+- `preCloseSnapshotId` on the sprint-close result — a database snapshot taken BEFORE the closeout
+  transaction, so every archived row is restorable.
+- `unmatchedIds` on the next-steps result: which requested ids a transition did not match.
+- `unreadCountScoped` / `unreadScope` on `ListMessagesResult`.
+- `--strict` on `npm run baseline:cross-store`, which exits non-zero when any store's counts are
+  unreliable rather than publishing a partial share under a zero exit code.
+- A per-store identity disclosure that names the store whose identity is unrecorded. It was one
+  process-wide line naming no path, so in a portfolio fan-out the first affected store silenced
+  every other one. **It is a disclosure, and heals no already-stamped row** — restamping rows that
+  already carry the `unknown-project` literal is an operator action outside this package. Swept at
+  close with `find <home> -maxdepth 7 -path '*/cmos/db/cmos.sqlite' -not -path '*/node_modules/*'`:
+  45 stores, 32 resolving by a non-empty `project_id`, 13 collapsing to the literal, 0
+  unclassifiable. Scope limit: one home directory on one machine — the count bounds nothing beyond
+  it.
+
+### Fixed
+
+- **The mission-transition surface no longer crashes on a mission row this repo's own store
+  holds.** Six handlers dereferenced a state-transition table with a status read from the
+  database, throwing an unhandled `TypeError` that the MCP boundary reported as "an internal
+  error … retry the call" — a loop with no exit. 15 mission rows across 4 of 21 registered stores
+  were unusable through `cmos_mission_transition`.
+- Two false refusal strings: a terminal mission was said to be unchangeable when only its STATUS
+  is settled, and an unrecognized status was answered with a transition error rather than being
+  named.
+- A read-only client could not open a store that was not already in WAL mode, because the
+  `journal_mode` pragma is itself a write and was issued unconditionally. Latent: no shipped code
+  path passes `readonly: true` to that client today.
+- The published seed no longer ships three empty-string identity rows, and its `Schema Version`
+  stamps and one documented column name (`event_data` → `payload`) now match the schema it ships.
+- The `whoami` no-roots warning no longer fires alongside a fully resolved payload.
+- A `cmos_auth(action="reissue")` that fails dashboard-side no longer destroys the local project
+  key, and its error message no longer double-prefixes `Dashboard error:`.
+
+### Removed
+
+Every entry here is unreachable or ignored surface **by measurement**, which is what keeps this
+release MINOR rather than MAJOR. Each cites its evidence.
+
+- `CmosReviewResult.warnings` — assigned `[]` at `cmos-review.ts` exactly once and never written
+  anywhere, so its renderer could only ever print an empty list and its size-trim stage could only
+  ever remove nothing. The **envelope** warnings channel is a different object and is unaffected.
+- `MessagingSummary.unreadCount`, replaced by `unreadCountScoped` / `unreadCountUserWide` /
+  `unreadScope`. Measured live: `.data.messaging === null` — the block carrying this field did not
+  render at all, because its client resolved through an env-only path that errors on a device-code
+  install. See the revival below.
+- `'none'` from the `KeySource` union — **no producer in `src/` ever emitted it**; a resolver that
+  finds no credential returns a failure rather than a success carrying `keySource: 'none'`. Now
+  asserted by a standing gate that every union member has a producer
+  (`tests/auth/user-scoped-resolution-gate.test.ts`).
+- `skipped-unconfigured` from the startup-recovery status union — **zero producers** once the
+  null-client path routes through classification, asserted by the same gate. It was not repointed:
+  filing a genuine internal inconsistency under a word meaning "not configured" would name the
+  wrong cause, and a store holding keys is not unconfigured.
+
+**The one genuine consumer break is in `### Changed`, not here:** `MessageSendResult.messageId`
+becomes optional. It ships MINOR on this project's own measured precedent — `## 2.4.0`'s "One
+consumer-visible break — see **Changed**" and 2.6.0's `unreadCount` → `unreadCountUserWide`
+rename — and it carries its own named bullet rather than being bundled.
+
+### Revived
+
+Two surfaces that were silently absent, not wrong. Said as revivals deliberately: claiming a wrong
+number was corrected would assert something that never happened on screen.
+
+- **`cmos_agent_onboard`'s messaging block STARTS APPEARING** for device-code installs. It
+  resolved its client through an env-only path, so on such installs it errored and returned null
+  with an explicit "don't warn" comment — the block rendered nothing at all.
+- **The `Healed stale cmos_address from X to Y` notice STARTS APPEARING** on the strict-success
+  path, where it has been silently dropped since sprint 53.
+
 ## 2.6.0 — 2026-08-12
 
 Sprint 86 "Say Only What You Know" — the honest-surface release. Sprint 85 made the durable

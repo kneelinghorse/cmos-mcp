@@ -33,13 +33,26 @@ describe('terminal-status', () => {
       );
     });
 
-    it('MISSION_TERMINAL_STATUSES is {Completed, Failed, Dropped, Deferred} — never Archived/Reverted', () => {
+    it('MISSION_TERMINAL_STATUSES is {Completed, Dropped, Deferred} — never Archived/Reverted/Failed', () => {
+      // s87-m01: 'Failed' REMOVED. #839 assigns it to the SPRINT domain and carries an
+      // implementation guardrail against exactly this copy — "do NOT blind-copy
+      // DEAD_SPRINT_STATUSES onto the mission predicate — the two predicates operate in DIFFERENT
+      // status domains" — and 'Failed' was never a key of VALID_STATE_TRANSITIONS, so the
+      // constant asserted a mission state the state machine had no entry for.
       expect([...MISSION_TERMINAL_STATUSES].sort()).toEqual(
-        ['Completed', 'Deferred', 'Dropped', 'Failed'].sort()
+        ['Completed', 'Deferred', 'Dropped'].sort()
       );
       expect(MISSION_TERMINAL_STATUSES).not.toContain('Archived');
       expect(MISSION_TERMINAL_STATUSES).not.toContain('Reverted');
+      expect(MISSION_TERMINAL_STATUSES).not.toContain('Failed');
       expect(MISSION_TERMINAL_STATUSES).toContain('Deferred');
+    });
+
+    it('the mission set and the sprint set do not overlap on Failed (#839, the drift this closes)', () => {
+      // The regression this pins is not "an item was removed" but "the two domains were merged".
+      // SPRINT_TERMINAL_STATUSES keeps Failed; MISSION_TERMINAL_STATUSES must not re-acquire it.
+      expect(SPRINT_TERMINAL_STATUSES).toContain('Failed');
+      expect(MISSION_TERMINAL_STATUSES).not.toContain('Failed');
     });
   });
 

@@ -27,23 +27,48 @@ export interface GenesisStamp {
   values: unknown[];
 }
 
-let warnedMissingProjectId = false;
+/**
+ * s87-m04 — PER STORE, not per process.
+ *
+ * This was a single module-level boolean, so N identity-less stores opened in one process
+ * produced ONE stderr line — and that line named no path, only the fallback VALUE. An operator
+ * reading it could not tell which store had no identity, or how many did. Measured: 12 of the 45
+ * CMOS stores on this machine resolve to the literal.
+ *
+ * Keyed by the store's own path so each one discloses exactly once. Still de-duplicated, because
+ * the alternative is a line per genesis row.
+ */
+const warnedStorePaths = new Set<string>();
 
 /**
  * Read the store's `project_id` from `metadata`. Explicit pass-through with no
  * process-level caching (matches the no-silent-state discipline that gives
  * `event_type` no DEFAULT).
  *
- * When `project_id` is missing or empty it falls back to the next-best store
- * identifier (`dashboard_slug` → `project_name` → `'unknown-project'`) and emits
- * a one-time stderr WARN rather than throwing. Rationale: every real CMOS store
- * carries a non-empty `project_id` (set at init/register), so the fallback never
- * fires in production — the real id is always used. A hard throw, by contrast,
- * would make any read path that lazily writes a genesis row (e.g. blob-migration
- * snapshots) fail on a misconfigured store, and would break a large body of test
- * fixtures that seed firehose rows without a project identity. The WARN keeps the
- * gap audible; the non-empty fallback keeps cross-store aggregation able to group
- * the row instead of writing an empty id.
+ * When `project_id` is missing or empty it falls back to the next-best store identifier
+ * (`dashboard_slug` → `project_name` → `'unknown-project'`) and emits a per-store stderr WARN
+ * rather than throwing.
+ *
+ * WHY IT FALLS BACK RATHER THAN THROWING — ruling #736, REAFFIRMED by decision #1017 (D-8). A
+ * hard throw breaks any read path that lazily writes a genesis row (blob-migration snapshots) on
+ * a store with no identity, and `getProjectId` serves 36 call sites across 26 files, 16 of them
+ * read/display. It would also do nothing for rows already stamped with the fallback.
+ *
+ * WHY THE OLD RATIONALE IS GONE. It asserted that every real store records an identity at
+ * init/register, so the fallback could not fire outside test fixtures — and that premise was the
+ * entire basis on which the fallback was approved over throwing. It is MEASURABLY FALSE. (The
+ * original sentence is quoted verbatim in decision #1017, where a quotation belongs; it is
+ * paraphrased here because a shipped-prose gate sweeps this tree for it.) Measured
+ * 2026-08-27, read-only, with its command —
+ *   find ~ -maxdepth 7 -path '*\/cmos/db/cmos.sqlite' -not -path '*\/node_modules/*'
+ * → 45 stores; 33 resolve via a non-empty `project_id`; 12 collapse to the literal; 1
+ * (`semantic-contract`) cannot be classified read-only at all. The fallback has already fired in
+ * production: `derekn.com`'s store carries 217 rows stamped `unknown-project` across six tables.
+ *
+ * The RULING stands and is reaffirmed; only its PREMISE is amended (#1017). What sprint-87
+ * changes is the DISCLOSURE (per store, naming the store, saying the id is unrecorded), the
+ * LABEL at the point of use, and the SEED that manufactures new instances. It ships NO identity
+ * write: the fleet is not healed and this store is not identified.
  */
 export function getProjectId(client: CmosDatabaseClient): string {
   const read = (key: string): string => {
@@ -54,11 +79,16 @@ export function getProjectId(client: CmosDatabaseClient): string {
   if (projectId) return projectId;
 
   const fallback = read('dashboard_slug') || read('project_name') || 'unknown-project';
-  if (!warnedMissingProjectId) {
-    warnedMissingProjectId = true;
+  const storePath = client.path;
+  if (!warnedStorePaths.has(storePath)) {
+    warnedStorePaths.add(storePath);
+    // Names the STORE and says the id is UNRECORDED. The old wording said only that a fallback
+    // value was being stamped, which reads as though `unknown-project` were a project.
     process.stderr.write(
-      `[WARN] cmos-mcp: metadata.project_id is missing/empty; stamping genesis rows with ` +
-        `fallback project_id="${fallback}". Set the project identity (init/register) to fix.\n`
+      `[WARN] cmos-mcp: ${storePath} has NO RECORDED project identity ` +
+        `(metadata.project_id is missing/empty). Genesis rows in this store are being stamped ` +
+        `project_id="${fallback}", which is a fallback label and not a project. Set the identity ` +
+        `with cmos_project(action="init") or register the project to fix it.\n`
     );
   }
   return fallback;

@@ -9,7 +9,7 @@ import {
   createSuccess,
   CmosErrors,
   CMOS_ERROR_CODES,
-  VALID_STATE_TRANSITIONS,
+  transitionsFrom,
 } from './errors';
 import { ensureMissionTimestamps } from './schema-migrations';
 import { appendWarnings } from './format-warnings';
@@ -90,7 +90,15 @@ export async function cmosMissionDrop(
         });
       }
 
-      const validTransitions = VALID_STATE_TRANSITIONS[currentStatus];
+      // s87-m01: guarded through the ONE shared helper. `currentStatus` is read from the store,
+      // not validated by the type system, and an unrecognized value now yields a NAMED refusal
+      // instead of an unhandled TypeError the MCP boundary reports as "an internal error".
+      const validTransitions = transitionsFrom(currentStatus);
+      if (validTransitions === undefined) {
+        return createError<MissionDropResult>(
+          CmosErrors.missionUnrecognizedStatus(missionId, currentStatus)
+        );
+      }
       if (!validTransitions.includes(targetStatus)) {
         return createError<MissionDropResult>(
           CmosErrors.missionInvalidTransition(missionId, currentStatus, targetStatus)

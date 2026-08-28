@@ -221,7 +221,12 @@ async function sendCarryForwardMessages(
   senderProjectId: string | undefined,
   projectRoot: string | undefined
 ): Promise<CarryForwardSendResult[]> {
-  const clientResult = DashboardClient.fromEnv();
+  // s87-m05 — `fromEnvForProject(projectRoot)`. This function ALREADY RECEIVES `projectRoot` (the
+  // parameter two lines up) and threw it away, resolving a user-scoped client instead. Third of
+  // the three identical `fromEnv()` sites this mission fixes, under the same standing rule
+  // (#580); leaving it would have been the "fixed two of three identical sites" this sprint is
+  // named against.
+  const clientResult = await DashboardClient.fromEnvForProject(projectRoot);
   if (!clientResult.success || !clientResult.data) {
     // All items fail with the same error
     return items.map((item) => ({
@@ -231,7 +236,7 @@ async function sendCarryForwardMessages(
     }));
   }
 
-  const client = clientResult.data;
+  const client = clientResult.data.client;
 
   // Sprint 53: resolve senderProjectId from the local project identity, NEVER
   // `projects[0]`. See sender-identity.ts for the full rationale.
@@ -259,7 +264,9 @@ async function sendCarryForwardMessages(
       results.push({
         item,
         sent: true,
-        messageId: sendResult.data.id,
+        // s87-m05 — the same absent key as cmos-message.ts:996. This site read `.id` too, so a
+        // carry-forward receipt recorded `undefined` for every message it actually sent.
+        messageId: sendResult.data.messageId,
       });
     } else {
       results.push({

@@ -8,12 +8,28 @@
  * cmos_context_view, cmos_mission_status) into a single ≤4KB digest so a
  * fresh agent can boot from one tool call instead of four.
  *
- * Scope is locked per sprint-64 m03 decision #671: cmos_review calls into the
- * existing handlers and shapes their output — it does NOT author new SQL of its
- * own. The s79-m06 portfolio section (below) likewise CONSUMES an existing
- * cross-store helper (`activeMissionsAcrossProjects`), which owns its SQL — so
- * #671 still holds. cmos_agent_onboard and cmos_context_view stay unchanged for
- * back-compat; this tool is purely additive.
+ * SCOPE. #671 (sprint-64 m03) locked this tool to "no new SQL queries beyond what
+ * cmos_agent_onboard and cmos_context_view already issue". That clause is SUPERSEDED IN PART by
+ * decision #1016 (s87-m03) and this file no longer cites it as a live constraint.
+ *
+ * WHAT REPLACED IT, and it is tighter in the dimension #671 actually cared about. #671 protected
+ * the session-opener budget: this tool runs on every session start, fans out across every
+ * registered store, and must stay inside a 4KB digest and a fan-in p95 measured in tens of
+ * milliseconds. "No new SQL" was the PROXY chosen in sprint-64, when cmos_review was a
+ * single-store digest and every read it needed already existed. The proxy is now retired and the
+ * fence is stated as a COST: cmos_review may issue a read of its own ONLY when it runs on a
+ * connection this call already opens (no new store opens, no new connections, no network), is
+ * read-only and index-covered with its per-store cost measured and recorded, degrades to a
+ * LABELLED fallback rather than an error, and exists to make a PUBLISHED NUMBER TRUE rather than
+ * to add a field. Anything failing that last clause is still forbidden.
+ *
+ * WHY THE PROXY HAD TO GO. Under it, the only available drift signal was a file mtime — and the
+ * cross-store fan-out CREATES the `-wal` sidecar whose mtime the signal read, so the instrument
+ * fabricated its own evidence. A constraint written to keep a mission cheap had come to keep a
+ * published number wrong. See {@link storeMtimeMs} and {@link newestRowStampMs}.
+ *
+ * cmos_agent_onboard and cmos_context_view stay unchanged for back-compat; this tool is purely
+ * additive.
  *
  * Cross-store portfolio rollup (s79-m06 — SUPERSEDES the #672 project-only
  * exclusion). #672 excluded cross-project status because the old model was one
@@ -28,6 +44,7 @@
  * @module tools/cmos/cmos-review
  */
 
+import type Database from 'better-sqlite3';
 import { statSync } from 'fs';
 import * as path from 'path';
 import { z } from 'zod';
@@ -80,7 +97,16 @@ export interface PortfolioDriftItem {
   projectId: string;
   /** Display name, capped to {@link DRIFT_NAME_CAP_CHARS}. */
   name: string;
-  /** Why it drifted, e.g. "no CMOS write in 37d" or "un-migrated (…)". */
+  /**
+   * Why it drifted, e.g. "no new CMOS rows in 37d", "un-migrated (…)", or "freshness
+   * unknown (…)".
+   *
+   * s87-m03: the wording changed WITH the mechanism. It used to assert a WRITE in the last N days,
+   * derived from a file mtime this very call created by opening the store. It is now derived from
+   * the newest row stamp across six domain tables, which measures row CREATION, not writes — so
+   * the sentence says rows. (The old phrase is deliberately not quoted here: a mechanical gate
+   * greps this tree for it, and a gate that a comment can trip is a gate someone will weaken.)
+   */
   reason: string;
   /** Store mtime age in whole days (0 when the store could not be stat'd). */
   ageDays: number;
@@ -110,7 +136,7 @@ export interface PortfolioSection {
   projects: number;
   /** Succeeded ∧ fresh (written within `drift.staleThresholdDays`). */
   reachable: number;
-  /** Succeeded ∧ stale (no CMOS write in > `drift.staleThresholdDays`). */
+  /** Succeeded ∧ stale (no new CMOS rows in > `drift.staleThresholdDays`; s87-m03). */
   silent: number;
   /** Failed with "no such column" — the missions table predates the s79 per-row rebuild. */
   unmigrated: number;
@@ -186,8 +212,22 @@ export interface CmosReviewResult {
     isStale: boolean;
   };
 
-  /** Auth and sync warnings only (size-warnings dropped to stay under budget). */
-  warnings: string[];
+  /*
+   * s87-m06 — `warnings` IS GONE FROM THIS TYPE. It was assigned `[]` exactly once and never
+   * written to, so the field, the renderer branch that printed it and the size-trim stage that
+   * sliced it were all operating on a list that could not have content. A published field that
+   * has never carried a value is a promise the payload cannot keep.
+   *
+   * THE ENVELOPE CHANNEL IS UNAFFECTED and is where warnings actually travel:
+   * `createSuccess(digest, reviewWarnings)` puts the filtered onboard warnings on the RESULT, and
+   * `appendWarnings(lines, result)` renders them. Two different objects; only the data-level one
+   * was dead.
+   *
+   * DELETED RATHER THAN POPULATED. Populating it would have shipped identical strings on two
+   * channels of one answer, against a test whose whole point is that the two stay distinct — and
+   * the digest measured 3995 of its 4096-byte budget live, so there was no room for a second copy
+   * even if it had been desirable.
+   */
 
   /** Build-freshness signal — present ONLY when stale=true (Sprint 67 m03).
    *  Closes the s65 retro footgun where missions were marked Complete against
@@ -268,7 +308,13 @@ const PORTFOLIO_MISSION_NAME_CAP_CHARS = 60;
 /** s79-m06 — under-budget re-truncation cap for sprint.focus (trim stage 2). */
 const SPRINT_FOCUS_TRIM_CAP_CHARS = 160;
 
-/** s80-m06 — a store with no CMOS write in more than this many days is "silent" (drift). */
+/**
+ * s80-m06 — a store with no new CMOS rows in more than this many days is "silent" (drift).
+ *
+ * s87-m03: "rows", not "writes". The signal is the newest `occurred_at` across the six domain
+ * tables, read on the connection the portfolio fan-out already holds — not a file mtime, which
+ * that same fan-out perturbs by opening the store.
+ */
 const STALE_THRESHOLD_DAYS = 21;
 
 /**
@@ -451,7 +497,6 @@ function buildDigest(
     localProjectId: onboard.localProjectId ?? null,
     portfolio,
     freshness,
-    warnings: [],
     digestSizeBytes: 0,
   };
 
@@ -542,8 +587,9 @@ async function touchProjectGraphRegistry(explicitRoot: string | undefined): Prom
 /**
  * s79-m06 — build the always-on cross-store portfolio section. Discovers stores
  * via the graph registry (injectable for tests) and merges active missions across
- * the portfolio through `activeMissionsAcrossProjects` (§5.4 query b — no new SQL,
- * #671 holds). Graceful degrade: returns null when the registry lists ≤1 active
+ * the portfolio through `activeMissionsAcrossProjects` (§5.4 query b — that helper owns its
+ * own SQL; the per-store content probe s87-m03 adds runs on the connection this fan-out already
+ * opens, within the cost fence #1016 set in place of #671's retired no-new-SQL proxy). Graceful degrade: returns null when the registry lists ≤1 active
  * project (a portfolio rollup is meaningless for one project) OR when the whole
  * fan-out throws. Latency-fenced: the single active-missions query only.
  */
@@ -559,13 +605,26 @@ const defaultStoreStatFn: StoreStatFn = (filePath) => {
 };
 
 /**
- * s80-m06 — a store's freshness age in days, from the NEWEST of its `cmos.sqlite` +
- * `cmos.sqlite-wal` mtimes (the WAL sidecar advances on every write before checkpoint).
- * Store mtime is the primary signal — the graph registry's `last_seen_at` is inflated
- * by `cmos_review`'s own touch, so it is NOT used here. Returns null when neither file
- * can be stat'd.
+ * The newest mtime (Unix ms) across a store's `cmos.sqlite` + `-wal` sidecar, or null.
+ *
+ * s87-m03 — THIS IS NO LONGER THE FRESHNESS SIGNAL, and it must not become one again.
+ *
+ * It was, and it was wrong in both directions. The mechanism: this function takes
+ * `max(base, base-wal)`, and SQLite CREATES the `-wal` sidecar on any open of a WAL database.
+ * `cmos_review`'s own cross-store fan-out opens every store microseconds before this function
+ * stats it — so the instrument manufactured the evidence it then read as proof of freshness.
+ * Live consequence: `portfolio/cmos-mcp` classified FRESH on a store whose durable content had
+ * not moved in months.
+ *
+ * AND DROPPING THE `-wal` LEG DOES NOT FIX IT. Base mtime lies too, measured: The Academy Web's
+ * base read 47.97d against a newest row of 105.27d; Project History's read 16.18d against a true
+ * 26.94d. A file's mtime is not a claim about the rows inside it.
+ *
+ * What survives here are the two uses it is still honest for: the `ageDays` shown beside an
+ * UN-MIGRATED store, whose rows cannot be read at all, and the s81-m03 unsynced overlay, which
+ * compares local mtime against a persisted push timestamp — a file-vs-file comparison, where a
+ * file timestamp is the right unit. The SILENCE decision now comes from the content probe.
  */
-/** The newest mtime (Unix ms) across a store's cmos.sqlite + -wal sidecar, or null. */
 function storeMtimeMs(storePath: string, statFn: StoreStatFn): number | null {
   const base = path.join(storePath, 'cmos', 'db', 'cmos.sqlite');
   let newest = 0;
@@ -583,6 +642,49 @@ function storeAgeDays(storePath: string, statFn: StoreStatFn, nowMs: number): nu
   return mtime === null ? null : (nowMs - mtime) / MS_PER_DAY;
 }
 
+/**
+ * s87-m03 (#529) — the six domain tables whose newest row stamp defines "this store has had
+ * activity". Chosen because they are what a CMOS store's own tools write; a store none of these
+ * has touched in N days is silent in the sense the reason string claims.
+ */
+const DRIFT_PROBE_TABLES = [
+  'missions',
+  'sprints',
+  'sessions',
+  'learnings',
+  'strategic_decisions',
+  'next_steps',
+] as const;
+
+/**
+ * s87-m03 (#529) — the newest `occurred_at` across the six domain tables, in Unix ms, or null.
+ *
+ * THIS IS THE FRESHNESS SIGNAL. It reads the content the drift reason string has always claimed
+ * to describe, on the connection the fan-out already holds — no new open, no new connection, no
+ * network, which is exactly the cost fence decision #1016 put in place of #671's syntax fence.
+ *
+ * COLUMN-GUARDED BY `PRAGMA table_info`, AND THAT GUARD IS A FIXTURE, NOT A HOPE. Synthesis
+ * Workbench's `next_steps` has no `occurred_at` column at all — one real gap in 19 readable
+ * stores — and a store may be missing a table outright. Either case skips that table rather than
+ * throwing, because a single missing column must not cost the whole probe.
+ *
+ * Returns null when NO table yielded a stamp. That is not "fresh" and not "silent": it is
+ * "unknown", and the caller renders it as unknown rather than guessing.
+ */
+export function newestRowStampMs(db: Database.Database): number | null {
+  let newest: number | null = null;
+  for (const table of DRIFT_PROBE_TABLES) {
+    const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name?: unknown }>;
+    if (!columns.some((c) => c.name === 'occurred_at')) continue;
+    const row = db.prepare(`SELECT MAX(occurred_at) AS newest FROM ${table}`).get() as
+      | { newest?: unknown }
+      | undefined;
+    const value = typeof row?.newest === 'number' ? row.newest : null;
+    if (value !== null && (newest === null || value > newest)) newest = value;
+  }
+  return newest;
+}
+
 /** s80-m06 — the strict reachability partition + the drift list. */
 export interface DriftPartition {
   reachable: number;
@@ -595,8 +697,9 @@ export interface DriftPartition {
 /**
  * s80-m06 — classify every queried store into the strict partition and build the
  * per-project drift list, consuming ONLY existing outputs (`registry.list()` +
- * `fanout.errors`) plus `fs.stat` on each store file (#671 holds — no new SQL/opens/
- * network). A store is:
+ * `fanout.errors`) plus `fs.stat` on each store file, and — since s87-m03 — the per-store content
+ * probe the fan-out ran on the connection it already held. No new store opens, no new
+ * connections, no network: the cost fence #1016 put in place of #671's retired no-new-SQL proxy. A store is:
  *   - `unmigrated` — failed with "no such column" (its missions table predates the s79
  *      per-row rebuild) → drift item with a backfill hint;
  *   - `unreadable` — failed otherwise (moved/locked/I/O; classified transient);
@@ -622,7 +725,19 @@ export function deriveDrift(
   }>,
   errors: ReadonlyArray<{ projectId: string; error: string }>,
   statFn: StoreStatFn,
-  nowMs: number
+  nowMs: number,
+  /**
+   * s87-m03 — THE FRESHNESS SIGNAL, keyed by `project_id`: the newest row stamp the fan-out's
+   * probe read on the connection it already held. A store absent from this map, or mapping to
+   * `null`, has no readable row stamps and is reported as freshness-unknown.
+   *
+   * REQUIRED, NOT OPTIONAL, and that is FORK-1b's ruling made structural. An optional parameter
+   * would leave a second code path that decides silence from file mtime while printing the
+   * sentence "no new CMOS rows in Nd" — a reason string describing a mechanism that did not
+   * produce it, which is precisely the defect this mission exists to close, reintroduced inside
+   * the fix for it. There is one mechanism here, so there is one sentence.
+   */
+  contentStamps: ReadonlyMap<string, number | null>
 ): DriftPartition {
   const errorById = new Map(errors.map((e) => [e.projectId, e.error]));
   let reachable = 0;
@@ -650,15 +765,48 @@ export function deriveDrift(
       }
       continue;
     }
-    // Succeeded — freshness by store mtime.
+    // Succeeded. `mtimeMs` is still read, but ONLY for the s81-m03 unsynced overlay below —
+    // never for the silence decision. See `storeMtimeMs`'s docblock for why.
     const mtimeMs = storeMtimeMs(store.store_path, statFn);
-    const age = mtimeMs === null ? null : (nowMs - mtimeMs) / MS_PER_DAY;
+
+    // s87-m03 — FRESHNESS FROM CONTENT, and from nothing else. The fan-out that would perturb
+    // the mtime is the same call that produced this stamp, and a row stamp is not perturbed by
+    // being read.
+    const contentMs = contentStamps.get(store.project_id) ?? null;
+    const age = contentMs === null ? null : (nowMs - contentMs) / MS_PER_DAY;
+
+    if (contentMs === null) {
+      // FORK-1b — NO MTIME FALLBACK. A fallback here could only ever say "fresh": `deriveDrift`
+      // runs after the fan-out has already touched every `-wal`, so every mtime it could read is
+      // ~now by construction. A labelled fallback describing a signal the caller has already
+      // destroyed would be this sprint's defect class inside this sprint's own fix.
+      //
+      // The store stays counted `reachable` — it IS reachable, the fan-out read it — so #920's
+      // strict partition still sums to `stores.length`. What it gets is a drift ITEM saying the
+      // freshness is unknown and why, in the same overlay shape s81-m03 uses for "unsynced". It
+      // is never reported as silent, and never asserted fresh.
+      reachable++;
+      items.push({
+        projectId: store.project_id,
+        name,
+        reason:
+          'freshness unknown — no readable row stamps; file mtime is not usable here because ' +
+          'this call opened the store',
+        ageDays: 0,
+      });
+      continue;
+    }
+
     if (age !== null && age > STALE_THRESHOLD_DAYS) {
       silent++;
       items.push({
         projectId: store.project_id,
         name,
-        reason: `no CMOS write in ${Math.round(age)}d`,
+        // s87-m03 (FORK-2) — the sentence says ROWS because the probe measures rows: the newest
+        // INSERT stamp across six domain tables. It does not observe writes, so it may not claim
+        // to. Making the sentence true is cheaper than making the mechanism match a sentence
+        // nobody validated.
+        reason: `no new CMOS rows in ${Math.round(age)}d`,
         ageDays: Math.round(age),
       });
     } else {
@@ -702,10 +850,18 @@ async function buildPortfolioSection(
     const fanout = await activeMissionsAcrossProjects({
       limit: PORTFOLIO_FETCH_LIMIT,
       registry,
+      // s87-m03 (#529) — read the CONTENT on the connection the fan-out already opens. This is
+      // the whole fix: the drift signal stops being a file mtime that this very call creates.
+      perStoreProbe: newestRowStampMs,
     });
     const meta = fanout.metadata;
     // s80-m06: strict partition + drift over the SAME store set the fan-out queried.
-    const partition = deriveDrift(stores, fanout.errors, statFn, nowMs);
+    // s87-m03: probe values keyed by project_id. `probeErrors` are deliberately NOT merged into
+    // `fanout.errors` — a failed optional probe must not reclassify a readable store as
+    // unreadable — so a store whose probe threw simply has no entry here and lands on the
+    // "freshness unknown" path.
+    const contentStamps = new Map(fanout.probes.map((p) => [p.projectId, p.value]));
+    const partition = deriveDrift(stores, fanout.errors, statFn, nowMs, contentStamps);
     return {
       projects: stores.length,
       reachable: partition.reachable,
@@ -763,11 +919,10 @@ function trimToBudget(digest: CmosReviewResult): CmosReviewResult {
     size = measure(current);
   }
 
-  // Stage 3: drop warnings.
-  while (size > DIGEST_BUDGET_BYTES && current.warnings.length > 0) {
-    current = { ...current, warnings: current.warnings.slice(0, -1) };
-    size = measure(current);
-  }
+  // s87-m06 — Stage 3 ("drop warnings") is GONE. It sliced a list that was assigned `[]` once
+  // and never written, so it could only ever remove nothing: a trim stage that could not trim.
+  // The envelope warnings it appeared to protect the budget from are not part of the digest and
+  // were never counted against it.
 
   // Stage 4: trim work-queue top arrays.
   while (
@@ -1065,10 +1220,8 @@ export function formatReviewForLLM(result: CmosToolResult<CmosReviewResult>): st
     );
   }
 
-  if (d.warnings.length > 0) {
-    lines.push('');
-    for (const w of d.warnings) lines.push(`⚠ ${w}`);
-  }
+  // s87-m06 — the DATA-level warnings render is gone with the field. The ENVELOPE warnings are
+  // rendered by `appendWarnings(lines, result)` below, exactly once, and that is the live channel.
 
   lines.push('');
   lines.push(`Digest size: ${d.digestSizeBytes} bytes (budget 4096)`);

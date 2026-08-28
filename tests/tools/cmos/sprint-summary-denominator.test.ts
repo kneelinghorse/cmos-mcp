@@ -297,14 +297,13 @@ describe('ensureSprintSummaryView (s86-m08)', () => {
 
   it('(e) on a READ-ONLY store, surfaces the stale view instead of throwing or lying', async () => {
     const dbPath = shapesStore(OLD_VIEW_SQL);
-    // The store must already be in WAL mode to be openable read-only at all: ensureConnection
-    // sets `journal_mode = WAL` unconditionally, and on a delete-mode store that pragma is
-    // itself a write, so the OPEN fails before any migration runs. Filed as a next-step; here
-    // we set up the shape the criterion is actually about — a readable store, stale view.
-    const prep = new Database(dbPath);
-    prep.pragma('journal_mode = WAL');
-    prep.close();
-
+    // s87-m03 (#535) — THE WORKAROUND THAT USED TO BE HERE IS GONE, and its removal is the proof.
+    // This test used to pre-open the store and set `journal_mode = WAL` by hand, with a comment
+    // explaining why: `ensureConnection` issued that pragma UNCONDITIONALLY, the pragma is itself
+    // a write, and on a delete-mode store it therefore failed the OPEN before any migration could
+    // run. The comment filed it as a next-step and worked around it. The guard now reads the
+    // journal mode first and only writes it on a writable connection whose mode differs, so a
+    // delete-mode store opens read-only on its own — and this leg proves it by no longer helping.
     const client = await clientFor(dbPath, true);
     try {
       const result = ensureSprintSummaryView(client);
@@ -349,6 +348,16 @@ describe('real-store fire: an EXISTING store upgrades and stays consistent (s86-
       const src = `${LIVE_DB}${suffix}`;
       if (fs.existsSync(src)) fs.copyFileSync(src, `${copyPath}${suffix}`);
     }
+    // Reset the COPY to the pre-m08 view. The rows are why this test wants the real store; the
+    // stale view is a precondition it must ESTABLISH, not inherit. Inheriting it made the test a
+    // hostage to a mutable tracked artifact: the live store carried the old view until the s86
+    // close committed one that had already migrated, and the precondition then failed forever —
+    // on a fresh clone and in CI, unclearable by re-running. This is the same trap the
+    // 'leaves the LIVE store byte-for-byte untouched' case below already had defused for itself.
+    const reset = new Database(copyPath);
+    reset.exec(`DROP VIEW IF EXISTS sprint_summary;`);
+    reset.exec(OLD_VIEW_SQL);
+    reset.close();
   });
 
   it('carries the OLD view before the migration runs', () => {
@@ -462,7 +471,9 @@ describe('the binding, not just the denominator (s86-m08)', () => {
       const src = `${LIVE_DB}${suffix}`;
       if (fs.existsSync(src)) fs.copyFileSync(src, `${copyPath}${suffix}`);
     }
-    // The copy carries the OLD view; upgrade it the way a reader would, then work on it.
+    // Set the copy to the CURRENT view, the way a reader's first call would, then work on it.
+    // Stated as an action rather than as a claim about what the copy arrived carrying: the
+    // tracked store's own view has changed once already (see the beforeAll above).
     const db = new Database(copyPath);
     db.exec('DROP VIEW IF EXISTS sprint_summary;');
     db.exec(SPRINT_SUMMARY_VIEW_SQL);

@@ -1514,6 +1514,298 @@ async function main(): Promise<void> {
       Object.keys({ ...distDefs[0], actionParams: {} }).filter((k) => !MCP_TOOL_KEYS.has(k))
         .length === 1
     );
+
+    // ─── s87-m01: the mission-transition crash must not ship ────────────────────────────────
+    //
+    // THIS IS THE ONLY CHECK THAT SEES THE PUBLISHED ARTIFACT. 2.6.0 shipped a `TypeError` in
+    // `dist/tools/cmos/errors.js`: `VALID_STATE_TRANSITIONS[currentStatus]` followed by an
+    // unguarded `.length`, reached by six handlers, thrown for any stored status outside the
+    // published enum — and this repo's own store holds mission B1.1 at status 'Archived'. The
+    // in-process matrix in `tests/tools/cmos/remedy-reachability.test.ts` drives `src/`; only
+    // this drives what npm receives.
+    const CMOS_DIST = path.join(REPO_ROOT, 'dist', 'tools', 'cmos');
+    const distJs = fs
+      .readdirSync(CMOS_DIST)
+      .filter((f) => f.endsWith('.js'))
+      .map((f) => ({ file: f, text: fs.readFileSync(path.join(CMOS_DIST, f), 'utf8') }));
+
+    // (a) EVERY dynamic lookup resolves through the shared guarded helper. A literal index
+    //     (`VALID_STATE_TRANSITIONS['Blocked']`) is safe by construction and stays allowed; a
+    //     variable index is the crash, and it may exist ONLY inside `transitionsFrom` itself.
+    const dynamicIndexers = distJs
+      .flatMap(({ file, text }) =>
+        [...text.matchAll(/VALID_STATE_TRANSITIONS\[([^\]]*)\]/g)].map((m) => ({
+          file,
+          index: m[1].trim(),
+        }))
+      )
+      .filter((h) => !/^['"`]/.test(h.index))
+      .filter((h) => h.file !== 'errors.js');
+    check(
+      's87-m01: no dynamic VALID_STATE_TRANSITIONS index outside the shared guard',
+      dynamicIndexers.length === 0,
+      `unguarded=[${dynamicIndexers.map((h) => `${h.file}[${h.index}]`).join(', ')}]`
+    );
+
+    // (b) The helper is actually WIRED, at every site that used to carry the bare index. Named
+    //     files, not a count — a count alone passes if six calls land in one file.
+    const HELPER_CALLERS = [
+      'cmos-mission-start.js',
+      'cmos-mission-complete.js',
+      'cmos-mission-block.js',
+      'cmos-mission-drop.js',
+      'cmos-mission-defer.js',
+      'cmos-mission-update.js',
+      'cmos-mission-move.js',
+    ];
+    // Matched against the COMPILED form: tsc emits a cross-module call as
+    // `(0, errors_1.transitionsFrom)(currentStatus)`, so a bare `transitionsFrom(` substring
+    // finds nothing and this check would have reported every handler missing while the guard was
+    // in fact wired — a gate failing for a reason that has nothing to do with the code.
+    const HELPER_CALL_RE = /\btransitionsFrom\s*\)?\s*\(/;
+    const missingHelper = HELPER_CALLERS.filter(
+      (f) => !HELPER_CALL_RE.test(distJs.find((d) => d.file === f)?.text ?? '')
+    );
+    check(
+      `s87-m01: the shared guard is called in all ${HELPER_CALLERS.length} compiled handlers`,
+      missingHelper.length === 0,
+      `missing=[${missingHelper.join(', ')}]`
+    );
+
+    // (c) The corpus floor. Without it (a) passes trivially on a dist that lost the constant
+    //     entirely — the vacuous-gate failure this sprint is named against.
+    const totalLookupSites = distJs.reduce(
+      (n, { text }) => n + [...text.matchAll(/VALID_STATE_TRANSITIONS\[/g)].length,
+      0
+    );
+    check(
+      's87-m01: the compiled lookup corpus is non-empty (floor 2: the guard + the literal index)',
+      totalLookupSites >= 2,
+      `sites=${totalLookupSites}`
+    );
+
+    // (d) THE BEHAVIOUR, over stdio, against the built server. Force an out-of-enum status into a
+    //     real store the way import and peer-merge paths do, then drive every transition. Each
+    //     must return a structured refusal that NAMES the status — not a TOOL_EXECUTION_ERROR
+    //     telling the operator to retry a call that can never succeed.
+    const projectDirM01 = mkTmp('cmos-verify-s87m01-');
+    await h.callOk('cmos_project', {
+      action: 'init',
+      projectRoot: projectDirM01,
+      projectName: 'verify-s87m01',
+    });
+    await h.callOk('cmos_sprint', {
+      action: 'add',
+      sprintId: 'sprint-m01',
+      title: 'verify s87-m01',
+      projectRoot: projectDirM01,
+    });
+    await h.callOk('cmos_mission', {
+      action: 'add',
+      missionId: 'vm-01',
+      name: 'verify s87-m01 mission',
+      sprintId: 'sprint-m01',
+      projectRoot: projectDirM01,
+    });
+    const m01Db = new Database(path.join(projectDirM01, 'cmos', 'db', 'cmos.sqlite'));
+    const forced = m01Db
+      .prepare(`UPDATE missions SET status = 'Archived' WHERE id = 'vm-01'`)
+      .run().changes;
+    m01Db.close();
+    check(
+      's87-m01: the out-of-enum precondition was ESTABLISHED, not inherited',
+      forced === 1,
+      `changes=${forced}`
+    );
+
+    for (const action of ['start', 'complete', 'block', 'drop', 'defer'] as const) {
+      const res = await h.callTool('cmos_mission_transition', {
+        action,
+        missionId: 'vm-01',
+        reason: 'verify:dist s87-m01 probe',
+        blockers: ['probe'],
+        resolution: 'probe',
+        projectRoot: projectDirM01,
+      });
+      const text = textOf(res);
+      check(
+        `s87-m01: cmos_mission_transition(${action}) on an out-of-enum status refuses, never crashes`,
+        !/TOOL_EXECUTION_ERROR|internal error/i.test(text) && /unrecognized status/i.test(text),
+        text.slice(0, 240)
+      );
+    }
+    const updRes = await h.callTool('cmos_mission', {
+      action: 'update',
+      missionId: 'vm-01',
+      fields: { status: 'Queued' },
+      projectRoot: projectDirM01,
+    });
+    const updText = textOf(updRes);
+    check(
+      's87-m01: cmos_mission(update) on an out-of-enum status refuses, never crashes',
+      !/TOOL_EXECUTION_ERROR|internal error/i.test(updText) && /unrecognized status/i.test(updText),
+      updText.slice(0, 240)
+    );
+
+    // ─── s87-m08: the sprint's other answer-shape deltas, on the BUILT artifact ──────────────
+    //
+    // Each assertion below was proven RED by the stash recipe before it was accepted (stash the
+    // src/ fix → rebuild → `npm run verify:dist` fails on THAT NAMED assertion → unstash →
+    // rebuild → green). An assertion never seen red is not evidence, and this file is the only
+    // gate that reads what npm actually receives.
+
+    // s87-m02 — the close ENUMERATES what it archived and hands back an undo handle.
+    const projectDirM02 = mkTmp('cmos-verify-s87m02-');
+    await h.callOk('cmos_project', {
+      action: 'init',
+      projectRoot: projectDirM02,
+      projectName: 'verify-s87m02',
+    });
+    await h.callOk('cmos_sprint', {
+      action: 'add',
+      sprintId: 'sprint-m02',
+      title: 'verify s87-m02',
+      projectRoot: projectDirM02,
+    });
+    // Seed one decision bound to the sprint so the close has something to archive — the assertion
+    // must not pass by there being nothing to name. Minted through the SHIPPED writer
+    // (mission complete → decisions[]) rather than by raw INSERT, so every NOT NULL column is
+    // filled the way production fills it and the row is one the close can really see.
+    await h.callOk('cmos_mission', {
+      action: 'add',
+      missionId: 'm02-probe',
+      name: 'verify-dist archival probe',
+      sprintId: 'sprint-m02',
+      projectRoot: projectDirM02,
+    });
+    await h.callOk('cmos_mission_transition', {
+      action: 'start',
+      missionId: 'm02-probe',
+      projectRoot: projectDirM02,
+    });
+    await h.callOk('cmos_mission_transition', {
+      action: 'complete',
+      missionId: 'm02-probe',
+      notes: 'verify:dist archival probe',
+      decisions: ['verify-dist seeded decision for the s87-m02 archival disclosure gate'],
+      projectRoot: projectDirM02,
+    });
+
+    const m02Db = new Database(path.join(projectDirM02, 'cmos', 'db', 'cmos.sqlite'));
+    const seededRow = m02Db
+      .prepare(
+        `SELECT id FROM strategic_decisions
+          WHERE status = 'active'
+            AND (sprint_id = 'sprint-m02' OR mission_id = 'm02-probe')
+          ORDER BY id DESC LIMIT 1`
+      )
+      .get() as { id: number } | undefined;
+    m02Db.close();
+    check(
+      's87-m02: the probe really seeded an archivable decision (precondition, established not assumed)',
+      typeof seededRow?.id === 'number',
+      'no active decision bound to sprint-m02 — the archival assertion below would be vacuous'
+    );
+    const seededDecisionId = Number(seededRow?.id);
+
+    const closeRes = await h.callOk('cmos_sprint', {
+      action: 'complete',
+      sprintId: 'sprint-m02',
+      summary: 'verify:dist s87-m02 probe',
+      projectRoot: projectDirM02,
+    });
+    const m02CloseData = h.dataOf(closeRes) as {
+      lifecycle?: {
+        archivedDecisionIds?: number[];
+        decisionsArchived?: number;
+        preCloseSnapshotId?: string | null;
+      };
+    } | null;
+    const lifecycle = m02CloseData?.lifecycle;
+    check(
+      's87-m02: the shipped close returns archivedDecisionIds naming the row it archived',
+      Array.isArray(lifecycle?.archivedDecisionIds) &&
+        lifecycle.archivedDecisionIds.includes(seededDecisionId),
+      `archivedDecisionIds=${JSON.stringify(lifecycle?.archivedDecisionIds)} seeded=${seededDecisionId}`
+    );
+    check(
+      's87-m02: the enumerated ids and the reported count are the same fact',
+      Array.isArray(lifecycle?.archivedDecisionIds) &&
+        lifecycle.archivedDecisionIds.length === lifecycle?.decisionsArchived,
+      `ids=${lifecycle?.archivedDecisionIds?.length} count=${lifecycle?.decisionsArchived}`
+    );
+    check(
+      's87-m02: the shipped close returns a pre-close snapshot handle',
+      typeof lifecycle?.preCloseSnapshotId === 'string' && lifecycle.preCloseSnapshotId.length > 0,
+      `preCloseSnapshotId=${String(lifecycle?.preCloseSnapshotId)}`
+    );
+    check(
+      's87-m02: the RENDERED close line names ids, not only a count',
+      /Archived: \d+ decisions \(#\d+/.test(textOf(closeRes)),
+      textOf(closeRes)
+        .split('\n')
+        .filter((l) => l.startsWith('Archived:'))
+        .join(' | ')
+    );
+
+    // s87-m03 — the drift reason says what the mechanism measures. Asserted on the SHIPPED
+    // strings rather than on a live fleet, because a one-project verify:dist store degrades
+    // `portfolio` to null and would make a behavioural assertion vacuous.
+    /**
+     * READ THE CODE, NOT THE PROSE.
+     *
+     * The first draft of the two m03 checks below searched the whole compiled file and PASSED on
+     * a comment — `// "freshness unknown" path.` — while the emitted string literal had been
+     * replaced. A gate that reports on a sentence nobody executes is the exact defect this sprint
+     * exists to close, committed inside the sprint's own gate; it was caught by the red phase, not
+     * by review. So every source-level assertion here reads comment-stripped code.
+     *
+     * Whole-line stripping only: a trailing `//` inside a string literal (a URL) must not truncate
+     * the code around it, and every comment occurrence that fooled the draft was on its own line.
+     */
+    const codeOf = (rel: string): string =>
+      fs
+        .readFileSync(path.join(REPO_ROOT, 'dist', 'tools', 'cmos', rel), 'utf8')
+        .split('\n')
+        .filter((l) => {
+          const t = l.trimStart();
+          return !t.startsWith('//') && !t.startsWith('*') && !t.startsWith('/*');
+        })
+        .join('\n');
+
+    const reviewSrc = codeOf('cmos-review.js');
+    check(
+      's87-m03: the shipped drift reason says "no new CMOS rows", never "no CMOS write"',
+      reviewSrc.includes('no new CMOS rows in') && !reviewSrc.includes('no CMOS write in'),
+      `rows=${reviewSrc.includes('no new CMOS rows in')} writes=${reviewSrc.includes('no CMOS write in')}`
+    );
+    check(
+      's87-m03: the shipped drift classifier reports freshness-unknown rather than guessing',
+      reviewSrc.includes('freshness unknown — no readable row stamps'),
+      'the probe-null path must not be silently absent from dist — and the bare phrase is not ' +
+        'enough, since it also occurs in prose'
+    );
+
+    // s87-m05 — a send with no messageId renders no `ID: undefined`. Asserted on the compiled
+    // renderer: the verify:dist environment has no dashboard auth, so a live send is not available
+    // and a behavioural probe here would assert nothing.
+    const messageSrc = codeOf('cmos-message.js');
+    // Every line that renders the id must carry its own guard. Stated this way rather than as
+    // "the guarded form is present" because the guarded and unguarded forms differ only by a
+    // prefix — an assertion that merely finds `${d.messageId}` passes on the broken code too.
+    const idRenderLines = messageSrc.split('\n').filter((l) => /ID: \$\{[^}]*messageId/.test(l));
+    check(
+      's87-m05: every shipped ID-render line is guarded — no unconditional `ID: undefined`',
+      idRenderLines.length > 0 && idRenderLines.every((l) => /messageId\s*\?/.test(l)),
+      idRenderLines.length === 0
+        ? 'no ID render line found at all — the assertion would be vacuous'
+        : idRenderLines.map((l) => l.trim()).join(' || ')
+    );
+    check(
+      's87-m05: the shipped send reads the key the dashboard actually returns',
+      messageSrc.includes('response.messageId'),
+      'reading only response.id yields undefined on the send route'
+    );
   } finally {
     await h.close();
     for (const dir of tmpDirs) {

@@ -105,7 +105,16 @@ describe('runStartupProjectKeyRecovery', () => {
     expect(result.status).toBe('skipped-already-present');
   });
 
-  it('returns skipped-unconfigured when no dashboard client can be built', async () => {
+  /**
+   * s87-m07 (#528) — REWRITTEN. This asserted `skipped-unconfigured` with the message
+   * "dashboard client unavailable — recovery deferred", which was wrong twice: NOTHING is
+   * deferred (no later run retries this, and the runner early-returns whenever a local row
+   * exists), and the real cause is knowable at that point.
+   *
+   * Classification is now hoisted above the null-client early return, so an EMPTY store reports
+   * the cause it actually has — no user-scoped key — and names where the credentials live.
+   */
+  it('names the real cause for a credential-less store, rather than deferring nothing', async () => {
     const store = await CredentialStore.create({ configDir: tempDir });
     const result = await runStartupProjectKeyRecovery({
       projectRoot: path.join(tempDir, 'no-client'),
@@ -113,7 +122,32 @@ describe('runStartupProjectKeyRecovery', () => {
       clientFactory: async () => null,
       store,
     });
-    expect(result.status).toBe('skipped-unconfigured');
+    expect(result.status).toBe('skipped-no-user-scoped-key');
+    // It says WHERE, so the operator has somewhere to go.
+    expect(result.message).toContain('credentials.json');
+    // …and it no longer promises a retry that never comes.
+    expect(result.message).not.toContain('deferred');
+  });
+
+  it('a NON-EMPTY store with a null client reports an inconsistency, not a configuration gap', async () => {
+    // The other half of the pair, and the reason `skipped-unconfigured` could not simply be
+    // repointed: a store that HOLDS keys is not unconfigured. Filing this under a word meaning
+    // "not configured" would have named the wrong cause — the defect this sprint closes.
+    const store = await CredentialStore.create({ configDir: tempDir });
+    await store.upsertUserScopedKey('user-parent-x', {
+      key: 'cmk_user',
+      label: 'device',
+      issuedAt: new Date().toISOString(),
+      lastUsedAt: new Date().toISOString(),
+    });
+    const result = await runStartupProjectKeyRecovery({
+      projectRoot: path.join(tempDir, 'no-client-but-keys'),
+      metadataReader: async () => ({ registered: true, projectId: 'proj-id' }),
+      clientFactory: async () => null,
+      store,
+    });
+    expect(result.status).not.toBe('skipped-no-user-scoped-key');
+    expect(result.message).not.toContain('deferred');
   });
 
   it('returns recovered and writes a fresh project-scoped record when reissue succeeds', async () => {
@@ -165,16 +199,12 @@ describe('runStartupProjectKeyRecovery', () => {
    * returns `skipped-already-present` whenever a local row exists, so no restart recovers
    * anything by itself).
    *
-   * REACHABILITY, STATED PLAINLY so it is not mistaken for coverage it is not: neither status
-   * arises with the DEFAULT factory, and one of the two — `skipped-no-user-scoped-key` — is not
-   * producible through this runner at all, by any type-conforming factory. The default factory
-   * returns null when no credential resolves, and the runner reports `skipped-unconfigured`
-   * before it classifies; a factory that DOES return a client can never yield the empty-store
-   * classification, which requires no client. That reachability limit was equally true of the
-   * status they replace: the runner early-returns on a present local row, so the old
-   * arm-2-with-no-keyId state was already unreachable here (see the code comment on
-   * `defaultClientFactory`). The operator-facing surface where both states ARE reachable is
-   * `cmos_auth(action="reissue")`, covered by tests/auth/reissue-resolution.test.ts.
+   * s87-m07 (#528) — THE REACHABILITY DISCLAIMER THAT STOOD HERE IS DELETED BECAUSE IT BECAME
+   * FALSE. It said `skipped-no-user-scoped-key` was "not producible through this runner at all,
+   * by any type-conforming factory", because the runner reported `skipped-unconfigured` before it
+   * classified. Classification is now hoisted above that early return, so a null-client factory
+   * on an empty store produces exactly that status — and the test above asserts it. A disclaimer
+   * that survives the change it describes is a comment asserting something that is not so.
    */
   it('returns skipped-unattributable-credential for a credential that is not a device-code user key', async () => {
     const store = await CredentialStore.create({ configDir: tempDir });
@@ -201,28 +231,29 @@ describe('runStartupProjectKeyRecovery', () => {
   });
 
   /**
-   * The remaining classification outcome, `no-user-scoped-key`, is NOT assertable through
-   * this runner — the default factory returns null on a credential-less store and the runner
-   * reports `skipped-unconfigured` before it classifies. Naming a test for it here and
-   * asserting something else would be the "test name asserts what the test no longer checks"
-   * defect this sprint is closing. It is asserted where it fires: the reissue handler, in
-   * tests/auth/reissue-resolution.test.ts (DEVICE_CODE_REQUIRED naming the store path), and
-   * the [WARN] routing of both new statuses is asserted by the `test.each` in
-   * tests/index.runtime.test.ts.
+   * s87-m07 (#528) — THE SECOND FALSE DISCLAIMER IS DELETED. It said `no-user-scoped-key` was
+   * "NOT assertable through this runner", because the runner reported `skipped-unconfigured`
+   * before it classified. That reason no longer exists: with classification hoisted, a
+   * null-client factory on an empty store reports it here, and the test near the top of this file
+   * asserts it directly. Both disclaimers were accurate when written and became false the moment
+   * the code they described changed — which is why this mission deletes rather than softens them.
+   *
+   * ─────────────────────────────────────────────────────────────────────────────────────────
+   * s87-m07 (#530) — A TEST WAS RETIRED HERE, AND THE REASON IS THE MISSION'S OWN THESIS.
+   *
+   * It read: "reports an inconsistency rather than a skip when a resolved client belongs to no
+   * attributable arm", and it expressed that state by passing `keySource: 'none'`. `'none'` was a
+   * published `KeySource` member that NO producer in `src/` ever emitted — the exact defect this
+   * mission removes. With it gone, `DashboardClientFactory` requires a non-null `KeySource`, so
+   * "a RESOLVED client belonging to no attributable arm" is not merely unproduced: it is
+   * unrepresentable through this runner's own factory contract.
+   *
+   * Forcing it through with a cast would have kept a test for a state the type system forbids —
+   * asserting behaviour that cannot occur, which is what `'none'` was doing in the first place.
+   *
+   * THE COVERAGE IS NOT LOST, and that is why this is a retirement rather than a deletion. The
+   * REACHABLE form of an unattributable resolution is a NULL CLIENT, which is exactly what the
+   * hoisted classification now handles — and "a NON-EMPTY store with a null client reports an
+   * inconsistency, not a configuration gap", near the top of this file, asserts it.
    */
-  it('reports an inconsistency rather than a skip when a resolved client belongs to no attributable arm', async () => {
-    const store = await CredentialStore.create({ configDir: tempDir });
-    const projectRoot = path.join(tempDir, 'inconsistent');
-
-    const result = await runStartupProjectKeyRecovery({
-      projectRoot,
-      metadataReader: async () => ({ registered: true, projectId: 'proj-p' }),
-      clientFactory: async () => resolvedStub({ authenticatingKeyId: undefined }, 'none'),
-      store,
-    });
-
-    expect(result.status).toBe('error');
-    expect(result.message).toContain('inconsistent');
-    expect(await store.getProjectKey(projectRoot)).toBeUndefined();
-  });
 });

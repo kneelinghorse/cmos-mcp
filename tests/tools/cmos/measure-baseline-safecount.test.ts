@@ -60,6 +60,7 @@ import {
   readStoreCounts,
   renderMarkdownSummary,
   safeCount,
+  evaluateStrict,
 } from '../../../scripts/measure-cross-store-baseline';
 import { CmosDatabaseClient } from '../../../src/tools/cmos/client';
 import { seedCmosDb } from '../../helpers/seedCmosDb';
@@ -663,5 +664,53 @@ describe('the run OUTPUT half of the criterion', () => {
     expect(source).toContain(`const MARK_START = '${MARK_START}'`);
     expect(source).toContain(`const MARK_END = '${MARK_END}'`);
     expect(source).toContain("'cmos/planning/phase-2-master-plan.md'");
+  });
+
+  /**
+   * s87-m03 (#524) — `--strict` must EXIT NON-ZERO on an unreliable store.
+   *
+   * WHY THE FIXTURE IS THE LOAD-BEARING HALF. Measured on this machine today, the fleet yields
+   * `unreliable.length === 0`. So `npm run baseline:cross-store -- --strict` exits 0 both before
+   * and after this change, and running it against the real fleet proves nothing whatsoever about
+   * whether the flag works. A criterion satisfied only by a clean fleet is a tautology. The store
+   * below is genuinely unreliable — `constraints` EXISTS in `sqlite_master` and every read of it
+   * raises SQLITE_CORRUPT_VTAB — so the flag is exercised against the condition it exists for.
+   *
+   * WHY IT MATTERS AT ALL: an unreliable store is EXCLUDED from the mutable-write denominator,
+   * and that denominator is spliced verbatim into `phase-2-master-plan.md` at every sprint close.
+   * Without `--strict` a partial measurement is published by a command that exited 0.
+   */
+  describe('s87-m03 (#524): --strict refuses to exit 0 on a partial measurement', () => {
+    it('a store whose table EXISTS but cannot be read is genuinely unreliable', async () => {
+      const { dbPath } = seedStore('safecount-strict-', HEALTHY);
+      makeConstraintsUnqueryable(dbPath, 4);
+
+      const created = await CmosDatabaseClient.create({ dbPath });
+      expect(created.success).toBe(true);
+      const client = created.data!;
+      const diag = newReadDiagnostics();
+      try {
+        safeCount(client, 'constraints', '', diag);
+      } finally {
+        client.close();
+      }
+
+      // NOT an absent table — that would be a genuine zero and must never trip --strict.
+      expect(diag.absentTables).toHaveLength(0);
+      expect(diag.queryErrors.length).toBeGreaterThan(0);
+    });
+
+    it('exits non-zero when any store is unreliable, and names it', () => {
+      const verdict = evaluateStrict([{ projectRoot: '/s/broken' }]);
+      expect(verdict.ok).toBe(false);
+      expect(verdict.message).toContain('/s/broken');
+      expect(verdict.message).toMatch(/refusing to exit 0/i);
+    });
+
+    it('exits 0 on a clean fleet — which is what this machine measures today', () => {
+      // The other half of the pair. Without it, a rule that always failed would satisfy the test
+      // above and break every close.
+      expect(evaluateStrict([])).toEqual({ ok: true });
+    });
   });
 });

@@ -87,7 +87,16 @@ function projectKey(overrides: Partial<ProjectKeyRecord> = {}): ProjectKeyRecord
  * Any request bearing the revoked project key 401s — that is what revocation looks
  * like from this process. A reissue POST bearing the live user key succeeds.
  */
-function installFetchMock(captured: CapturedRequest[], liveUserKeys: string[] = ['cmk_user_live']) {
+/**
+ * s87-m07 (#527) — `reissueStatus` lets a caller force the mint to FAIL, which is the only way to
+ * reach the arm that used to destroy the operator's key. Defaults to 200, so every existing
+ * caller is unaffected.
+ */
+function installFetchMock(
+  captured: CapturedRequest[],
+  liveUserKeys: string[] = ['cmk_user_live'],
+  reissueStatus = 200
+) {
   const impl = async (input: unknown, init?: { method?: string; headers?: unknown }) => {
     const url = String(input);
     const method = (init?.method ?? 'GET').toUpperCase();
@@ -108,6 +117,15 @@ function installFetchMock(captured: CapturedRequest[], liveUserKeys: string[] = 
     }
 
     if (method === 'POST' && url.includes('/keys/reissue')) {
+      if (reissueStatus !== 200) {
+        return {
+          ok: false,
+          status: reissueStatus,
+          statusText: reissueStatus === 500 ? 'Internal Server Error' : 'Error',
+          json: async () => ({ error: 'upstream exploded' }),
+          text: async () => 'upstream exploded',
+        };
+      }
       return {
         ok: true,
         status: 200,
@@ -487,7 +505,10 @@ describe('cmos_auth(reissue) credential resolution (s86-m06)', () => {
         [clientWith(undefined), 'legacy-env'],
         [clientWith(undefined), 'password-fallback'],
         [clientWith(undefined), 'project-scoped'],
-        [clientWith(undefined), 'none'],
+        // s87-m07 (#530): `'none'` removed from KeySource — no producer in src/ emitted it, so
+        // this row exercised an unreachable state. `null` is what a caller with no keySource
+        // actually passes.
+        [clientWith(undefined), null],
         [null, null],
       ];
 
@@ -580,6 +601,77 @@ describe('cmos_auth(reissue) credential resolution (s86-m06)', () => {
       expect(rendered).not.toContain('Suggestion:');
       // The dashboard's revoked list is named in the text, not only in structuredContent.
       expect(rendered).toContain('revoked 1 prior key(s): p-dead');
+    });
+  });
+
+  /**
+   * s87-m07 (#527) — A REISSUE THAT FAILS DASHBOARD-SIDE MUST NOT DESTROY THE KEY IT REPLACES.
+   *
+   * MEASURED LIVE before the fix: force a 500 on the mint and `getProjectKey` afterwards returns
+   * `null`. The operator's only project-scoped credential was gone, and reissue had nothing to
+   * put in its place. The delete is the FIRST destructive step and it is LOAD-BEARING —
+   * `recoverProjectKey` returns `no-op-already-present` while a row exists, so reissue must clear
+   * it to force a fresh mint. The fix is therefore snapshot-and-re-upsert, not move-the-delete.
+   *
+   * THREE UN-RESTORING ARMS, not the two the next-step names, plus the exception path.
+   */
+  describe('s87-m07 (#527): a failed reissue restores the key it deleted', () => {
+    it('a 500 on the mint leaves the ORIGINAL key and keyId readable', async () => {
+      const projectRoot = projectRootFor('restore-500');
+      await store.upsertUserScopedKey('user-live-1', userKey());
+      const original = projectKey();
+      await store.upsertProjectKey(projectRoot, original);
+      installFetchMock(captured, undefined, 500);
+
+      const result = await cmosAuth({ action: 'reissue', projectRoot }, realResolverDeps());
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('DASHBOARD_ERROR');
+
+      // THE POINT. Before this mission both of these read `undefined`.
+      const persisted = await store.getProjectKey(projectRoot);
+      expect(persisted?.key).toBe(original.key);
+      expect(persisted?.keyId).toBe(original.keyId);
+    });
+
+    it('the same holds for a 401 on the mint — the arm is the same one', async () => {
+      const projectRoot = projectRootFor('restore-401');
+      await store.upsertUserScopedKey('user-live-1', userKey());
+      const original = projectKey();
+      await store.upsertProjectKey(projectRoot, original);
+      installFetchMock(captured, undefined, 401);
+
+      const result = await cmosAuth({ action: 'reissue', projectRoot }, realResolverDeps());
+      expect(result.success).toBe(false);
+      const persisted = await store.getProjectKey(projectRoot);
+      expect(persisted?.key).toBe(original.key);
+    });
+
+    it('the failure message says "Dashboard error:" exactly ONCE', async () => {
+      // Measured before: "Dashboard error: Dashboard error: Server error 500: upstream exploded".
+      // The dashboard client's message already carries the prefix; wrapping it again stuttered.
+      const projectRoot = projectRootFor('prefix');
+      await store.upsertUserScopedKey('user-live-1', userKey());
+      await store.upsertProjectKey(projectRoot, projectKey());
+      installFetchMock(captured, undefined, 500);
+
+      const result = await cmosAuth({ action: 'reissue', projectRoot }, realResolverDeps());
+      const message = result.error?.message ?? '';
+      expect(message).toContain('Dashboard error:');
+      expect(message.match(/Dashboard error:/g) ?? []).toHaveLength(1);
+    });
+
+    it('an ABSENT-row reissue is unaffected — restore never fabricates a key', async () => {
+      // The snapshot may legitimately be `undefined`; restoring must be a no-op then, not an
+      // upsert of nothing. Without this arm a restore that ran unconditionally would pass the
+      // tests above and corrupt this path.
+      const projectRoot = projectRootFor('absent');
+      await store.upsertUserScopedKey('user-live-1', userKey());
+      installFetchMock(captured, undefined, 500);
+
+      const result = await cmosAuth({ action: 'reissue', projectRoot }, realResolverDeps());
+      expect(result.success).toBe(false);
+      expect(await store.getProjectKey(projectRoot)).toBeUndefined();
     });
   });
 });

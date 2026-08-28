@@ -16,7 +16,7 @@ import {
   CmosErrors,
   CMOS_ERROR_CODES,
   VALID_MISSION_STATUSES,
-  VALID_STATE_TRANSITIONS,
+  transitionsFrom,
 } from './errors';
 import {
   sanitizeContentField,
@@ -305,14 +305,23 @@ export async function cmosMissionUpdate(
 
       // Validate status transition if status is being changed
       if (fields.status !== undefined && fields.status !== currentStatus) {
-        // s86-m08: `?? []` is load-bearing, not defensive padding. `currentStatus` comes from
-        // the STORE, not from the type system, and the live store holds a mission whose status
-        // ('Archived') is not a key of this map — import and peer-merge paths do not validate it.
-        // Without the fallback this threw `Cannot read properties of undefined (reading
-        // 'includes')`, which escapes withClient and surfaces as TOOL_EXECUTION_ERROR telling the
-        // operator to "retry the call" — a loop with no exit. With it, an unknown current status
-        // yields the ordinary invalid-transition error, which names the statuses involved.
-        const validTransitions = VALID_STATE_TRANSITIONS[currentStatus] ?? [];
+        // s87-m01, correcting s86-m08's comment as well as its code. The premise was right —
+        // `currentStatus` comes from the STORE, not the type system, and this repo's own store
+        // holds mission B1.1 at status 'Archived', which import and peer-merge paths never
+        // validated. The CONCLUSION was false: with `?? []` in place, an unknown status did NOT
+        // yield "the ordinary invalid-transition error". `[].includes(x)` is false, so control
+        // fell into `CmosErrors.missionInvalidTransition`, which performed the SAME unguarded
+        // lookup one frame up and threw `Cannot read properties of undefined (reading 'length')`
+        // from errors.ts. The guard was real; it was simply below the throw. Measured: driving
+        // cmos_mission(update, fields:{status:'Queued'}) against B1.1 threw from errors.ts, never
+        // from this line (D-4, #1023). Both frames are now guarded, and an unrecognized status
+        // gets a refusal that names it rather than one that guesses a transition.
+        const validTransitions = transitionsFrom(currentStatus);
+        if (validTransitions === undefined) {
+          return createError<MissionUpdateResult>(
+            CmosErrors.missionUnrecognizedStatus(missionId, currentStatus)
+          );
+        }
         if (!validTransitions.includes(fields.status)) {
           return createError<MissionUpdateResult>(
             CmosErrors.missionInvalidTransition(missionId, currentStatus, fields.status)

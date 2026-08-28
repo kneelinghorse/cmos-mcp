@@ -29,6 +29,7 @@ import type { CmosToolResult } from './types';
 import { migrateContentHash, computeContentHash } from './schema-migrations';
 import { appendWarnings } from './format-warnings';
 import { checkWrite } from './write-guard';
+import { deriveProjectSlug } from './project-identity';
 
 /**
  * s86-m01 — write diagnostics straight to fd 2 instead of through the global
@@ -1156,11 +1157,6 @@ const PG_TO_SQLITE_TABLE: Record<string, string> = {
   cmos_mission_dependencies: 'mission_dependencies',
 };
 
-/** Derive a dashboard-compatible slug from the project name */
-function deriveProjectSlug(projectName: string): string {
-  return projectName.toLowerCase().replace(/\s+/g, '-');
-}
-
 interface CountRow {
   cnt: number;
 }
@@ -1226,12 +1222,34 @@ export async function cmosDbReconcile(params: {
   );
 }
 
-/** Fallback: reconcile using global endpoint (pre-Sprint 34 behavior) */
+/**
+ * s87-m03 — explicit "no project scope". The three sites this mission fixed were all cases of a
+ * scope argument being FORGOTTEN; the one below is a case of it being DECLINED. Spelling the
+ * difference makes an unscoped call read as a decision rather than an omission, and it keeps the
+ * "every getSyncStatus call states its scope" rule true without pretending this call is scoped.
+ */
+const PLATFORM_WIDE: string | undefined = undefined;
+
+/**
+ * Fallback: reconcile using the UNSCOPED sync-status endpoint (pre-Sprint 34 behavior).
+ *
+ * s87-m03 — DELIBERATELY NOT SCOPED, and this is the one of the four `getSyncStatus` call sites
+ * that keeps its no-argument call. It is reached only when `getSyncStatus(slug)` — the SAME
+ * endpoint, scoped — has already failed, so passing the slug again would be a verbatim retry of
+ * the call that just failed, and it would delete the degradation path this function exists to be.
+ *
+ * IT IS ALSO THE ONE SITE THAT WAS ALREADY HONEST ABOUT ITSELF. Its result carries
+ * `projectScoped: false` and `projectSlug: null`, and the renderer prints
+ * "Reconciliation (global): " — so a reader is told the counts are platform-wide before they read
+ * a single delta. That disclosure is the reason no fix is owed here: the defect this mission
+ * closes is a surface reporting a platform-wide number AS this project's, and this surface never
+ * did.
+ */
 async function reconcileWithGlobalEndpoint(
   db: CmosDatabaseClient,
   client: DashboardClient
 ): Promise<CmosToolResult<ReconciliationResult>> {
-  const statusResult = await client.getSyncStatus();
+  const statusResult = await client.getSyncStatus(PLATFORM_WIDE);
   if (!statusResult.success || !statusResult.data) {
     return createError(
       statusResult.error ?? CmosErrors.dashboardError('Failed to fetch sync status')

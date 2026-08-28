@@ -32,11 +32,32 @@ export const SPRINT_TERMINAL_STATUSES = ['Archived', 'Failed', 'Dropped', 'Rever
 export const SPRINT_NO_OPEN_WORK_STATUSES = [...SPRINT_TERMINAL_STATUSES, 'Completed'] as const;
 
 /**
- * Mission statuses that are terminal — the mission is done and not live work.
- * Distinct from the sprint set: missions are never 'Archived'/'Reverted', but can
- * be 'Deferred' (temporarily parked — still terminal for orphan / live purposes).
+ * Mission statuses that are terminal — the mission is done and not live work. Distinct from the
+ * sprint set; 'Deferred' (temporarily parked) is still terminal for orphan / live purposes.
+ *
+ * s87-m01 — TWO CORRECTIONS, both to sentences that were not true.
+ *
+ * (1) `'Failed'` IS REMOVED, and that is a BEHAVIOUR CHANGE, not a bug fix. #839 assigns 'Failed'
+ * to the SPRINT domain and carries an implementation guardrail against exactly this copy: *"do NOT
+ * blind-copy DEAD_SPRINT_STATUSES onto the mission predicate — the two predicates operate in
+ * DIFFERENT status domains."* The canonical mission terminal set is {Completed, Dropped, Deferred}.
+ * 'Failed' is also not a key of `VALID_STATE_TRANSITIONS`, so this constant asserted a mission
+ * could be Failed while the state machine had no entry for it — the shipped code contradicting a
+ * ratified decision three lines from where it was written.
+ * CONSEQUENCE, said out loud rather than filed under "Fixed": `orphan-detection.ts` consumes this
+ * set inside `statusNotInSql('status', …)`, so a Failed mission with no sprint now REPORTS AS
+ * ORPHANED where it previously did not. Zero such rows exist in this store (`Archived` 1,
+ * `Completed` 363, `Dropped` 7, `In Progress` 1, `Queued` 7) or in the fleet enumeration, so the
+ * change is reachable-but-unwitnessed rather than observed. It owes a `### Changed` bullet.
+ *
+ * (2) THE OLD DOCBLOCK SAID *"missions are never 'Archived'/'Reverted'"*. Refuted by data: this
+ * repo's own store holds mission B1.1 at status `'Archived'`, and it is not alone in the fleet.
+ * `'Archived'` remains correctly EXCLUDED from this set — but the reason is that it is OUTSIDE the
+ * mission status domain entirely (`transitionsFrom` returns `undefined` for it and callers name it
+ * unrecognized), not that it cannot occur. The membership is unchanged; only the false claim about
+ * the world is.
  */
-export const MISSION_TERMINAL_STATUSES = ['Completed', 'Failed', 'Dropped', 'Deferred'] as const;
+export const MISSION_TERMINAL_STATUSES = ['Completed', 'Dropped', 'Deferred'] as const;
 
 /**
  * Sprint statuses that hold an OPEN (current, resumable) sprint. The
