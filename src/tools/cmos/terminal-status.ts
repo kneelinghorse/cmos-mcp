@@ -125,8 +125,8 @@ export function isTerminalStatus(
  * a sprint for parking work honestly. It is excluded from `total_missions` and reported in
  * `parked_missions` — visible, just not counted against.
  *
- * DELIBERATELY NOT `MISSION_TERMINAL_STATUSES`: that set also contains Completed and Failed,
- * which ARE outcomes the sprint owns. Two sets, two questions.
+ * DELIBERATELY NOT `MISSION_TERMINAL_STATUSES`: that set also contains Completed, which IS an
+ * outcome the sprint owns. Two sets, two questions.
  */
 export const PARKED_MISSION_STATUSES = ['Deferred', 'Dropped'] as const;
 

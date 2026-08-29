@@ -655,7 +655,7 @@ export async function cmosAgentOnboard(
       // Server health (build staleness). The server-stale signal tracks THIS
       // server's OWN build (cmos-mcp-pro), not the onboarding project's — so it is
       // only actionable for our own project. For a sibling project it is noise it
-      // cannot act on (it can't rebuild/restart our server), and surfacing it made
+      // cannot act on (its host session does not own our server), and surfacing it made
       // every sibling digest squawk after any cmos-mcp-pro rebuild. Scope it to the
       // server's own root, and (parity with the sprint-close advisory) require a
       // startup manifest — a null startup yields codeIsCurrent=false for an
@@ -1885,7 +1885,7 @@ function generateSuggestedActions(state: {
   projectRootSupplied: boolean;
   /** True only when the running-server-stale signal is the server's OWN build
    * drift (scoped + startup-manifest-gated). Siblings get false so the digest
-   * does not promote a "restart required" action they cannot act on. */
+   * does not promote a host-session action for an unrelated project. */
   serverCodeStaleActionable: boolean;
   /** s84-m03: the querying store's own project_id, so a foreign (pull-merged) mission's
    *  name is dropped from the action text (id-only) rather than embedded unfenced. These
@@ -1906,11 +1906,11 @@ function generateSuggestedActions(state: {
 
   // If OUR OWN server is running stale code, top priority action. Scoped to the
   // server's own project (serverCodeStaleActionable) so a sibling project's digest
-  // is never told to "restart" over a cmos-mcp-pro rebuild it cannot act on.
+  // is never told to reconnect over a cmos-mcp-pro rebuild unrelated to that project.
   if (state.serverCodeStaleActionable) {
     actions.push({
-      action: 'MCP server is running stale code — restart required to pick up latest build',
-      command: 'Restart MCP server process (e.g., reload Claude Desktop config or restart PM2)',
+      action: 'MCP server is running stale code — use a new host session for the latest build',
+      command: 'Start a new IDE/host session or reconnect before subsequent MCP calls',
       priority: 0,
     });
   }

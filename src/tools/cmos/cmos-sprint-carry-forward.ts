@@ -352,7 +352,10 @@ export async function cmosSprintCarryForward(
         totalFailed,
       });
     },
-    { projectRoot: params.projectRoot }
+    // carry_forward mutates the dashboard, but its local CMOS access is an identity/read probe.
+    // Do not mint a new local project_id before sender resolution has interpreted the existing
+    // dashboard_project_id + cmos_address linkage.
+    { projectRoot: params.projectRoot, registerProject: false }
   );
 }
 
@@ -380,6 +383,7 @@ export function formatSprintCarryForwardForLLM(
 
   if (d.items.length === 0) {
     lines.push('No carry-forward items detected.');
+    appendWarnings(lines, result);
     return lines.join('\n');
   }
 

@@ -27,6 +27,7 @@ import {
   type ContextFreshness,
 } from './context-freshness';
 import { appendWarnings } from './format-warnings';
+import { summarizeSessionCaptures } from './session-capture-state';
 import { checkWrite } from './write-guard';
 
 // Re-export for convenience
@@ -234,10 +235,9 @@ export async function cmosSessionStart(
       const warnings: string[] = [];
 
       // Check for existing active session
-      const activeResult = client.getOne<Session>(
-        'SELECT id, type, title, started_at FROM sessions WHERE status = ?',
-        ['active']
-      );
+      const activeResult = client.getOne<
+        Pick<Session, 'id' | 'type' | 'title' | 'started_at' | 'captures'>
+      >('SELECT id, type, title, started_at, captures FROM sessions WHERE status = ?', ['active']);
 
       if (!activeResult.success) {
         return createError<CmosSessionStartResult>(
@@ -250,11 +250,18 @@ export async function cmosSessionStart(
 
       if (activeResult.data) {
         const active = activeResult.data;
+        const captures = summarizeSessionCaptures(active.captures);
         return createError<CmosSessionStartResult>({
           code: CMOS_ERROR_CODES.SESSION_ALREADY_ACTIVE,
           message: `Session '${active.id}' is already active`,
           suggestion: `Complete the active session first with cmos_session(action="complete"), or use cmos_session(action="capture") to add to it`,
-          currentState: active.id,
+          currentState: {
+            id: active.id,
+            type: active.type,
+            title: active.title,
+            startedAt: active.started_at,
+            captureCount: captures.captureCount,
+          },
         });
       }
 
@@ -430,6 +437,24 @@ export function formatSessionStartForLLM(result: CmosToolResult<CmosSessionStart
     const error = result.error;
     const lines = ['❌ Failed to start session', '', `Error: ${error?.message ?? 'Unknown error'}`];
 
+    if (
+      error?.code === CMOS_ERROR_CODES.SESSION_ALREADY_ACTIVE &&
+      isActiveSessionState(error.currentState)
+    ) {
+      lines.push('');
+      lines.push(`Active session: ${error.currentState.id}`);
+      lines.push(`Type: ${error.currentState.type}`);
+      lines.push(`Title: ${error.currentState.title}`);
+      lines.push(`Started at: ${error.currentState.startedAt}`);
+      lines.push(
+        `Capture count: ${
+          error.currentState.captureCount === null
+            ? 'unknown'
+            : `${error.currentState.captureCount} capture(s)`
+        }`
+      );
+    }
+
     if (error?.suggestion) {
       lines.push('');
       lines.push(`Suggestion: ${error.suggestion}`);
@@ -484,4 +509,24 @@ export function formatSessionStartForLLM(result: CmosToolResult<CmosSessionStart
   );
 
   return lines.join('\n');
+}
+
+interface ActiveSessionState {
+  id: string;
+  type: string;
+  title: string;
+  startedAt: string;
+  captureCount: number | null;
+}
+
+function isActiveSessionState(value: unknown): value is ActiveSessionState {
+  if (typeof value !== 'object' || value === null) return false;
+  const state = value as Record<string, unknown>;
+  return (
+    typeof state.id === 'string' &&
+    typeof state.type === 'string' &&
+    typeof state.title === 'string' &&
+    typeof state.startedAt === 'string' &&
+    (typeof state.captureCount === 'number' || state.captureCount === null)
+  );
 }

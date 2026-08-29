@@ -16,6 +16,13 @@ import { withClient } from './client';
 import type { CmosToolResult } from './types';
 import { CMOS_ERROR_CODES, CmosErrors, createError, createSuccess } from './errors';
 import { appendWarnings } from './format-warnings';
+import {
+  mintProjectId,
+  ProjectGraphRegistry,
+  readStoreIdentity,
+  type ProjectGraphEntry,
+} from '../../intelligence/project-graph-registry';
+import { registerResolvedProjectStore } from '../../intelligence/project-resolution';
 
 const SNAPSHOT_FILE_EXTENSION = '.sqlite';
 const PRE_RESTORE_BACKUP_PREFIX = 'pre-restore-';
@@ -61,6 +68,17 @@ interface HealthSummary {
   missionCount: number;
   sessionCount: number;
   contextCount: number;
+}
+
+interface PreRestoreGraphState {
+  storeIdentity: { project_id: string; name: string } | null;
+  entry: ProjectGraphEntry | null;
+  defaultProjectId: string | null;
+}
+
+interface RollbackResult {
+  succeeded: boolean;
+  message: string;
 }
 
 /**
@@ -170,6 +188,7 @@ export async function cmosDbRestore(
   }
 
   const dbPath = dbPathResult.data.dbPath;
+  const projectRoot = path.resolve(path.dirname(dbPath), '..', '..');
   const snapshotDirectory = path.join(path.dirname(dbPath), 'snapshots');
   const preRestoreBackupDirectory = path.join(snapshotDirectory, 'pre-restore');
   fs.mkdirSync(preRestoreBackupDirectory, { recursive: true });
@@ -183,6 +202,10 @@ export async function cmosDbRestore(
   if (validationError) {
     return createError(validationError);
   }
+
+  // Snapshot validity is known; now capture the live store identity before any destructive step.
+  // The database identity is authoritative even when this store has never entered the graph.
+  const preRestoreGraphState = await readPreRestoreGraphState(projectRoot);
 
   const backupId = generatePreRestoreBackupId();
   const backupPath = path.join(preRestoreBackupDirectory, `${backupId}${SNAPSHOT_FILE_EXTENSION}`);
@@ -211,13 +234,39 @@ export async function cmosDbRestore(
 
   const verificationResult = await verifyRestoredDatabase(dbPath);
   if (!verificationResult.success || !verificationResult.data) {
-    const rollbackMessage = attemptRollback(backupPath, dbPath);
+    const rollback = attemptRollback(backupPath, dbPath);
     return createError({
       code: CMOS_ERROR_CODES.SNAPSHOT_RESTORE_FAILED,
       message:
         verificationResult.error?.message ??
         'Restore verification failed. The database may not be a valid CMOS schema.',
-      suggestion: `${rollbackMessage} Inspect snapshot integrity and retry restore.`,
+      suggestion: `${rollback.message} Inspect snapshot integrity and retry restore.`,
+    });
+  }
+
+  // The snapshot is now the active store. Preserve the live store's pre-replacement identity
+  // before registering THIS post-replacement database: a legacy snapshot may have no project_id,
+  // while a foreign snapshot may claim a conflicting id. On failure, put both the database and
+  // graph back as they were.
+  try {
+    reconcileRestoredIdentity(projectRoot, preRestoreGraphState);
+    await registerResolvedProjectStore(projectRoot, { requireStoredIdentity: true });
+  } catch (error) {
+    const registrationMessage = error instanceof Error ? error.message : String(error);
+    const rollback = attemptRollback(backupPath, dbPath);
+    let graphRecovery = '';
+    if (rollback.succeeded) {
+      try {
+        await restorePreRestoreGraphState(projectRoot, preRestoreGraphState);
+      } catch (graphError) {
+        const message = graphError instanceof Error ? graphError.message : String(graphError);
+        graphRecovery = ` Graph rollback also failed: ${message}.`;
+      }
+    }
+    return createError({
+      code: CMOS_ERROR_CODES.SNAPSHOT_RESTORE_FAILED,
+      message: `Restored database could not establish a consistent project identity: ${registrationMessage}`,
+      suggestion: `${rollback.message}${graphRecovery} Inspect the snapshot identity before retrying.`,
     });
   }
 
@@ -281,8 +330,72 @@ async function resolveDbPath(projectRoot?: string): Promise<CmosToolResult<DbPat
       createSuccess({
         dbPath: client.path,
       }),
-    { projectRoot }
+    // Path discovery happens against the database that is about to be replaced. Registering here
+    // would mint/touch the pre-restore identity and let the replacement immediately undo it.
+    { projectRoot, registerProject: false }
   );
+}
+
+async function readPreRestoreGraphState(projectRoot: string): Promise<PreRestoreGraphState> {
+  const graph = await ProjectGraphRegistry.create();
+  const projectId = graph.getByStorePath(projectRoot);
+  return {
+    storeIdentity: readStoreIdentity(projectRoot),
+    entry: projectId ? (graph.get(projectId) ?? null) : null,
+    defaultProjectId: graph.getDefault()?.project_id ?? null,
+  };
+}
+
+function reconcileRestoredIdentity(projectRoot: string, state: PreRestoreGraphState): void {
+  const protectedProjectId = state.storeIdentity?.project_id ?? state.entry?.project_id ?? null;
+  if (!protectedProjectId) return;
+
+  const restoredProjectId = readStoreIdentity(projectRoot)?.project_id ?? null;
+  if (restoredProjectId && restoredProjectId !== protectedProjectId) {
+    throw new Error(
+      `Snapshot project identity '${restoredProjectId}' conflicts with active store identity ` +
+        `'${protectedProjectId}' for ${projectRoot}`
+    );
+  }
+  if (restoredProjectId === protectedProjectId) return;
+
+  const persistedProjectId = mintProjectId(projectRoot, protectedProjectId);
+  if (persistedProjectId !== protectedProjectId) {
+    throw new Error(
+      `Unable to restore active store identity '${protectedProjectId}' after replacement; ` +
+        `persisted '${persistedProjectId ?? 'none'}'`
+    );
+  }
+}
+
+async function restorePreRestoreGraphState(
+  projectRoot: string,
+  state: PreRestoreGraphState
+): Promise<void> {
+  const graph = await ProjectGraphRegistry.create();
+  const currentProjectId = graph.getByStorePath(projectRoot);
+  if (currentProjectId && currentProjectId !== state.entry?.project_id) {
+    graph.unregisterStore(projectRoot);
+  }
+  if (state.entry && graph.getByStorePath(projectRoot) !== state.entry.project_id) {
+    const restored = graph.register({
+      project_id: state.entry.project_id,
+      store_path: state.entry.store_path,
+      name: state.entry.name,
+    });
+    if (
+      restored.project_id !== state.entry.project_id ||
+      path.resolve(restored.store_path) !== path.resolve(state.entry.store_path)
+    ) {
+      throw new Error(`Unable to restore graph row '${state.entry.project_id}' after rollback`);
+    }
+  }
+
+  if (state.defaultProjectId && graph.get(state.defaultProjectId)) {
+    graph.setDefault(state.defaultProjectId);
+  } else if (!state.defaultProjectId) {
+    graph.clearDefault();
+  }
 }
 
 function resolveSnapshotPath(snapshotDirectory: string, snapshotId: string): string | null {
@@ -399,14 +512,20 @@ function cleanupWalFiles(dbPath: string): void {
   fs.rmSync(`${dbPath}-shm`, { force: true });
 }
 
-function attemptRollback(backupPath: string, dbPath: string): string {
+function attemptRollback(backupPath: string, dbPath: string): RollbackResult {
   try {
     fs.copyFileSync(backupPath, dbPath);
     cleanupWalFiles(dbPath);
-    return `Restore verification failed; rolled back from '${backupPath}'.`;
+    return {
+      succeeded: true,
+      message: `Restore failed; rolled back from '${backupPath}'.`,
+    };
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown rollback failure';
-    return `Restore verification failed and rollback also failed: ${message}.`;
+    return {
+      succeeded: false,
+      message: `Restore failed and rollback also failed: ${message}.`,
+    };
   }
 }
 

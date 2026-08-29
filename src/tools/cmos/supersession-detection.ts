@@ -96,7 +96,7 @@ export async function detectSupersessionCandidates(
   }
 
   const limited = candidates.slice(0, MAX_CANDIDATES);
-  const message = formatSuggestionMessage(limited);
+  const message = formatSuggestionMessage(limited, excludeDecisionId);
 
   return { candidates: limited, message };
 }
@@ -121,7 +121,10 @@ function countKeywordOverlap(text: string, keywords: string[]): number {
   return keywords.reduce((count, kw) => count + (lower.includes(kw) ? 1 : 0), 0);
 }
 
-function formatSuggestionMessage(candidates: SupersessionCandidate[]): string {
+function formatSuggestionMessage(
+  candidates: SupersessionCandidate[],
+  newDecisionId?: number
+): string {
   if (candidates.length === 0) return '';
 
   const lines = ['Potential supersession detected:'];
@@ -132,7 +135,12 @@ function formatSuggestionMessage(candidates: SupersessionCandidate[]): string {
     lines.push(`  - Decision #${c.id}${sprint}: "${preview}" (${c.overlapCount} keyword overlap)`);
   }
   lines.push('');
-  lines.push('To mark as superseded: cmos_decisions update decisionId=<id> supersededBy=<new_id>');
+  lines.push('To mark a candidate as superseded:');
+  for (const c of candidates) {
+    lines.push(
+      `  cmos_decisions(action="update", decisionId=${c.id}, supersededBy=${newDecisionId ?? '<new_decision_id>'})`
+    );
+  }
   return lines.join('\n');
 }
 

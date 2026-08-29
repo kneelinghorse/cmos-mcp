@@ -11,7 +11,7 @@ import { withClientValidated } from './client';
 import type { CmosToolResult } from './types';
 import { createError, createSuccess, CmosErrors, CMOS_ERROR_CODES } from './errors';
 import { ensureReviewTimestamps, ensureLearningsTable } from './schema-migrations';
-import { appendWarnings } from './format-warnings';
+import { appendWarnings, attachWarnings } from './format-warnings';
 import { checkWrite } from './write-guard';
 
 const VALID_LEARNING_STATUSES = ['active', 'archived', 'superseded'];
@@ -82,12 +82,13 @@ export async function cmosLearningsUpdate(
     );
   }
 
-  return withClientValidated(
+  const warnings: string[] = [];
+  const result = await withClientValidated(
     (client) => {
       // Sprint 52 m03: ensure last_reviewed_at exists so we can bump it on update.
       // Sprint 61 m03: ensure the evergreen column exists before we read/write it.
-      ensureReviewTimestamps(client);
-      ensureLearningsTable(client);
+      warnings.push(...(ensureReviewTimestamps(client).warnings ?? []));
+      warnings.push(...(ensureLearningsTable(client).warnings ?? []));
 
       const existing = client.getOne<{
         id: number;
@@ -115,7 +116,6 @@ export async function cmosLearningsUpdate(
       if (!statusChanged && !evergreenChanged) {
         // Idempotent set still counts as a review touch — bump the timestamp so
         // a reviewer can use update(status=current) as a tacit "still valid" ping.
-        const warnings: string[] = [];
         const touchResult = client.execute(
           'UPDATE learnings SET last_reviewed_at = ? WHERE id = ?',
           [nowIso, params.learningId]
@@ -152,17 +152,21 @@ export async function cmosLearningsUpdate(
         messageParts.push(`evergreen ${previousEvergreen} → ${newEvergreen}`);
       }
 
-      return createSuccess<CmosLearningsUpdateResult>({
-        learningId: params.learningId,
-        previousStatus,
-        newStatus,
-        previousEvergreen,
-        newEvergreen,
-        message: messageParts.join(': '),
-      });
+      return createSuccess<CmosLearningsUpdateResult>(
+        {
+          learningId: params.learningId,
+          previousStatus,
+          newStatus,
+          previousEvergreen,
+          newEvergreen,
+          message: messageParts.join(': '),
+        },
+        warnings
+      );
     },
     { projectRoot: params.projectRoot }
   );
+  return attachWarnings(result, warnings);
 }
 
 /**
@@ -173,14 +177,14 @@ export function formatLearningsUpdateForLLM(
 ): string {
   if (!result.success || !result.data) {
     const error = result.error;
-    return [
+    const lines = [
       '❌ Failed to update learning',
       '',
       `Error: ${error?.message ?? 'Unknown error'}`,
       error?.suggestion ? `Suggestion: ${error.suggestion}` : '',
-    ]
-      .filter(Boolean)
-      .join('\n');
+    ].filter(Boolean);
+    appendWarnings(lines, result);
+    return lines.join('\n');
   }
 
   const d = result.data;

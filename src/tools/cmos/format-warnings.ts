@@ -6,6 +6,25 @@ import type { CmosToolResult } from './types';
 import type { WriteFailure } from './write-guard';
 
 /**
+ * Attach warnings accumulated outside a result constructor to either a success or error envelope.
+ *
+ * Keeping this at the handler boundary prevents an early `createError(...)` from bypassing a
+ * migration warning gathered earlier in the same call. Warning-free results are returned by
+ * identity so existing envelope shapes remain byte-for-byte unchanged.
+ */
+export function attachWarnings<T>(
+  result: CmosToolResult<T>,
+  warnings: readonly string[]
+): CmosToolResult<T> {
+  if (warnings.length === 0) return result;
+  const merged = [...warnings];
+  for (const warning of result.warnings ?? []) {
+    if (!merged.includes(warning)) merged.push(warning);
+  }
+  return { ...result, warnings: merged };
+}
+
+/**
  * Render `result.warnings` — the ENVELOPE channel — into a formatter's line buffer.
  *
  * WHY THIS EXISTS AS A MODULE. `createSuccess` (errors.ts:147-158) writes `warnings` onto the

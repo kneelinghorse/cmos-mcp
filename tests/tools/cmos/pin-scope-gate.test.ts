@@ -56,6 +56,10 @@ const ALLOWLIST = new Set<string>([
   // fan out across stores (no queryAcrossStores / cross-store-queries), so it does not
   // violate the sender-scoping this gate protects.
   'checkpoint-backfill.ts',
+  // s88-m08: restore is an explicit destructive, single-project WRITE. After replacing the
+  // pinned store, it reconciles that store's identity with its one graph row or rolls both
+  // back. It never reads/fans out across portfolio stores.
+  'cmos-db-restore.ts',
 ]);
 
 // Matches an import from the cross-store fan-out modules OR the project-graph registry —

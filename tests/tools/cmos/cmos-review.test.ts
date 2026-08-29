@@ -1,5 +1,5 @@
 // ABOUTME: Tests for cmos_review — sprint-64 m03 bundled session-opener digest.
-// ABOUTME: Verifies ≤4KB budget, flat top-level next_actions, project-only scope, and bundling behavior.
+// ABOUTME: Verifies ≤4KB budget, flat next_actions, project-scoped core, and portfolio behavior.
 
 import Database from 'better-sqlite3';
 import * as fs from 'fs';
@@ -236,16 +236,16 @@ describe('cmos_review', () => {
     });
   });
 
-  // ─── Project-only scope (no cross-project status) ───────────────────────
+  // ─── Project-scoped core + canonical portfolio boundary ─────────────────
 
-  describe('project-only scope', () => {
-    it('does not expose cross-project status fields in the default response', async () => {
+  describe('project-scoped core', () => {
+    it('keeps cross-project data under the canonical portfolio field', async () => {
       const result = await cmosReview({ projectRoot: tempDir });
       const digest = result.data as unknown as Record<string, unknown>;
 
-      // The whole point of cmos_review (s64-m03 decision #672) is that it
-      // does NOT walk the project registry. Guard against accidental
-      // reintroduction by failing if any cross-project-shaped field appears.
+      // Decision #906 superseded #672 and added the deliberate graph-backed portfolio section.
+      // Obsolete aliases remain forbidden; the project-local core stays separate.
+      expect(Object.prototype.hasOwnProperty.call(digest, 'portfolio')).toBe(true);
       expect(digest.crossProjectStatus).toBeUndefined();
       expect(digest.crossProject).toBeUndefined();
       expect(digest.projects).toBeUndefined();

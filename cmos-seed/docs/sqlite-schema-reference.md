@@ -9,55 +9,80 @@ Quick reference for querying CMOS history using any SQLite client.
 
 ## Core Tables
 
-| Table                  | Purpose                                  | Key Columns                                                     |
-| ---------------------- | ---------------------------------------- | --------------------------------------------------------------- |
-| `sprints`              | Sprint registry with metrics             | `id`, `title`, `status`, `total_missions`, `completed_missions` |
-| `missions`             | Mission backlog with status              | `id`, `sprint_id`, `name`, `status`, `completed_at`, `notes`    |
-| `mission_dependencies` | Edges between missions                   | `from_id`, `to_id`, `type`                                      |
-| `contexts`             | JSON payloads for PROJECT/MASTER context | `id`, `content`, `updated_at`                                   |
-| `context_snapshots`    | Historical context versions              | `context_id`, `content`, `created_at`, `content_hash`           |
-| `sessions`             | Universal session registry               | `id`, `type`, `sprint_id`, `started_at`, `status`               |
-| `session_events`       | Append-only session log                  | `ts`, `agent`, `mission`, `action`, `status`, `summary`         |
-| `telemetry_events`     | Runtime metrics and health signals       | `source_path`, `payload`, `created_at`                          |
-| `prompt_mappings`      | Prompt → behavior mapping                | `prompt`, `behavior`                                            |
+| Table                  | Purpose                                  | Key Columns                                                  |
+| ---------------------- | ---------------------------------------- | ------------------------------------------------------------ |
+| `metadata`             | Project identity and schema markers      | `key`, `value`                                               |
+| `sprints`              | Sprint registry                          | `id`, `title`, `status`, `start_date`, `end_date`            |
+| `missions`             | Mission backlog with status              | `id`, `sprint_id`, `name`, `status`, `completed_at`, `notes` |
+| `mission_dependencies` | Edges between missions                   | `from_id`, `to_id`, `type`                                   |
+| `contexts`             | JSON payloads for project/master context | `id`, `content`, `updated_at`                                |
+| `context_snapshots`    | Historical context versions              | `context_id`, `content`, `created_at`, `content_hash`        |
+| `sessions`             | Universal session registry               | `id`, `type`, `sprint_id`, `started_at`, `status`            |
+| `session_missions`     | Session-to-mission links                 | `session_id`, `mission_id`                                   |
+| `session_events`       | Project activity/event log               | `ts`, `agent`, `mission`, `action`, `status`, `summary`      |
+| `telemetry_events`     | Runtime metrics and health signals       | `mission`, `source_path`, `ts`, `payload`                    |
+| `strategic_decisions`  | Durable decision records                 | `id`, `sprint_id`, `mission_id`, `decision`, `status`        |
+| `learnings`            | Durable learning records                 | `id`, `sprint_id`, `mission_id`, `content`, `status`         |
+| `next_steps`           | Action items from sessions and missions  | `id`, `sprint_id`, `mission_id`, `content`, `status`         |
+| `constraints`          | Project constraints and review state     | `id`, `content`, `status`, `content_hash`                    |
+| `sync_event_queue`     | Outbound synchronization queue           | `id`, `event_type`, `envelope`, `status`                     |
+| `prompt_mappings`      | Prompt → behavior mapping                | `prompt`, `behavior`                                         |
 
 **Views**:
 
+- `project_identity` - Stable project identity and schema markers
 - `active_missions` - Convenience projection for current work
+- `mission_details` - Missions joined to sprint titles and extended fields
+- `sprint_summary` - Dynamically calculated mission and decision counts
+
+Runtime migrations may add tables such as `agent_feedback` and optional search/vector structures.
 
 ---
 
 ## Useful Queries
 
-### View Current Sprint Status
+### Mission Counts by Sprint
 
 ```sql
 SELECT sprint_id, status, COUNT(*) as count
 FROM missions
 GROUP BY sprint_id, status
-ORDER BY sprint_id, status;
+ORDER BY sprint_id IS NULL,
+         CASE
+           WHEN sprint_id GLOB 'sprint-[0-9]*'
+            AND substr(sprint_id, 8) NOT GLOB '*[^0-9]*'
+           THEN CAST(substr(sprint_id, 8) AS INTEGER)
+         END DESC,
+         sprint_id COLLATE BINARY DESC,
+         status;
 ```
 
-### Find Active/Recent Missions
+### Find Open Missions
 
 ```sql
 SELECT id, name, status, completed_at
 FROM missions
 WHERE status IN ('Current', 'In Progress', 'Queued')
-ORDER BY completed_at DESC NULLS FIRST;
+ORDER BY CASE status
+           WHEN 'In Progress' THEN 1
+           WHEN 'Current' THEN 2
+           WHEN 'Queued' THEN 3
+           ELSE 4
+         END,
+         id;
 ```
 
 ### View Sprint Progress
 
 ```sql
-SELECT id, title,
+SELECT sprint_id AS id, title,
        completed_missions || '/' || total_missions as progress,
-       status
-FROM sprints
-ORDER BY id;
+       status, blocked_missions, active_missions
+FROM sprint_summary
+ORDER BY start_date DESC, sprint_id COLLATE BINARY DESC;
 ```
 
-### Get Recent Sessions
+### Get Recent Activity Events
 
 ```sql
 SELECT ts, mission, action, status, summary
@@ -76,12 +101,12 @@ ORDER BY started_at DESC
 LIMIT 10;
 ```
 
-### Export Full Mission History for a Sprint
+### List Mission Rows for a Sprint
 
 ```sql
 SELECT id, name, status, completed_at, notes
 FROM missions
-WHERE sprint_id = 'Sprint 05'
+WHERE sprint_id = 'sprint-05'
 ORDER BY id;
 ```
 
@@ -135,13 +160,13 @@ sqlite3 cmos/db/cmos.sqlite
 - VS Code SQLite extension
 - etc.
 
-All standard SQLite tools work - no special configuration needed.
+All standard SQLite tools work for reads without special configuration.
 
 ---
 
 ## Schema Details
 
-See `cmos/db/schema.sql` for complete schema including:
+See `cmos/db/schema.sql` for the shipped base schema including:
 
 - Table definitions with foreign keys
 - Indexes for query performance
@@ -153,6 +178,9 @@ See `cmos/db/schema.sql` for complete schema including:
 ## Maintenance Queries
 
 ### Compact Database
+
+Back up the database and stop the MCP server (or otherwise ensure there are no active writers)
+before running `VACUUM`.
 
 ```sql
 VACUUM;
@@ -171,18 +199,17 @@ FROM pragma_page_count(), pragma_page_size();
 PRAGMA foreign_key_check;
 ```
 
-### List All Tables and Row Counts
+### List All Tables
 
 ```sql
-SELECT name,
-       (SELECT COUNT(*) FROM sqlite_master m2
-        WHERE m2.type='table' AND m2.name=m1.name)
-FROM sqlite_master m1
-WHERE type='table'
+SELECT name
+FROM sqlite_schema
+WHERE type = 'table'
+  AND name NOT LIKE 'sqlite_%'
 ORDER BY name;
 ```
 
 ---
 
-**Last Updated**: 2025-11-13  
+**Last Updated**: 2026-08-28
 **Replaces**: `sqlite-db-browser-guide.md` (tool-agnostic version)

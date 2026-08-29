@@ -21,9 +21,9 @@ CREATE TABLE IF NOT EXISTS metadata (
 -- cmos-seed/db/schema.sql is GENERATED from here (scripts/regenerate-seed-schema.ts imports
 -- CMOS_SCHEMA and writes it wholesale), and cmos-seed is inside package.json files[] -- so every
 -- published tarball manufactured a store carrying project_id='', project_name='' and
--- tracelab_project_id='': rows that satisfy NOT NULL while being semantically absent. Twelve of
--- the 45 CMOS stores on this machine resolve to the unknown-project literal, and this is where
--- new instances came from.
+-- tracelab_project_id='': rows that satisfy NOT NULL while being semantically absent. The #1038
+-- immutable remeasurement found 45 stores: 32 identified, 13 identity-less, 0 unreadable; this is
+-- where new identity-less instances came from.
 --
 -- DELETING THEM IS BEHAVIOUR-NEUTRAL, measured rather than assumed: genesis-columns.ts's read()
 -- returns '' for an ABSENT row, so absent and empty resolve identically; every writer is

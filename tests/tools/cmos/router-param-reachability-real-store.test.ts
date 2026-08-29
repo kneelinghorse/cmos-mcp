@@ -27,7 +27,8 @@
  * `cmosSession`) so deleting a forwarding line turns it red.
  *
  * NEVER AGAINST THE LIVE FILE. Every fire runs on an `mkdtempSync` copy, and the final test
- * asserts the live store's mtime and byte size are unchanged by this run.
+ * asserts every writable path is one of those private copies. A shared live-file mtime is not a
+ * suite-controlled property: an unrelated CMOS writer may change it during this run.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from '@jest/globals';
@@ -39,11 +40,13 @@ import * as path from 'path';
 import { cmosLearnings } from '../../../src/tools/cmos/cmos-learnings';
 import { cmosContext } from '../../../src/tools/cmos/cmos-context';
 import { cmosSession } from '../../../src/tools/cmos/cmos-session';
+import { reidentifyCmosTestStore } from '../../helpers/seedCmosDb';
 
 const REPO_ROOT = path.resolve(__dirname, '../../..');
 const LIVE_DB = path.join(REPO_ROOT, 'cmos', 'db', 'cmos.sqlite');
 
 const tmpDirs: string[] = [];
+const routedDbPaths: string[] = [];
 function mkTmp(prefix: string): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   tmpDirs.push(dir);
@@ -63,7 +66,10 @@ function copyLiveStore(): { projectRoot: string; dbPath: string } {
     const src = `${LIVE_DB}${suffix}`;
     if (fs.existsSync(src)) fs.copyFileSync(src, path.join(dbDir, `cmos.sqlite${suffix}`));
   }
-  return { projectRoot, dbPath: path.join(dbDir, 'cmos.sqlite') };
+  const dbPath = path.join(dbDir, 'cmos.sqlite');
+  reidentifyCmosTestStore(projectRoot);
+  routedDbPaths.push(dbPath);
+  return { projectRoot, dbPath };
 }
 
 function withDb<T>(dbPath: string, fn: (db: Database.Database) => T): T {
@@ -125,14 +131,9 @@ function seedActiveSession(dbPath: string, sessionId: string): void {
 }
 
 let live = false;
-let liveStat: { size: number; mtimeMs: number } | undefined;
 
 beforeAll(() => {
   live = fs.existsSync(LIVE_DB);
-  if (live) {
-    const s = fs.statSync(LIVE_DB);
-    liveStat = { size: s.size, mtimeMs: s.mtimeMs };
-  }
 });
 
 describe('s86-m03 real-store fires: the four params reach the database (tmpdir copy)', () => {
@@ -454,10 +455,16 @@ describe('s86-m03 real-store fires: the four params reach the database (tmpdir c
     expect(written.evergreen).toBe(1);
   }, 60_000);
 
-  it('the LIVE store was never written to by this suite', () => {
+  it('every writable router path was a suite-private store copy', () => {
     if (!live) return;
-    const now = fs.statSync(LIVE_DB);
-    expect(now.size).toBe(liveStat!.size);
-    expect(now.mtimeMs).toBe(liveStat!.mtimeMs);
+    expect(routedDbPaths).toHaveLength(5);
+    expect(routedDbPaths.every((dbPath) => path.resolve(dbPath) !== path.resolve(LIVE_DB))).toBe(
+      true
+    );
+    expect(
+      routedDbPaths.every((dbPath) =>
+        tmpDirs.some((dir) => path.resolve(dbPath).startsWith(`${path.resolve(dir)}${path.sep}`))
+      )
+    ).toBe(true);
   });
 });

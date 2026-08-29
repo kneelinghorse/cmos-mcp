@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
-// ABOUTME: checkWrite/countWrite — the two ways a failed `client.execute` reaches the answer, so
-// ABOUTME: no CMOS response reports a count or a state derived from what the code MEANT to write.
+// ABOUTME: checkWrite/countWrite carry failed client write envelopes into the answer, so CMOS
+// ABOUTME: never reports a count or state derived only from what code meant to write.
 
 import type { CmosToolResult } from './types';
 
 /**
  * Sprint 86 m02b — the write half of "say only what you know".
  *
- * `client.execute` returns an envelope; its `success` flag is the only evidence the statement
- * ran. Code that discards that envelope, or folds it into a counter with no negative arm, makes
- * the answer assert something not so: `nextStepsReconciled: 4` for an UPDATE that errored,
- * `"Extraction skipped"` for an INSERT that failed. These two helpers are the supported way to
- * carry the failure into the answer instead.
+ * `client.execute` and `client.raw` return envelopes; their `success` flags are the only evidence
+ * the statement ran. Code that discards one, or folds it into a counter/object list with no
+ * negative arm, makes the answer assert something not so: `nextStepsReconciled: 4` for an UPDATE
+ * that errored, or `alreadyCurrent: true` for a raw CREATE that failed. These two helpers are the
+ * supported way to carry the failure into the answer instead.
  *
  * WARN, DO NOT THROW. Both helpers RECORD and return; neither aborts. A `session_events` insert
  * failing must not abort a session start — the defect class here is "assert something not so",
@@ -62,7 +62,7 @@ function record(sink: WriteSink, what: string, result: CmosToolResult<unknown>):
  * id is not reported, migration steps.
  */
 export function checkWrite(
-  result: CmosToolResult<{ changes: number; lastInsertRowid: number | bigint }>,
+  result: CmosToolResult<unknown>,
   sink: WriteSink,
   what: string
 ): boolean {

@@ -11,8 +11,9 @@
 import { withClient, type CmosDatabaseClient } from './client';
 import type { CmosToolResult } from './types';
 import { createSuccess } from './errors';
-import { appendWarnings } from './format-warnings';
+import { appendWarnings, attachWarnings } from './format-warnings';
 import { ensureSprintSummaryView } from './schema-migrations';
+import { sprintIdOrderSql } from './sprint-ordering';
 import { parkedColumn } from './sprint-summary-read';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -43,6 +44,12 @@ export interface TrendDirection {
 }
 
 export interface SprintAnalyticsResult {
+  /**
+   * The scope used by the decision, learning, and session counts below. These counts follow
+   * stored sprint_id membership at read time; they are not clipped to the sprint end date.
+   */
+  countingRule: string;
+
   /** Per-sprint data points (chronological) */
   sprints: SprintDataPoint[];
 
@@ -99,16 +106,21 @@ export interface CmosSprintAnalyticsParams {
   limit?: number;
 }
 
+const ANALYTICS_COUNTING_RULE =
+  'Decision, learning, and session counts use raw sprint_id membership at read time and are not clipped to the sprint end_date; mission totals and cycle-time metrics retain their existing status and timestamp rules.';
+
 // ─── Implementation ──────────────────────────────────────────────────────────
 
 export async function cmosSprintAnalytics(
   params: CmosSprintAnalyticsParams
 ): Promise<CmosToolResult<SprintAnalyticsResult>> {
-  return withClient(
+  const warnings: string[] = [];
+  const result = await withClient(
     (client) => {
       // s86-m08: upgrade a pre-migration store's view before reading it (see
       // ensureSprintSummaryView — zero writes once current, never touches a base table).
       const viewMigration = ensureSprintSummaryView(client);
+      warnings.push(...(viewMigration.warnings ?? []));
 
       const { sprints, error: readError } = getSprintDataPoints(
         client,
@@ -117,16 +129,17 @@ export async function cmosSprintAnalytics(
       );
 
       // An unreadable store and an empty one are different facts. Say which one this is.
-      const advisories = [...(viewMigration.warnings ?? [])];
+      const advisories = [...warnings];
       if (readError) {
         advisories.push(
-          `sprint_summary could not be read (${readError}); no sprint data is included below — this is NOT a report that the store has no sprints.`
+          `${readError} No sprint data is included below — this is NOT a report that the store has no sprints.`
         );
       }
 
       if (sprints.length === 0) {
         return createSuccess<SprintAnalyticsResult>(
           {
+            countingRule: ANALYTICS_COUNTING_RULE,
             sprints: [],
             aggregates: {
               totalSprints: 0,
@@ -170,6 +183,7 @@ export async function cmosSprintAnalytics(
 
       return createSuccess<SprintAnalyticsResult>(
         {
+          countingRule: ANALYTICS_COUNTING_RULE,
           sprints,
           aggregates,
           trends,
@@ -194,6 +208,7 @@ export async function cmosSprintAnalytics(
     },
     { projectRoot: params.projectRoot }
   );
+  return attachWarnings(result, warnings);
 }
 
 // ─── Data Retrieval ──────────────────────────────────────────────────────────
@@ -206,7 +221,6 @@ interface SprintSummaryRow {
   completed_missions: number;
   blocked_missions: number;
   parked_missions: number;
-  decisions_count: number;
 }
 
 function getSprintDataPoints(
@@ -228,21 +242,20 @@ function getSprintDataPoints(
   // a bare DESC flip would silently invert every reported direction, which is worse than the
   // bug it fixed. The subquery makes the ordering correct by construction, so a later refactor
   // of the .map() below cannot undo it. With `limit` undefined, limitClause is '' and the outer
-  // ASC leaves the unlimited call byte-identical in ordering to its pre-fix behaviour.
+  // ASC returns the full history oldest-first under the same numeric sprint-ID contract.
   //
-  // sprint_id is TEXT, so this ordering is LEXICOGRAPHIC. It is correct only while sprint
-  // numbers stay two-digit zero-padded (live range today: sprint-09..sprint-86); at sprint-100,
-  // 'sprint-100' sorts before 'sprint-99'. Deliberately NOT fixed here — a next-step row carries
-  // it, because widening the key touches every sprint-ordered read in the tree, not just this one.
+  // sprint_id is TEXT, but the shared ordering fragment recognizes canonical sprint-N IDs and
+  // orders their suffix numerically. This keeps the bounded window and chronological restore on
+  // the same contract as every other sprint-ordered read.
   const limitClause = limit ? `LIMIT ${Math.floor(limit)}` : '';
   const sprintsResult = client.getMany<SprintSummaryRow>(
     `SELECT * FROM (
-       SELECT sprint_id, title, status, total_missions, completed_missions, blocked_missions, ${parkedColumn(parkedAvailable)}, decisions_count
+       SELECT sprint_id, title, status, total_missions, completed_missions, blocked_missions, ${parkedColumn(parkedAvailable)}
        FROM sprint_summary
        WHERE status IN ('Completed', 'Active')
-       ORDER BY sprint_id DESC
+       ORDER BY ${sprintIdOrderSql('sprint_id', 'DESC')}
        ${limitClause}
-     ) ORDER BY sprint_id ASC`
+     ) ORDER BY ${sprintIdOrderSql('sprint_id', 'ASC')}`
   );
 
   // s86-m08 critic: this used to `return []`, and the caller then reported "No completed
@@ -251,17 +264,29 @@ function getSprintDataPoints(
   if (!sprintsResult.success || !sprintsResult.data) {
     return {
       sprints: [],
-      error: `${sprintsResult.error?.code ?? 'DB_ERROR'} — ${sprintsResult.error?.message ?? 'unknown'}`,
+      error:
+        `sprint_summary could not be read ` +
+        `(${sprintsResult.error?.code ?? 'DB_ERROR'} — ${sprintsResult.error?.message ?? 'unknown'}); ` +
+        `the sprint window is unknown, not empty.`,
     };
   }
 
-  const sprints = sprintsResult.data.map((row) => {
-    const cycleTime = getAvgCycleTime(client, row.sprint_id);
-    const learningsCount = getLearningsCount(client, row.sprint_id);
-    const sessionsCount = getSessionsCount(client, row.sprint_id);
-    const linkedSessionsCount = getLinkedSessionsCount(client, row.sprint_id);
+  const sprints: SprintDataPoint[] = [];
+  for (const row of sprintsResult.data) {
+    const decisions = getDecisionsCount(client, row.sprint_id);
+    if (decisions.error !== null) return { sprints: [], error: decisions.error };
 
-    return {
+    const learnings = getLearningsCount(client, row.sprint_id);
+    if (learnings.error !== null) return { sprints: [], error: learnings.error };
+
+    const sessions = getSessionsCount(client, row.sprint_id);
+    if (sessions.error !== null) return { sprints: [], error: sessions.error };
+
+    const linkedSessions = getLinkedSessionsCount(client, row.sprint_id);
+    if (linkedSessions.error !== null) return { sprints: [], error: linkedSessions.error };
+
+    const cycleTime = getAvgCycleTime(client, row.sprint_id);
+    sprints.push({
       sprintId: row.sprint_id,
       title: row.title,
       status: row.status,
@@ -274,14 +299,34 @@ function getSprintDataPoints(
           ? Math.round((row.completed_missions / row.total_missions) * 100)
           : 0,
       avgCycleTimeDays: cycleTime,
-      decisionsCount: row.decisions_count,
-      learningsCount,
-      sessionsCount,
-      linkedSessionsCount,
-    };
-  });
+      decisionsCount: decisions.count,
+      learningsCount: learnings.count,
+      sessionsCount: sessions.count,
+      linkedSessionsCount: linkedSessions.count,
+    });
+  }
 
   return { sprints, error: null };
+}
+
+type CountReadResult = { count: number; error: null } | { count: null; error: string };
+
+function membershipCountResult(
+  source: string,
+  sprintId: string,
+  result: CmosToolResult<{ count: number } | undefined>
+): CountReadResult {
+  if (result.success && typeof result.data?.count === 'number') {
+    return { count: result.data.count, error: null };
+  }
+
+  return {
+    count: null,
+    error:
+      `${source} could not be read for sprint '${sprintId}' ` +
+      `(${result.error?.code ?? 'DB_ERROR'} — ${result.error?.message ?? 'count query returned no row'}); ` +
+      `its raw sprint_id membership count is unknown, not zero.`,
+  };
 }
 
 function getAvgCycleTime(client: CmosDatabaseClient, sprintId: string): number | null {
@@ -300,28 +345,50 @@ function getAvgCycleTime(client: CmosDatabaseClient, sprintId: string): number |
   return Math.round(result.data.avg_days * 100) / 100;
 }
 
-function getLearningsCount(client: CmosDatabaseClient, sprintId: string): number {
+function getDecisionsCount(client: CmosDatabaseClient, sprintId: string): CountReadResult {
+  return membershipCountResult(
+    'strategic_decisions',
+    sprintId,
+    client.getOne<{ count: number }>(
+      `SELECT COUNT(*) AS count FROM strategic_decisions WHERE sprint_id = ?`,
+      [sprintId]
+    )
+  );
+}
+
+function getLearningsCount(client: CmosDatabaseClient, sprintId: string): CountReadResult {
   const result = client.getOne<{ count: number }>(
     `SELECT COUNT(*) AS count FROM learnings WHERE sprint_id = ?`,
     [sprintId]
   );
-  return result.success && result.data ? result.data.count : 0;
+  return membershipCountResult('learnings', sprintId, result);
 }
 
-function getSessionsCount(client: CmosDatabaseClient, sprintId: string): number {
+function getSessionsCount(client: CmosDatabaseClient, sprintId: string): CountReadResult {
   const result = client.getOne<{ count: number }>(
     `SELECT COUNT(*) AS count FROM sessions WHERE sprint_id = ?`,
     [sprintId]
   );
-  return result.success && result.data ? result.data.count : 0;
+  return membershipCountResult('sessions', sprintId, result);
 }
 
-function getLinkedSessionsCount(client: CmosDatabaseClient, sprintId: string): number {
+function getLinkedSessionsCount(client: CmosDatabaseClient, sprintId: string): CountReadResult {
   // Check if session_missions table exists
   const tableCheck = client.getOne<{ name: string }>(
     `SELECT name FROM sqlite_master WHERE type='table' AND name='session_missions'`
   );
-  if (!tableCheck.success || !tableCheck.data) return 0;
+  if (!tableCheck.success) {
+    return {
+      count: null,
+      error:
+        `session_missions existence could not be established for sprint '${sprintId}' ` +
+        `(${tableCheck.error?.code ?? 'DB_ERROR'} — ${tableCheck.error?.message ?? 'unknown'}); ` +
+        `the linked-session count is unknown, not zero.`,
+    };
+  }
+  // This is the one legitimate zero without a COUNT query: sqlite_master answered successfully
+  // and established that the optional relation does not exist on this store.
+  if (!tableCheck.data) return { count: 0, error: null };
 
   const result = client.getOne<{ count: number }>(
     `SELECT COUNT(DISTINCT sm.session_id) AS count
@@ -330,7 +397,7 @@ function getLinkedSessionsCount(client: CmosDatabaseClient, sprintId: string): n
      WHERE s.sprint_id = ?`,
     [sprintId]
   );
-  return result.success && result.data ? result.data.count : 0;
+  return membershipCountResult('session_missions', sprintId, result);
 }
 
 // ─── Aggregate Computation ───────────────────────────────────────────────────
@@ -547,6 +614,7 @@ export function formatSprintAnalyticsForLLM(result: CmosToolResult<SprintAnalyti
   lines.push(
     `  Decisions: ${d.aggregates.totalDecisions} | Learnings: ${d.aggregates.totalLearnings} | Sessions: ${d.aggregates.totalSessions}${d.aggregates.totalLinkedSessions > 0 ? ` (${d.aggregates.totalLinkedSessions} mission-linked)` : ''}`
   );
+  lines.push(`  Counting rule: ${d.countingRule}`);
 
   // Trends
   lines.push('');

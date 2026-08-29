@@ -2,6 +2,63 @@
 
 All notable changes to cmos-mcp are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 2.8.0 — 2026-08-29
+
+Sprint 88 "Fix the Instrument" — Arc F sprint 2. This release repairs the claims and gates that
+made 2.7.0's behavioural audit look more complete than it was, makes sprint close evidence
+self-describing, separates read-only discovery from identity registration, and carries migration
+warnings all the way to the agent-visible answer. It remains a MINOR release: no consolidated MCP
+tool was added or removed.
+
+### Changed
+
+- **Read-classified calls and `cmos_review` no longer register a project or mint its identity.**
+  `getProjectId` is now a pure lookup. Explicit `cmos_project(action="register")` and ordinary
+  write boundaries perform registration and identity persistence instead, including an explicit
+  `projectRoot`. Identity-less reads continue to work and now disclose their unattributed state
+  on the answer rather than only on process stderr.
+- **Project identity collisions fail closed at registration and restore boundaries.** Physical
+  path aliases resolve to the same store, identity-less snapshots are reconciled to the live
+  identity, and a foreign snapshot is rejected with database and graph state rolled back.
+- **Sprint ordering is numeric for canonical ids.** `sprint-9` now sorts before `sprint-10` while
+  mixed or non-canonical ids retain a deterministic fallback order.
+- **Dependency relationships are documented as record-only.** `Blocks`, `Requires`, and `Enables`
+  feed ordering and graph expansion; they do not prevent a mission from starting or completing.
+- **Migration and sync warnings reach the existing response warning channel.** All 41 answer-bound
+  calls to the 21 exported `MigrationResult`-compatible schema helpers now consume or forward
+  warnings; the 7 remaining calls have no answer carrier. Pull-before-push warnings also survive
+  every mutable-push success and error path, with exact-string deduplication.
+
+### Added
+
+- **Sprint-close receipts now audit the process that produced them.** The result includes
+  `activeSessionsAtClose`, `startupBuildTime`, and `driftMinutes`, verifies that the archival id
+  arrays exist, and renders reconnect guidance from the measured process state.
+- **Session-capture receipts identify what was written and when it materializes.** Decision and
+  learning captures return their row id, next-step captures disclose that they materialize at
+  session close, learning capture accepts `evergreen`, and `SESSION_ALREADY_ACTIVE` identifies the
+  active session and its pending captures.
+- Standing tests now inventory legacy tool-definition modules, prove shipped `Last Updated` stamps
+  change when their body changes, cover both `.execute()` and `.raw()` write guards, and publish
+  executable semantic warning censuses. The formatter census closes from 93 of 103 genuine render
+  returns carrying warnings to 103 of 103; deliberate error preambles and delegations are counted
+  separately.
+
+### Fixed
+
+- Rejected next-step writes no longer misreport SQL failures as `unmatchedIds`, and completed sprint
+  guidance no longer tells an operator to complete work that is already complete. Seven shipped
+  assertions found by the sprint-87 review were corrected rather than preserved as compatibility
+  text.
+- `cmos_sprint(action="analytics")` now states that its counts use direct `sprint_id` membership and
+  reports an unavailable count as unknown rather than zero.
+- Advisory schema migrations no longer report false-current after a failed or incomplete DDL step.
+  They validate same-named virtual tables and triggers before claiming them, rebuild empty FTS
+  indexes when source rows exist, retry when a missing base table later appears, preserve schema
+  markers newer than 2.3, and warn without throwing or overwriting a conflicting object.
+- The schema write guard now sees raw DDL as well as prepared execution, closing the path that could
+  swallow a failed `CREATE VIRTUAL TABLE` and still return `alreadyCurrent: true`.
+
 ## 2.7.0 — 2026-08-28
 
 Sprint 87 "Mean What You Say" — Arc F sprint 1. Sprint 86 closed the axis a mechanical gate can

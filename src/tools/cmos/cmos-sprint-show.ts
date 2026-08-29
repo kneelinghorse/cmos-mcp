@@ -12,9 +12,9 @@ import { withClient } from './client';
 import type { CmosToolResult, MissionStatus } from './types';
 import { createError, createSuccess, CmosErrors } from './errors';
 import { getSprintDecisionCounts } from './decision-memory';
-import { appendWarnings } from './format-warnings';
+import { appendWarnings, attachWarnings } from './format-warnings';
 import { ensureSprintSummaryView } from './schema-migrations';
-import { parkedColumn, withViewContext } from './sprint-summary-read';
+import { parkedColumn } from './sprint-summary-read';
 
 /**
  * Mission summary within a sprint.
@@ -173,11 +173,13 @@ export async function cmosSprintShow(
     return createError(CmosErrors.missingParameter('sprintId'));
   }
 
-  return withClient(
+  const warnings: string[] = [];
+  const result = await withClient(
     (client) => {
       // s86-m08: upgrade a pre-migration store's view before reading it (zero writes once
       // current; a base table of the same name is left untouched).
       const viewMigration = ensureSprintSummaryView(client);
+      warnings.push(...(viewMigration.warnings ?? []));
 
       // Get sprint from sprint_summary view
       const sprintResult = client.getOne<SprintSummaryRow>(
@@ -191,14 +193,8 @@ export async function cmosSprintShow(
       );
 
       if (!sprintResult.success) {
-        // Carry the migration's warning onto the ERROR too: on a store whose view could not be
-        // upgraded, that warning is the one fact explaining the failure, and createError has no
-        // warnings channel of its own.
         return createError<SprintShowResult>(
-          withViewContext(
-            sprintResult.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to query sprint' },
-            viewMigration
-          )
+          sprintResult.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to query sprint' }
         );
       }
 
@@ -261,6 +257,7 @@ export async function cmosSprintShow(
     },
     { projectRoot: params.projectRoot }
   );
+  return attachWarnings(result, warnings);
 }
 
 /**
@@ -283,6 +280,7 @@ export function formatSprintShowForLLM(result: CmosToolResult<SprintShowResult>)
       lines.push(`Suggestion: ${error.suggestion}`);
     }
 
+    appendWarnings(lines, result);
     return lines.join('\n');
   }
 

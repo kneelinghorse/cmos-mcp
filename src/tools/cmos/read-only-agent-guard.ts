@@ -20,8 +20,9 @@ export class ReadOnlyAgentGuardError extends Error {
   constructor(toolName: string, action: string | undefined) {
     super(
       `[read-only-agent-guard] BLOCKED: ${toolName}${action ? `(action=${action})` : ''} is a WRITE ` +
-        `and ${READ_ONLY_AGENT_ENV}=${READ_ONLY_AGENT_ROLE} pins this session to read-only. ` +
-        `No database was opened and no row/credential was mutated. Use a read action, or unset ` +
+        `and ${READ_ONLY_AGENT_ENV}=${READ_ONLY_AGENT_ROLE} permits only read-classified calls. ` +
+        `This blocked call stopped before project resolution or DB open; it mutated no row or ` +
+        `credential. Use a read action, or unset ` +
         `${READ_ONLY_AGENT_ENV} to run with write access.`
     );
     this.name = 'ReadOnlyAgentGuardError';

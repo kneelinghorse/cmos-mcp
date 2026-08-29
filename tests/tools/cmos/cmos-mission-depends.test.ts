@@ -24,6 +24,9 @@ import {
   type DependencyType,
 } from '../../../src/tools/cmos/cmos-mission-depends';
 
+const EXPECTED_DEPENDENCY_DISCLOSURE =
+  'Dependency relationships are recorded for ordering and graph expansion; they are not enforced at mission start or completion.';
+
 /**
  * Helper to create test database.
  */
@@ -35,7 +38,9 @@ interface TestDb {
 
 function createTestDb(): TestDb {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-depends-test-'));
-  const dbPath = path.join(tempDir, 'cmos.sqlite');
+  const dbDir = path.join(tempDir, 'cmos', 'db');
+  fs.mkdirSync(dbDir, { recursive: true });
+  const dbPath = path.join(dbDir, 'cmos.sqlite');
   const db = new Database(dbPath);
 
   // Create schema
@@ -88,6 +93,15 @@ function createTestDb(): TestDb {
       raw_event TEXT NOT NULL
     );
 
+    CREATE TABLE metadata (
+      key TEXT PRIMARY KEY,
+      value TEXT
+    );
+
+    INSERT INTO metadata (key, value)
+    VALUES ('project_id', 'depends-test-project'),
+           ('project_name', 'Depends Test Project');
+
     -- Insert test sprint
     INSERT INTO sprints (id, title, focus, status)
     VALUES ('sprint-14', 'Sprint 14 - Testing', 'Test dependencies', 'Active');
@@ -122,156 +136,8 @@ async function callMissionDepends(
   dbPath: string,
   params: Omit<CmosMissionDependsParams, 'projectRoot'>
 ): Promise<CmosToolResult<MissionDependsResult>> {
-  const { withClient } = await import('../../../src/tools/cmos/client');
-  const { createError, createSuccess, CmosErrors, CMOS_ERROR_CODES } =
-    await import('../../../src/tools/cmos/errors');
-
-  const { fromId, toId, type } = params;
-
-  // Validate required parameters
-  if (!fromId || fromId.trim() === '') {
-    return createError(CmosErrors.missingParameter('fromId'));
-  }
-
-  if (!toId || toId.trim() === '') {
-    return createError(CmosErrors.missingParameter('toId'));
-  }
-
-  if (!type) {
-    return createError(CmosErrors.missingParameter('type'));
-  }
-
-  // Validate dependency type
-  if (!VALID_DEPENDENCY_TYPES.includes(type)) {
-    return createError(CmosErrors.invalidParameter('type', type, [...VALID_DEPENDENCY_TYPES]));
-  }
-
-  // Prevent self-dependency
-  if (fromId.trim() === toId.trim()) {
-    return createError({
-      code: CMOS_ERROR_CODES.INVALID_PARAMETER,
-      message: 'A mission cannot depend on itself',
-      suggestion: 'Provide different mission IDs for fromId and toId',
-    });
-  }
-
-  return withClient(
-    (client) => {
-      // Verify fromId mission exists
-      const fromResult = client.getOne<{ id: string }>('SELECT id FROM missions WHERE id = ?', [
-        fromId.trim(),
-      ]);
-
-      if (!fromResult.success) {
-        return createError<MissionDependsResult>(
-          fromResult.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to verify mission' }
-        );
-      }
-
-      if (!fromResult.data) {
-        return createError<MissionDependsResult>(CmosErrors.missionNotFound(fromId));
-      }
-
-      // Verify toId mission exists
-      const toResult = client.getOne<{ id: string }>('SELECT id FROM missions WHERE id = ?', [
-        toId.trim(),
-      ]);
-
-      if (!toResult.success) {
-        return createError<MissionDependsResult>(
-          toResult.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to verify mission' }
-        );
-      }
-
-      if (!toResult.data) {
-        return createError<MissionDependsResult>(CmosErrors.missionNotFound(toId));
-      }
-
-      // Check if dependency already exists
-      const existingResult = client.getOne<{ from_id: string; to_id: string }>(
-        'SELECT from_id, to_id FROM mission_dependencies WHERE from_id = ? AND to_id = ?',
-        [fromId.trim(), toId.trim()]
-      );
-
-      if (!existingResult.success) {
-        return createError<MissionDependsResult>(
-          existingResult.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to check dependency' }
-        );
-      }
-
-      if (existingResult.data) {
-        return createError<MissionDependsResult>({
-          code: CMOS_ERROR_CODES.INVALID_PARAMETER,
-          message: `Dependency from '${fromId}' to '${toId}' already exists`,
-          suggestion: 'Use a different pair of missions or remove the existing dependency first',
-        });
-      }
-
-      // Insert the dependency
-      const insertResult = client.execute(
-        `INSERT INTO mission_dependencies (from_id, to_id, type)
-         VALUES (?, ?, ?)`,
-        [fromId.trim(), toId.trim(), type]
-      );
-
-      if (!insertResult.success) {
-        return createError<MissionDependsResult>(
-          insertResult.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to create dependency' }
-        );
-      }
-
-      if (insertResult.data?.changes === 0) {
-        return createError<MissionDependsResult>({
-          code: 'DB_QUERY_FAILED',
-          message: 'Dependency was not created (no rows affected)',
-          suggestion: 'Check database permissions and try again',
-        });
-      }
-
-      // Log creation event
-      const now = new Date().toISOString();
-      client.execute(
-        `INSERT INTO session_events (ts, agent, mission, action, status, summary, raw_event)
-         VALUES (?, 'mcp-tool', ?, 'dependency', ?, ?, ?)`,
-        [
-          now,
-          fromId,
-          'dependency_created',
-          `Created ${type} dependency: ${fromId} -> ${toId}`,
-          JSON.stringify({
-            tool: 'cmos_mission_depends',
-            fromId: fromId.trim(),
-            toId: toId.trim(),
-            type,
-          }),
-        ]
-      );
-
-      // Build descriptive message based on type
-      let description: string;
-      switch (type) {
-        case 'Blocks':
-          description = `Mission '${fromId}' now blocks '${toId}' from starting`;
-          break;
-        case 'Requires':
-          description = `Mission '${fromId}' now requires '${toId}' to be completed first`;
-          break;
-        case 'Enables':
-          description = `Mission '${fromId}' now enables '${toId}' to proceed`;
-          break;
-        default:
-          description = `Dependency created: ${fromId} ${type} ${toId}`;
-      }
-
-      return createSuccess({
-        fromId: fromId.trim(),
-        toId: toId.trim(),
-        type,
-        message: description,
-      });
-    },
-    { dbPath }
-  );
+  const projectRoot = path.resolve(path.dirname(dbPath), '..', '..');
+  return cmosMissionDepends({ ...params, projectRoot });
 }
 
 describe('cmos_mission_depends', () => {
@@ -287,47 +153,26 @@ describe('cmos_mission_depends', () => {
   });
 
   describe('happy path - dependency creation', () => {
-    it('should create a Blocks dependency', async () => {
+    it.each([
+      { fromId: 'm-02', toId: 'm-03', type: 'Blocks' },
+      { fromId: 'm-03', toId: 'm-04', type: 'Requires' },
+      { fromId: 'm-02', toId: 'm-04', type: 'Enables' },
+    ] as const)('should create a $type dependency with an honest receipt', async (params) => {
       const result = await callMissionDepends(testDb.dbPath, {
-        fromId: 'm-02',
-        toId: 'm-03',
-        type: 'Blocks',
+        fromId: params.fromId,
+        toId: params.toId,
+        type: params.type,
       });
 
       expect(result.success).toBe(true);
-      expect(result.data?.fromId).toBe('m-02');
-      expect(result.data?.toId).toBe('m-03');
-      expect(result.data?.type).toBe('Blocks');
-      expect(result.data?.message).toContain('blocks');
+      expect(result.data).toMatchObject(params);
+      expect(result.data?.message).toContain(params.type);
+      expect(result.data?.message).toContain(EXPECTED_DEPENDENCY_DISCLOSURE);
 
       const row = testDb.db
         .prepare('SELECT * FROM mission_dependencies WHERE from_id = ? AND to_id = ?')
-        .get('m-02', 'm-03') as { type: string };
-      expect(row.type).toBe('Blocks');
-    });
-
-    it('should create a Requires dependency', async () => {
-      const result = await callMissionDepends(testDb.dbPath, {
-        fromId: 'm-03',
-        toId: 'm-04',
-        type: 'Requires',
-      });
-
-      expect(result.success).toBe(true);
-      expect(result.data?.type).toBe('Requires');
-      expect(result.data?.message).toContain('requires');
-    });
-
-    it('should create an Enables dependency', async () => {
-      const result = await callMissionDepends(testDb.dbPath, {
-        fromId: 'm-02',
-        toId: 'm-04',
-        type: 'Enables',
-      });
-
-      expect(result.success).toBe(true);
-      expect(result.data?.type).toBe('Enables');
-      expect(result.data?.message).toContain('enables');
+        .get(params.fromId, params.toId) as { type: string };
+      expect(row.type).toBe(params.type);
     });
 
     it('should trim whitespace from mission IDs', async () => {
@@ -490,6 +335,9 @@ describe('cmos_mission_depends', () => {
       expect(cmosMissionDependsToolDefinition.description).toContain('Blocks');
       expect(cmosMissionDependsToolDefinition.description).toContain('Requires');
       expect(cmosMissionDependsToolDefinition.description).toContain('Enables');
+      expect(cmosMissionDependsToolDefinition.description).toContain(
+        EXPECTED_DEPENDENCY_DISCLOSURE
+      );
     });
 
     it('should require fromId, toId, and type', () => {
@@ -520,7 +368,7 @@ describe('cmos_mission_depends', () => {
       expect(formatted).toContain('From: m-03');
       expect(formatted).toContain('To: m-04');
       expect(formatted).toContain('Type: Blocks');
-      expect(formatted).toContain('blocks');
+      expect(formatted).toContain(EXPECTED_DEPENDENCY_DISCLOSURE);
     });
 
     it('should format error result', async () => {

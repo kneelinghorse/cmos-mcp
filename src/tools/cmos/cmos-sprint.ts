@@ -10,6 +10,7 @@
 
 import { z } from 'zod';
 import { createError, CmosErrors } from './errors';
+import { appendWarnings } from './format-warnings';
 import type { ActionParamMap, CmosToolResult } from './types';
 import {
   cmosSprintAdd,
@@ -437,7 +438,11 @@ export function formatSprintForLLM(
       return formatSprintCarryForwardForLLM(result as CmosToolResult<SprintCarryForwardResult>);
     case 'analytics':
       return formatSprintAnalyticsForLLM(result as CmosToolResult<SprintAnalyticsResult>);
-    default:
-      return result.success ? '✓ Sprint action completed' : '❌ Failed to execute cmos_sprint';
+    default: {
+      if (!result.success) return '❌ Failed to execute cmos_sprint';
+      const lines = ['✓ Sprint action completed'];
+      appendWarnings(lines, result);
+      return lines.join('\n');
+    }
   }
 }

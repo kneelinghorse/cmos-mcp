@@ -338,6 +338,7 @@ export function formatDecisionsSearchForLLM(
     lines.push('**Suggestions**:');
     lines.push('  • Try different keywords');
     lines.push('  • Use cmos_decisions(action="list") to browse all decisions');
+    appendWarnings(lines, result);
     return lines.join('\n');
   }
 

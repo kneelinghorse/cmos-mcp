@@ -381,6 +381,267 @@ describe('schema-migrations', () => {
       }
     });
 
+    it.each([
+      ['table', 'CREATE TABLE decisions_fts (id INTEGER PRIMARY KEY, decision_text TEXT)'],
+      ['view', "CREATE VIEW decisions_fts AS SELECT 1 AS rowid, 'consumer view' AS decision_text"],
+      ['index', 'CREATE INDEX decisions_fts ON strategic_decisions (id)'],
+    ])(
+      'rejects a same-named %s without claiming that it created decisions_fts',
+      async (objectType, collisionSql) => {
+        const db = createOldSchemaDb();
+        db.exec(collisionSql);
+        db.close();
+
+        const { ensureDecisionsFts5 } = await import('../../../src/tools/cmos/schema-migrations');
+        const client = await getClient();
+        try {
+          const result = ensureDecisionsFts5(client);
+
+          expect(result).toEqual({
+            columnsAdded: [],
+            indexesCreated: [],
+            rowsUpdated: 0,
+            alreadyCurrent: false,
+            warnings: [
+              `CREATE VIRTUAL TABLE decisions_fts blocked: DB_SCHEMA_MISMATCH — Existing ${objectType} 'decisions_fts' is not a fts5 virtual table.`,
+            ],
+          });
+          expect(
+            client.getOne<{ type: string; sql: string }>(
+              "SELECT type, sql FROM sqlite_master WHERE name = 'decisions_fts'",
+              []
+            ).data?.type
+          ).toBe(objectType);
+        } finally {
+          client.close();
+        }
+      }
+    );
+
+    it('rejects a same-named fts5 table with the wrong indexed columns', async () => {
+      const db = createOldSchemaDb();
+      db.exec(`
+        CREATE VIRTUAL TABLE decisions_fts USING fts5(
+          other_text,
+          content='strategic_decisions',
+          content_rowid='id'
+        );
+      `);
+      db.close();
+
+      const { ensureDecisionsFts5 } = await import('../../../src/tools/cmos/schema-migrations');
+      const client = await getClient();
+      try {
+        expect(ensureDecisionsFts5(client)).toEqual({
+          columnsAdded: [],
+          indexesCreated: [],
+          rowsUpdated: 0,
+          alreadyCurrent: false,
+          warnings: [
+            "CREATE VIRTUAL TABLE decisions_fts blocked: DB_SCHEMA_MISMATCH — Existing fts5 virtual table 'decisions_fts' has a different definition; drop or rename it, then retry.",
+          ],
+        });
+        expect(
+          client.getOne<{ sql: string }>(
+            "SELECT sql FROM sqlite_master WHERE name = 'decisions_fts'",
+            []
+          ).data?.sql
+        ).toContain('other_text');
+      } finally {
+        client.close();
+      }
+    });
+
+    it('accepts a current fts5 table and trigger with benign SQL spelling differences', async () => {
+      const db = createOldSchemaDb();
+      db.close();
+
+      const { ensureDecisionsFts5 } = await import('../../../src/tools/cmos/schema-migrations');
+      const client = await getClient();
+      try {
+        expect(ensureDecisionsFts5(client).warnings).toEqual([]);
+        expect(client.raw('DROP TABLE decisions_fts').success).toBe(true);
+        expect(
+          client.raw(`
+            CREATE VIRTUAL TABLE IF NOT EXISTS decisions_fts
+            USING fts5 (
+              decision_text,
+              content = 'strategic_decisions',
+              content_rowid = 'id'
+            );
+          `).success
+        ).toBe(true);
+        expect(client.raw('DROP TRIGGER decisions_fts_insert').success).toBe(true);
+        expect(
+          client.raw(`
+            CREATE TRIGGER IF NOT EXISTS decisions_fts_insert
+            AFTER INSERT ON strategic_decisions
+            BEGIN
+              INSERT INTO decisions_fts (rowid, decision_text)
+              VALUES (new.id, new.decision_text);
+            END;
+          `).success
+        ).toBe(true);
+
+        expect(ensureDecisionsFts5(client)).toEqual({
+          columnsAdded: [],
+          indexesCreated: [],
+          rowsUpdated: 0,
+          alreadyCurrent: true,
+          warnings: [],
+        });
+      } finally {
+        client.close();
+      }
+    });
+
+    it('rejects a same-named trigger with a different body and leaves it untouched', async () => {
+      const db = createOldSchemaDb();
+      db.close();
+
+      const { ensureDecisionsFts5 } = await import('../../../src/tools/cmos/schema-migrations');
+      const client = await getClient();
+      try {
+        expect(ensureDecisionsFts5(client).warnings).toEqual([]);
+        expect(client.raw('DROP TRIGGER decisions_fts_insert').success).toBe(true);
+        expect(
+          client.raw(`
+            CREATE TRIGGER decisions_fts_insert AFTER INSERT ON strategic_decisions BEGIN
+              SELECT 1;
+            END
+          `).success
+        ).toBe(true);
+
+        expect(ensureDecisionsFts5(client)).toEqual({
+          columnsAdded: [],
+          indexesCreated: [],
+          rowsUpdated: 0,
+          alreadyCurrent: false,
+          warnings: [
+            "CREATE TRIGGER decisions_fts_insert blocked: DB_SCHEMA_MISMATCH — Existing trigger 'decisions_fts_insert' has a different definition; drop or rename it, then retry.",
+          ],
+        });
+        expect(
+          client.getOne<{ sql: string }>(
+            "SELECT sql FROM sqlite_master WHERE name = 'decisions_fts_insert'",
+            []
+          ).data?.sql
+        ).toContain('SELECT 1');
+      } finally {
+        client.close();
+      }
+    });
+
+    it('surfaces a real raw CREATE failure without throwing or claiming created objects', async () => {
+      const db = createOldSchemaDb();
+      db.pragma('journal_mode = DELETE');
+      db.close();
+
+      const { ensureDecisionsFts5 } = await import('../../../src/tools/cmos/schema-migrations');
+      const opened = await CmosDatabaseClient.create({ dbPath, readonly: true });
+      expect(opened.success).toBe(true);
+      expect(opened.data).toBeDefined();
+      const client = opened.data!;
+      try {
+        expect(ensureDecisionsFts5(client)).toEqual({
+          columnsAdded: [],
+          indexesCreated: [],
+          rowsUpdated: 0,
+          alreadyCurrent: false,
+          warnings: [
+            'CREATE VIRTUAL TABLE decisions_fts failed: DB_CONNECTION_FAILED — Database is opened in read-only mode',
+          ],
+        });
+      } finally {
+        client.close();
+      }
+    });
+
+    it('retries missing triggers and rebuilds after a partial first invocation is repaired', async () => {
+      const db = createOldSchemaDb();
+      db.exec('DROP TABLE strategic_decisions');
+      db.close();
+
+      const { ensureDecisionsFts5 } = await import('../../../src/tools/cmos/schema-migrations');
+      const client = await getClient();
+      try {
+        const first = ensureDecisionsFts5(client);
+
+        expect(first).toEqual({
+          columnsAdded: ['decisions_fts (virtual table)'],
+          indexesCreated: [],
+          rowsUpdated: 0,
+          alreadyCurrent: false,
+          warnings: [
+            "CREATE TRIGGER decisions_fts_insert failed: DB_SCHEMA_MISMATCH — Table 'strategic_decisions' does not exist",
+            "CREATE TRIGGER decisions_fts_delete failed: DB_SCHEMA_MISMATCH — Table 'strategic_decisions' does not exist",
+            "CREATE TRIGGER decisions_fts_update failed: DB_SCHEMA_MISMATCH — Table 'strategic_decisions' does not exist",
+            "decisions_fts rebuild failed: DB_SCHEMA_MISMATCH — Table 'strategic_decisions' does not exist",
+          ],
+        });
+        expect(new Set(first.warnings).size).toBe(first.warnings?.length);
+        expect(
+          client.getOne<{ type: string }>(
+            "SELECT type FROM sqlite_master WHERE name = 'decisions_fts'",
+            []
+          ).data?.type
+        ).toBe('table');
+        expect(
+          client.getMany<{ name: string }>(
+            "SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'decisions_fts_%' ORDER BY name",
+            []
+          ).data
+        ).toEqual([]);
+
+        expect(
+          client.raw(`
+            CREATE TABLE strategic_decisions (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              decision_text TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            );
+            INSERT INTO strategic_decisions (decision_text, created_at)
+            VALUES ('repair retry proof', '2026-08-28T00:00:00Z');
+          `).success
+        ).toBe(true);
+
+        const second = ensureDecisionsFts5(client);
+
+        expect(second).toEqual({
+          columnsAdded: [],
+          indexesCreated: ['decisions_fts_insert', 'decisions_fts_delete', 'decisions_fts_update'],
+          rowsUpdated: 1,
+          alreadyCurrent: false,
+          warnings: [],
+        });
+        expect(
+          client.getMany<{ name: string }>(
+            "SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'decisions_fts_%' ORDER BY name",
+            []
+          ).data
+        ).toEqual([
+          { name: 'decisions_fts_delete' },
+          { name: 'decisions_fts_insert' },
+          { name: 'decisions_fts_update' },
+        ]);
+        expect(
+          client.getMany<{ rowid: number }>(
+            "SELECT rowid FROM decisions_fts WHERE decisions_fts MATCH 'retry'",
+            []
+          ).data
+        ).toHaveLength(1);
+        expect(ensureDecisionsFts5(client)).toEqual({
+          columnsAdded: [],
+          indexesCreated: [],
+          rowsUpdated: 0,
+          alreadyCurrent: true,
+          warnings: [],
+        });
+      } finally {
+        client.close();
+      }
+    });
+
     it('should index existing decisions on rebuild', async () => {
       const db = createOldSchemaDb();
       db.exec(`

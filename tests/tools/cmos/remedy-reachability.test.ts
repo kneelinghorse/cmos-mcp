@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-// ABOUTME: s87-m01 class-(a) remedy-reachability gate — every cmos_*(action=…) a mission-transition
-// ABOUTME: refusal prescribes must be executable from the state it was prescribed in, or say it is not.
+// ABOUTME: Remedy-reachability gate for mission refusals and the two close-adjacent success warnings.
+// ABOUTME: Every covered cmos_*(action=…) prescription is replayed from its prescribed state.
 
 /**
  * Sprint 87 m01 — NO PRESCRIBED REMEDY MAY CRASH.
@@ -98,17 +98,47 @@
  *  8. THE MATRIX DRIVES THE ROUTERS IN-PROCESS, NOT THE BUILT `dist/` OVER STDIO. The published
  *     artifact is gated separately, in `scripts/verify-dist.ts` — which is the only check that
  *     sees what actually ships.
+ *  9. ENVELOPE SUCCESS-WARNING COVERAGE IS BOUNDED TO TWO CLOSE-ADJACENT PRODUCERS. ARM 1
+ *     establishes and replays the `cmos_sprint(action="complete")` warning from successful
+ *     `cmos_mission_transition(action="complete")` and `cmos_session(action="complete")`
+ *     answers; it does not imply coverage of those actions' other warning branches. A source
+ *     audit finds exactly NINE other shipped success paths whose envelope `warnings[]` can carry
+ *     an executable `cmos_*(` prescription:
+ *       - `cmos_agent_onboard`
+ *       - `cmos_session(action="start")`
+ *       - `cmos_message(action="send")`
+ *       - `cmos_message(action="whoami")`
+ *       - `cmos_context(action="view")`
+ *       - `cmos_context(action="update")`
+ *       - `cmos_sprint(action="retro")`
+ *       - `cmos_sprint(action="complete")`
+ *       - `cmos_decisions(action="review")`
+ *     They remain ARM-3-only: their tool/action/parameters may be checked for existence, but the
+ *     prescribed call is not run. The `whoami` warning's unquoted `action=reissue` also escapes
+ *     ACTION_RE.
+ *
+ *     Three lookalikes are excluded by rule, not omission. `cmos_review` filters out the onboard
+ *     call-bearing warnings; its promoted `next_actions` are not warnings.
+ *     `cmos_db(action="backfill")` stores its registration prescription in `data.warnings`, not
+ *     the envelope `warnings[]` this arm reads (and its formatter does not render that nested
+ *     list).
+ *     `cmos_session(action="capture")` says an unstamped row “will not appear in” a dynamically
+ *     named list call; that call is descriptive, while the actual advice (“Pass missionId”) is
+ *     prose, and its split template token is already conceded by hole 7.
  *
  * NO ALLOWLIST. There is no exemption file and no per-site suppression anywhere in this gate.
  * Every exclusion above derives from a stated rule, which is the standing convention set by the
  * s85/s86 gate headers.
  *
- * NEVER AGAINST THE LIVE FILE. Every cell runs on an `mkdtempSync` copy, and the final test
- * asserts the live store's mtime AND byte size are unchanged by this run.
+ * NEVER AGAINST THE LIVE FILE. One suite-private snapshot is taken before the matrix; every cell
+ * runs on a further `mkdtempSync` copy. The final test hashes that private snapshot and checks all
+ * routed write paths. It deliberately makes no claim about a shared live file's mtime, which a
+ * concurrent CMOS writer owns too.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from '@jest/globals';
 import Database from 'better-sqlite3';
+import { createHash } from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -116,8 +146,11 @@ import * as ts from 'typescript';
 
 import { cmosMission } from '../../../src/tools/cmos/cmos-mission';
 import { cmosMissionTransition } from '../../../src/tools/cmos/cmos-mission-transition';
+import { cmosSession } from '../../../src/tools/cmos/cmos-session';
+import { cmosSprint } from '../../../src/tools/cmos/cmos-sprint';
 import { CMOS_TOOL_DEFINITIONS } from '../../../src/tools/cmos';
 import { classifyAction } from '../../../src/tools/cmos/action-taxonomy';
+import { reidentifyCmosTestStore } from '../../helpers/seedCmosDb';
 
 const REPO_ROOT = path.resolve(__dirname, '../../..');
 const LIVE_DB = path.join(REPO_ROOT, 'cmos', 'db', 'cmos.sqlite');
@@ -127,6 +160,9 @@ const SRC_ROOT = path.join(REPO_ROOT, 'src');
 const DRIVER_MISSION_ID = 'B1.1';
 
 const tmpDirs: string[] = [];
+const routedDbPaths: string[] = [];
+let privateSourceDb = '';
+let privateSourceDigest = '';
 function mkTmp(prefix: string): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   tmpDirs.push(dir);
@@ -146,16 +182,42 @@ function withDb<T>(dbPath: string, fn: (db: Database.Database) => T): T {
   }
 }
 
-/** Copy the live store into a temp project root. The live file is never opened for writing. */
-function copyLiveStore(prefix: string): { projectRoot: string; dbPath: string } {
-  const projectRoot = mkTmp(prefix);
-  const dbDir = path.join(projectRoot, 'cmos', 'db');
-  fs.mkdirSync(dbDir, { recursive: true });
+function copyStoreBundle(sourceDb: string, destinationDb: string): void {
+  fs.mkdirSync(path.dirname(destinationDb), { recursive: true });
   for (const suffix of ['', '-wal', '-shm']) {
-    const src = `${LIVE_DB}${suffix}`;
-    if (fs.existsSync(src)) fs.copyFileSync(src, path.join(dbDir, `cmos.sqlite${suffix}`));
+    const source = `${sourceDb}${suffix}`;
+    if (fs.existsSync(source)) fs.copyFileSync(source, `${destinationDb}${suffix}`);
   }
-  return { projectRoot, dbPath: path.join(dbDir, 'cmos.sqlite') };
+}
+
+/** Content identity for a SQLite main/WAL/SHM bundle; timestamps are intentionally absent. */
+function storeBundleDigest(dbPath: string): string {
+  const hash = createHash('sha256');
+  for (const suffix of ['', '-wal', '-shm']) {
+    const candidate = `${dbPath}${suffix}`;
+    hash.update(`${suffix}\0${fs.existsSync(candidate) ? 'present' : 'absent'}\0`);
+    if (fs.existsSync(candidate)) hash.update(fs.readFileSync(candidate));
+  }
+  return hash.digest('hex');
+}
+
+/** Freeze the shared source once. No test handler receives this path. */
+beforeAll(() => {
+  const privateRoot = mkTmp('cmos-s88m03-private-source-');
+  privateSourceDb = path.join(privateRoot, 'cmos', 'db', 'cmos.sqlite');
+  copyStoreBundle(LIVE_DB, privateSourceDb);
+  privateSourceDigest = storeBundleDigest(privateSourceDb);
+});
+
+/** Give each scenario its own writable copy of the suite-private frozen source. */
+function copyFrozenStore(prefix: string): { projectRoot: string; dbPath: string } {
+  if (!privateSourceDb) throw new Error('suite-private source was not initialized');
+  const projectRoot = mkTmp(prefix);
+  const dbPath = path.join(projectRoot, 'cmos', 'db', 'cmos.sqlite');
+  copyStoreBundle(privateSourceDb, dbPath);
+  reidentifyCmosTestStore(projectRoot);
+  routedDbPaths.push(dbPath);
+  return { projectRoot, dbPath };
 }
 
 // ───────────────────────────────────────────────────────────────────────────────────────────────
@@ -282,6 +344,65 @@ function setDriverStatus(dbPath: string, status: string): void {
   });
 }
 
+const CLOSE_ADJACENT_SPRINT_ID = 'sprint-10';
+
+/** Establish, rather than inherit, the exact state in which a sprint-close nudge is truthful. */
+function establishCloseAdjacentSprint(dbPath: string, missionInProgress: boolean): void {
+  withDb(dbPath, (db) => {
+    const sprint = db
+      .prepare(`UPDATE sprints SET status = 'Active', end_date = NULL WHERE id = ?`)
+      .run(CLOSE_ADJACENT_SPRINT_ID);
+    if (sprint.changes !== 1) {
+      throw new Error(`close-adjacent fixture sprint '${CLOSE_ADJACENT_SPRINT_ID}' was not found`);
+    }
+    const missions = db
+      .prepare(
+        `UPDATE missions SET status = 'Completed', completed_at = COALESCE(completed_at, ?) WHERE sprint_id = ?`
+      )
+      .run(new Date().toISOString(), CLOSE_ADJACENT_SPRINT_ID);
+    if (missions.changes < 1) {
+      throw new Error(
+        `close-adjacent fixture sprint '${CLOSE_ADJACENT_SPRINT_ID}' has no missions`
+      );
+    }
+    if (missionInProgress) {
+      const driver = db
+        .prepare(`UPDATE missions SET status = 'In Progress', completed_at = NULL WHERE id = ?`)
+        .run(DRIVER_MISSION_ID);
+      if (driver.changes !== 1) {
+        throw new Error(`close-adjacent driver mission '${DRIVER_MISSION_ID}' was not found`);
+      }
+    }
+  });
+}
+
+/** Add one active session using the live schema's required provenance columns. */
+function seedCloseAdjacentSession(dbPath: string, sessionId: string): void {
+  withDb(dbPath, (db) => {
+    const projectId = (
+      db.prepare(`SELECT value FROM metadata WHERE key = 'project_id'`).get() as
+        | { value: string }
+        | undefined
+    )?.value;
+    if (!projectId) throw new Error('close-adjacent fixture has no metadata.project_id');
+    db.prepare(
+      `INSERT INTO sessions
+         (id, type, title, sprint_id, started_at, agent, status, captures,
+          project_id, stable_event_id, occurred_at, origin_seq, event_type, schema_version)
+       VALUES (?, 'build', 's88-m03 successful-warning probe', ?, ?, 'jest', 'active', '[]',
+               ?, ?, ?, ?, 'session_started', 1)`
+    ).run(
+      sessionId,
+      CLOSE_ADJACENT_SPRINT_ID,
+      new Date().toISOString(),
+      projectId,
+      '01S88M03WARNINGPROBE00000',
+      Date.now(),
+      8_803
+    );
+  });
+}
+
 /**
  * Drive one action through the REAL router. A handler-only call is what let this class survive:
  * the routers are where a client actually enters.
@@ -355,6 +476,49 @@ async function drive(
   }
 }
 
+interface ExecutedRemedy extends PrescribedCall {
+  mode: string;
+  outcome?: Outcome;
+}
+
+/** Replay one extracted prescription through the real router from the state that emitted it. */
+async function replayPrescription(
+  projectRoot: string,
+  dbPath: string,
+  call: PrescribedCall,
+  triggerStatus?: string
+): Promise<ExecutedRemedy> {
+  const mode = classifyAction(call.tool, call.action);
+  if (mode === 'read') return { ...call, mode };
+
+  if (call.tool === 'cmos_mission' || call.tool === 'cmos_mission_transition') {
+    if (triggerStatus === undefined) return { ...call, mode: 'out-of-corpus' };
+    const remedyAction = call.tool === 'cmos_mission' ? 'update' : (call.action as DrivenAction);
+    if (!DRIVEN_ACTIONS.includes(remedyAction)) {
+      return { ...call, mode: 'out-of-corpus' };
+    }
+    setDriverStatus(dbPath, triggerStatus);
+    const result = await drive(projectRoot, remedyAction, call.status ?? null);
+    return { ...call, mode, outcome: result.outcome };
+  }
+
+  if (call.tool === 'cmos_sprint' && call.action === 'complete') {
+    try {
+      const result = await cmosSprint({
+        action: 'complete',
+        sprintId: CLOSE_ADJACENT_SPRINT_ID,
+        summary: 'remedy-reachability successful-warning replay',
+        projectRoot,
+      });
+      return { ...call, mode, outcome: result.success ? 'SUCCEEDS' : 'REFUSES' };
+    } catch {
+      return { ...call, mode, outcome: 'CRASHES' };
+    }
+  }
+
+  return { ...call, mode: 'out-of-corpus' };
+}
+
 /**
  * Tokens that DISCLOSE a remedy as conditional. Tier 2 is satisfied when a refusing remedy's
  * own suggestion carries one of these — i.e. the string does not read as an unconditional
@@ -374,11 +538,48 @@ interface MatrixCell {
   message?: string;
   suggestion?: string;
   /** Remedies the refusal prescribed, each with the outcome of EXECUTING it from this state. */
-  remedies: Array<{ tool: string; action: string | undefined; mode: string; outcome?: Outcome }>;
+  remedies: ExecutedRemedy[];
+}
+
+interface ObservedSuccessfulWarning {
+  source: string;
+  warnings: string[];
+  prescriptions: PrescribedCall[];
+  remedies: ExecutedRemedy[];
+}
+
+/** Every covered success producer must independently emit and execute its close remedy. */
+function successWarningCoverageProblems(observed: ObservedSuccessfulWarning[]): string[] {
+  const problems: string[] = [];
+  for (const producer of observed) {
+    const prescriptions = producer.prescriptions.filter(
+      (call) => call.tool === 'cmos_sprint' && call.action === 'complete'
+    );
+    const remedies = producer.remedies.filter(
+      (call) => call.tool === 'cmos_sprint' && call.action === 'complete'
+    );
+    if (prescriptions.length === 0) {
+      problems.push(`${producer.source}: emitted no cmos_sprint(action="complete") prescription`);
+    }
+    if (remedies.length < prescriptions.length) {
+      problems.push(
+        `${producer.source}: executed ${remedies.length}/${prescriptions.length} close prescriptions`
+      );
+    }
+    for (const remedy of remedies) {
+      if (remedy.mode === 'out-of-corpus' || remedy.outcome !== 'SUCCEEDS') {
+        problems.push(
+          `${producer.source}: cmos_sprint(action="complete") mode=${remedy.mode} ` +
+            `outcome=${String(remedy.outcome)}`
+        );
+      }
+    }
+  }
+  return problems;
 }
 
 let matrix: MatrixCell[] = [];
-let liveStat: fs.Stats | undefined;
+let observedSuccessfulWarnings: ObservedSuccessfulWarning[] = [];
 /** Measured, never gated on: what out-of-enum mission statuses the LIVE store actually holds. */
 let liveOutOfEnum: Array<{ status: string; count: number }> = [];
 
@@ -394,8 +595,7 @@ const PUBLISHED_STATUSES = new Set([
 
 describe('s87-m01 ARM 1 — the mission-transition remedy matrix (real-store copy)', () => {
   beforeAll(async () => {
-    liveStat = fs.statSync(LIVE_DB);
-    const { projectRoot, dbPath } = copyLiveStore('cmos-s87m01-matrix-');
+    const { projectRoot, dbPath } = copyFrozenStore('cmos-s87m01-matrix-');
 
     liveOutOfEnum = withDb(dbPath, (db) =>
       (
@@ -425,38 +625,77 @@ describe('s87-m01 ARM 1 — the mission-transition remedy matrix (real-store cop
 
         // Execute what the refusal prescribed, from the state it was prescribed in.
         for (const call of extractPrescribedCalls(res.suggestion ?? '')) {
-          const mode = classifyAction(call.tool, call.action);
-          // ARM 2's rule: a read cannot move the state machine, so it is exempt from execution.
-          if (mode === 'read') {
-            cell.remedies.push({ tool: call.tool, action: call.action, mode });
-            continue;
-          }
-          // False-negative 2: only this family's own remedies are executed.
-          if (call.tool !== 'cmos_mission' && call.tool !== 'cmos_mission_transition') {
-            cell.remedies.push({ tool: call.tool, action: call.action, mode: 'out-of-corpus' });
-            continue;
-          }
-          setDriverStatus(dbPath, trigger.status);
-          const remedyAction =
-            call.tool === 'cmos_mission' ? 'update' : (call.action as DrivenAction);
-          if (!DRIVEN_ACTIONS.includes(remedyAction)) {
-            cell.remedies.push({ tool: call.tool, action: call.action, mode: 'out-of-corpus' });
-            continue;
-          }
-          // `call.status` is undefined when the prescription named no status; `null` carries that
-          // fact into `drive` without colliding with a default parameter.
-          const rem = await drive(projectRoot, remedyAction, call.status ?? null);
-          cell.remedies.push({
-            tool: call.tool,
-            action: call.action,
-            mode,
-            outcome: rem.outcome,
-          });
+          cell.remedies.push(await replayPrescription(projectRoot, dbPath, call, trigger.status));
         }
         cells.push(cell);
       }
     }
     matrix = cells;
+
+    // RED witness: two close-adjacent successful answers carry executable prescriptions, while
+    // ARM 1 still has no path that executes them. Each producer gets a fresh store so its state
+    // is established independently rather than inherited from the refusal matrix.
+    const observed: ObservedSuccessfulWarning[] = [];
+
+    {
+      const missionCopy = copyFrozenStore('cmos-s88m03-mission-warning-');
+      establishCloseAdjacentSprint(missionCopy.dbPath, true);
+      const completed = await cmosMissionTransition({
+        action: 'complete',
+        missionId: DRIVER_MISSION_ID,
+        notes: 's88-m03 successful-warning reachability probe',
+        projectRoot: missionCopy.projectRoot,
+      });
+      if (!completed.success) {
+        throw new Error(
+          `mission close-adjacent producer refused: ${completed.error?.code} ${completed.error?.message}`
+        );
+      }
+      const warnings = completed.warnings ?? [];
+      const prescriptions = warnings.flatMap(extractPrescribedCalls);
+      const remedies: ExecutedRemedy[] = [];
+      for (const call of prescriptions) {
+        remedies.push(await replayPrescription(missionCopy.projectRoot, missionCopy.dbPath, call));
+      }
+      observed.push({
+        source: 'cmos_mission_transition(action="complete")',
+        warnings,
+        prescriptions,
+        remedies,
+      });
+    }
+
+    {
+      const sessionCopy = copyFrozenStore('cmos-s88m03-session-warning-');
+      establishCloseAdjacentSprint(sessionCopy.dbPath, false);
+      const sessionId = 'PS-2099-01-01-883';
+      seedCloseAdjacentSession(sessionCopy.dbPath, sessionId);
+      const completed = await cmosSession({
+        action: 'complete',
+        sessionId,
+        summary: 's88-m03 successful-warning reachability probe',
+        projectRoot: sessionCopy.projectRoot,
+      });
+      if (!completed.success) {
+        throw new Error(
+          `session close-adjacent producer refused: ${completed.error?.code} ${completed.error?.message}`
+        );
+      }
+      const warnings = completed.warnings ?? [];
+      const prescriptions = warnings.flatMap(extractPrescribedCalls);
+      const remedies: ExecutedRemedy[] = [];
+      for (const call of prescriptions) {
+        remedies.push(await replayPrescription(sessionCopy.projectRoot, sessionCopy.dbPath, call));
+      }
+      observed.push({
+        source: 'cmos_session(action="complete")',
+        warnings,
+        prescriptions,
+        remedies,
+      });
+    }
+
+    observedSuccessfulWarnings = observed;
   }, 300_000);
 
   it('reports its cell count and its SUCCEEDS/REFUSES/CRASHES tally', () => {
@@ -497,6 +736,55 @@ describe('s87-m01 ARM 1 — the mission-transition remedy matrix (real-store cop
       }
     }
     expect(crashes).toEqual([]);
+  });
+
+  it('covers prescriptive warnings returned by successful close-adjacent answers', () => {
+    expect(observedSuccessfulWarnings.map((c) => c.source).sort()).toEqual([
+      'cmos_mission_transition(action="complete")',
+      'cmos_session(action="complete")',
+    ]);
+    // Per-producer anti-vacuity: aggregate counts can be satisfied twice by one producer while
+    // the other emits or executes nothing. Undefined outcomes and out-of-corpus records fail.
+    expect(successWarningCoverageProblems(observedSuccessfulWarnings)).toEqual([]);
+  });
+
+  it('rejects aggregate success-warning coverage that leaves one producer unexecuted', () => {
+    const planted: ObservedSuccessfulWarning[] = [
+      {
+        source: 'producer-a',
+        warnings: [],
+        prescriptions: [
+          { tool: 'cmos_sprint', action: 'complete', status: undefined },
+          { tool: 'cmos_sprint', action: 'complete', status: undefined },
+        ],
+        remedies: [
+          {
+            tool: 'cmos_sprint',
+            action: 'complete',
+            status: undefined,
+            mode: 'write',
+            outcome: 'SUCCEEDS',
+          },
+          {
+            tool: 'cmos_sprint',
+            action: 'complete',
+            status: undefined,
+            mode: 'write',
+            outcome: 'SUCCEEDS',
+          },
+        ],
+      },
+      {
+        source: 'producer-b',
+        warnings: [],
+        prescriptions: [],
+        remedies: [],
+      },
+    ];
+
+    expect(successWarningCoverageProblems(planted)).toEqual([
+      'producer-b: emitted no cmos_sprint(action="complete") prescription',
+    ]);
   });
 
   it('TIER 2 (DISCLOSED) — a remedy that refuses from the state it is prescribed in says so', () => {
@@ -739,10 +1027,27 @@ describe('s87-m01 ARM 3 — every parameter an agent-facing cmos_*() call names 
   });
 });
 
-describe('s87-m01 — the live store was never written to by this suite', () => {
-  it('cmos/db/cmos.sqlite mtime and byte size are unchanged', () => {
-    const now = fs.statSync(LIVE_DB);
-    expect(now.size).toBe(liveStat!.size);
-    expect(now.mtimeMs).toBe(liveStat!.mtimeMs);
+describe('s88-m03 — the suite routes writes only to copies it owns', () => {
+  it('the content oracle survives a content-preserving external timestamp write', () => {
+    const dir = mkTmp('cmos-s88m03-concurrent-writer-');
+    const file = path.join(dir, 'shared.sqlite');
+    fs.writeFileSync(file, 'same bytes');
+    const digest = storeBundleDigest(file);
+    const before = fs.statSync(file);
+    fs.writeFileSync(file, fs.readFileSync(file));
+    fs.utimesSync(file, before.atime, new Date(before.mtimeMs + 2_000));
+    const after = fs.statSync(file);
+    expect(after.mtimeMs).not.toBe(before.mtimeMs);
+    expect(storeBundleDigest(file)).toBe(digest);
+  });
+
+  it('the frozen source is unchanged and every writable route is a further private copy', () => {
+    expect(routedDbPaths.length).toBeGreaterThanOrEqual(3);
+    expect(storeBundleDigest(privateSourceDb)).toBe(privateSourceDigest);
+    expect(
+      routedDbPaths.every(
+        (dbPath) => path.resolve(dbPath) !== path.resolve(LIVE_DB) && dbPath !== privateSourceDb
+      )
+    ).toBe(true);
   });
 });

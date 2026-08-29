@@ -396,6 +396,7 @@ export function formatDecisionsListForLLM(result: CmosToolResult<CmosDecisionsLi
 
   if (data.decisions.length === 0) {
     lines.push('No decisions found matching the criteria.');
+    appendWarnings(lines, result);
     return lines.join('\n');
   }
 

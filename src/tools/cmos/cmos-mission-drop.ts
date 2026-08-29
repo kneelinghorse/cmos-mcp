@@ -12,7 +12,7 @@ import {
   transitionsFrom,
 } from './errors';
 import { ensureMissionTimestamps } from './schema-migrations';
-import { appendWarnings } from './format-warnings';
+import { appendWarnings, attachWarnings } from './format-warnings';
 import { checkWrite } from './write-guard';
 
 /**
@@ -59,10 +59,9 @@ export async function cmosMissionDrop(
   const missionId = params.missionId.trim();
   const targetStatus: MissionStatus = 'Dropped';
 
-  return withClientValidated(
+  const warnings: string[] = [];
+  const result = await withClientValidated(
     (client) => {
-      const warnings: string[] = [];
-
       const missionResult = client.getOne<Mission>(
         `SELECT id, status, name, domain_fields FROM missions WHERE id = ?`,
         [missionId]
@@ -127,7 +126,7 @@ export async function cmosMissionDrop(
         ? `[Dropped] ${params.reason}`
         : `[Dropped] Removed from active queue`;
 
-      ensureMissionTimestamps(client);
+      warnings.push(...(ensureMissionTimestamps(client).warnings ?? []));
 
       const updateResult = client.execute(
         `UPDATE missions
@@ -189,6 +188,7 @@ export async function cmosMissionDrop(
     },
     { projectRoot: params.projectRoot }
   );
+  return attachWarnings(result, warnings);
 }
 
 export function formatMissionDropForLLM(result: CmosToolResult<MissionDropResult>): string {
@@ -209,6 +209,7 @@ export function formatMissionDropForLLM(result: CmosToolResult<MissionDropResult
       lines.push(`Suggestion: ${error.suggestion}`);
     }
 
+    appendWarnings(lines, result);
     return lines.join('\n');
   }
 

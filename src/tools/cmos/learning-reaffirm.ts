@@ -91,15 +91,21 @@ export function sanitizeLearningIds(
  *
  * s86-m02b: both halves say only what they know. A failed existence SELECT classifies NOTHING
  * (see below), and a failed UPDATE reports NO id as reaffirmed; either way the DB error travels
- * out on `writeFailures`.
+ * out on `writeFailures`. The optional `warnings` sink is the enclosing answer's existing
+ * migration-warning carrier; standalone helper callers may omit it.
  */
 export function reaffirmLearningsByIds(
   client: CmosDatabaseClient,
   ids: readonly number[],
-  reaffirmedAt: string
+  reaffirmedAt: string,
+  warnings: string[] = []
 ): { reaffirmedIds: number[]; missingIds: number[]; writeFailures: WriteFailure[] } {
   if (ids.length === 0) return { reaffirmedIds: [], missingIds: [], writeFailures: [] };
-  ensureReviewTimestamps(client);
+  // One answer can run this helper repeatedly (explicit cites, implicit cites, and multiple
+  // session-close decisions). A persistent DDL failure is still one fact about that answer.
+  for (const warning of ensureReviewTimestamps(client).warnings ?? []) {
+    if (!warnings.includes(warning)) warnings.push(warning);
+  }
   const writeFailures: WriteFailure[] = [];
   const placeholders = ids.map(() => '?').join(', ');
   const existsResult = client.getMany<{ id: number }>(
@@ -205,11 +211,12 @@ export async function applyLearningReaffirm(
      * a learning shouldn't reaffirm itself via its own content overlap.
      */
     excludeIds?: readonly number[];
-  }
+  },
+  warnings: string[] = []
 ): Promise<LearningReaffirmOutcome> {
   const { explicitIds, newContent, reaffirmedAt, excludeIds } = options;
 
-  const explicit = reaffirmLearningsByIds(client, explicitIds, reaffirmedAt);
+  const explicit = reaffirmLearningsByIds(client, explicitIds, reaffirmedAt, warnings);
 
   const implicitCandidates = await detectImplicitLearningCites(client, newContent);
   const explicitSet = new Set(explicit.reaffirmedIds);
@@ -218,7 +225,7 @@ export async function applyLearningReaffirm(
     (id) => !explicitSet.has(id) && !excludeSet.has(id)
   );
 
-  const implicit = reaffirmLearningsByIds(client, implicitOnly, reaffirmedAt);
+  const implicit = reaffirmLearningsByIds(client, implicitOnly, reaffirmedAt, warnings);
 
   return {
     explicitlyReaffirmedIds: explicit.reaffirmedIds,

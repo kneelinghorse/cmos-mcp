@@ -6,13 +6,14 @@
 
 ## Architecture Overview
 
-CMOS projects use **two layers** of AI configuration:
+CMOS projects use **two complementary layers** of AI configuration:
 
-### 1. Project Root agents.md (YOUR APPLICATION)
+### 1. Project Root agents.md (REPOSITORY-WIDE CONTRACT)
 
 **Location**: `project-root/agents.md`
 
-**Purpose**: Instructions for building YOUR APPLICATION CODE
+**Purpose**: Hard operating rules, code/build/test conventions, and project-specific workflow for
+every task in the repository.
 
 **Contains**:
 
@@ -24,7 +25,8 @@ CMOS projects use **two layers** of AI configuration:
 - Your security requirements
 - Your API design patterns
 
-**Used when**: Agent is writing code in `src/`, `tests/`, `app/`, etc.
+**Used when**: Every task. Implementation missions commonly edit `src/`, `tests/`, `app/`, and
+project documentation while CMOS records their state.
 
 **Example**:
 
@@ -61,30 +63,33 @@ pytest tests/ -v
 | ----------- | ----------------------- | -------------------------------------------------- |
 | **Build**   | `cmos/tiers/build.md`   | Full mission/sprint workflow for structured builds |
 | **Managed** | `cmos/tiers/managed.md` | Mission tracking without sprint overhead           |
-| **General** | `cmos/tiers/general.md` | Lightweight — notes and decisions only             |
+| **General** | `cmos/tiers/general.md` | Sessions, context, notes, decisions; no missions   |
 
 **Tier selection**: Set via `cmos_project(action="update", projectType="general|managed|build")`.
 
-**Loaded automatically**: `cmos_agent_onboard()` reads the active tier config and adjusts the onboard payload accordingly — hiding irrelevant fields and filtering suggested actions.
+**Loaded automatically**: `cmos_review()` is the normal bounded opener and uses tier-shaped
+onboarding internally. Use `cmos_agent_onboard()` for a cold start or the full long-form payload.
+The active tier filters suggested actions and shapes onboarding fields.
 
 ---
 
 ## Critical Boundaries
 
-**When working on YOUR APPLICATION**:
+**Repository and implementation boundary**:
 
 ```
-Agent reads: project-root/agents.md
-Agent writes to: src/, tests/, docs/ (YOUR CODE)
-Agent ignores: cmos/ (management layer)
+Agent reads: project-root/agents.md for every task
+Implementation missions may write: src/, tests/, app/, and project docs
+Agent never puts application code in: cmos/
 ```
 
-**When working on MISSIONS/PLANNING**:
+**CMOS state boundary**:
 
 ```
-Agent reads: cmos/tiers/{tier}.md (loaded automatically via onboard)
-Agent writes to: cmos/db/ (via MCP tools only)
-Agent ignores: src/ (application code)
+Agent opens normal work with: cmos_review()
+Agent reads tier detail from: cmos/tiers/{tier}.md
+Agent changes database-backed CMOS state: through MCP tools only
+Agent does not edit cmos/db/cmos.sqlite or generated exports directly
 ```
 
 **NEVER**:
@@ -212,13 +217,16 @@ onboard_fields_hide: []
 ---
 ```
 
-The markdown body below the frontmatter provides the behavioral guide text that gets included in onboard output.
+The markdown body below the frontmatter provides the behavioral guide text included in onboarding
+output. `tools_use` is human-readable documentation, not a permission list; tiers never disable
+tools. `tools_skip` filters suggested actions, and the onboard field lists shape presentation.
 
 ### Choosing a Tier
 
 - **Build** (default): Full CMOS workflow with sprints, missions, sessions, and decisions. Best for structured engineering projects.
 - **Managed**: Mission tracking without sprint overhead. Good for ongoing work without sprint cadence.
-- **General**: Lightweight note-taking and decision capture. Best for exploration, research, or projects that don't need mission tracking.
+- **General**: Sessions, context, note-taking, decisions, and messaging without mission tracking.
+  Best for exploration, research, or lightweight projects.
 
 ---
 
@@ -226,7 +234,7 @@ The markdown body below the frontmatter provides the behavioral guide text that 
 
 ```
 project/
-├── agents.md              # YOUR APPLICATION instructions
+├── agents.md              # Repository-wide operating and application rules
 └── cmos/
     ├── db/
     │   └── cmos.sqlite    # All CMOS state
@@ -234,20 +242,20 @@ project/
     │   ├── build.md
     │   ├── general.md
     │   └── managed.md
-    └── docs/              # Optional documentation
+    └── docs/              # CMOS documentation
 ```
 
 ---
 
 ## Quick Start Summary
 
-1. **Project root agents.md** — Instructions for YOUR CODE
-2. **Tier guides in cmos/tiers/** — CMOS behavioral configuration (loaded automatically)
+1. **Project root agents.md** — Repository-wide hard rules and project conventions
+2. **Tier guides in cmos/tiers/** — Additional CMOS behavior for the active tier
 3. **Clear boundaries** — Never mix application and management concerns
 4. **Be specific** — Give real commands and examples in agents.md
 5. **Keep updated** — Evolve agents.md with your project
 
 ---
 
-**Last Updated**: 2026-03-13
+**Last Updated**: 2026-08-28
 **See Also**: `cmos/docs/getting-started.md` for full setup flow

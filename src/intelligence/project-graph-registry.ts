@@ -36,10 +36,12 @@
 
 import Database from 'better-sqlite3';
 import { randomUUID } from 'crypto';
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, readFileSync, realpathSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import { ensureDir } from '../utils/fs';
+import { isReadOnlyAgentSession } from '../tools/cmos/read-only-agent-guard';
+import { currentToolCallActionMode } from '../tools/cmos/tool-call-context';
 
 /**
  * s86-m01 — write the one diagnostic this module emits (the registration-collision
@@ -60,6 +62,20 @@ import { ensureDir } from '../utils/fs';
  */
 function log(line: string): void {
   process.stderr.write(line + '\n');
+}
+
+/** Compare roots by physical location when they exist, falling back to absolute spelling. */
+function physicalStorePath(storePath: string): string {
+  const resolved = path.resolve(storePath);
+  try {
+    return realpathSync.native(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
+function isSameStorePath(left: string, right: string): boolean {
+  return physicalStorePath(left) === physicalStorePath(right);
 }
 
 /**
@@ -91,8 +107,8 @@ const BACKFILL_MARKER_KEY = 'backfill_done';
 /**
  * registry_meta key set once the s79-m01 identity backfill has run. SEPARATE from
  * {@link BACKFILL_MARKER_KEY}: existing operators already have that marker set, so
- * the s69 backfill is a no-op for them — but the identity backfill (mint ids into
- * id-less stores + migrate the JSON default) still needs to run exactly once.
+ * the s69 backfill is a no-op for them — but the identity/default compatibility
+ * migration still needs its own exactly-once marker. Since s88-m08 it skips id-less stores.
  */
 const IDENTITY_BACKFILL_MARKER_KEY = 'identity_backfill_done';
 
@@ -101,6 +117,9 @@ const IDENTITY_BACKFILL_MARKER_KEY = 'identity_backfill_done';
  * (s79-m01, F1). The graph's answer to the JSON registry's `defaultProject`.
  */
 const DEFAULT_PROJECT_META_KEY = 'default_project_id';
+
+/** Legacy default path waiting for its store to receive a durable project_id. */
+const PENDING_LEGACY_DEFAULT_PATH_META_KEY = 'pending_legacy_default_store_path';
 
 /** A row in the project-graph registry. Timestamps are Unix epoch milliseconds. */
 export interface ProjectGraphEntry {
@@ -112,7 +131,7 @@ export interface ProjectGraphEntry {
   name: string;
   /** When first registered (Unix ms). */
   registered_at: number;
-  /** Updated on every CMOS-MCP open / register (Unix ms). */
+  /** Updated on registration or an explicit eligible touch (Unix ms). */
   last_seen_at: number;
   /** Per-row schema version. */
   schema_version: number;
@@ -188,15 +207,20 @@ export class ProjectGraphRegistry {
   }
 
   /**
-   * Async factory: ensure the config dir + schema exist, then run the one-time
-   * filesystem/registry backfill (marker-gated, so it is a no-op after first run).
+   * Async factory: ensure the config dir + schema exist, then, outside read/review calls, run the
+   * one-time legacy-registry backfills (marker-gated, so they no-op after first completion).
    */
   static async create(options?: ProjectGraphRegistryOptions): Promise<ProjectGraphRegistry> {
     const registry = ProjectGraphRegistry.getInstance(options);
     await ensureDir(registry.configDir);
     registry.ensureSchema();
-    await registry.maybeBackfill();
-    await registry.maybeIdentityBackfill();
+    // Legacy import is a compatibility WRITE. A read-classified/review call may open and query
+    // the graph schema, but must neither consume the one-shot markers nor add legacy rows. The
+    // first later write/direct administrative open performs the deferred migration.
+    if (currentToolCallActionMode() !== 'read' && !isReadOnlyAgentSession()) {
+      await registry.maybeBackfill();
+      await registry.maybeIdentityBackfill();
+    }
     return registry;
   }
 
@@ -291,7 +315,7 @@ export class ProjectGraphRegistry {
     const resolvedPath = path.resolve(input.store_path);
     const incumbent = this.get(input.project_id);
 
-    if (incumbent && incumbent.store_path !== resolvedPath) {
+    if (incumbent && !isSameStorePath(incumbent.store_path, resolvedPath)) {
       // A different path is claiming an id that already has a row. Distinguish a
       // genuine collision (incumbent is still a live store holding this id) from
       // a legitimate move (incumbent path no longer resolves the id).
@@ -350,10 +374,22 @@ export class ProjectGraphRegistry {
    */
   getByStorePath(storePath: string): string | null {
     const db = this.connection();
+    const resolvedPath = path.resolve(storePath);
     const row = db
       .prepare('SELECT project_id FROM projects WHERE store_path = ?')
-      .get(path.resolve(storePath)) as { project_id: string } | undefined;
-    return row?.project_id ?? null;
+      .get(resolvedPath) as { project_id: string } | undefined;
+    if (row) return row.project_id;
+
+    // macOS commonly exposes one temp root as both /var/... and /private/var/...;
+    // symlinked workspaces are equivalent. Compare physical roots only after the indexed hit.
+    const candidates = db.prepare('SELECT project_id, store_path FROM projects').all() as Array<{
+      project_id: string;
+      store_path: string;
+    }>;
+    return (
+      candidates.find((candidate) => isSameStorePath(candidate.store_path, resolvedPath))
+        ?.project_id ?? null
+    );
   }
 
   /**
@@ -467,7 +503,7 @@ export class ProjectGraphRegistry {
   }
 
   /**
-   * Integration helper for `cmos_review` / `cmos_project register`: read the
+   * Integration helper for compatibility/discovery migrations: read the
    * store's identity (metadata.project_id + project_name) from `storePath` (the
    * project ROOT) and upsert it. Returns the row, or null when the store has no
    * readable project_id (nothing to key on). Best-effort: never throws.
@@ -483,8 +519,8 @@ export class ProjectGraphRegistry {
   }
 
   /**
-   * s79-m02 — the authoritative registration primitive for the discovery-write
-   * handlers (cmos_project init/register, the resolver's cwd auto-register). Give
+   * s79-m02 — the authoritative registration primitive for discovery-write
+   * handlers (`cmos_project` init/register and write-client registration). Give
    * the store a STABLE project_id and upsert it. Id resolution, in order:
    *   1. reuse the id an already-registered row at this path holds (stable across
    *      re-registration, even when the store DB is momentarily unreadable);
@@ -497,17 +533,54 @@ export class ProjectGraphRegistry {
    */
   registerStore(
     projectRoot: string,
-    opts: { name?: string; setAsDefault?: boolean } = {}
+    opts: { name?: string; setAsDefault?: boolean; requireStoredIdentity?: boolean } = {}
   ): ProjectGraphEntry {
     const resolved = path.resolve(projectRoot);
-    const projectId =
-      this.getByStorePath(resolved) ??
-      mintProjectId(resolved) ??
-      slugifyName(path.basename(resolved));
+    const existingGraphId = this.getByStorePath(resolved);
+    // When an existing graph row outlived an accidentally-cleared metadata row, restore that
+    // SAME id rather than minting a replacement. Otherwise two first writers generate their own
+    // candidates and the conditional UPSERT in mintProjectId makes both observe one winner.
+    const storedProjectId = mintProjectId(resolved, existingGraphId ?? undefined);
+    if (opts.requireStoredIdentity && !storedProjectId) {
+      throw new Error(
+        `Unable to persist a project identity in ${path.join(resolved, 'cmos', 'db', 'cmos.sqlite')}`
+      );
+    }
+    if (
+      opts.requireStoredIdentity &&
+      existingGraphId &&
+      storedProjectId &&
+      storedProjectId !== existingGraphId
+    ) {
+      throw new Error(
+        `Stored project identity '${storedProjectId}' conflicts with graph identity ` +
+          `'${existingGraphId}' for ${resolved}`
+      );
+    }
+    const projectId = existingGraphId ?? storedProjectId ?? slugifyName(path.basename(resolved));
     const identity = readStoreIdentity(resolved);
     const name = opts.name ?? identity?.name ?? path.basename(resolved);
     const entry = this.register({ project_id: projectId, store_path: resolved, name });
-    if (opts.setAsDefault) this.setDefault(entry.project_id);
+    if (entry.project_id !== projectId || !isSameStorePath(entry.store_path, resolved)) {
+      throw new Error(
+        `Project identity collision: '${projectId}' is already registered to ` +
+          `'${entry.store_path}', so '${resolved}' was not registered.`
+      );
+    }
+
+    const pendingLegacyDefault = this.readMeta(PENDING_LEGACY_DEFAULT_PATH_META_KEY);
+    const restoresLegacyDefault =
+      pendingLegacyDefault !== null && isSameStorePath(pendingLegacyDefault, resolved);
+    if (opts.setAsDefault || restoresLegacyDefault) {
+      this.setDefault(entry.project_id);
+      // An explicit replacement default supersedes any deferred legacy pointer; registering the
+      // deferred path consumes it. Either way it must not override a later operator choice.
+      if (pendingLegacyDefault !== null) {
+        this.connection()
+          .prepare('DELETE FROM registry_meta WHERE key = ?')
+          .run(PENDING_LEGACY_DEFAULT_PATH_META_KEY);
+      }
+    }
     return entry;
   }
 
@@ -556,13 +629,11 @@ export class ProjectGraphRegistry {
   }
 
   /**
-   * One-time backfill so operators with projects from before s69-m05 don't have
-   * to re-register. Marker-gated (registry_meta.backfill_done): runs once, then a
-   * fast no-op. Sources the existing {@link ProjectRegistry} (the user's known
-   * project roots — itself populated by auto-discovery), reading each store's
-   * metadata.project_id/project_name. Stores that are gone or unreadable are
-   * skipped silently. (A redundant raw filesystem walk is intentionally omitted:
-   * ProjectRegistry already IS the discovered-project set.)
+   * One-time compatibility backfill so operators with projects from before s69-m05 don't have
+   * to re-register. Marker-gated (registry_meta.backfill_done): runs once from a non-read context,
+   * then fast-no-ops. Reads the deleted registry system's JSON artifact as a finite migration
+   * input and imports only stores that already record metadata.project_id/project_name. Gone,
+   * unreadable, and identity-less stores are skipped silently; no filesystem walk is performed.
    */
   private async maybeBackfill(): Promise<void> {
     const db = this.connection();
@@ -593,8 +664,8 @@ export class ProjectGraphRegistry {
       }
     } catch {
       // Backfill is best-effort; never block registry availability on it. The
-      // marker is still set so we don't re-scan on every open — a missed store
-      // will be picked up by cmos_review's touchOrRegisterFromStore on next open.
+      // marker is still set so we don't re-scan on every open. A missed store stays absent until
+      // an explicit/write registration path adds it; read-classified cmos_review never does.
     } finally {
       db.prepare('INSERT OR REPLACE INTO registry_meta (key, value) VALUES (?, ?)').run(
         BACKFILL_MARKER_KEY,
@@ -604,13 +675,11 @@ export class ProjectGraphRegistry {
   }
 
   /**
-   * s79-m01 identity backfill (marker-gated, SEPARATE marker) — the precondition
-   * for the m02 authority flip. Walks every JSON-known store and, unlike the s69
-   * backfill (which SKIPS id-less stores), **mints a UUID** into any store lacking
-   * `metadata.project_id` so it can enter the graph — then **migrates the default**:
-   * reads `ProjectRegistry.getDefault()`, resolves its `project_id`, and sets it as
-   * the graph default. Existing ids (slug or UUID) are never churned. Best-effort:
-   * never blocks registry availability; the marker is set regardless so it runs once.
+   * s79-m01 identity backfill (marker-gated, SEPARATE marker), narrowed by s88-m08.
+   * Walk every JSON-known store and migrate stores that ALREADY record an identity plus the
+   * legacy default pointer. An identity-less store is skipped: opening the discovery registry is
+   * a read/compatibility path, not an operator registration, and must never mint into a project
+   * store. Explicit write registration handles those stores later. Best-effort and run-once.
    */
   private async maybeIdentityBackfill(): Promise<void> {
     if (this.readMeta(IDENTITY_BACKFILL_MARKER_KEY)) return;
@@ -620,26 +689,32 @@ export class ProjectGraphRegistry {
       // raw legacy-JSON read; nothing writes the JSON any more.
       const legacy = readLegacyJsonRegistry(this.configDir);
       for (const proj of legacy?.projects ?? []) {
-        // Mint a UUID where absent (id-less stores the s69 backfill skipped);
-        // returns the existing id untouched otherwise. Null = store gone/unreadable.
-        const projectId = mintProjectId(proj.projectRoot);
-        if (!projectId) continue;
-        if (this.get(projectId)) continue; // already present (e.g. s69 backfill)
         const identity = readStoreIdentity(proj.projectRoot);
+        if (!identity) continue; // registration, not a registry read, owns identity minting
+        const projectId = identity.project_id;
+        if (this.get(projectId)) continue; // already present (e.g. s69 backfill)
         this.register({
           project_id: projectId,
           store_path: proj.projectRoot,
-          name: identity?.name ?? path.basename(path.resolve(proj.projectRoot)),
+          name: identity.name,
         });
       }
 
       // Migrate the legacy JSON default → graph default (a DATA migration, not
-      // behavior-only). readStoreIdentity now resolves any just-minted id.
+      // behavior-only). If it is still identity-less, retain the path so the later authoritative
+      // registration can promote the minted row instead of losing the operator's old default.
       const jsonDefaultPath = legacy?.defaultProject;
       if (jsonDefaultPath) {
         const defaultId =
           readStoreIdentity(jsonDefaultPath)?.project_id ?? this.getByStorePath(jsonDefaultPath);
-        if (defaultId) this.setDefault(defaultId);
+        if (defaultId) {
+          this.setDefault(defaultId);
+          this.connection()
+            .prepare('DELETE FROM registry_meta WHERE key = ?')
+            .run(PENDING_LEGACY_DEFAULT_PATH_META_KEY);
+        } else {
+          this.writeMeta(PENDING_LEGACY_DEFAULT_PATH_META_KEY, path.resolve(jsonDefaultPath));
+        }
       }
     } catch {
       // Best-effort — mirror maybeBackfill: never block availability on it.
@@ -665,12 +740,11 @@ interface LegacyJsonRegistry {
  * migrate the default-project pointer. Best-effort: returns null on absent file or
  * any parse error (a corrupt legacy file must never block registry availability).
  *
- * **Module-private on purpose** (s80-m02 review): NOT exported, so no other src file
- * can import it and turn the inert legacy JSON back into a live discovery source (the
- * split-brain this sprint deleted). The discovery-read gate additionally fails on any
- * `project-registry.json` reference outside this file, but keeping the reader private
- * is the primary guard — the gate is defense-in-depth. The file is inert compat data
- * that operators may safely delete.
+ * **Module-private on purpose** (s80-m02 review): NOT exported, so no other src file can turn the
+ * legacy JSON into a live discovery source (the split-brain this sprint deleted). The file is a
+ * read-only, one-time compatibility input until the marker-gated import runs; it is never written
+ * and is not consulted afterward. Operators may safely delete it after migration (deleting it
+ * earlier means its projects/default may need explicit re-registration).
  *
  * @param configDir the config dir holding `project-registry.json`.
  */
@@ -737,7 +811,7 @@ function slugifyName(value: string): string {
   return value.trim().toLowerCase().replace(/\s+/g, '-') || 'project';
 }
 
-export function mintProjectId(storePath: string): string | null {
+export function mintProjectId(storePath: string, preferredId?: string): string | null {
   const dbPath = path.join(storePath, 'cmos', 'db', 'cmos.sqlite');
   if (!existsSync(dbPath)) return null;
   let db: Database.Database | null = null;
@@ -748,9 +822,19 @@ export function mintProjectId(storePath: string): string | null {
       | undefined;
     const existing = idRow?.value?.trim();
     if (existing) return existing; // never churn an existing id
-    const minted = randomUUID();
-    db.prepare("INSERT OR REPLACE INTO metadata (key, value) VALUES ('project_id', ?)").run(minted);
-    return minted;
+    const minted = preferredId ?? randomUUID();
+    // One conditional UPSERT, rather than SELECT + unconditional REPLACE. Two MCP processes can
+    // observe the same blank row concurrently; the first committed UUID wins and the second must
+    // not overwrite it. Re-read the persisted winner after the statement.
+    db.prepare(
+      `INSERT INTO metadata (key, value) VALUES ('project_id', ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value
+       WHERE TRIM(COALESCE(metadata.value, '')) = ''`
+    ).run(minted);
+    const persisted = db.prepare("SELECT value FROM metadata WHERE key = 'project_id'").get() as
+      | MetaRow
+      | undefined;
+    return persisted?.value?.trim() || null;
   } catch {
     return null;
   } finally {

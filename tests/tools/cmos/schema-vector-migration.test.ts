@@ -211,6 +211,500 @@ describe('ensureVectorStorage', () => {
       );
       expect(row.data?.value).toBe('2.3');
     });
+
+    it('does not downgrade a newer schema_version marker', () => {
+      ensureVectorStorage(client);
+      expect(
+        client.execute("UPDATE metadata SET value = '2.4' WHERE key = 'schema_version'", []).success
+      ).toBe(true);
+
+      expect(ensureVectorStorage(client)).toEqual({
+        columnsAdded: [],
+        indexesCreated: [],
+        rowsUpdated: 0,
+        alreadyCurrent: true,
+        warnings: [],
+      });
+      expect(
+        client.getOne<{ value: string }>(
+          "SELECT value FROM metadata WHERE key = 'schema_version'",
+          []
+        ).data?.value
+      ).toBe('2.4');
+    });
+
+    it.each([
+      {
+        sourceTable: 'learnings',
+        ftsTable: 'learnings_fts',
+        insertSql:
+          "INSERT INTO learnings (content, created_at) VALUES ('current marker repair sentinel', '2026-08-28T00:00:00Z')",
+        matchTerm: 'sentinel',
+        schemaVersion: '2.3',
+      },
+      {
+        sourceTable: 'missions',
+        ftsTable: 'missions_fts',
+        insertSql:
+          "INSERT INTO missions (id, name, status) VALUES ('s99-m99', 'current marker repair sentinel', 'Queued')",
+        matchTerm: 'sentinel',
+        schemaVersion: '2.4',
+      },
+    ])(
+      'repairs an empty $ftsTable index even when schema_version is already $schemaVersion',
+      ({ sourceTable, ftsTable, insertSql, matchTerm, schemaVersion }) => {
+        expect(ensureVectorStorage(client).warnings).toEqual([]);
+        expect(client.raw(insertSql).success).toBe(true);
+        expect(
+          client.execute(`INSERT INTO ${ftsTable}(${ftsTable}) VALUES(?)`, ['delete-all']).success
+        ).toBe(true);
+        expect(
+          client.execute("UPDATE metadata SET value = ? WHERE key = 'schema_version'", [
+            schemaVersion,
+          ]).success
+        ).toBe(true);
+        expect(
+          client.getOne<{ count: number }>(`SELECT COUNT(*) AS count FROM ${sourceTable}`, []).data
+            ?.count
+        ).toBe(1);
+        expect(
+          client.getOne<{ count: number }>(`SELECT COUNT(*) AS count FROM ${ftsTable}_docsize`, [])
+            .data?.count
+        ).toBe(0);
+
+        expect(ensureVectorStorage(client)).toEqual({
+          columnsAdded: [],
+          indexesCreated: [],
+          rowsUpdated: 1,
+          alreadyCurrent: false,
+          warnings: [],
+        });
+        expect(
+          client.getMany(`SELECT rowid FROM ${ftsTable} WHERE ${ftsTable} MATCH ?`, [matchTerm])
+            .data
+        ).toHaveLength(1);
+        expect(
+          client.getOne<{ value: string }>(
+            "SELECT value FROM metadata WHERE key = 'schema_version'",
+            []
+          ).data?.value
+        ).toBe(schemaVersion);
+        expect(ensureVectorStorage(client)).toEqual({
+          columnsAdded: [],
+          indexesCreated: [],
+          rowsUpdated: 0,
+          alreadyCurrent: true,
+          warnings: [],
+        });
+      }
+    );
+
+    it('accepts benign IF NOT EXISTS, whitespace, and trailing-semicolon spelling differences', () => {
+      expect(ensureVectorStorage(client).warnings).toEqual([]);
+      expect(client.raw('DROP TABLE decisions_vec').success).toBe(true);
+      expect(
+        client.raw(`
+          CREATE VIRTUAL TABLE IF NOT EXISTS decisions_vec
+          USING vec0 (
+            decision_id INTEGER PRIMARY KEY,
+            embedding FLOAT[384]
+          );
+        `).success
+      ).toBe(true);
+      expect(client.raw('DROP TRIGGER learnings_fts_insert').success).toBe(true);
+      expect(
+        client.raw(`
+          CREATE TRIGGER IF NOT EXISTS learnings_fts_insert
+          AFTER INSERT ON learnings
+          BEGIN
+            INSERT INTO learnings_fts (rowid, content)
+            VALUES (new.id, new.content);
+          END;
+        `).success
+      ).toBe(true);
+
+      expect(ensureVectorStorage(client)).toEqual({
+        columnsAdded: [],
+        indexesCreated: [],
+        rowsUpdated: 0,
+        alreadyCurrent: true,
+        warnings: [],
+      });
+    });
+  });
+
+  describe('failed DDL disclosure', () => {
+    it.each([
+      ['table', 'CREATE TABLE decisions_vec (decision_id INTEGER PRIMARY KEY, embedding BLOB)'],
+      ['view', 'CREATE VIEW decisions_vec AS SELECT 1 AS decision_id, zeroblob(1536) AS embedding'],
+      ['index', 'CREATE INDEX decisions_vec ON strategic_decisions (id)'],
+    ])(
+      'rejects a same-named %s as a vec0 table without false creation claims',
+      (objectType, collisionSql) => {
+        const initial = ensureVectorStorage(client);
+        expect(initial.warnings).toEqual([]);
+
+        expect(client.raw('DROP TABLE decisions_vec').success).toBe(true);
+        expect(client.raw(collisionSql).success).toBe(true);
+        expect(
+          client.execute("UPDATE metadata SET value = '2.1' WHERE key = 'schema_version'", [])
+            .success
+        ).toBe(true);
+
+        const result = ensureVectorStorage(client);
+
+        expect(result).toMatchObject({
+          columnsAdded: [],
+          indexesCreated: [],
+          alreadyCurrent: false,
+        });
+        expect(result.warnings).toEqual([
+          `CREATE VIRTUAL TABLE decisions_vec blocked: DB_SCHEMA_MISMATCH — Existing ${objectType} 'decisions_vec' is not a vec0 virtual table.`,
+        ]);
+
+        const object = client.getOne<{ type: string; sql: string }>(
+          "SELECT type, sql FROM sqlite_master WHERE name = 'decisions_vec'",
+          []
+        );
+        expect(object.data?.type).toBe(objectType);
+        expect(object.data?.sql).not.toMatch(/CREATE\s+VIRTUAL\s+TABLE/i);
+        expect(
+          client.getOne<{ value: string }>(
+            "SELECT value FROM metadata WHERE key = 'schema_version'",
+            []
+          ).data?.value
+        ).toBe('2.1');
+      }
+    );
+
+    it('rejects a same-named vec0 table with the wrong key and dimensions', () => {
+      expect(ensureVectorStorage(client).warnings).toEqual([]);
+      expect(client.raw('DROP TABLE decisions_vec').success).toBe(true);
+      expect(
+        client.raw(`
+          CREATE VIRTUAL TABLE decisions_vec USING vec0(
+            other_id INTEGER PRIMARY KEY,
+            embedding FLOAT[8]
+          )
+        `).success
+      ).toBe(true);
+      expect(
+        client.execute("UPDATE metadata SET value = '2.4' WHERE key = 'schema_version'", []).success
+      ).toBe(true);
+
+      expect(ensureVectorStorage(client)).toEqual({
+        columnsAdded: [],
+        indexesCreated: [],
+        rowsUpdated: 0,
+        alreadyCurrent: false,
+        warnings: [
+          "CREATE VIRTUAL TABLE decisions_vec blocked: DB_SCHEMA_MISMATCH — Existing vec0 virtual table 'decisions_vec' has a different definition; drop or rename it, then retry.",
+        ],
+      });
+      expect(
+        client.getOne<{ sql: string }>(
+          "SELECT sql FROM sqlite_master WHERE name = 'decisions_vec'",
+          []
+        ).data?.sql
+      ).toContain('other_id INTEGER PRIMARY KEY');
+      expect(
+        client.getOne<{ value: string }>(
+          "SELECT value FROM metadata WHERE key = 'schema_version'",
+          []
+        ).data?.value
+      ).toBe('2.4');
+    });
+
+    it('rejects a same-named trigger with the wrong target behavior', () => {
+      expect(ensureVectorStorage(client).warnings).toEqual([]);
+      expect(client.raw('DROP TRIGGER learnings_fts_insert').success).toBe(true);
+      expect(
+        client.raw(`
+          CREATE TRIGGER learnings_fts_insert AFTER INSERT ON learnings BEGIN
+            SELECT 1;
+          END
+        `).success
+      ).toBe(true);
+      expect(
+        client.execute("UPDATE metadata SET value = '2.4' WHERE key = 'schema_version'", []).success
+      ).toBe(true);
+
+      expect(ensureVectorStorage(client)).toEqual({
+        columnsAdded: [],
+        indexesCreated: [],
+        rowsUpdated: 0,
+        alreadyCurrent: false,
+        warnings: [
+          "CREATE TRIGGER learnings_fts_insert blocked: DB_SCHEMA_MISMATCH — Existing trigger 'learnings_fts_insert' has a different definition; drop or rename it, then retry.",
+        ],
+      });
+      expect(
+        client.getOne<{ sql: string }>(
+          "SELECT sql FROM sqlite_master WHERE name = 'learnings_fts_insert'",
+          []
+        ).data?.sql
+      ).toContain('SELECT 1');
+    });
+
+    it('does not stamp a partial store current until a missing source table is restored', () => {
+      expect(client.raw('DROP TABLE strategic_decisions').success).toBe(true);
+
+      const first = ensureVectorStorage(client);
+
+      expect(first.alreadyCurrent).toBe(false);
+      expect(first.warnings).toEqual([
+        "ALTER TABLE strategic_decisions ADD COLUMN last_embedded_hash blocked: DB_SCHEMA_MISMATCH — Source table 'strategic_decisions' does not exist.",
+      ]);
+      expect(
+        client.getOne<{ value: string }>(
+          "SELECT value FROM metadata WHERE key = 'schema_version'",
+          []
+        ).data?.value
+      ).toBe('2.1');
+
+      const stillPartial = ensureVectorStorage(client);
+      expect(stillPartial.alreadyCurrent).toBe(false);
+      expect(stillPartial.columnsAdded).toEqual([]);
+      expect(stillPartial.indexesCreated).toEqual([]);
+      expect(stillPartial.warnings).toEqual(first.warnings);
+      expect(
+        client.getOne<{ value: string }>(
+          "SELECT value FROM metadata WHERE key = 'schema_version'",
+          []
+        ).data?.value
+      ).toBe('2.1');
+
+      expect(
+        client.raw(`
+          CREATE TABLE strategic_decisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            decision_text TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active'
+          )
+        `).success
+      ).toBe(true);
+
+      expect(ensureVectorStorage(client)).toEqual({
+        columnsAdded: ['strategic_decisions.last_embedded_hash'],
+        indexesCreated: [],
+        rowsUpdated: 0,
+        alreadyCurrent: false,
+        warnings: [],
+      });
+      expect(
+        client.getOne<{ value: string }>(
+          "SELECT value FROM metadata WHERE key = 'schema_version'",
+          []
+        ).data?.value
+      ).toBe('2.3');
+      expect(ensureVectorStorage(client)).toEqual({
+        columnsAdded: [],
+        indexesCreated: [],
+        rowsUpdated: 0,
+        alreadyCurrent: true,
+        warnings: [],
+      });
+    });
+
+    it('retries missing FTS triggers and rebuild after the source table is repaired', () => {
+      expect(client.raw('DROP TABLE learnings').success).toBe(true);
+
+      const first = ensureVectorStorage(client);
+
+      expect(first.alreadyCurrent).toBe(false);
+      expect(first.indexesCreated).toEqual([
+        'missions_fts_insert',
+        'missions_fts_delete',
+        'missions_fts_update',
+      ]);
+      expect(first.warnings).toEqual([
+        "CREATE TRIGGER learnings_fts_insert failed: DB_SCHEMA_MISMATCH — Table 'learnings' does not exist",
+        "CREATE TRIGGER learnings_fts_delete failed: DB_SCHEMA_MISMATCH — Table 'learnings' does not exist",
+        "CREATE TRIGGER learnings_fts_update failed: DB_SCHEMA_MISMATCH — Table 'learnings' does not exist",
+        "learnings_fts rebuild failed: DB_SCHEMA_MISMATCH — Table 'learnings' does not exist",
+      ]);
+      expect(new Set(first.warnings).size).toBe(first.warnings?.length);
+      expect(
+        client.getOne<{ type: string }>(
+          "SELECT type FROM sqlite_master WHERE name = 'learnings_fts'",
+          []
+        ).data?.type
+      ).toBe('table');
+      expect(
+        client.getMany<{ name: string }>(
+          "SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'learnings_fts_%' ORDER BY name",
+          []
+        ).data
+      ).toEqual([]);
+      expect(
+        client.getOne<{ value: string }>(
+          "SELECT value FROM metadata WHERE key = 'schema_version'",
+          []
+        ).data?.value
+      ).toBe('2.1');
+
+      expect(
+        client.raw(`
+          CREATE TABLE learnings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            content TEXT NOT NULL,
+            category TEXT,
+            status TEXT NOT NULL DEFAULT 'active',
+            created_at TEXT NOT NULL,
+            last_embedded_hash TEXT
+          );
+          INSERT INTO learnings (content, created_at)
+          VALUES ('rebuild me after repair', '2026-08-28T00:00:00Z');
+        `).success
+      ).toBe(true);
+
+      const second = ensureVectorStorage(client);
+
+      expect(second.alreadyCurrent).toBe(false);
+      expect(second.warnings).toEqual([]);
+      expect(second.columnsAdded).toEqual([]);
+      expect(second.indexesCreated).toEqual([
+        'learnings_fts_insert',
+        'learnings_fts_delete',
+        'learnings_fts_update',
+      ]);
+      expect(second.rowsUpdated).toBe(1);
+      expect(
+        client.getMany<{ name: string }>(
+          "SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'learnings_fts_%' ORDER BY name",
+          []
+        ).data
+      ).toEqual([
+        { name: 'learnings_fts_delete' },
+        { name: 'learnings_fts_insert' },
+        { name: 'learnings_fts_update' },
+      ]);
+      expect(
+        client.getMany<{ rowid: number }>(
+          "SELECT rowid FROM learnings_fts WHERE learnings_fts MATCH 'rebuild'",
+          []
+        ).data
+      ).toHaveLength(1);
+      expect(
+        client.getOne<{ value: string }>(
+          "SELECT value FROM metadata WHERE key = 'schema_version'",
+          []
+        ).data?.value
+      ).toBe('2.3');
+
+      expect(ensureVectorStorage(client)).toEqual({
+        columnsAdded: [],
+        indexesCreated: [],
+        rowsUpdated: 0,
+        alreadyCurrent: true,
+        warnings: [],
+      });
+    });
+
+    it('retries a failed schema_version write after all storage objects already exist', () => {
+      expect(
+        client.raw(`
+          CREATE TRIGGER block_vector_schema_version BEFORE INSERT ON metadata
+          WHEN NEW.key = 'schema_version'
+          BEGIN
+            SELECT RAISE(FAIL, 'schema version blocked');
+          END;
+        `).success
+      ).toBe(true);
+
+      const first = ensureVectorStorage(client);
+
+      expect(first.alreadyCurrent).toBe(false);
+      expect(first.columnsAdded).toEqual([
+        'decisions_vec (virtual table)',
+        'learnings_vec (virtual table)',
+        'missions_vec (virtual table)',
+        'strategic_decisions.last_embedded_hash',
+        'learnings.last_embedded_hash',
+        'missions.last_embedded_hash',
+        'learnings_fts (virtual table)',
+        'missions_fts (virtual table)',
+      ]);
+      expect(first.indexesCreated).toEqual([
+        'learnings_fts_insert',
+        'learnings_fts_delete',
+        'learnings_fts_update',
+        'missions_fts_insert',
+        'missions_fts_delete',
+        'missions_fts_update',
+      ]);
+      expect(first.warnings).toEqual([
+        "metadata.schema_version = '2.3' failed: DB_QUERY_FAILED — Query failed: schema version blocked",
+      ]);
+      expect(
+        client.getMany<{ name: string }>(
+          `SELECT name FROM sqlite_master
+           WHERE type = 'table'
+             AND name IN ('decisions_vec', 'learnings_vec', 'missions_vec', 'learnings_fts', 'missions_fts')
+           ORDER BY name`,
+          []
+        ).data
+      ).toEqual([
+        { name: 'decisions_vec' },
+        { name: 'learnings_fts' },
+        { name: 'learnings_vec' },
+        { name: 'missions_fts' },
+        { name: 'missions_vec' },
+      ]);
+      expect(
+        client.getOne<{ count: number }>(
+          `SELECT COUNT(*) AS count FROM sqlite_master
+           WHERE type = 'trigger'
+             AND (name LIKE 'learnings_fts_%' OR name LIKE 'missions_fts_%')`,
+          []
+        ).data?.count
+      ).toBe(6);
+      expect(
+        client.getOne<{ value: string }>(
+          "SELECT value FROM metadata WHERE key = 'schema_version'",
+          []
+        ).data?.value
+      ).toBe('2.1');
+
+      expect(client.raw('DROP TRIGGER block_vector_schema_version').success).toBe(true);
+      const second = ensureVectorStorage(client);
+
+      expect(second).toEqual({
+        columnsAdded: [],
+        indexesCreated: [],
+        rowsUpdated: 0,
+        alreadyCurrent: false,
+        warnings: [],
+      });
+      expect(
+        client.getOne<{ value: string }>(
+          "SELECT value FROM metadata WHERE key = 'schema_version'",
+          []
+        ).data?.value
+      ).toBe('2.3');
+      expect(ensureVectorStorage(client).alreadyCurrent).toBe(true);
+    });
+
+    it('surfaces a failed vec0 raw CREATE without throwing or claiming the table', async () => {
+      expect(ensureVectorStorage(client).warnings).toEqual([]);
+      expect(client.raw('DROP TABLE decisions_vec').success).toBe(true);
+
+      client.close();
+      const opened = await CmosDatabaseClient.create({ dbPath, readonly: true });
+      expect(opened.success).toBe(true);
+      expect(opened.data).toBeDefined();
+      client = opened.data!;
+
+      const result = ensureVectorStorage(client);
+
+      expect(result.alreadyCurrent).toBe(false);
+      expect(result.columnsAdded).toEqual([]);
+      expect(result.indexesCreated).toEqual([]);
+      expect(result.warnings).toEqual([
+        'CREATE VIRTUAL TABLE decisions_vec failed: DB_CONNECTION_FAILED — Database is opened in read-only mode',
+      ]);
+    });
   });
 
   describe('learnings_fts triggers', () => {

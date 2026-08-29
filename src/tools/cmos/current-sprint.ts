@@ -31,6 +31,7 @@ import {
   statusInSql,
   statusNotInSql as statusNotIn,
 } from './terminal-status';
+import { sprintIdOrderSql } from './sprint-ordering';
 
 /**
  * Resolve the single current sprint ID via a mission-aware 6-step cascade.
@@ -303,7 +304,7 @@ function getMostRecentlyActiveSprintId(client: CmosDatabaseClient): string | nul
        ) AS activity
       WHERE activity.activity_at IS NOT NULL
       GROUP BY activity.sprint_id
-      ORDER BY MAX(activity.activity_at) DESC, activity.sprint_id DESC
+      ORDER BY MAX(activity.activity_at) DESC, ${sprintIdOrderSql('activity.sprint_id', 'DESC')}
       LIMIT 1`,
     []
   );
@@ -337,7 +338,7 @@ function getMostRecentlyActiveSprintIdIncludingCompleted(
        ) AS activity
       WHERE activity.activity_at IS NOT NULL
       GROUP BY activity.sprint_id
-      ORDER BY MAX(activity.activity_at) DESC, activity.sprint_id DESC
+      ORDER BY MAX(activity.activity_at) DESC, ${sprintIdOrderSql('activity.sprint_id', 'DESC')}
       LIMIT 1`,
     []
   );

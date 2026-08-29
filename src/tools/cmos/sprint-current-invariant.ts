@@ -25,6 +25,7 @@ import { createError, createSuccess, CMOS_ERROR_CODES } from './errors';
 import type { CmosToolResult } from './types';
 import { ensureAuthorNamespaceColumns, ensureFirehoseEventColumns } from './schema-migrations';
 import { SPRINT_OPEN_STATUSES, statusInSql } from './terminal-status';
+import { attachWarnings } from './format-warnings';
 
 /** A sprint that was auto-demoted to 'Planned' to preserve the single-open invariant. */
 export interface DemotedSprint {
@@ -55,95 +56,101 @@ const openStatusSql = statusInSql('status', SPRINT_OPEN_STATUSES);
  * @param client   open DB client
  * @param keepSprintId  the sprint being made current — excluded from demotion
  * @param primaryWrite  the caller's write; its success/failure drives commit/rollback
+ * @returns The write data and demotions, with pre-BEGIN migration warnings on the result envelope.
  */
 export function writeSingleCurrentSprint<T>(
   client: CmosDatabaseClient,
   keepSprintId: string,
   primaryWrite: () => CmosToolResult<T>
 ): CmosToolResult<SingleCurrentSprintResult<T>> {
-  // Pre-BEGIN migrations (see doc comment): the firehose rebuild cannot run inside
-  // a transaction, and the author-namespace ALTERs are kept out of it for symmetry.
-  ensureFirehoseEventColumns(client);
-  ensureAuthorNamespaceColumns(client);
+  const warnings: string[] = [];
+  const result = (() => {
+    // Pre-BEGIN migrations (see doc comment): the firehose rebuild cannot run inside
+    // a transaction, and the author-namespace ALTERs are kept out of it for symmetry.
+    warnings.push(...(ensureFirehoseEventColumns(client).warnings ?? []));
+    warnings.push(...(ensureAuthorNamespaceColumns(client).warnings ?? []));
 
-  const begin = client.execute('BEGIN IMMEDIATE', []);
-  if (!begin.success) {
-    return createError(
-      begin.error ?? {
-        code: CMOS_ERROR_CODES.DB_QUERY_FAILED,
-        message: 'Failed to begin single-current-sprint transaction',
-        suggestion: 'Retry once the database becomes available.',
-      }
-    );
-  }
-
-  let transactionOpen = true;
-  const rollback = (): void => {
-    if (!transactionOpen) return;
-    client.execute('ROLLBACK', []);
-    transactionOpen = false;
-  };
-  const fail = (
-    error: Parameters<typeof createError<SingleCurrentSprintResult<T>>>[0]
-  ): CmosToolResult<SingleCurrentSprintResult<T>> => {
-    rollback();
-    return createError<SingleCurrentSprintResult<T>>(error);
-  };
-
-  // Name the sprints we are about to demote (for the warning). BEGIN IMMEDIATE
-  // holds the write lock, so no other writer can change the set between this
-  // SELECT and the UPDATE below — the two predicates match identically.
-  const othersResult = client.getMany<DemotedSprint>(
-    `SELECT id, title FROM sprints WHERE ${openStatusSql} AND id != ?`,
-    [keepSprintId]
-  );
-  if (!othersResult.success) {
-    return fail(
-      othersResult.error ?? {
-        code: CMOS_ERROR_CODES.DB_QUERY_FAILED,
-        message: 'Failed to query other open sprints',
-      }
-    );
-  }
-  const demoted = othersResult.data ?? [];
-
-  if (demoted.length > 0) {
-    const demoteResult = client.execute(
-      `UPDATE sprints SET status = 'Planned' WHERE ${openStatusSql} AND id != ?`,
-      [keepSprintId]
-    );
-    if (!demoteResult.success) {
-      return fail(
-        demoteResult.error ?? {
+    const begin = client.execute('BEGIN IMMEDIATE', []);
+    if (!begin.success) {
+      return createError<SingleCurrentSprintResult<T>>(
+        begin.error ?? {
           code: CMOS_ERROR_CODES.DB_QUERY_FAILED,
-          message: 'Failed to demote other open sprints',
+          message: 'Failed to begin single-current-sprint transaction',
+          suggestion: 'Retry once the database becomes available.',
         }
       );
     }
-  }
 
-  const writeResult = primaryWrite();
-  if (!writeResult.success) {
-    return fail(
-      writeResult.error ?? {
-        code: CMOS_ERROR_CODES.DB_QUERY_FAILED,
-        message: 'Primary sprint write failed',
-      }
+    let transactionOpen = true;
+    const rollback = (): void => {
+      if (!transactionOpen) return;
+      client.execute('ROLLBACK', []);
+      transactionOpen = false;
+    };
+    const fail = (
+      error: Parameters<typeof createError<SingleCurrentSprintResult<T>>>[0]
+    ): CmosToolResult<SingleCurrentSprintResult<T>> => {
+      rollback();
+      return createError<SingleCurrentSprintResult<T>>(error);
+    };
+
+    // Name the sprints we are about to demote (for the warning). BEGIN IMMEDIATE
+    // holds the write lock, so no other writer can change the set between this
+    // SELECT and the UPDATE below — the two predicates match identically.
+    const othersResult = client.getMany<DemotedSprint>(
+      `SELECT id, title FROM sprints WHERE ${openStatusSql} AND id != ?`,
+      [keepSprintId]
     );
-  }
+    if (!othersResult.success) {
+      return fail(
+        othersResult.error ?? {
+          code: CMOS_ERROR_CODES.DB_QUERY_FAILED,
+          message: 'Failed to query other open sprints',
+        }
+      );
+    }
+    const demoted = othersResult.data ?? [];
 
-  const commit = client.execute('COMMIT', []);
-  if (!commit.success) {
-    return fail(
-      commit.error ?? {
-        code: CMOS_ERROR_CODES.DB_QUERY_FAILED,
-        message: 'Failed to commit single-current-sprint transaction',
+    if (demoted.length > 0) {
+      const demoteResult = client.execute(
+        `UPDATE sprints SET status = 'Planned' WHERE ${openStatusSql} AND id != ?`,
+        [keepSprintId]
+      );
+      if (!demoteResult.success) {
+        return fail(
+          demoteResult.error ?? {
+            code: CMOS_ERROR_CODES.DB_QUERY_FAILED,
+            message: 'Failed to demote other open sprints',
+          }
+        );
       }
-    );
-  }
-  transactionOpen = false;
+    }
 
-  return createSuccess({ data: writeResult.data as T, demoted });
+    const writeResult = primaryWrite();
+    if (!writeResult.success) {
+      return fail(
+        writeResult.error ?? {
+          code: CMOS_ERROR_CODES.DB_QUERY_FAILED,
+          message: 'Primary sprint write failed',
+        }
+      );
+    }
+
+    const commit = client.execute('COMMIT', []);
+    if (!commit.success) {
+      return fail(
+        commit.error ?? {
+          code: CMOS_ERROR_CODES.DB_QUERY_FAILED,
+          message: 'Failed to commit single-current-sprint transaction',
+        }
+      );
+    }
+    transactionOpen = false;
+
+    return createSuccess({ data: writeResult.data as T, demoted }, writeResult.warnings);
+  })();
+
+  return attachWarnings(result, warnings);
 }
 
 /**

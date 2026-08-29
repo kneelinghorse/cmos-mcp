@@ -13,7 +13,7 @@ import {
 } from './errors';
 import { ensureMissionTimestamps } from './schema-migrations';
 import { sanitizeContentField } from '../../intelligence/content-sanitizer';
-import { appendWarnings } from './format-warnings';
+import { appendWarnings, attachWarnings } from './format-warnings';
 import { checkWrite } from './write-guard';
 
 /**
@@ -87,10 +87,9 @@ export async function cmosMissionDefer(
     }
   }
 
-  return withClientValidated(
+  const warnings: string[] = [];
+  const result = await withClientValidated(
     (client) => {
-      const warnings: string[] = [];
-
       const missionResult = client.getOne<Mission>(
         `SELECT id, status, name, domain_fields FROM missions WHERE id = ?`,
         [missionId]
@@ -161,7 +160,7 @@ export async function cmosMissionDefer(
         ? `[Deferred] ${cleanedReason}${cleanedDeferUntil ? ` (until: ${cleanedDeferUntil})` : ''}`
         : `[Deferred] Temporarily parked${cleanedDeferUntil ? ` (until: ${cleanedDeferUntil})` : ''}`;
 
-      ensureMissionTimestamps(client);
+      warnings.push(...(ensureMissionTimestamps(client).warnings ?? []));
 
       const updateResult = client.execute(
         `UPDATE missions
@@ -226,6 +225,7 @@ export async function cmosMissionDefer(
     },
     { projectRoot: params.projectRoot }
   );
+  return attachWarnings(result, warnings);
 }
 
 export function formatMissionDeferForLLM(result: CmosToolResult<MissionDeferResult>): string {
@@ -246,6 +246,7 @@ export function formatMissionDeferForLLM(result: CmosToolResult<MissionDeferResu
       lines.push(`Suggestion: ${error.suggestion}`);
     }
 
+    appendWarnings(lines, result);
     return lines.join('\n');
   }
 

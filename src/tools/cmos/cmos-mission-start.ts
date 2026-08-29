@@ -25,7 +25,7 @@ import {
   buildMissionSearchText,
   type RelevantDecision,
 } from './relevance-surfacing';
-import { appendWarnings } from './format-warnings';
+import { appendWarnings, attachWarnings } from './format-warnings';
 import { checkWrite } from './write-guard';
 
 /**
@@ -128,10 +128,9 @@ export async function cmosMissionStart(
   const missionId = params.missionId.trim();
   const targetStatus: MissionStatus = 'In Progress';
 
-  return withClientAsync(
+  const warnings: string[] = [];
+  const result = await withClientAsync(
     async (client) => {
-      const warnings: string[] = [];
-
       // Query mission by ID
       const missionResult = loadMissionForStart(client, missionId);
 
@@ -202,7 +201,7 @@ export async function cmosMissionStart(
       }
 
       // Ensure timestamp columns exist (migration)
-      ensureMissionTimestamps(client);
+      warnings.push(...(ensureMissionTimestamps(client).warnings ?? []));
 
       // Build update query - include notes if provided
       // Set started_at only if not already set (first start), always update updated_at
@@ -357,6 +356,7 @@ export async function cmosMissionStart(
     },
     { projectRoot: params.projectRoot }
   );
+  return attachWarnings(result, warnings);
 }
 
 function loadMissionForStart(
@@ -487,6 +487,7 @@ export function formatMissionStartForLLM(result: CmosToolResult<MissionStartResu
       lines.push(`Suggestion: ${error.suggestion}`);
     }
 
+    appendWarnings(lines, result);
     return lines.join('\n');
   }
 

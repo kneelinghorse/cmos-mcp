@@ -20,6 +20,9 @@ import { checkWrite } from './write-guard';
 export const VALID_DEPENDENCY_TYPES = ['Blocks', 'Requires', 'Enables'] as const;
 export type DependencyType = (typeof VALID_DEPENDENCY_TYPES)[number];
 
+export const MISSION_DEPENDENCY_DISCLOSURE =
+  'Dependency relationships are recorded for ordering and graph expansion; they are not enforced at mission start or completion.';
+
 /**
  * Result type for cmos_mission_depends.
  */
@@ -53,7 +56,9 @@ export const cmosMissionDependsSchema = z.object({
   /** Dependency type */
   type: z
     .enum(['Blocks', 'Requires', 'Enables'])
-    .describe("Dependency type: 'Blocks', 'Requires', or 'Enables'"),
+    .describe(
+      `Dependency label: 'Blocks', 'Requires', or 'Enables'. ${MISSION_DEPENDENCY_DISCLOSURE}`
+    ),
 
   /** Optional: explicit project root to search from */
   projectRoot: z
@@ -71,8 +76,8 @@ export const cmosMissionDependsToolDefinition = {
   name: 'cmos_mission_depends',
   description:
     'Create a dependency relationship between two missions in the CMOS database. ' +
-    "Validates that both missions exist. Supports types: 'Blocks' (A blocks B from starting), " +
-    "'Requires' (A requires B to be completed first), 'Enables' (A enables B to proceed).",
+    "Validates that both missions exist. Supports relationship labels: 'Blocks', 'Requires', and 'Enables'. " +
+    MISSION_DEPENDENCY_DISCLOSURE,
   inputSchema: {
     type: 'object',
     properties: {
@@ -87,7 +92,7 @@ export const cmosMissionDependsToolDefinition = {
       type: {
         type: 'string',
         enum: ['Blocks', 'Requires', 'Enables'],
-        description: "Dependency type: 'Blocks', 'Requires', or 'Enables'",
+        description: `Dependency label: 'Blocks', 'Requires', or 'Enables'. ${MISSION_DEPENDENCY_DISCLOSURE}`,
       },
       projectRoot: {
         type: 'string',
@@ -233,21 +238,9 @@ export async function cmosMissionDepends(
 
       checkWrite(eventResult, warnings, 'mission dependency create event logging');
 
-      // Build descriptive message based on type
-      let description: string;
-      switch (type) {
-        case 'Blocks':
-          description = `Mission '${fromId}' now blocks '${toId}' from starting`;
-          break;
-        case 'Requires':
-          description = `Mission '${fromId}' now requires '${toId}' to be completed first`;
-          break;
-        case 'Enables':
-          description = `Mission '${fromId}' now enables '${toId}' to proceed`;
-          break;
-        default:
-          description = `Dependency created: ${fromId} ${type} ${toId}`;
-      }
+      const description =
+        `Recorded ${type} dependency: '${fromId.trim()}' -> '${toId.trim()}'. ` +
+        MISSION_DEPENDENCY_DISCLOSURE;
 
       return createSuccess(
         {

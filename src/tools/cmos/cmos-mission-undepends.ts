@@ -12,6 +12,7 @@ import type { CmosToolResult } from './types';
 import { createError, createSuccess, CMOS_ERROR_CODES } from './errors';
 import { appendWarnings } from './format-warnings';
 import { checkWrite } from './write-guard';
+import { MISSION_DEPENDENCY_DISCLOSURE } from './cmos-mission-depends';
 
 /**
  * Result type for dependency removal.
@@ -119,7 +120,7 @@ export async function cmosMissionUndepends(
           fromId: fromId.trim(),
           toId: toId.trim(),
           removedAt: now,
-          message: `Dependency removed: ${fromId} no longer ${existing.data.type.toLowerCase()} ${toId}`,
+          message: `Removed ${existing.data.type} dependency: '${fromId.trim()}' -> '${toId.trim()}'. ${MISSION_DEPENDENCY_DISCLOSURE}`,
         },
         warnings
       );

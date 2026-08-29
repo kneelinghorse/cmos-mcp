@@ -1,7 +1,21 @@
 // ABOUTME: Per-worker test isolation — strips real dashboard credentials before each
 // ABOUTME: test so fire-and-forget checkpoint syncs never hit the live dashboard or log late.
 
-import { afterEach, beforeEach } from '@jest/globals';
+import { createHash } from 'crypto';
+import { mkdirSync } from 'fs';
+import path from 'path';
+import { afterEach, beforeEach, expect } from '@jest/globals';
+
+const runConfigRoot = process.env.CMOS_JEST_CONFIG_DIR_CANONICAL;
+const testPath = expect.getState().testPath ?? `unknown-test-${process.env.JEST_WORKER_ID ?? '1'}`;
+const testPathKey = createHash('sha256').update(testPath).digest('hex').slice(0, 16);
+const testFileConfigDir = runConfigRoot
+  ? path.join(runConfigRoot, `worker-${process.env.JEST_WORKER_ID ?? '1'}`, testPathKey)
+  : undefined;
+if (testFileConfigDir) {
+  mkdirSync(testFileConfigDir, { recursive: true });
+  process.env.CMOS_CONFIG_DIR = testFileConfigDir;
+}
 
 /**
  * Dashboard credential env vars that gate `triggerCheckpointBackfill`
@@ -51,7 +65,7 @@ beforeEach(() => {
 });
 
 /**
- * s86-m01 — re-assert the run's canonical CMOS_CONFIG_DIR after every test.
+ * s86-m01/s88-m08 — re-assert this test file's isolated CMOS_CONFIG_DIR after every test.
  *
  * Twelve sites across eleven files delete this var deliberately (each restoring it
  * from a describe-scoped snapshot, or inline in a try/finally), and until this
@@ -67,13 +81,13 @@ beforeEach(() => {
  * the time this fires — for well-behaved files this hook is a no-op that writes
  * back the value that is already there.
  *
- * The canonical value comes from CMOS_JEST_CONFIG_DIR_CANONICAL, stamped by
- * tests/jest-global-setup.ts (both branches). See that file for why neither a
- * module-load capture nor `globalThis` can supply it.
+ * The per-run root comes from CMOS_JEST_CONFIG_DIR_CANONICAL, stamped by globalSetup. A stable
+ * hash of Jest's current testPath gives every file its own graph/credential store; the worker id
+ * prevents two parallel workers from ever sharing a SQLite file. This matters now that identity
+ * collisions fail loud: unrelated fixtures in unrelated suites must not form one portfolio.
  */
 afterEach(() => {
-  const canonical = process.env.CMOS_JEST_CONFIG_DIR_CANONICAL;
-  if (canonical) {
-    process.env.CMOS_CONFIG_DIR = canonical;
+  if (testFileConfigDir) {
+    process.env.CMOS_CONFIG_DIR = testFileConfigDir;
   }
 });

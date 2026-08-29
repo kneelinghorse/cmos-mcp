@@ -9,6 +9,7 @@
 import { promises as fs } from 'fs';
 import os from 'os';
 import path from 'path';
+import Database from 'better-sqlite3';
 import { CmosDetector } from '../../../src/intelligence/cmos-detector';
 import { ProjectGraphRegistry } from '../../../src/intelligence/project-graph-registry';
 import { cmosProjectRegister } from '../../../src/tools/cmos/cmos-project-register';
@@ -28,7 +29,12 @@ async function ensureCmosDatabase(workspace: string): Promise<string> {
   const dbPath = path.join(workspace, 'cmos', 'db');
   await fs.mkdir(dbPath, { recursive: true });
   const sqlitePath = path.join(dbPath, 'cmos.sqlite');
-  await fs.writeFile(sqlitePath, 'pragma user_version = 1;\n');
+  const db = new Database(sqlitePath);
+  db.exec(`
+    PRAGMA user_version = 1;
+    CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+  `);
+  db.close();
   return sqlitePath;
 }
 
@@ -40,8 +46,11 @@ describe('cmos_project_unregister', () => {
 
   // Register through the graph-authoritative tool path (s79-m02). s80-m02: the
   // graph is the single discovery source (no derived JSON mirror).
-  const register = (opts: { name?: string; setAsDefault?: boolean } = {}) =>
-    cmosProjectRegister({ projectRoot: workspace, ...opts });
+  const register = async (opts: { name?: string; setAsDefault?: boolean } = {}) => {
+    const result = await cmosProjectRegister({ projectRoot: workspace, ...opts });
+    expect(result.success).toBe(true);
+    return result;
+  };
 
   beforeEach(async () => {
     workspace = await createTempWorkspace('cmos-project-unregister-');

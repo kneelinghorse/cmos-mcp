@@ -1773,7 +1773,11 @@ export function formatMessageForLLM(
       return formatDirectoryForLLM(result as CmosToolResult<MessageDirectoryResult>);
     case 'whoami':
       return formatWhoamiForLLM(result as CmosToolResult<MessageWhoamiResult>);
-    default:
-      return result.success ? 'Message action completed' : 'Failed to execute cmos_message';
+    default: {
+      if (!result.success) return 'Failed to execute cmos_message';
+      const lines = ['Message action completed'];
+      appendWarnings(lines, result);
+      return lines.join('\n');
+    }
   }
 }

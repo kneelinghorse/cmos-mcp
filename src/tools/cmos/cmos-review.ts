@@ -1,5 +1,5 @@
 // ABOUTME: cmos_review — sprint-64 m03 bundled session-opener digest tool.
-// ABOUTME: Replaces the rote cmos_agent_onboard + cmos_context_view + cmos_mission_status opener with one ≤4KB payload, project-only, top-3 next_actions promoted to flat top-level.
+// ABOUTME: Bundles a project-scoped core plus compact portfolio into ≤4KB, with flat top-3 next_actions.
 
 /**
  * cmos_review Tool
@@ -63,6 +63,7 @@ import {
   isForeignProject,
 } from '../../intelligence/provenance-frame';
 import { isReadOnlyAgentSession } from './read-only-agent-guard';
+import { captureToolCall, currentToolCallActionMode } from './tool-call-context';
 import { appendWarnings } from './format-warnings';
 
 /**
@@ -346,6 +347,14 @@ export async function cmosReview(
   // inputSchema (it must never reach the MCP boundary).
   internalOpts: { registry?: ProjectGraphRegistry } = {}
 ): Promise<CmosToolResult<CmosReviewResult>> {
+  // Direct callers do not pass through the MCP dispatcher, but this action-less tool is still
+  // intrinsically read-classified. Establish the same request-local registration policy here so
+  // its nested onboard/status client opens cannot infer write permission from an absent context.
+  // Registered dispatch already supplies the context and skips this wrapper.
+  if (currentToolCallActionMode() === undefined) {
+    return (await captureToolCall('read', () => cmosReview(params, internalOpts))).value;
+  }
+
   const projectRoot = params.projectRoot;
 
   const [onboardResult, missionStatusResult, buildFreshness, portfolio] = await Promise.all([
@@ -359,9 +368,9 @@ export async function cmosReview(
     // so it adds no serial latency; latency-fenced to the active-missions query.
     // Degrades to null (never throws) on ≤1 project or fan-out failure.
     buildPortfolioSection(internalOpts.registry),
-    // s69-m05 — record this project's last_seen_at in the per-user project-graph
-    // registry (auto-registering it if absent). Never throws, never blocks the
-    // opener (runs in the same parallel batch; result discarded).
+    // s69-m05 / s88-m08 — refresh last_seen_at only for an EXISTING registration.
+    // A read-classified opener must not register a store it merely names; the first write or an
+    // explicit cmos_project(register) owns that transition. Never throws or blocks the opener.
     touchProjectGraphRegistry(projectRoot),
   ]);
 
@@ -558,15 +567,17 @@ async function resolveReviewFreshness(
 
 /**
  * Record the current project's `last_seen_at` in the per-user project-graph
- * registry (s69-m05), auto-registering it if absent. Pure side-effect — the
- * result never enters the digest. Resolves the project root the same way the
- * freshness probe does (explicit param, else `resolveProjectRootEnhanced` with
- * auto-register off so this read-path never mutates the JSON ProjectRegistry).
+ * registry (s69-m05) when it is already registered. Since s88-m08, this read-classified opener
+ * never creates the selected project's registration. The bookkeeping result never enters the
+ * digest. Resolves the project root the same way the freshness probe does (explicit param, else
+ * `resolveProjectRootEnhanced` with auto-register off so this path neither registers nor touches
+ * a project row; opening the graph may still ensure its own schema).
  * Swallows every error: registry bookkeeping must never break the session opener.
  */
 async function touchProjectGraphRegistry(explicitRoot: string | undefined): Promise<void> {
-  // s78-m04: the read-only review role must not mutate ANY store — skip the per-user
-  // project-graph last_seen_at write so review mode is side-effect-free everywhere.
+  // s78-m04: suppress this intentional per-user graph bookkeeping under the review role. This is
+  // deliberately call-scoped; it does not claim every nested compatibility read is physically
+  // write-free (see the action-taxonomy contract).
   if (isReadOnlyAgentSession()) return;
   try {
     let root = explicitRoot;
@@ -578,7 +589,8 @@ async function touchProjectGraphRegistry(explicitRoot: string | undefined): Prom
       root = resolution.projectRoot;
     }
     const graph = await ProjectGraphRegistry.create();
-    graph.touchOrRegisterFromStore(root);
+    const projectId = graph.getByStorePath(root);
+    if (projectId) graph.touch(projectId);
   } catch {
     // Best-effort — the project-graph registry is an additive discovery index.
   }

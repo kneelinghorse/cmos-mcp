@@ -15,7 +15,10 @@ import Database from 'better-sqlite3';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { pushMutableStatus } from '../../../src/tools/cmos/sync-mutable-push';
+import {
+  formatPushMutableStatusForLLM,
+  pushMutableStatus,
+} from '../../../src/tools/cmos/sync-mutable-push';
 import { CmosDetector } from '../../../src/intelligence/cmos-detector';
 
 const SLUG = 'test-project';
@@ -36,6 +39,36 @@ let nextPushResponse: Record<string, unknown> = { success: true };
 let pushShouldFail = false;
 let pushedBodies: Record<string, unknown>[] = [];
 let callOrder: string[] = [];
+
+const PULL_PROVENANCE_WARNING =
+  '1 genesis event(s) lacked the provenance/data needed to reconstruct a replica row ' +
+  'faithfully (a pre-s71-m01 origin, or a malformed payload) and were skipped — not ' +
+  're-stamped, to preserve cross-machine event identity.';
+
+function arrangeSuccessfulPullWithWarning(): void {
+  pullPage = {
+    events: [
+      {
+        cursor: 7,
+        eventType: 'decision_captured',
+        payload: {
+          projectId: 'proj-test',
+          projectName: 'Test Project',
+          eventType: 'decision_captured',
+          timestamp: '2026-05-31T10:00:00Z',
+          // Missing stableEventId/occurredAt/originSeq: syncPull succeeds but warns that
+          // it could not reconstruct this genesis row without inventing provenance.
+          data: { decisionId: 9, content: 'no provenance' },
+        },
+        receivedAt: '2026-05-31T10:00:01Z',
+        processed: true,
+        error: null,
+      },
+    ],
+    nextCursor: 7,
+    hasMore: false,
+  };
+}
 
 function loginResponse() {
   return {
@@ -177,6 +210,7 @@ describe('pushMutableStatus (Sprint 71 m04)', () => {
     expect(result.data?.originSeq).toBe(1);
     expect(result.data?.superseded).toBe(false);
     expect(result.data?.localStatus).toBe('Completed');
+    expect(result.warnings).toBeUndefined();
 
     // The pull ran BEFORE the push (pull-before-push discipline).
     expect(callOrder).toEqual(['pull', 'push']);
@@ -195,6 +229,79 @@ describe('pushMutableStatus (Sprint 71 m04)', () => {
 
     // Local row optimistically reflects the edit.
     expect(missionStatus()).toBe('Completed');
+  });
+
+  it('carries a successful pull-before-push warning onto the push result and rendered answer', async () => {
+    createStore();
+    arrangeSuccessfulPullWithWarning();
+
+    const pending = pushMutableStatus({
+      projectRoot: tempDir,
+      missionId: 'm1',
+      status: 'Completed',
+      now: 1780250000000,
+    });
+    await expect(pending).resolves.toMatchObject({ success: true });
+    const result = await pending;
+
+    expect(callOrder).toEqual(['pull', 'push']);
+    // The pull's advisory is not summarized, prefixed, or otherwise rewritten by the push leg.
+    expect(result.warnings).toEqual([PULL_PROVENANCE_WARNING]);
+    const answer = formatPushMutableStatusForLLM(result);
+    expect(answer).toContain('Warnings:');
+    expect(answer).toContain(PULL_PROVENANCE_WARNING);
+    expect(answer.split(PULL_PROVENANCE_WARNING)).toHaveLength(2);
+  });
+
+  it('preserves a successful pull warning when the broker push fails', async () => {
+    createStore();
+    arrangeSuccessfulPullWithWarning();
+    pushShouldFail = true;
+
+    const pending = pushMutableStatus({
+      projectRoot: tempDir,
+      missionId: 'm1',
+      status: 'Completed',
+      now: 1780250000000,
+    });
+    await expect(pending).resolves.toMatchObject({
+      success: false,
+      error: { code: 'DASHBOARD_ERROR' },
+    });
+    const result = await pending;
+
+    expect(callOrder).toEqual(['pull', 'push']);
+    expect(result.warnings).toEqual([PULL_PROVENANCE_WARNING]);
+    const answer = formatPushMutableStatusForLLM(result);
+    expect(answer).toContain(
+      'Mutable push failed: Dashboard error: Server error 500: Server error'
+    );
+    expect(answer).toContain('Warnings:');
+    expect(answer.split(PULL_PROVENANCE_WARNING)).toHaveLength(2);
+  });
+
+  it('preserves a successful pull warning when a non-collab store refuses the push', async () => {
+    createStore({ collab: false });
+    arrangeSuccessfulPullWithWarning();
+
+    const pending = pushMutableStatus({
+      projectRoot: tempDir,
+      missionId: 'm1',
+      status: 'Completed',
+      now: 1780250000000,
+    });
+    await expect(pending).resolves.toMatchObject({
+      success: false,
+      error: { code: 'NOT_COLLAB_STORE' },
+    });
+    const result = await pending;
+
+    expect(callOrder).toEqual(['pull']);
+    expect(result.warnings).toEqual([PULL_PROVENANCE_WARNING]);
+    const answer = formatPushMutableStatusForLLM(result);
+    expect(answer).toContain('Mutable push failed: The mutable-surface event-push path');
+    expect(answer).toContain('Warnings:');
+    expect(answer.split(PULL_PROVENANCE_WARNING)).toHaveLength(2);
   });
 
   // ─── Pull-before-push converges a newer remote value before the edit ──────────────
@@ -343,8 +450,14 @@ describe('pushMutableStatus (Sprint 71 m04)', () => {
     });
     expect(result.success).toBe(false);
     expect(result.error?.code).toBe('NOT_COLLAB_STORE');
+    expect(result.warnings).toBeUndefined();
     expect(callOrder).not.toContain('push'); // never pushed
     expect(missionStatus()).toBe('In Progress'); // local untouched
+    expect(formatPushMutableStatusForLLM(result)).toBe(
+      'Mutable push failed: The mutable-surface event-push path is only for shared/collaborative ' +
+        'stores (metadata.collab_role set). A solo project syncs mutable state via the whole-DB ' +
+        'file-sync on checkpoint; per-field event-push would be redundant.'
+    );
   });
 
   it('returns an error on push failure, leaving the optimistic local edit in place (caller retries)', async () => {
@@ -357,10 +470,14 @@ describe('pushMutableStatus (Sprint 71 m04)', () => {
       now: 1780250000000,
     });
     expect(result.success).toBe(false);
+    expect(result.warnings).toBeUndefined();
     expect(callOrder).toEqual(['pull', 'push']); // it did attempt the push
     // Optimistic-apply semantic (documented): the local edit stands so a retry can
     // re-push it; the broker reconciles via LWW on the eventual successful push.
     expect(missionStatus()).toBe('Completed');
+    expect(formatPushMutableStatusForLLM(result)).toBe(
+      'Mutable push failed: Dashboard error: Server error 500: Server error'
+    );
   });
 
   it('aborts the push when the pre-push pull fails (no blind clobber)', async () => {

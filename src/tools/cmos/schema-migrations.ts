@@ -119,126 +119,67 @@ export interface MigrationResult {
    * failed `ALTER`/`CREATE INDEX`/`INSERT INTO metadata` was indistinguishable from
    * "nothing to do".
    *
-   * WHAT IS ACTUALLY GUARDED (counted, not asserted). 30 of the 40 `client.execute`
+   * WHAT IS ACTUALLY GUARDED (counted, not asserted). 28 of the 38 `client.execute`
    * calls in this module route through `checkWrite`/`countWrite` into the enclosing
    * helper's warnings array. The other 10 are already fail-loud — they `throw
    * SchemaMigrationError` rather than disclose (the ALTER/backfill steps of
    * `ensureRenamedColumn`, `ensureColumnWithCheck`, `migrateFirehoseTable` and
    * `ensureAuthorNamespaceColumns`, plus the row copy inside
-   * `rebuildTableWithConstraints`). **Not covered at all:** the `client.raw` DDL — nine
-   * `CREATE TRIGGER` statements whose result is never read (in `ensureDecisionsFts5` and
-   * `ensureVectorStorage`) and five `CREATE VIRTUAL TABLE` statements in
-   * `ensureVectorStorage` whose `.success` is read only to decide whether to push onto
-   * `columnsAdded`, so a failed vec0/FTS5 create still returns `alreadyCurrent`. That is
-   * a KNOWN OPEN GAP, recorded here so nobody reads this field as full coverage.
+   * `rebuildTableWithConstraints`). The s88-m09 pre-fix raw baseline was 18 call sites:
+   * nine discarded trigger CREATEs, five vector-storage virtual-table CREATEs bound without a
+   * negative arm, and four inspected results. The fix centralizes those 14 violations plus the
+   * formerly inspected-but-nondiagnostic decisions_fts CREATE in two helper call sites guarded by
+   * `checkWrite`; the post-fix module has five raw call sites total (those two guarded helpers and
+   * three sites with explicit negative arms). In particular, failed vec0/FTS5 creates populate
+   * `warnings`, keep `alreadyCurrent` false, and cannot advance the schema version; trigger names
+   * enter `indexesCreated` only after their own CREATE succeeds.
    *
-   * OPTIONAL BY DESIGN: no exported helper takes a sink parameter — each builds its own
-   * local array — so every signature, and all 57 call sites across src/ (42 for the
-   * MigrationResult helpers + 9 `snapshotDedupPrunedFilter` + 6 `computeContentHash`),
-   * keep their shape. Threading a sink PARAMETER through all 22 exported functions was
-   * rejected (disproportionate, and it would touch every read path); so was a
-   * module-scope collector (global mutable state shared across concurrent client opens).
+   * CARRIER DESIGN. Producers retain their local `warnings` arrays; consumers splice
+   * `result.warnings` into an existing answer carrier. No producer takes a sink parameter, and
+   * there is no module-scope collector whose mutable state could cross concurrent client opens.
    *
-   * ── REACH MAP ────────────────────────────────────────────────────────────────────
+   * ── EXECUTABLE REACH MAP (s88-m09) ───────────────────────────────────────────────────────
    *
-   * Re-derived MECHANICALLY at the s86-m02b critic pass, not read off the previous
-   * prose. Re-derive it the same way rather than trusting this list — line numbers are
-   * deliberately omitted because they rot within a sprint:
+   * The authoritative census is the semantic TypeScript gate at
+   * `tests/tools/cmos/migration-warning-reachability.test.ts`. Reproduce it exactly with:
    *
-   *   git grep -nE '\b(ensure|migrate)[A-Z][A-Za-z]*\(' -- src/ \
-   *     | grep -v src/tools/cmos/schema-migrations.ts
+   *   npx jest tests/tools/cmos/migration-warning-reachability.test.ts --runInBand --coverage=false
    *
-   * 19 of the 22 exported functions can return a non-empty `warnings`
-   * (`computeContentHash` and `snapshotDedupPrunedFilter` return no MigrationResult;
-   * `ensureRenamedColumn` never populates the field — it throws).
+   * SCOPE: 21 exported functions declared in THIS module whose return type is assignable to
+   * `MigrationResult`, and their 48 shipped call sites under `src/`. This deliberately excludes
+   * tests/scripts and MigrationResult producers declared elsewhere (for example,
+   * project-identity.ts). Semantic assignability matters: {@link ensureSprintSummaryView} returns
+   * the narrower `SprintSummaryViewResult`, so the old name/return-text grep missed that producer
+   * and its three already-spliced callers.
    *
-   * s87-m03 — THE COUNT WAS WRONG AND IS RE-DERIVED. This block said 42 call sites with A=6 and a
-   * remainder of 29+7. Re-derived mechanically at build time (walk `src/`, skip comment lines,
-   * match each MigrationResult-returning export): **45 call sites across 16 functions** — four of
-   * the twenty have no `src/` caller at all. A reach map that miscounts its own reach is exactly
-   * the class this arc is named for, so the number is corrected here rather than carried.
+   * The fresh pre-fix RED was A=11 / B=30 / C=7. After s88-m09 it is A=41 / B=0 / C=7:
    *
-   * WHERE THE THREE MISSING SITES WERE, named so the correction is checkable:
-   *   - `cmos-mission-move.ts` — `ensureMissionTimestamps`, added by s86-m08 after this prose
-   *     was last written;
-   *   - `cmos-learnings-reaffirm.ts` — `ensureLearningsTable`, present all along and simply
-   *     omitted by the prose;
-   *   - `cmos-sprint-complete.ts` — `ensureLearningsTable`, added by s87-m02 THIS SPRINT, and
-   *     spliced by s87-m03 rather than left to become a forty-sixth unspliced site.
+   *  A. CONSUMED — 41 sites reach a rendered warning/error carrier: 36 run inside a result
+   *     initializer whose only post-initializer return is
+   *     `attachWarnings(result, thatExactWarningSink)`, and 5 travel through four shared helpers.
+   *     The gate resolves aliases/bindings, correlates the producer read with that exact sink,
+   *     and symbol-traces each helper's result or mutable-sink forwarding through every shipped
+   *     caller. A mere owner-level `.warnings` read therefore cannot make an early error path
+   *     false-green.
    *
-   * HONEST LIMIT ON THIS CORRECTION: the TOTAL and group A were re-derived. The B-vs-C split
-   * below (reachable-but-unspliced vs no-warnings-channel) was NOT re-verified this sprint and is
-   * carried forward from s86 with that caveat stated. Do not quote the B and C figures as
-   * measured; quote 45 and 7, which are.
+   *  B. REACHABLE BUT DROPPED — zero. All 30 pre-fix sites whose enclosing answer already had a
+   *     disclosure carrier now consume the migration result.
    *
-   *  A. SPLICED — 7 sites carry the warnings onto a rendered answer:
-   *     cmos-sprint-complete.ts (×3, the pre-BEGIN firehose + author-namespace ensures and
-   *     s87-m03's `ensureLearningsTable` inside the archival), cmos-session-capture.ts (×2, the
-   *     author-namespace ensure before each dedup SELECT), cmos-session-complete.ts (×1, same),
-   *     cmos-db-backfill.ts (×1, `migrateContentHash`).
+   *  C. STRUCTURAL RESIDUALS — 7 sites have no answer warning carrier to attach to:
+   *     genesis-columns.ts ×2 (`GenesisStamp` feeds SQL writes), fts5-retriever.ts ×2
+   *     (`search()` returns `RankedResult[]`), and staleness-detection.ts ×3
+   *     (`StalenessResult` / a bare count pair). The gate names each residual by
+   *     file + enclosing function + producer and fails if this set changes silently.
    *
-   *  B. UNSPLICED BUT REACHABLE — 29 sites DISCARD the MigrationResult inside a handler
-   *     whose answer DOES render a warnings channel. These are WORK, not structure: a
-   *     later mission can wire each one without inventing a carrier, and must not read
-   *     this block as saying they cannot be reached.
-   *       - cmos-constraints.ts — `ensureConstraintsTable`,
-   *         `ensureConstraintReviewTimestamp`, `ensureConstraintEvergreen` (×3)
-   *       - cmos-next-steps.ts — `ensureNextStepsTable`
-   *       - cmos-learnings-update.ts — `ensureReviewTimestamps` + `ensureLearningsTable`
-   *         (×2; the handler already builds a `warnings` array a few lines below)
-   *       - cmos-learnings-list.ts, cmos-learnings-search.ts — `ensureLearningsTable`
-   *       - cmos-learnings-reaffirm.ts — `ensureReviewTimestamps`
-   *       - cmos-feedback.ts, agent-feedback.ts — `ensureAgentFeedbackTable` (×2;
-   *         `recordAgentFeedback` returns its own `warnings` array ~30 lines below its
-   *         own call to the migration)
-   *       - cmos-mission-{add,block,complete,defer,drop,start,unblock}.ts —
-   *         `ensureMissionTimestamps` (×7)
-   *       - cmos-session-capture.ts — `ensureSessionMissionsTable`,
-   *         `ensureLearningsTable`, `ensureConstraintsTable` (×3) and
-   *         cmos-session-complete.ts — `ensureNextStepsTable` ×2, `ensureConstraintsTable`
-   *         (×3): both handlers already hold the live `warnings` array the group-A sites
-   *         push onto, so these are the cheapest of all to wire
-   *       - cmos-sprint-complete.ts — `ensureArchivalColumns` inside
-   *         `archiveSprintDecisionsAndLearnings`, whose result already carries an `error`
-   *         string out to the answer
-   *       - learning-reaffirm.ts — `ensureReviewTimestamps` inside
-   *         `reaffirmLearningsByIds`, which already returns a rendered `writeFailures[]`
-   *       - sprint-current-invariant.ts — `ensureFirehoseEventColumns` +
-   *         `ensureAuthorNamespaceColumns` (×2) inside `writeSingleCurrentSprint`, whose
-   *         two callers (cmos-sprint-add.ts, cmos-sprint-update.ts) already pass a
-   *         warnings array to `success()`; wiring needs one field on
-   *         `SingleCurrentSprintResult`
-   *     Reachable by CHAIN rather than by a direct call site: cmos-mission-complete.ts
-   *     calls `ensureStrategicDecisionsSchema` (→ {@link migrateStrategicDecisionsV21})
-   *     from `ensureMissionIdColumn`, which returns `void` — that `void` is the whole
-   *     break. Its three callers (cmos-mission-complete.ts, cmos-session-capture.ts,
-   *     cmos-session-complete.ts) all sit next to a live warnings array.
-   *
-   *  C. NO ANSWER TO ATTACH TO — 7 sites are shared resolvers whose own return type
-   *     carries no envelope: genesis-columns.ts ×2 (`genesisColumns` returns a
-   *     `GenesisStamp` spliced into 20 INSERT statements), fts5-retriever.ts ×2
-   *     (`search()` returns `RankedResult[]`), staleness-detection.ts ×3
-   *     (`StalenessResult` / a bare count pair, read from onboard + context-view).
-   *     Reaching an answer from here means inventing a disclosure carrier on a hot read
-   *     path and threading it through every consumer — deliberately not done.
-   *
-   *  D. NOT REACHED FROM src/ AT ALL — {@link ensureColumnWithCheck} is test-only
-   *     (tests/tools/cmos/schema-migrations.test.ts) and {@link ensureContentPrunedColumn}
-   *     is script-only (scripts/prune-context-snapshots.ts — a CLI that prints to stdout;
-   *     there is no MCP answer). {@link ensureVectorStorage} also has a script caller
-   *     (scripts/backfill-embeddings.ts) alongside its group-C src/ call site.
-   *
-   * CORRECTION — what this block used to say, and why it was wrong. It carried "of the 11
-   * call sites … only 6 have a sink that reaches a rendered answer", a figure computed for
-   * the ten PLANNED bare-execute sites in six helpers and never re-derived after the
-   * implementation widened the guard to the 30 `client.execute` calls above. Six is the count
-   * of sites ALREADY SPLICED (group A), not the count of sites that CAN be. Two of its
-   * named "structural facts" were also false: {@link migrateStrategicDecisionsV21} was
-   * called "ZERO call sites in src/ — test-only", when it has been reachable since Sprint
-   * 16-18 via `ensureStrategicDecisionsSchema` → `ensureMissionIdColumn`; and the two
-   * sprint-current-invariant.ts sites were called "producers with no consumer BY
-   * CONSTRUCTION", when they sit on the cmos_sprint(add|update) WRITE path whose answers
-   * already render warnings. Structural unreachability is group C and group D only.
+   * HISTORICAL CORRECTION, KEPT COMPACT. The inherited 45/A7/B29/C7 prose was stale: the three
+   * `ensureSprintSummaryView` subtype calls account for 45→48 and A7→A10;
+   * cmos-mission-move.ts and cmos-learnings-reaffirm.ts were omitted from B, while
+   * cmos-session-capture.ts's `ensureLearningsTable` had already moved from B to A, yielding the
+   * measured pre-fix A11/B30/C7. The older claim that `ensureMissionIdColumn` returned `void` is
+   * also false now: it returns `ensureStrategicDecisionsSchema(...).warnings ?? []`, and all three
+   * callers splice that string array. The still-valid earlier corrections remain:
+   * {@link migrateStrategicDecisionsV21} is reachable through `ensureStrategicDecisionsSchema`,
+   * and the sprint-current-invariant sites have cmos_sprint answer carriers; neither belongs in C.
    */
   warnings?: string[];
 }
@@ -252,13 +193,12 @@ export interface MigrationResult {
  *
  * Safe to call multiple times (idempotent).
  *
- * s86-m02b, CORRECTED at the critic pass: this helper is NOT test-only, and its `warnings`
- * are not structurally unreachable. Direct callers in src/ are zero, but
- * {@link ensureStrategicDecisionsSchema} (immediately below) delegates to it verbatim,
- * and cmos-mission-complete.ts calls that from `ensureMissionIdColumn` — which returns
- * `void`, discarding the result before it can reach any of its three handler call sites.
- * The channel is populated here because a consumer IS missing (group B of
- * {@link MigrationResult.warnings}), not for uniformity.
+ * s86-m02b, corrected through s88-m09: this helper is NOT test-only, and its `warnings` are
+ * reachable. Its module-local caller {@link ensureStrategicDecisionsSchema} delegates the result
+ * verbatim. `ensureMissionIdColumn` reads that result's warnings and returns a `string[]`; all
+ * three callers (mission complete, session capture, and session complete) splice the array into
+ * their rendered warning carriers. This path is therefore consumed group A in the executable
+ * {@link MigrationResult.warnings} reachability census.
  */
 export function migrateStrategicDecisionsV21(client: CmosDatabaseClient): MigrationResult {
   const existingColumns = getTableColumns(client, 'strategic_decisions');
@@ -972,70 +912,351 @@ export function snapshotDedupPrunedFilter(client: CmosDatabaseClient): string {
     : '';
 }
 
-export function ensureDecisionsFts5(client: CmosDatabaseClient): MigrationResult {
-  // Check if FTS5 table already exists
-  const existing = client.getOne<{ name: string }>(
-    "SELECT name FROM sqlite_master WHERE type='table' AND name='decisions_fts'",
-    []
-  );
+type VirtualTableModule = 'fts5' | 'vec0';
 
-  if (existing.success && existing.data) {
-    return { columnsAdded: [], indexesCreated: [], rowsUpdated: 0, alreadyCurrent: true };
+interface EnsuredSchemaObject {
+  readonly ready: boolean;
+  readonly created: boolean;
+}
+
+interface TriggerSpec {
+  readonly name: string;
+  readonly sql: string;
+}
+
+interface ExternalFtsResult {
+  readonly ready: boolean;
+  readonly tableCreated: boolean;
+  readonly triggersCreated: string[];
+  readonly rowsUpdated: number;
+  readonly rebuilt: boolean;
+}
+
+/**
+ * Tokenize stored CREATE SQL for definition comparisons without making formatting part of the
+ * schema contract. SQLite preserves much of the caller's original spelling in sqlite_master, so
+ * whitespace, comments, a benign IF NOT EXISTS, keyword case, and trailing semicolons must not
+ * turn an equivalent object into a collision. Quoted string contents remain byte-sensitive: FTS5
+ * commands such as 'delete' are data, not case-insensitive SQL syntax.
+ */
+function normalizeSchemaSql(sql: string): string {
+  const tokens: string[] = [];
+
+  for (let index = 0; index < sql.length; ) {
+    const char = sql[index];
+    const next = sql[index + 1];
+
+    if (/\s/.test(char)) {
+      index += 1;
+      continue;
+    }
+    if (char === '-' && next === '-') {
+      index += 2;
+      while (index < sql.length && sql[index] !== '\n') index += 1;
+      continue;
+    }
+    if (char === '/' && next === '*') {
+      const end = sql.indexOf('*/', index + 2);
+      index = end === -1 ? sql.length : end + 2;
+      continue;
+    }
+    if (char === "'" || char === '"' || char === '`') {
+      const quote = char;
+      let token = quote;
+      index += 1;
+      while (index < sql.length) {
+        token += sql[index];
+        if (sql[index] === quote) {
+          if (sql[index + 1] === quote) {
+            token += sql[index + 1];
+            index += 2;
+            continue;
+          }
+          index += 1;
+          break;
+        }
+        index += 1;
+      }
+      tokens.push(token);
+      continue;
+    }
+    if (char === '[') {
+      const end = sql.indexOf(']', index + 1);
+      const tokenEnd = end === -1 ? sql.length : end + 1;
+      tokens.push(sql.slice(index, tokenEnd).toLowerCase());
+      index = tokenEnd;
+      continue;
+    }
+    if (/[A-Za-z0-9_$]/.test(char)) {
+      let end = index + 1;
+      while (end < sql.length && /[A-Za-z0-9_$]/.test(sql[end])) end += 1;
+      tokens.push(sql.slice(index, end).toLowerCase());
+      index = end;
+      continue;
+    }
+
+    const twoCharacterOperator = sql.slice(index, index + 2);
+    if (['<=', '>=', '<>', '!=', '==', '||', '->'].includes(twoCharacterOperator)) {
+      tokens.push(twoCharacterOperator);
+      index += 2;
+      continue;
+    }
+    tokens.push(char);
+    index += 1;
   }
 
-  // Create FTS5 virtual table (content-external pattern)
-  const createResult = client.raw(
-    `CREATE VIRTUAL TABLE IF NOT EXISTS decisions_fts USING fts5(
-      decision_text,
-      content='strategic_decisions',
-      content_rowid='id'
-    )`
-  );
-
-  if (!createResult.success) {
-    return { columnsAdded: [], indexesCreated: [], rowsUpdated: 0, alreadyCurrent: false };
+  const withoutIfNotExists: string[] = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    if (tokens[index] === 'if' && tokens[index + 1] === 'not' && tokens[index + 2] === 'exists') {
+      index += 2;
+      continue;
+    }
+    withoutIfNotExists.push(tokens[index]);
   }
+  while (withoutIfNotExists[withoutIfNotExists.length - 1] === ';') withoutIfNotExists.pop();
+  return withoutIfNotExists.join('\u001f');
+}
 
-  // Create triggers for auto-sync
-  client.raw(`
-    CREATE TRIGGER IF NOT EXISTS decisions_fts_insert AFTER INSERT ON strategic_decisions BEGIN
-      INSERT INTO decisions_fts(rowid, decision_text) VALUES (new.id, new.decision_text);
-    END
-  `);
-
-  client.raw(`
-    CREATE TRIGGER IF NOT EXISTS decisions_fts_delete AFTER DELETE ON strategic_decisions BEGIN
-      INSERT INTO decisions_fts(decisions_fts, rowid, decision_text) VALUES('delete', old.id, old.decision_text);
-    END
-  `);
-
-  client.raw(`
-    CREATE TRIGGER IF NOT EXISTS decisions_fts_update AFTER UPDATE OF decision_text ON strategic_decisions BEGIN
-      INSERT INTO decisions_fts(decisions_fts, rowid, decision_text) VALUES('delete', old.id, old.decision_text);
-      INSERT INTO decisions_fts(rowid, decision_text) VALUES (new.id, new.decision_text);
-    END
-  `);
-
-  // Rebuild index from existing data
-  const warnings: string[] = [];
-  let rowsUpdated = 0;
-  const rebuildResult = client.execute(
-    "INSERT INTO decisions_fts(decisions_fts) VALUES('rebuild')",
-    []
+/**
+ * Ensure `name` is the expected virtual-table module, not merely any same-named SQLite object.
+ * A collision is advisory and non-destructive: leave the foreign object untouched and name it in
+ * the migration warnings instead of treating a plain table/view/index as a working vec0/FTS5 table.
+ */
+function ensureVirtualTableObject(
+  client: CmosDatabaseClient,
+  name: string,
+  moduleName: VirtualTableModule,
+  createSql: string,
+  warnings: string[]
+): EnsuredSchemaObject {
+  const existing = client.getOne<{ type: string; sql: string | null }>(
+    'SELECT type, sql FROM sqlite_master WHERE name = ?',
+    [name]
   );
-  if (checkWrite(rebuildResult, warnings, 'decisions_fts rebuild')) {
-    const countResult = client.getOne<{ count: number }>(
-      'SELECT COUNT(*) as count FROM strategic_decisions',
-      []
+  if (!existing.success) {
+    warnings.push(
+      `CREATE VIRTUAL TABLE ${name} preflight failed: ${existing.error?.code ?? 'DB_ERROR'} — ${existing.error?.message ?? 'unknown'}`
     );
-    rowsUpdated = countResult.success ? (countResult.data?.count ?? 0) : 0;
+    return { ready: false, created: false };
+  }
+
+  if (existing.data) {
+    const sql = existing.data.sql ?? '';
+    const isExpectedVirtualTable =
+      existing.data.type === 'table' &&
+      /^\s*CREATE\s+VIRTUAL\s+TABLE\b/i.test(sql) &&
+      new RegExp(`\\bUSING\\s+${moduleName}\\b`, 'i').test(sql);
+    if (isExpectedVirtualTable && normalizeSchemaSql(sql) === normalizeSchemaSql(createSql)) {
+      return { ready: true, created: false };
+    }
+    if (isExpectedVirtualTable) {
+      warnings.push(
+        `CREATE VIRTUAL TABLE ${name} blocked: DB_SCHEMA_MISMATCH — Existing ${moduleName} virtual table '${name}' has a different definition; drop or rename it, then retry.`
+      );
+      return { ready: false, created: false };
+    }
+    warnings.push(
+      `CREATE VIRTUAL TABLE ${name} blocked: DB_SCHEMA_MISMATCH — Existing ${existing.data.type} '${name}' is not a ${moduleName} virtual table.`
+    );
+    return { ready: false, created: false };
+  }
+
+  const created = checkWrite(client.raw(createSql), warnings, `CREATE VIRTUAL TABLE ${name}`);
+  return { ready: created, created };
+}
+
+/** Ensure a trigger exists, while reporting a name collision and only claiming a real CREATE. */
+function ensureSchemaTrigger(
+  client: CmosDatabaseClient,
+  spec: TriggerSpec,
+  warnings: string[]
+): EnsuredSchemaObject {
+  const existing = client.getOne<{ type: string; sql: string | null }>(
+    'SELECT type, sql FROM sqlite_master WHERE name = ?',
+    [spec.name]
+  );
+  if (!existing.success) {
+    warnings.push(
+      `CREATE TRIGGER ${spec.name} preflight failed: ${existing.error?.code ?? 'DB_ERROR'} — ${existing.error?.message ?? 'unknown'}`
+    );
+    return { ready: false, created: false };
+  }
+  if (existing.data) {
+    if (
+      existing.data.type === 'trigger' &&
+      normalizeSchemaSql(existing.data.sql ?? '') === normalizeSchemaSql(spec.sql)
+    ) {
+      return { ready: true, created: false };
+    }
+    if (existing.data.type === 'trigger') {
+      warnings.push(
+        `CREATE TRIGGER ${spec.name} blocked: DB_SCHEMA_MISMATCH — Existing trigger '${spec.name}' has a different definition; drop or rename it, then retry.`
+      );
+      return { ready: false, created: false };
+    }
+    warnings.push(
+      `CREATE TRIGGER ${spec.name} blocked: DB_SCHEMA_MISMATCH — Existing ${existing.data.type} '${spec.name}' is not a trigger.`
+    );
+    return { ready: false, created: false };
+  }
+
+  const created = checkWrite(client.raw(spec.sql), warnings, `CREATE TRIGGER ${spec.name}`);
+  return { ready: created, created };
+}
+
+function readMigrationCount(
+  client: CmosDatabaseClient,
+  sql: string,
+  warnings: string[],
+  what: string
+): number | null {
+  const result = client.getOne<{ count: number }>(sql, []);
+  if (!result.success) {
+    warnings.push(
+      `${what} failed: ${result.error?.code ?? 'DB_ERROR'} — ${result.error?.message ?? 'unknown'}`
+    );
+    return null;
+  }
+  return result.data?.count ?? 0;
+}
+
+/**
+ * Ensure one external-content FTS5 table, its three source triggers, and its initial/retry rebuild.
+ * `forceRebuild` is the durable retry signal used by vector storage while schema_version is stale.
+ * Without it, a docsize/source count mismatch detects a prior decisions_fts rebuild failure.
+ */
+function ensureExternalFts(
+  client: CmosDatabaseClient,
+  params: {
+    readonly name: string;
+    readonly sourceTable: string;
+    readonly createSql: string;
+    readonly triggers: readonly TriggerSpec[];
+    readonly forceRebuild: boolean;
+    readonly verifyIndexedRowCount: boolean;
+  },
+  warnings: string[]
+): ExternalFtsResult {
+  const table = ensureVirtualTableObject(client, params.name, 'fts5', params.createSql, warnings);
+  if (!table.ready) {
+    return {
+      ready: false,
+      tableCreated: false,
+      triggersCreated: [],
+      rowsUpdated: 0,
+      rebuilt: false,
+    };
+  }
+
+  const triggerResults = params.triggers.map((spec) => ({
+    name: spec.name,
+    ...ensureSchemaTrigger(client, spec, warnings),
+  }));
+  const triggersCreated = triggerResults.filter((result) => result.created).map((r) => r.name);
+  const triggersReady = triggerResults.every((result) => result.ready);
+
+  let readinessCheckSucceeded = true;
+  let needsRebuild =
+    params.forceRebuild || table.created || triggersCreated.length > 0 || !triggersReady;
+  if (!needsRebuild && params.verifyIndexedRowCount) {
+    const sourceCount = readMigrationCount(
+      client,
+      `SELECT COUNT(*) AS count FROM ${params.sourceTable}`,
+      warnings,
+      `${params.name} source row count`
+    );
+    const indexedCount = readMigrationCount(
+      client,
+      `SELECT COUNT(*) AS count FROM ${params.name}_docsize`,
+      warnings,
+      `${params.name} indexed row count`
+    );
+    readinessCheckSucceeded = sourceCount !== null && indexedCount !== null;
+    needsRebuild = readinessCheckSucceeded && sourceCount !== indexedCount;
+  }
+
+  let rowsUpdated = 0;
+  let rebuilt = false;
+  let rebuildReady = true;
+  if (needsRebuild) {
+    rebuildReady = checkWrite(
+      client.execute(`INSERT INTO ${params.name}(${params.name}) VALUES('rebuild')`, []),
+      warnings,
+      `${params.name} rebuild`
+    );
+    rebuilt = rebuildReady;
+    if (rebuildReady) {
+      const count = readMigrationCount(
+        client,
+        `SELECT COUNT(*) AS count FROM ${params.sourceTable}`,
+        warnings,
+        `${params.name} rebuilt row count`
+      );
+      if (count === null) {
+        rebuildReady = false;
+      } else {
+        rowsUpdated = count;
+      }
+    }
   }
 
   return {
-    columnsAdded: ['decisions_fts (virtual table)'],
-    indexesCreated: ['decisions_fts_insert', 'decisions_fts_delete', 'decisions_fts_update'],
+    ready: table.ready && triggersReady && readinessCheckSucceeded && rebuildReady,
+    tableCreated: table.created,
+    triggersCreated,
     rowsUpdated,
-    alreadyCurrent: false,
+    rebuilt,
+  };
+}
+
+export function ensureDecisionsFts5(client: CmosDatabaseClient): MigrationResult {
+  const warnings: string[] = [];
+  const fts = ensureExternalFts(
+    client,
+    {
+      name: 'decisions_fts',
+      sourceTable: 'strategic_decisions',
+      createSql: `CREATE VIRTUAL TABLE decisions_fts USING fts5(
+        decision_text,
+        content='strategic_decisions',
+        content_rowid='id'
+      )`,
+      triggers: [
+        {
+          name: 'decisions_fts_insert',
+          sql: `CREATE TRIGGER decisions_fts_insert AFTER INSERT ON strategic_decisions BEGIN
+            INSERT INTO decisions_fts(rowid, decision_text) VALUES (new.id, new.decision_text);
+          END`,
+        },
+        {
+          name: 'decisions_fts_delete',
+          sql: `CREATE TRIGGER decisions_fts_delete AFTER DELETE ON strategic_decisions BEGIN
+            INSERT INTO decisions_fts(decisions_fts, rowid, decision_text)
+            VALUES('delete', old.id, old.decision_text);
+          END`,
+        },
+        {
+          name: 'decisions_fts_update',
+          sql: `CREATE TRIGGER decisions_fts_update
+            AFTER UPDATE OF decision_text ON strategic_decisions BEGIN
+            INSERT INTO decisions_fts(decisions_fts, rowid, decision_text)
+            VALUES('delete', old.id, old.decision_text);
+            INSERT INTO decisions_fts(rowid, decision_text) VALUES (new.id, new.decision_text);
+          END`,
+        },
+      ],
+      forceRebuild: false,
+      verifyIndexedRowCount: true,
+    },
+    warnings
+  );
+
+  const didWork = fts.tableCreated || fts.triggersCreated.length > 0 || fts.rebuilt;
+  return {
+    columnsAdded: fts.tableCreated ? ['decisions_fts (virtual table)'] : [],
+    indexesCreated: fts.triggersCreated,
+    rowsUpdated: fts.rowsUpdated,
+    alreadyCurrent: fts.ready && !didWork && warnings.length === 0,
     warnings,
   };
 }
@@ -1135,42 +1356,54 @@ export function ensureVectorStorage(client: CmosDatabaseClient): MigrationResult
   const indexesCreated: string[] = [];
   const warnings: string[] = [];
   let rowsUpdated = 0;
+  let didWork = false;
+  let allReady = true;
+
+  const schemaVersion = client.getOne<{ value: string }>(
+    "SELECT value FROM metadata WHERE key = 'schema_version'",
+    []
+  );
+  const versionMatch = /^(\d+)\.(\d+)$/.exec(schemaVersion.data?.value ?? '');
+  const markerCurrent =
+    schemaVersion.success &&
+    versionMatch !== null &&
+    (Number(versionMatch[1]) > 2 ||
+      (Number(versionMatch[1]) === 2 && Number(versionMatch[2]) >= 3));
 
   // ─── Vector tables (vec0) ────────────────────────────────────────────────
 
-  if (!virtualTableExists(client, 'decisions_vec')) {
-    const created = client.raw(
-      `CREATE VIRTUAL TABLE decisions_vec USING vec0(
+  const vectorTables: ReadonlyArray<{
+    readonly name: string;
+    readonly sql: string;
+  }> = [
+    {
+      name: 'decisions_vec',
+      sql: `CREATE VIRTUAL TABLE decisions_vec USING vec0(
         decision_id INTEGER PRIMARY KEY,
         embedding FLOAT[384]
-      )`
-    );
-    if (created.success) {
-      columnsAdded.push('decisions_vec (virtual table)');
-    }
-  }
-
-  if (!virtualTableExists(client, 'learnings_vec')) {
-    const created = client.raw(
-      `CREATE VIRTUAL TABLE learnings_vec USING vec0(
+      )`,
+    },
+    {
+      name: 'learnings_vec',
+      sql: `CREATE VIRTUAL TABLE learnings_vec USING vec0(
         learning_id INTEGER PRIMARY KEY,
         embedding FLOAT[384]
-      )`
-    );
-    if (created.success) {
-      columnsAdded.push('learnings_vec (virtual table)');
-    }
-  }
-
-  if (!virtualTableExists(client, 'missions_vec')) {
-    const created = client.raw(
-      `CREATE VIRTUAL TABLE missions_vec USING vec0(
+      )`,
+    },
+    {
+      name: 'missions_vec',
+      sql: `CREATE VIRTUAL TABLE missions_vec USING vec0(
         mission_id TEXT PRIMARY KEY,
         embedding FLOAT[384]
-      )`
-    );
-    if (created.success) {
-      columnsAdded.push('missions_vec (virtual table)');
+      )`,
+    },
+  ];
+  for (const table of vectorTables) {
+    const ensured = ensureVirtualTableObject(client, table.name, 'vec0', table.sql, warnings);
+    allReady = allReady && ensured.ready;
+    if (ensured.created) {
+      columnsAdded.push(`${table.name} (virtual table)`);
+      didWork = true;
     }
   }
 
@@ -1180,58 +1413,92 @@ export function ensureVectorStorage(client: CmosDatabaseClient): MigrationResult
 
   for (const table of ['strategic_decisions', 'learnings', 'missions']) {
     const cols = getTableColumns(client, table);
-    if (cols.size > 0 && ensureColumn(client, table, embedHashCol, cols, warnings)) {
+    if (cols.size === 0) {
+      allReady = false;
+      // Missing learnings/missions sources are named by their FTS trigger/rebuild checks below.
+      // strategic_decisions has no FTS arm in this helper, so diagnose it here rather than let the
+      // absent hash-column source silently pass the readiness gate.
+      if (table !== 'strategic_decisions') continue;
+      const source = client.getOne<{ type: string }>(
+        'SELECT type FROM sqlite_master WHERE name = ?',
+        [table]
+      );
+      if (!source.success) {
+        warnings.push(
+          `ALTER TABLE ${table} ADD COLUMN last_embedded_hash preflight failed: ${source.error?.code ?? 'DB_ERROR'} — ${source.error?.message ?? 'unknown'}`
+        );
+      } else if (!source.data) {
+        warnings.push(
+          `ALTER TABLE ${table} ADD COLUMN last_embedded_hash blocked: DB_SCHEMA_MISMATCH — Source table '${table}' does not exist.`
+        );
+      } else {
+        warnings.push(
+          `ALTER TABLE ${table} ADD COLUMN last_embedded_hash blocked: DB_SCHEMA_MISMATCH — Existing ${source.data.type} '${table}' has no readable columns.`
+        );
+      }
+      continue;
+    }
+
+    const alreadyPresent = cols.has(embedHashCol.name);
+    if (ensureColumn(client, table, embedHashCol, cols, warnings)) {
       columnsAdded.push(`${table}.last_embedded_hash`);
+      didWork = true;
+    } else if (!alreadyPresent) {
+      allReady = false;
     }
   }
 
   // ─── FTS5 parity — learnings_fts ─────────────────────────────────────────
 
-  if (!virtualTableExists(client, 'learnings_fts')) {
-    const created = client.raw(
-      `CREATE VIRTUAL TABLE learnings_fts USING fts5(
+  const learningsFts = ensureExternalFts(
+    client,
+    {
+      name: 'learnings_fts',
+      sourceTable: 'learnings',
+      createSql: `CREATE VIRTUAL TABLE learnings_fts USING fts5(
         content,
         content='learnings',
         content_rowid='id'
-      )`
-    );
-    if (created.success) {
-      columnsAdded.push('learnings_fts (virtual table)');
-
-      client.raw(`
-        CREATE TRIGGER IF NOT EXISTS learnings_fts_insert AFTER INSERT ON learnings BEGIN
-          INSERT INTO learnings_fts(rowid, content) VALUES (new.id, new.content);
-        END
-      `);
-      client.raw(`
-        CREATE TRIGGER IF NOT EXISTS learnings_fts_delete AFTER DELETE ON learnings BEGIN
-          INSERT INTO learnings_fts(learnings_fts, rowid, content)
-          VALUES('delete', old.id, old.content);
-        END
-      `);
-      client.raw(`
-        CREATE TRIGGER IF NOT EXISTS learnings_fts_update AFTER UPDATE OF content ON learnings BEGIN
-          INSERT INTO learnings_fts(learnings_fts, rowid, content)
-          VALUES('delete', old.id, old.content);
-          INSERT INTO learnings_fts(rowid, content) VALUES (new.id, new.content);
-        END
-      `);
-      indexesCreated.push('learnings_fts_insert', 'learnings_fts_delete', 'learnings_fts_update');
-
-      // Backfill index from existing rows
-      const rebuilt = client.execute(
-        "INSERT INTO learnings_fts(learnings_fts) VALUES('rebuild')",
-        []
-      );
-      if (checkWrite(rebuilt, warnings, 'learnings_fts rebuild')) {
-        const count = client.getOne<{ count: number }>(
-          'SELECT COUNT(*) as count FROM learnings',
-          []
-        );
-        rowsUpdated += count.success ? (count.data?.count ?? 0) : 0;
-      }
-    }
+      )`,
+      triggers: [
+        {
+          name: 'learnings_fts_insert',
+          sql: `CREATE TRIGGER learnings_fts_insert AFTER INSERT ON learnings BEGIN
+            INSERT INTO learnings_fts(rowid, content) VALUES (new.id, new.content);
+          END`,
+        },
+        {
+          name: 'learnings_fts_delete',
+          sql: `CREATE TRIGGER learnings_fts_delete AFTER DELETE ON learnings BEGIN
+            INSERT INTO learnings_fts(learnings_fts, rowid, content)
+            VALUES('delete', old.id, old.content);
+          END`,
+        },
+        {
+          name: 'learnings_fts_update',
+          sql: `CREATE TRIGGER learnings_fts_update AFTER UPDATE OF content ON learnings BEGIN
+            INSERT INTO learnings_fts(learnings_fts, rowid, content)
+            VALUES('delete', old.id, old.content);
+            INSERT INTO learnings_fts(rowid, content) VALUES (new.id, new.content);
+          END`,
+        },
+      ],
+      forceRebuild: !markerCurrent,
+      verifyIndexedRowCount: true,
+    },
+    warnings
+  );
+  allReady = allReady && learningsFts.ready;
+  if (learningsFts.tableCreated) {
+    columnsAdded.push('learnings_fts (virtual table)');
   }
+  indexesCreated.push(...learningsFts.triggersCreated);
+  rowsUpdated += learningsFts.rowsUpdated;
+  didWork =
+    didWork ||
+    learningsFts.tableCreated ||
+    learningsFts.triggersCreated.length > 0 ||
+    learningsFts.rebuilt;
 
   // ─── FTS5 parity — missions_fts ──────────────────────────────────────────
   //
@@ -1239,88 +1506,81 @@ export function ensureVectorStorage(client: CmosDatabaseClient): MigrationResult
   // implicit `rowid` column. Retrieval joins missions_fts.rowid back to
   // missions.rowid (then SELECTs missions.id) for the public ID surface.
 
-  if (!virtualTableExists(client, 'missions_fts')) {
-    const created = client.raw(
-      `CREATE VIRTUAL TABLE missions_fts USING fts5(
+  const missionsFts = ensureExternalFts(
+    client,
+    {
+      name: 'missions_fts',
+      sourceTable: 'missions',
+      createSql: `CREATE VIRTUAL TABLE missions_fts USING fts5(
         name,
         objective,
         notes,
         content='missions',
         content_rowid='rowid'
-      )`
-    );
-    if (created.success) {
-      columnsAdded.push('missions_fts (virtual table)');
-
-      client.raw(`
-        CREATE TRIGGER IF NOT EXISTS missions_fts_insert AFTER INSERT ON missions BEGIN
-          INSERT INTO missions_fts(rowid, name, objective, notes)
-          VALUES (new.rowid, new.name, COALESCE(new.objective, ''), COALESCE(new.notes, ''));
-        END
-      `);
-      client.raw(`
-        CREATE TRIGGER IF NOT EXISTS missions_fts_delete AFTER DELETE ON missions BEGIN
-          INSERT INTO missions_fts(missions_fts, rowid, name, objective, notes)
-          VALUES('delete', old.rowid, old.name, COALESCE(old.objective, ''), COALESCE(old.notes, ''));
-        END
-      `);
-      client.raw(`
-        CREATE TRIGGER IF NOT EXISTS missions_fts_update
-        AFTER UPDATE OF name, objective, notes ON missions BEGIN
-          INSERT INTO missions_fts(missions_fts, rowid, name, objective, notes)
-          VALUES('delete', old.rowid, old.name, COALESCE(old.objective, ''), COALESCE(old.notes, ''));
-          INSERT INTO missions_fts(rowid, name, objective, notes)
-          VALUES (new.rowid, new.name, COALESCE(new.objective, ''), COALESCE(new.notes, ''));
-        END
-      `);
-      indexesCreated.push('missions_fts_insert', 'missions_fts_delete', 'missions_fts_update');
-
-      const rebuilt = client.execute(
-        "INSERT INTO missions_fts(missions_fts) VALUES('rebuild')",
-        []
-      );
-      if (checkWrite(rebuilt, warnings, 'missions_fts rebuild')) {
-        const count = client.getOne<{ count: number }>(
-          'SELECT COUNT(*) as count FROM missions',
-          []
-        );
-        rowsUpdated += count.success ? (count.data?.count ?? 0) : 0;
-      }
-    }
+      )`,
+      triggers: [
+        {
+          name: 'missions_fts_insert',
+          sql: `CREATE TRIGGER missions_fts_insert AFTER INSERT ON missions BEGIN
+            INSERT INTO missions_fts(rowid, name, objective, notes)
+            VALUES (new.rowid, new.name, COALESCE(new.objective, ''), COALESCE(new.notes, ''));
+          END`,
+        },
+        {
+          name: 'missions_fts_delete',
+          sql: `CREATE TRIGGER missions_fts_delete AFTER DELETE ON missions BEGIN
+            INSERT INTO missions_fts(missions_fts, rowid, name, objective, notes)
+            VALUES('delete', old.rowid, old.name, COALESCE(old.objective, ''), COALESCE(old.notes, ''));
+          END`,
+        },
+        {
+          name: 'missions_fts_update',
+          sql: `CREATE TRIGGER missions_fts_update
+            AFTER UPDATE OF name, objective, notes ON missions BEGIN
+            INSERT INTO missions_fts(missions_fts, rowid, name, objective, notes)
+            VALUES('delete', old.rowid, old.name, COALESCE(old.objective, ''), COALESCE(old.notes, ''));
+            INSERT INTO missions_fts(rowid, name, objective, notes)
+            VALUES (new.rowid, new.name, COALESCE(new.objective, ''), COALESCE(new.notes, ''));
+          END`,
+        },
+      ],
+      forceRebuild: !markerCurrent,
+      verifyIndexedRowCount: true,
+    },
+    warnings
+  );
+  allReady = allReady && missionsFts.ready;
+  if (missionsFts.tableCreated) {
+    columnsAdded.push('missions_fts (virtual table)');
   }
+  indexesCreated.push(...missionsFts.triggersCreated);
+  rowsUpdated += missionsFts.rowsUpdated;
+  didWork =
+    didWork ||
+    missionsFts.tableCreated ||
+    missionsFts.triggersCreated.length > 0 ||
+    missionsFts.rebuilt;
 
-  const alreadyCurrent = columnsAdded.length === 0 && indexesCreated.length === 0;
-
-  // Bump schema_version on first successful application. Re-runs are no-ops.
-  if (!alreadyCurrent) {
+  // A stale marker is a durable retry signal: even when every object now exists, re-run the FTS
+  // rebuilds above and retry this write. Only a warning-free, structurally ready store may claim
+  // vector schema 2.3.
+  if (!markerCurrent && allReady && warnings.length === 0) {
     const versionResult = client.execute(
       "INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_version', '2.3')",
       []
     );
-    checkWrite(versionResult, warnings, "metadata.schema_version = '2.3'");
+    if (checkWrite(versionResult, warnings, "metadata.schema_version = '2.3'")) {
+      didWork = true;
+    }
   }
 
   return {
     columnsAdded,
     indexesCreated,
     rowsUpdated,
-    alreadyCurrent,
+    alreadyCurrent: markerCurrent && allReady && !didWork && warnings.length === 0,
     warnings,
   };
-}
-
-/**
- * Existence check for a virtual table (or regular table) by name.
- * Used by `ensureVectorStorage` to short-circuit CREATEs against the vec0 / FTS5
- * virtual tables — these can't use IF NOT EXISTS cleanly across all sqlite-vec
- * dialect quirks, so we pre-check sqlite_master.
- */
-function virtualTableExists(client: CmosDatabaseClient, name: string): boolean {
-  const row = client.getOne<{ name: string }>(
-    "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-    [name]
-  );
-  return row.success && !!row.data;
 }
 
 /**
@@ -1812,10 +2072,10 @@ function occurredAtExpr(client: CmosDatabaseClient, table: FirehoseTable): strin
  *
  * s87-m04 — THE OLD RATIONALE HERE WAS FALSE AND IS REPLACED. It claimed real stores invariably
  * record an identity, so the fallback only ever fired on misconfigured or test stores. Measured
- * read-only across every CMOS store on this machine: 45 stores, 33 resolving via a recorded
- * identity, 12 collapsing to the fallback label, 1 unclassifiable read-only. The fallback fires
- * on twelve, and it has already fired in production — derekn.com's store carries 217 rows
- * stamped with the label across six tables.
+ * with immutable SQLite inspection across every CMOS store on this machine (#1038): 45 stores,
+ * 32 resolving via a recorded identity, 13 collapsing to the fallback label, 0 unclassifiable.
+ * The fallback fires on thirteen, and it has already fired in production — derekn.com's store
+ * carries 217 rows stamped with the label across six tables.
  *
  * WHAT IS UNCHANGED: the fallback itself. Ruling #736 — fall back and warn rather than throw —
  * is REAFFIRMED by decision #1017 (D-8); only its premise is amended. The fallback still keeps

@@ -18,8 +18,25 @@
  */
 
 import path from 'path';
+import { isReadOnlyAgentSession } from '../tools/cmos/read-only-agent-guard';
+import { currentToolCallActionMode } from '../tools/cmos/tool-call-context';
 import { CmosDetector } from './cmos-detector';
 import { ProjectGraphRegistry } from './project-graph-registry';
+
+/**
+ * Authoritative registration half of the resolve/register split.
+ *
+ * Kept beside the graph-backed resolver so tool clients do not import portfolio fan-out
+ * machinery directly. Callers must establish that the target contains a CMOS database before
+ * invoking this write primitive.
+ */
+export async function registerResolvedProjectStore(
+  projectRoot: string,
+  options: { name?: string; setAsDefault?: boolean; requireStoredIdentity?: boolean } = {}
+) {
+  const graph = await ProjectGraphRegistry.create();
+  return graph.registerStore(projectRoot, options);
+}
 
 /**
  * Result of project root resolution
@@ -77,6 +94,8 @@ export async function resolveProjectRootEnhanced(
   options: { autoRegister?: boolean; silent?: boolean } = {}
 ): Promise<ProjectResolutionResult> {
   const { autoRegister = true, silent = false } = options;
+  const registrationAllowed =
+    autoRegister && currentToolCallActionMode() !== 'read' && !isReadOnlyAgentSession();
 
   // Step 1: Explicit parameter
   if (explicitRoot) {
@@ -104,18 +123,23 @@ export async function resolveProjectRootEnhanced(
       message: `Auto-discovered CMOS project at: ${cwd}`,
     };
 
-    // Auto-register if enabled. s80-m01: write the AUTHORITATIVE project-graph
-    // registry directly — the JSON mirror + its deriveJson() re-materialization
-    // are gone (m02). A store already present at this path just gets touched.
-    if (autoRegister) {
+    // Auto-register if enabled AND this is not a read/review call. s88-m08: discovery may add/touch
+    // a store that ALREADY records an identity, but it must never mint one. Identity minting
+    // belongs to the write-registration path in CmosDatabaseClient / cmos_project(register),
+    // before a handler transaction exists. `touchOrRegisterFromStore` returns null for an
+    // identity-less store, leaving the selected store/row unchanged. (s80-m02: the graph is the
+    // single discovery source; no JSON mirror remains.)
+    if (registrationAllowed) {
       try {
         const graph = await ProjectGraphRegistry.create();
         const existingId = graph.getByStorePath(cwd);
         if (!existingId) {
-          graph.registerStore(cwd);
-          result.autoRegistered = true;
-          if (!silent) {
-            console.error(`[CMOS] Auto-registered project: ${cwd}`);
+          const registered = graph.touchOrRegisterFromStore(cwd);
+          if (registered) {
+            result.autoRegistered = true;
+            if (!silent) {
+              console.error(`[CMOS] Auto-registered project: ${cwd}`);
+            }
           }
         } else {
           graph.touch(existingId);
@@ -139,7 +163,9 @@ export async function resolveProjectRootEnhanced(
         forceRefresh: true,
       });
       if (defaultDetection.hasCmosDirectory && defaultDetection.hasDatabase) {
-        graph.touch(defaultProject.project_id);
+        // Read/review calls may open/ensure the graph schema to resolve the default, but never
+        // touch or register a project row. A write/direct caller may refresh last_seen_at.
+        if (registrationAllowed) graph.touch(defaultProject.project_id);
         return {
           projectRoot: defaultProject.store_path,
           source: 'registry',

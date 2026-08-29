@@ -36,13 +36,15 @@ import { formatContextForLLM } from '../../../src/tools/cmos/cmos-context';
 import { cmosMissionComplete } from '../../../src/tools/cmos/cmos-mission-complete';
 import { formatMissionCompleteForLLM } from '../../../src/tools/cmos/cmos-mission-complete';
 import { cmosDecisions, formatDecisionsForLLM } from '../../../src/tools/cmos/cmos-decisions';
-import { seedCmosDb } from '../../helpers/seedCmosDb';
+import { reidentifyCmosTestStore, seedCmosDb } from '../../helpers/seedCmosDb';
 
 const tmpDirs: string[] = [];
 function mkStore(): { projectRoot: string; dbPath: string } {
   const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-m02b-intent-'));
   tmpDirs.push(projectRoot);
-  return { projectRoot, dbPath: seedCmosDb(projectRoot, { projectName: 'intent-vs-fact' }) };
+  const dbPath = seedCmosDb(projectRoot, { projectName: 'intent-vs-fact' });
+  reidentifyCmosTestStore(projectRoot);
+  return { projectRoot, dbPath };
 }
 
 afterAll(() => {

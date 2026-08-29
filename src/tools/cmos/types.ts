@@ -30,8 +30,8 @@ export interface CmosToolError {
   /** Snake_case alias for MCP-facing structured content compatibility */
   available_actions?: string[];
 
-  /** For state errors: the current state that caused the error */
-  currentState?: string;
+  /** For state errors: the current state, or structured diagnostics needed to act on it */
+  currentState?: string | Record<string, unknown>;
 
   /** For state errors: valid transitions from current state */
   validTransitions?: string[];

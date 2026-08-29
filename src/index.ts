@@ -76,6 +76,13 @@ import {
   assertReadOnlyAgentAllowed,
   ReadOnlyAgentGuardError,
 } from './tools/cmos/read-only-agent-guard';
+import { classifyAction } from './tools/cmos/action-taxonomy';
+import {
+  captureToolCall,
+  currentToolCallActionMode,
+  projectIdentityDisclosuresForError,
+  unwrapCapturedToolCallError,
+} from './tools/cmos/tool-call-context';
 import {
   CMOS_TOOL_DEFINITIONS,
   // Consolidated entity tools (Sprint 24)
@@ -396,8 +403,15 @@ export function registerToolHandlers(
         throw new McpError(ErrorCode.InternalError, 'Server context not initialized');
       }
 
-      return await executeMissionProtocolTool(name, args, context);
+      // Establish the outer request carrier here so failures retain this call's disclosures.
+      // executeMissionProtocolTool sees the active ALS context and runs its switch directly.
+      const actionMode = classifyAction(name, extractActionArg(args));
+      const captured = await captureToolCall(actionMode, () =>
+        executeMissionProtocolTool(name, args, context)
+      );
+      return attachProjectIdentityDisclosures(captured.value, captured.projectIdentityDisclosures);
     } catch (error) {
+      const originalError = unwrapCapturedToolCallError(error);
       // Sprint 74 m03: a tool HANDLER that throws an unhandled exception (a
       // write-path crash — e.g. cmos_sprint(complete)/cmos_session(capture)
       // hitting a store-specific failure) is a tool-EXECUTION failure, not a
@@ -406,8 +420,11 @@ export function registerToolHandlers(
       // never a bare JSON-RPC -32603 that swallows the cause (aquex.ai aa124685).
       // Genuine protocol errors (McpError: unknown tool, uninitialized context)
       // keep their JSON-RPC error shape — they already carry a clear message.
-      if (!(error instanceof McpError)) {
-        return buildToolExecutionErrorResult(name, args, error);
+      if (!(originalError instanceof McpError)) {
+        return attachProjectIdentityDisclosures(
+          buildToolExecutionErrorResult(name, args, originalError),
+          projectIdentityDisclosuresForError(error)
+        );
       }
 
       const sanitizedArgs = sanitizeArgs(args);
@@ -419,7 +436,7 @@ export function registerToolHandlers(
       }
 
       const missionError = ErrorHandler.handle(
-        error,
+        originalError,
         'server.execute_tool',
         {
           module: 'server',
@@ -457,6 +474,8 @@ export function buildToolExecutionErrorResult(
   args: unknown,
   error: unknown
 ): CallToolResult {
+  const reportableError =
+    error instanceof Error ? error : new Error(typeof error === 'string' ? error : String(error));
   const sanitizedArgs = sanitizeArgs(args);
   const data: Record<string, JsonValue> = { tool: toolName };
   if (sanitizedArgs) {
@@ -464,7 +483,7 @@ export function buildToolExecutionErrorResult(
   }
 
   const missionError = ErrorHandler.handle(
-    error,
+    reportableError,
     'server.execute_tool',
     { module: 'server', data },
     { rethrow: false, userMessage: 'Tool execution failed. Please check inputs and try again.' }
@@ -511,11 +530,65 @@ function extractActionArg(args: unknown): string | undefined {
   return undefined;
 }
 
+/** Attach request-local fallback-identity disclosures to both MCP answer channels. */
+function attachProjectIdentityDisclosures(
+  result: CallToolResult,
+  disclosures: readonly string[]
+): CallToolResult {
+  if (disclosures.length === 0) return result;
+
+  const structured =
+    result.structuredContent && typeof result.structuredContent === 'object'
+      ? (result.structuredContent as Record<string, unknown>)
+      : {};
+  const existingWarnings = Array.isArray(structured.warnings)
+    ? structured.warnings.filter((warning): warning is string => typeof warning === 'string')
+    : [];
+  const warnings = [...new Set([...existingWarnings, ...disclosures])];
+  const section =
+    `Project identity disclosure${disclosures.length === 1 ? '' : 's'}:\n` +
+    disclosures.map((disclosure) => `- ${disclosure}`).join('\n');
+  const content = [...result.content];
+  const textIndex = content.findIndex((part) => part.type === 'text');
+  if (textIndex >= 0) {
+    const part = content[textIndex];
+    if (part.type === 'text') {
+      content[textIndex] = { ...part, text: `${part.text}\n\n${section}` };
+    }
+  } else {
+    content.push({ type: 'text', text: section });
+  }
+
+  return {
+    ...result,
+    content,
+    structuredContent: { ...structured, warnings },
+  };
+}
+
 export async function executeMissionProtocolTool(
   name: string,
   args: unknown,
   _context: MissionProtocolContext
 ): Promise<CallToolResult> {
+  // s88-m08: establish one concurrency-safe request context before resolution or DB open. The
+  // recursive call sees the active context and executes the existing switch unchanged; keeping
+  // the switch in this exported function preserves the static router-param audit's reach.
+  if (currentToolCallActionMode() === undefined) {
+    const actionMode = classifyAction(name, extractActionArg(args));
+    try {
+      const captured = await captureToolCall(actionMode, () =>
+        executeMissionProtocolTool(name, args, _context)
+      );
+      return attachProjectIdentityDisclosures(captured.value, captured.projectIdentityDisclosures);
+    } catch (error) {
+      // This exported function historically throws the original protocol/handler value. The
+      // registered CallTool boundary owns the unique disclosure carrier; direct callers retain
+      // the established McpError instanceof/code contract.
+      throw unwrapCapturedToolCallError(error);
+    }
+  }
+
   // Sprint 78 m04 (FORK-5): read-only review-agent guard. Runs BEFORE the switch —
   // and therefore before any resolveToolSenderContext / DB open — so a blocked write
   // opens no DB and mutates no row. Strict no-op unless CMOS_AGENT_ROLE=review; then

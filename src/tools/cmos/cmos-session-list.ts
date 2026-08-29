@@ -326,7 +326,11 @@ export function formatSessionListForLLM(result: CmosToolResult<CmosSessionListRe
     const filterDesc = Object.entries(data.filters)
       .map(([k, v]) => `${k}=${v}`)
       .join(', ');
-    return filterDesc ? `No sessions found matching filters: ${filterDesc}` : 'No sessions found';
+    const lines = [
+      filterDesc ? `No sessions found matching filters: ${filterDesc}` : 'No sessions found',
+    ];
+    appendWarnings(lines, result);
+    return lines.join('\n');
   }
 
   const lines = [`📋 **Sessions** (${data.sessions.length} of ${data.totalCount})`, ''];

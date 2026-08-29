@@ -24,6 +24,7 @@ import {
   type PurgeResult,
 } from '../../../src/tools/cmos/cmos-db-backfill';
 import { CmosDetector } from '../../../src/intelligence/cmos-detector';
+import { ProjectGraphRegistry } from '../../../src/intelligence/project-graph-registry';
 import { CredentialStore } from '../../../src/intelligence/credential-store';
 import type { CmosToolResult } from '../../../src/tools/cmos/types';
 
@@ -528,6 +529,7 @@ describe('cmosDbBackfill', () => {
     db.close();
 
     const backfillBodies: string[] = [];
+    const graphIdsObservedAtPublish: Array<string | null> = [];
     fetchMock.mockImplementation(async (input: string | URL | Request, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input.toString();
       if (url.includes('/api/auth/login')) {
@@ -544,6 +546,8 @@ describe('cmosDbBackfill', () => {
         );
       }
       if (url.includes('/api/sync/sqlite-backfill')) {
+        const graph = await ProjectGraphRegistry.create();
+        graphIdsObservedAtPublish.push(graph.getByStorePath(tempDir));
         // FormData body — capture the projectSlug field to confirm the incumbent slug.
         const form = init?.body as FormData | undefined;
         backfillBodies.push(String(form?.get?.('projectSlug') ?? ''));
@@ -564,6 +568,7 @@ describe('cmosDbBackfill', () => {
     expect(result.success).toBe(true);
     expect(result.data?.message).toMatch(/File-based sync complete/);
     expect(backfillBodies).toContain('incumbent-proj');
+    expect(graphIdsObservedAtPublish).toEqual(['incumbent-proj']);
 
     // Defect-3: identity was repaired from the incumbent slug, never 'Unknown'.
     const verifyDb = new Database(dbPath);
@@ -577,6 +582,8 @@ describe('cmosDbBackfill', () => {
     expect(pid?.value).toBe('incumbent-proj');
     expect(pname?.value).not.toBe('Unknown');
     expect(pname?.value).toBe('Incumbent Proj');
+    const graph = await ProjectGraphRegistry.create();
+    expect(graph.getByStorePath(tempDir)).toBe(pid?.value);
   });
 
   // ─── Q3 dashboard-ingest gate (dashboard msg 03064b74; carry-forward #770) ───

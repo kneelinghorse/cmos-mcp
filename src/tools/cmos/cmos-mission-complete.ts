@@ -28,8 +28,9 @@ import {
 import { sanitizeContentField, sanitizeStringArray } from '../../intelligence/content-sanitizer';
 import { recordEmbedding, decisionEmbeddingInput } from '../../intelligence/embedding-pipeline';
 import { patchProjectIdentity, type ProjectIdentityData } from './project-identity';
-import { appendWarnings } from './format-warnings';
+import { appendWarnings, attachWarnings } from './format-warnings';
 import { checkWrite } from './write-guard';
+import { isOpenStatus } from './terminal-status';
 
 interface MissionCompletionRecord {
   id: string;
@@ -201,10 +202,9 @@ export async function cmosMissionComplete(
     inputSanitized.push(...r.sanitizedFields);
   }
 
-  return withClientAsync(
+  const warnings: string[] = [];
+  const result = await withClientAsync(
     async (client) => {
-      const warnings: string[] = [];
-
       // Query mission by ID
       const missionResult = client.getOne<MissionCompletionRecord>(
         `
@@ -258,7 +258,7 @@ export async function cmosMissionComplete(
       const now = new Date().toISOString();
 
       // Ensure timestamp columns exist (migration)
-      ensureMissionTimestamps(client);
+      warnings.push(...(ensureMissionTimestamps(client).warnings ?? []));
 
       // Build update query - include notes, completed_at, and updated_at
       let updateQuery: string;
@@ -413,6 +413,7 @@ export async function cmosMissionComplete(
     },
     { projectRoot: params.projectRoot }
   );
+  return attachWarnings(result, warnings);
 }
 
 interface DecisionCaptureInput {
@@ -435,7 +436,7 @@ async function captureDecisions(
   warnings: string[]
 ): Promise<DecisionCaptureResult> {
   // Ensure mission_id column exists (defensive DDL for existing databases)
-  ensureMissionIdColumn(client);
+  warnings.push(...ensureMissionIdColumn(client));
 
   const decisions = input.decisions?.filter((d) => d.trim().length > 0) ?? [];
   // s86-m02b: rows the database ACCEPTED, not rows we meant to write. See the return below.
@@ -527,10 +528,11 @@ async function captureDecisions(
   return result;
 }
 
-export function ensureMissionIdColumn(client: CmosDatabaseClient): void {
+export function ensureMissionIdColumn(client: CmosDatabaseClient): string[] {
   // Delegate to the full schema migration which handles mission_id
-  // and all other v2.1 columns (category, status, superseded_by, evidence)
-  ensureStrategicDecisionsSchema(client);
+  // and all other v2.1 columns (category, status, superseded_by, evidence). Return its warnings
+  // so each answer-bearing caller can splice them into its existing envelope.
+  return ensureStrategicDecisionsSchema(client).warnings ?? [];
 }
 
 interface MissionAggregationInput {
@@ -704,6 +706,10 @@ function getMetadataValue(client: CmosDatabaseClient, key: string): string | nul
 }
 
 function isSprintFullyCompleted(client: CmosDatabaseClient, sprintId: string): boolean {
+  const sprintResult = client.getOne<{ status: string }>(
+    'SELECT status FROM sprints WHERE id = ?',
+    [sprintId]
+  );
   const totalResult = client.getOne<{ count: number }>(
     'SELECT COUNT(*) as count FROM missions WHERE sprint_id = ?',
     [sprintId]
@@ -714,6 +720,8 @@ function isSprintFullyCompleted(client: CmosDatabaseClient, sprintId: string): b
   );
 
   if (
+    !sprintResult.success ||
+    !isOpenStatus(sprintResult.data?.status) ||
     !totalResult.success ||
     !remainingResult.success ||
     !totalResult.data ||
@@ -790,6 +798,7 @@ export function formatMissionCompleteForLLM(result: CmosToolResult<MissionComple
       lines.push(`Suggestion: ${error.suggestion}`);
     }
 
+    appendWarnings(lines, result);
     return lines.join('\n');
   }
 

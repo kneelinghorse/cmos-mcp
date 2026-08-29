@@ -45,7 +45,7 @@ import {
 } from './errors';
 import { ensureMissionTimestamps } from './schema-migrations';
 import { sanitizeContentField } from '../../intelligence/content-sanitizer';
-import { appendWarnings } from './format-warnings';
+import { appendWarnings, attachWarnings } from './format-warnings';
 import { checkWrite } from './write-guard';
 import { isTerminalStatus, SPRINT_NO_OPEN_WORK_STATUSES } from './terminal-status';
 
@@ -116,10 +116,9 @@ export async function cmosMissionMove(
     }
   }
 
-  return withClientValidated(
+  const warnings: string[] = [];
+  const result = await withClientValidated(
     (client) => {
-      const warnings: string[] = [];
-
       // ─── 1. The mission exists ───────────────────────────────────────────
       const missionResult = client.getOne<MissionWithSprint>(
         `SELECT id, status, name, sprint_id FROM missions WHERE id = ?`,
@@ -245,7 +244,7 @@ export async function cmosMissionMove(
         ? `[Moved] ${fromSprintId ?? '(unbound)'} -> ${toSprintId} (${cleanedReason})`
         : `[Moved] ${fromSprintId ?? '(unbound)'} -> ${toSprintId}`;
 
-      ensureMissionTimestamps(client);
+      warnings.push(...(ensureMissionTimestamps(client).warnings ?? []));
 
       const updateResult = client.execute(
         `UPDATE missions
@@ -313,6 +312,7 @@ export async function cmosMissionMove(
     },
     { projectRoot: params.projectRoot }
   );
+  return attachWarnings(result, warnings);
 }
 
 export function formatMissionMoveForLLM(result: CmosToolResult<MissionMoveResult>): string {
@@ -329,6 +329,7 @@ export function formatMissionMoveForLLM(result: CmosToolResult<MissionMoveResult
       lines.push(`Suggestion: ${error.suggestion}`);
     }
 
+    appendWarnings(lines, result);
     return lines.join('\n');
   }
 

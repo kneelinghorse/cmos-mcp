@@ -155,7 +155,9 @@ export async function readLocalSenderIdentity(projectRoot?: string): Promise<Loc
 
         return createSuccess<LocalSenderIdentity>(localIdentity);
       },
-      { projectRoot }
+      // Sender resolution observes (and may repair owner/address linkage); it is not the
+      // project-registration authority even when nested inside a write-classified send.
+      { projectRoot, registerProject: false }
     );
     return result.success && result.data ? result.data : { projectId: null, cmosAddress: null };
   } catch {

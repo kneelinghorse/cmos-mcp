@@ -64,6 +64,14 @@ describe('CmosDatabaseClient', () => {
         metadata TEXT
       );
 
+      CREATE TABLE metadata (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+
+      INSERT INTO metadata (key, value)
+      VALUES ('project_id', 'client-test-project');
+
       -- Insert test data
       INSERT INTO missions (id, name, status, objective)
       VALUES
@@ -666,10 +674,10 @@ describe('withClientAsync', () => {
    * already WAL.
    *
    * HONEST SCOPE, stated so this is not read as a rescue: no `src/` site passes `readonly: true`
-   * to this client today — all eight read-only opens in the tree are raw `better-sqlite3` calls.
-   * The defect was LATENT. It is fixed here because the read/write distinction at the client
-   * layer is the signal SPLIT-THE-PATHS needs next sprint, and because a pragma that writes must
-   * not run on a connection that has declared it will not.
+   * to this client today — all seven read-only opens in the tree are raw `better-sqlite3` calls.
+   * The defect was LATENT when fixed. Sprint 88 m08 now uses the client distinction to keep
+   * read-classified/readonly resolution outside project-identity registration; independently, a
+   * pragma that writes must not run on a connection that has declared it will not.
    */
   describe('s87-m03 (#535): read-only opens do not write', () => {
     function deleteModeStore(): string {

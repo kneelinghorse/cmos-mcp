@@ -1083,6 +1083,30 @@ async function cmosSessionCaptureWithDb(
         timestamp: now,
         captureCount: captures.length,
         message: `Captured ${category} in session '${sessionId}' (${captures.length} total captures)`,
+        structuredMaterialization:
+          category === 'decision'
+            ? {
+                target: 'strategic_decisions',
+                timing: 'immediate',
+                outcome: decisionAlreadyExtracted
+                  ? 'existing'
+                  : decisionExtractionCount === 1
+                    ? 'materialized'
+                    : 'failed',
+              }
+            : category === 'context'
+              ? {
+                  target: 'master_context.context_notes',
+                  timing: 'session-close',
+                  outcome: 'deferred',
+                }
+              : category === 'next-step'
+                ? { target: 'next_steps', timing: 'session-close', outcome: 'deferred' }
+                : {
+                    target: category === 'learning' ? 'learnings' : 'constraints',
+                    timing: 'immediate',
+                    outcome: 'failed',
+                  },
         writeFailures: [],
       };
 

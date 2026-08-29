@@ -13,6 +13,7 @@
 
 import type { CmosDatabaseClient } from './client';
 import { ensureReviewTimestamps, ensureLearningsTable } from './schema-migrations';
+import { sprintIdOrderSql } from './sprint-ordering';
 import { countWrite } from './write-guard';
 
 /**
@@ -268,7 +269,7 @@ export function reviewDecisionStaleness(
     `SELECT id, decision_text, status, sprint_id, category, evidence
      FROM strategic_decisions
      WHERE ${statusFilter} AND sprint_id IS NOT NULL
-     ORDER BY sprint_id ASC, id ASC`,
+     ORDER BY ${sprintIdOrderSql('sprint_id', 'ASC')}, id ASC`,
     []
   );
 

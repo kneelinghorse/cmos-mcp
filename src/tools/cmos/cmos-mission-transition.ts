@@ -11,6 +11,7 @@
 
 import { z } from 'zod';
 import { createError, CmosErrors } from './errors';
+import { appendWarnings } from './format-warnings';
 import type { ActionParamMap, CmosToolResult } from './types';
 import {
   cmosMissionStart,
@@ -325,9 +326,11 @@ export function formatMissionTransitionForLLM(
       return formatMissionDropForLLM(result as CmosToolResult<MissionDropResult>);
     case 'defer':
       return formatMissionDeferForLLM(result as CmosToolResult<MissionDeferResult>);
-    default:
-      return result.success
-        ? '✓ Mission transition completed'
-        : '❌ Failed to execute cmos_mission_transition';
+    default: {
+      if (!result.success) return '❌ Failed to execute cmos_mission_transition';
+      const lines = ['✓ Mission transition completed'];
+      appendWarnings(lines, result);
+      return lines.join('\n');
+    }
   }
 }

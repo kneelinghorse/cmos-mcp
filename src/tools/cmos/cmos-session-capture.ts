@@ -29,7 +29,7 @@ import {
   decisionEmbeddingInput,
   learningEmbeddingInput,
 } from '../../intelligence/embedding-pipeline';
-import { appendWarnings, appendWriteFailures } from './format-warnings';
+import { appendWarnings, appendWriteFailures, attachWarnings } from './format-warnings';
 import { checkWrite, type WriteFailure } from './write-guard';
 
 /**
@@ -44,6 +44,28 @@ export const VALID_CAPTURE_CATEGORIES = [
 ] as const;
 
 export type CaptureCategory = (typeof VALID_CAPTURE_CATEGORIES)[number];
+
+export type CaptureMaterializationTarget =
+  | 'strategic_decisions'
+  | 'learnings'
+  | 'constraints'
+  | 'master_context.context_notes'
+  | 'next_steps';
+
+export type CaptureMaterializationTiming = 'immediate' | 'session-close';
+
+export type CaptureMaterializationOutcome = 'materialized' | 'existing' | 'deferred' | 'failed';
+
+export interface CaptureStructuredMaterialization {
+  /** Durable projection written by this capture category. */
+  target: CaptureMaterializationTarget;
+
+  /** Whether the projection is attempted now or when the session closes. */
+  timing: CaptureMaterializationTiming;
+
+  /** What happened to the projection during this call. */
+  outcome: CaptureMaterializationOutcome;
+}
 
 /**
  * Result of session capture operation.
@@ -67,6 +89,9 @@ export interface CmosSessionCaptureResult {
   /** Message describing the result */
   message: string;
 
+  /** Outcome-aware receipt for the category's durable structured projection. */
+  structuredMaterialization: CaptureStructuredMaterialization;
+
   /**
    * s86-m02b — writes this capture ATTEMPTED and the database REJECTED. Always present, `[]` on
    * the happy path. The extraction flags above report what actually landed.
@@ -75,6 +100,12 @@ export interface CmosSessionCaptureResult {
 
   /** Associated mission ID (when missionId was provided) */
   missionId?: string;
+
+  /** Real strategic_decisions row ID for a new or de-duplicated decision capture. */
+  decisionId?: number;
+
+  /** Real learnings row ID for a new or de-duplicated learning capture. */
+  learningId?: number;
 
   /** Number of decisions extracted (present for decision category captures) */
   decisionExtractionCount?: number;
@@ -209,6 +240,14 @@ export const cmosSessionCaptureSchema = z.object({
       'Learning IDs this capture cites. Bumps last_reviewed_at on each — applies to category=decision|learning.'
     ),
 
+  /** Optional never-stale flag for learning captures. */
+  evergreen: z
+    .boolean()
+    .optional()
+    .describe(
+      'Whether this learning is exempt from staleness archival. Applies only to learning captures.'
+    ),
+
   /** Optional project root */
   projectRoot: z
     .string()
@@ -287,6 +326,11 @@ export const cmosSessionCaptureToolDefinition = {
         description:
           'Learning IDs this capture cites. Bumps last_reviewed_at on each — applies to category=decision|learning.',
       },
+      evergreen: {
+        type: 'boolean',
+        description:
+          'Whether this learning is exempt from staleness archival. Applies only to learning captures.',
+      },
       projectRoot: {
         type: 'string',
         description: 'Project root directory to search for CMOS database (defaults to cwd)',
@@ -314,6 +358,16 @@ export async function cmosSessionCapture(
     return createError(CmosErrors.missingParameter('content'));
   }
 
+  if (params.evergreen !== undefined && params.category !== 'learning') {
+    return createError<CmosSessionCaptureResult>({
+      code: CMOS_ERROR_CODES.INVALID_PARAMETER,
+      message: "Parameter 'evergreen' applies only to category='learning' captures",
+      field: 'evergreen',
+      providedValue: params.evergreen,
+      suggestion: 'Remove evergreen or capture the content as category="learning"',
+    });
+  }
+
   const category = params.category;
   const sanitizedFields: SanitizedField[] = [];
   const contentSan = sanitizeContentField(params.content.trim());
@@ -338,12 +392,12 @@ export async function cmosSessionCapture(
   const citesLearningIds = citesLearningIdsSan.cleaned;
   const agent = params.agent ?? 'assistant';
 
-  return withClientAsync(
+  const warnings: string[] = [];
+  const result = await withClientAsync(
     async (client) => {
       // s86-m02b — SINK HOISTING. `warnings` was declared ~400 lines below, AFTER the decision
       // INSERT, the learning arm and the constraint arm. Wiring their failures into it required
       // moving the declaration here; the alternative — a second array — is explicitly forbidden.
-      const warnings: string[] = [];
       // Writes attempted and rejected. Distinct from `warnings` (fork f09): a lost decision must
       // not be buried beside "you forgot missionId".
       const writeSink = { failures: [] as WriteFailure[] };
@@ -483,7 +537,7 @@ export async function cmosSessionCapture(
 
       // Track session→mission association when missionId is provided
       if (missionId) {
-        ensureSessionMissionsTable(client);
+        warnings.push(...(ensureSessionMissionsTable(client).warnings ?? []));
         // INSERT OR IGNORE: idempotent — won't duplicate if already linked
         checkWrite(
           client.execute(
@@ -504,6 +558,7 @@ export async function cmosSessionCapture(
         timestamp: now,
         captureCount: captures.length,
         message: `Captured ${category} in session '${sessionId}' (${captures.length} total captures)`,
+        structuredMaterialization: initialStructuredMaterialization(category),
         writeFailures: writeSink.failures,
       };
 
@@ -514,7 +569,7 @@ export async function cmosSessionCapture(
       if (category === 'decision') {
         // Ensure mission_id column exists for decision association
         if (missionId) {
-          ensureMissionIdColumn(client);
+          warnings.push(...ensureMissionIdColumn(client));
         }
 
         // Get sprint_id from session or mission
@@ -553,6 +608,8 @@ export async function cmosSessionCapture(
         if (existingResult.success && existingResult.data) {
           resultData.decisionAlreadyExtracted = true;
           resultData.decisionExtractionCount = 0;
+          resultData.decisionId = existingResult.data.id;
+          resultData.structuredMaterialization.outcome = 'existing';
         } else {
           // Build dynamic column list
           const columns = [
@@ -610,6 +667,11 @@ export async function cmosSessionCapture(
                   ? Number(insertResult.data.lastInsertRowid)
                   : undefined;
 
+            if (newDecisionId !== undefined) {
+              resultData.decisionId = newDecisionId;
+            }
+            resultData.structuredMaterialization.outcome = 'materialized';
+
             const suggestion = await detectSupersessionCandidates(client, content, newDecisionId);
 
             if (suggestion.candidates.length > 0) {
@@ -643,7 +705,7 @@ export async function cmosSessionCapture(
       let newlyInsertedLearningId: number | undefined;
       if (category === 'learning') {
         // Ensure learnings table exists
-        ensureLearningsTable(client);
+        warnings.push(...(ensureLearningsTable(client).warnings ?? []));
 
         // Get sprint_id from session or mission
         let sprintId: string | null = null;
@@ -681,9 +743,18 @@ export async function cmosSessionCapture(
         if (!existingLearning.success || !existingLearning.data) {
           const g = genesisColumns(client, 'learnings', getProjectId(client));
           const insertResult = client.execute(
-            `INSERT INTO learnings (content, category, status, sprint_id, author_session_id, mission_id, created_at, ${g.columns.join(', ')})
-             VALUES (?, ?, 'active', ?, ?, ?, ?, ${g.placeholders})`,
-            [content, null, sprintId, sessionId, missionId ?? null, now, ...g.values]
+            `INSERT INTO learnings (content, category, status, sprint_id, author_session_id, mission_id, created_at, evergreen, ${g.columns.join(', ')})
+             VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ${g.placeholders})`,
+            [
+              content,
+              null,
+              sprintId,
+              sessionId,
+              missionId ?? null,
+              now,
+              params.evergreen === true ? 1 : 0,
+              ...g.values,
+            ]
           );
           // s86-m02b: `learningExtracted` used to be the INSERT's success flag, so `false` meant
           // BOTH "a duplicate already existed" (the else arm below) and "the INSERT errored".
@@ -696,6 +767,11 @@ export async function cmosSessionCapture(
             } else if (typeof lastId === 'bigint') {
               newlyInsertedLearningId = Number(lastId);
             }
+
+            if (newlyInsertedLearningId !== undefined) {
+              resultData.learningId = newlyInsertedLearningId;
+            }
+            resultData.structuredMaterialization.outcome = 'materialized';
 
             // Sprint 66 m03 — write-path embedding hook
             if (newlyInsertedLearningId !== undefined) {
@@ -710,11 +786,26 @@ export async function cmosSessionCapture(
         } else {
           resultData.learningExtracted = false;
           newlyInsertedLearningId = existingLearning.data.id;
+          resultData.learningId = existingLearning.data.id;
+          if (params.evergreen === undefined) {
+            resultData.structuredMaterialization.outcome = 'existing';
+          } else if (
+            checkWrite(
+              client.execute('UPDATE learnings SET evergreen = ? WHERE id = ?', [
+                params.evergreen ? 1 : 0,
+                existingLearning.data.id,
+              ]),
+              writeSink,
+              'learnings.evergreen.update'
+            )
+          ) {
+            resultData.structuredMaterialization.outcome = 'existing';
+          }
         }
       }
 
       if (category === 'constraint') {
-        ensureConstraintsTable(client);
+        warnings.push(...(ensureConstraintsTable(client).warnings ?? []));
 
         // Get sprint_id from session or mission
         let sprintId: string | null = null;
@@ -758,8 +849,12 @@ export async function cmosSessionCapture(
             writeSink,
             'constraints.insert'
           );
+          if (resultData.constraintExtracted) {
+            resultData.structuredMaterialization.outcome = 'materialized';
+          }
         } else {
           resultData.constraintExtracted = false;
+          resultData.structuredMaterialization.outcome = 'existing';
         }
       }
 
@@ -769,12 +864,17 @@ export async function cmosSessionCapture(
       // institutional-rule corpus). For learning captures, exclude the freshly
       // inserted row from implicit matches so a learning can't reaffirm itself.
       if (category === 'decision' || category === 'learning') {
-        const reaffirm = await applyLearningReaffirm(client, {
-          explicitIds: citesLearningIds,
-          newContent: content,
-          reaffirmedAt: now,
-          excludeIds: newlyInsertedLearningId !== undefined ? [newlyInsertedLearningId] : undefined,
-        });
+        const reaffirm = await applyLearningReaffirm(
+          client,
+          {
+            explicitIds: citesLearningIds,
+            newContent: content,
+            reaffirmedAt: now,
+            excludeIds:
+              newlyInsertedLearningId !== undefined ? [newlyInsertedLearningId] : undefined,
+          },
+          warnings
+        );
         // s86-m02b: a failed existence lookup classifies NOTHING, so the reaffirmed/missing
         // lists above are INCOMPLETE rather than authoritative. That has to reach the answer, or
         // the caller reads a partial corpus view as a complete one.
@@ -830,6 +930,7 @@ export async function cmosSessionCapture(
     },
     { projectRoot: params.projectRoot }
   );
+  return attachWarnings(result, warnings);
 }
 
 function inferSprintIdForDecisionCapture(
@@ -865,6 +966,27 @@ function inferSprintIdForDecisionCapture(
   return resolveOpenSprintIdForWrite(client);
 }
 
+function initialStructuredMaterialization(
+  category: CaptureCategory
+): CaptureStructuredMaterialization {
+  switch (category) {
+    case 'decision':
+      return { target: 'strategic_decisions', timing: 'immediate', outcome: 'failed' };
+    case 'learning':
+      return { target: 'learnings', timing: 'immediate', outcome: 'failed' };
+    case 'constraint':
+      return { target: 'constraints', timing: 'immediate', outcome: 'failed' };
+    case 'context':
+      return {
+        target: 'master_context.context_notes',
+        timing: 'session-close',
+        outcome: 'deferred',
+      };
+    case 'next-step':
+      return { target: 'next_steps', timing: 'session-close', outcome: 'deferred' };
+  }
+}
+
 /**
  * Format session capture result for LLM readability.
  */
@@ -884,6 +1006,7 @@ export function formatSessionCaptureForLLM(
       lines.push(`Suggestion: ${error.suggestion}`);
     }
 
+    appendWarnings(lines, result);
     return lines.join('\n');
   }
 
@@ -906,6 +1029,22 @@ export function formatSessionCaptureForLLM(
 
   if (data.missionId) {
     lines.push(`**Mission**: ${data.missionId}`);
+  }
+
+  if (data.structuredMaterialization) {
+    lines.push(
+      `Structured materialization: ${data.structuredMaterialization.outcome} — ` +
+        `${data.structuredMaterialization.timing === 'session-close' ? 'session close' : 'immediate'} → ` +
+        data.structuredMaterialization.target
+    );
+  }
+
+  if (data.decisionId !== undefined) {
+    lines.push(`Decision ID: #${data.decisionId}`);
+  }
+
+  if (data.learningId !== undefined) {
+    lines.push(`Learning ID: #${data.learningId}`);
   }
 
   if (data.category === 'decision' && data.decisionExtractionCount !== undefined) {

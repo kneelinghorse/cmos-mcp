@@ -61,6 +61,27 @@ function copyLiveStore(): string {
   return projectRoot;
 }
 
+/** Independent JS oracle for the shipped SQL contract; BigInt avoids SQLite INTEGER limits. */
+function orderSprintIds(ids: string[], direction: 'ASC' | 'DESC'): string[] {
+  const directionFactor = direction === 'ASC' ? 1 : -1;
+  const canonical = /^sprint-(\d+)$/;
+
+  return [...ids].sort((left, right) => {
+    const leftMatch = canonical.exec(left);
+    const rightMatch = canonical.exec(right);
+    if (leftMatch && !rightMatch) return -1;
+    if (!leftMatch && rightMatch) return 1;
+    if (leftMatch && rightMatch) {
+      const leftNumber = BigInt(leftMatch[1]);
+      const rightNumber = BigInt(rightMatch[1]);
+      if (leftNumber !== rightNumber) {
+        return (leftNumber < rightNumber ? -1 : 1) * directionFactor;
+      }
+    }
+    return Buffer.compare(Buffer.from(left), Buffer.from(right)) * directionFactor;
+  });
+}
+
 describe('analytics window over stdio against the built dist (s86-m05)', () => {
   let harness: StdioHarness;
   let projectRoot: string;
@@ -81,25 +102,17 @@ describe('analytics window over stdio against the built dist (s86-m05)', () => {
 
     projectRoot = copyLiveStore();
 
-    // Ground the expectation in the copy rather than a hardcoded id list, so the assertion keeps
-    // meaning as sprints accumulate. The pre-fix ordering is computed too, which is what makes
-    // the final assertion a claim about DIRECTION and not about a particular sprint number.
+    // Ground both ends of the numeric ordering in the copy rather than hardcoded IDs, so the
+    // assertion keeps meaning as sprints accumulate and proves the selected window's direction.
     const db = new Database(path.join(projectRoot, 'cmos', 'db', 'cmos.sqlite'), {
       readonly: true,
     });
-    const ids = (sql: string): string[] =>
-      db
-        .prepare(sql)
-        .all()
-        .map((r) => (r as { sprint_id: string }).sprint_id);
-    newestFive = ids(
-      `SELECT sprint_id FROM sprint_summary WHERE status IN ('Completed','Active')
-       ORDER BY sprint_id DESC LIMIT 5`
-    );
-    oldestFive = ids(
-      `SELECT sprint_id FROM sprint_summary WHERE status IN ('Completed','Active')
-       ORDER BY sprint_id ASC LIMIT 5`
-    );
+    const eligibleIds = db
+      .prepare(`SELECT sprint_id FROM sprint_summary WHERE status IN ('Completed','Active')`)
+      .all()
+      .map((r) => (r as { sprint_id: string }).sprint_id);
+    newestFive = orderSprintIds(eligibleIds, 'DESC').slice(0, 5);
+    oldestFive = orderSprintIds(eligibleIds, 'ASC').slice(0, 5);
     db.close();
 
     harness = await connectStdioServer({
@@ -140,10 +153,9 @@ describe('analytics window over stdio against the built dist (s86-m05)', () => {
     // …and it bounded the window at the NEWEST end, handed back oldest-first.
     expect(returned).toEqual([...newestFive].reverse());
 
-    // The pre-fix result, asserted as DISJOINTNESS rather than by naming sprint ids. Hardcoding
-    // 'sprint-86' would be a time-bomb that fails the moment sprint-87 opens, for a reason
-    // unrelated to this code (agents.md: no hardcoded values that age out). On a 77-sprint store
-    // the newest window and the oldest window share no members, which is the real claim.
+    // The independent oldest window, asserted as DISJOINTNESS rather than by naming sprint IDs.
+    // A hardcoded ID would become a time-bomb as soon as another sprint opens; the durable claim
+    // is that a sufficiently long history's newest and oldest windows share no members.
     expect(newestFive).not.toEqual(oldestFive);
     for (const oldId of oldestFive) expect(returned).not.toContain(oldId);
 
@@ -162,7 +174,8 @@ describe('analytics window over stdio against the built dist (s86-m05)', () => {
     });
     const text = harness.textOf(res);
     expect(text).toMatch(/\*\*Window\*\*/);
-    expect(text).toContain('sprint-86');
+    expect(text).toContain(newestFive[0]);
+    expect(text).toContain([...newestFive].reverse()[0]);
     expect(text).toMatch(/oldest → newest/);
   }, 60000);
 

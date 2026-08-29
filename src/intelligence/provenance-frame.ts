@@ -44,7 +44,7 @@ export function isForeignProject(
 
 /**
  * s87-m04 — the fallback identifier `getProjectId` stamps when a store has no recorded identity.
- * Not a project. Twelve of the 45 CMOS stores on this machine resolve to it.
+ * Not a project. The #1038 immutable remeasurement found 13 of 45 stores resolve to it.
  */
 export const UNRECORDED_PROJECT_ID = 'unknown-project';
 
@@ -58,7 +58,7 @@ export const UNRECORDED_PROJECT_ID = 'unknown-project';
  *
  * THE FENCE IS UNCHANGED, and the distinction is load-bearing. A row carrying the literal is
  * still FOREIGN and still gets the untrusted framing — because a pull-merged genuinely foreign
- * row from any of the twelve collapsing stores ALSO carries the literal, so de-fencing on it
+ * row from any of the thirteen collapsing stores ALSO carries the literal, so de-fencing on it
  * would de-fence foreign content. The standing bias is stated twice in this codebase
  * ("fence-more, never fence-less"), and s87-m04's criterion 5 asserts BOTH halves: no rendered
  * surface says `proj:unknown-project`, AND the same rows are still wrapped.

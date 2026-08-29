@@ -86,15 +86,16 @@ describe('npm publish pipeline configuration', () => {
     }
   });
 
-  test('.npmignore excludes local workspace and development artifacts', () => {
+  test('.npmignore excludes private workspace artifacts but not the shipped seed', () => {
     const npmIgnoreLines = readTextFile('.npmignore')
       .split(/\r?\n/)
       .map((line) => line.trim())
       .filter(Boolean);
 
     expect(npmIgnoreLines).toEqual(
-      expect.arrayContaining(['cmos/', 'cmos-seed/', 'tests/', 'tmp/', 'coverage/', '.eslintcache'])
+      expect.arrayContaining(['cmos/', 'tests/', 'tmp/', 'coverage/', '.eslintcache'])
     );
+    expect(npmIgnoreLines).not.toContain('cmos-seed/');
   });
 
   test('publish workflow triggers on version tags and publishes to npm', () => {

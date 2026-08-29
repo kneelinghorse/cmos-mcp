@@ -21,9 +21,11 @@ import {
   PROJECT_GRAPH_SCHEMA_VERSION,
 } from '../../src/intelligence/project-graph-registry';
 import { CmosDetector } from '../../src/intelligence/cmos-detector';
+import { resolveProjectRootEnhanced } from '../../src/intelligence/project-resolution';
 import { seedCmosDb } from '../helpers/seedCmosDb';
 import { cmosProjectRegister } from '../../src/tools/cmos/cmos-project-register';
 import { cmosReview } from '../../src/tools/cmos/cmos-review';
+import { captureToolCall } from '../../src/tools/cmos/tool-call-context';
 
 describe('ProjectGraphRegistry (Sprint 69 m05)', () => {
   let tmpDir: string;
@@ -119,6 +121,22 @@ describe('ProjectGraphRegistry (Sprint 69 m05)', () => {
     expect(updated.store_path).toBe('/tmp/new');
     expect(updated.name).toBe('New');
     expect(reg.list()).toHaveLength(1); // still one row
+  });
+
+  it('treats filesystem aliases of one live store as one registration', async () => {
+    const root = makeStore('alias-target', 'alias-project-id');
+    const alias = path.join(tmpDir, 'alias-link');
+    fs.symlinkSync(root, alias, 'dir');
+    const reg = await ProjectGraphRegistry.create();
+
+    reg.registerStore(root, { requireStoredIdentity: true });
+    const throughAlias = reg.registerStore(alias, { requireStoredIdentity: true });
+
+    expect(throughAlias.project_id).toBe('alias-project-id');
+    expect(throughAlias.store_path).toBe(path.resolve(alias));
+    expect(reg.getByStorePath(root)).toBe('alias-project-id');
+    expect(reg.getByStorePath(alias)).toBe('alias-project-id');
+    expect(reg.list()).toHaveLength(1);
   });
 
   // ── (b) list with and without archived ──────────────────────────────────────
@@ -364,25 +382,50 @@ describe('ProjectGraphRegistry (Sprint 69 m05)', () => {
     expect(entry?.name).toBe('regd');
   });
 
-  // ── (h) integration with cmos_review (last_seen_at touched at session start) ─
-  it('cmos_review touches/auto-registers the current project in the project-graph registry', async () => {
+  it('cmos_project register mints and reports repair for a real identity-less SQLite store', async () => {
+    const root = path.join(tmpDir, 'projects', 'registration-repair');
+    seedCmosDb(root, { projectId: '', projectName: 'registration-repair' });
+
+    const result = await cmosProjectRegister({ projectRoot: root });
+
+    expect(result.success).toBe(true);
+    expect(result.data?.metadataRepaired).toBe(true);
+    const identity = readStoreIdentity(root);
+    expect(identity?.project_id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+    );
+    const reg = await ProjectGraphRegistry.create();
+    expect(reg.getByStorePath(root)).toBe(identity?.project_id);
+  });
+
+  // ── (h) integration with cmos_review (existing last_seen_at touched) ─────────
+  it('cmos_review touches an existing graph row but never registers an absent one', async () => {
     const root = makeStore('reviewed', 'reviewed-id');
 
-    // Project not yet in the graph registry — review must auto-register it.
-    const review1 = await cmosReview({ projectRoot: root });
+    // A read-classified opener must not create discovery state, even when the
+    // project store already carries a durable identity.
+    const review1 = (await captureToolCall('read', () => cmosReview({ projectRoot: root }))).value;
     expect(review1.success).toBe(true);
     const reg = await ProjectGraphRegistry.create();
-    const first = reg.get('reviewed-id');
-    expect(first).toBeDefined();
-    const firstSeen = first!.last_seen_at;
+    expect(reg.get('reviewed-id')).toBeUndefined();
 
-    // A second review bumps last_seen_at (touch), without adding a duplicate row.
-    await new Promise((r) => setTimeout(r, 5));
+    // Once an explicit registration exists, review may update its bookkeeping.
+    reg.register({
+      project_id: 'reviewed-id',
+      store_path: root,
+      name: 'reviewed',
+    });
+    const raw = new Database(reg.path);
+    raw.prepare('UPDATE projects SET last_seen_at = ? WHERE project_id = ?').run(1, 'reviewed-id');
+    raw.close();
+
+    // A second review strictly bumps last_seen_at (touch), without adding a duplicate row.
+    // The deterministic old timestamp makes deletion/no-op of the touch fail this test.
     ProjectGraphRegistry.resetInstance();
-    await cmosReview({ projectRoot: root });
+    await captureToolCall('read', () => cmosReview({ projectRoot: root }));
     const reg2 = await ProjectGraphRegistry.create();
     expect(reg2.list()).toHaveLength(1);
-    expect(reg2.get('reviewed-id')!.last_seen_at).toBeGreaterThanOrEqual(firstSeen);
+    expect(reg2.get('reviewed-id')!.last_seen_at).toBeGreaterThan(1);
   });
 
   // ── regression: explicit configDir is honored ON THE BACKFILL PATH ──────────
@@ -508,8 +551,8 @@ describe('ProjectGraphRegistry (Sprint 69 m05)', () => {
       expect(moved.store_path).toBe(path.resolve(rootC)); // moved store wins
     });
 
-    // ── identity backfill (separate marker) migrates ids + the default ──────────
-    it('identity backfill mints ids for id-less JSON-known stores and migrates the JSON default', async () => {
+    // ── identity backfill (separate marker) migrates recorded ids + the default ─
+    it('identity backfill skips id-less JSON-known stores and migrates recorded identity + default', async () => {
       const idless = path.join(tmpDir, 'projects', 'legacy-noid');
       seedCmosDb(idless, { projectId: '', projectName: 'legacy-noid' });
       const withId = makeStore('has-id', 'has-id-uuid');
@@ -519,10 +562,10 @@ describe('ProjectGraphRegistry (Sprint 69 m05)', () => {
       // First graph create() runs the identity backfill.
       const reg = await ProjectGraphRegistry.create();
 
-      // The id-less store now carries a minted UUID and is in the graph.
-      const mintedId = readStoreIdentity(idless)?.project_id;
-      expect(mintedId).toMatch(UUID_RE);
-      expect(reg.get(mintedId!)?.store_path).toBe(idless);
+      // s88-m08: opening the registry is a compatibility READ, not explicit registration.
+      // The id-less store stays untouched and cannot enter a project_id-keyed graph yet.
+      expect(readStoreIdentity(idless)).toBeNull();
+      expect(reg.getByStorePath(idless)).toBeNull();
 
       // The store that already had an id is present, id untouched.
       expect(reg.get('has-id-uuid')?.store_path).toBe(withId);
@@ -540,6 +583,46 @@ describe('ProjectGraphRegistry (Sprint 69 m05)', () => {
       ProjectGraphRegistry.resetInstance();
       const reg2 = await ProjectGraphRegistry.create();
       expect(reg2.get('late-id')).toBeUndefined();
+    });
+
+    it('defers an identity-less legacy default and promotes it when that path is registered', async () => {
+      const idless = path.join(tmpDir, 'projects', 'legacy-default-noid');
+      seedCmosDb(idless, { projectId: '', projectName: 'legacy-default-noid' });
+      seedLegacyJson(configDir, [{ projectRoot: idless }], idless);
+
+      const reg = await ProjectGraphRegistry.create();
+      expect(reg.getDefault()).toBeNull();
+
+      const registered = reg.registerStore(idless, { requireStoredIdentity: true });
+      expect(reg.getDefault()?.project_id).toBe(registered.project_id);
+      expect(reg.getDefault()?.store_path).toBe(path.resolve(idless));
+
+      const originalCwd = process.cwd;
+      process.cwd = () => path.join(tmpDir, 'not-a-cmos-project');
+      CmosDetector.resetInstance();
+      try {
+        const resolved = await resolveProjectRootEnhanced(undefined, { autoRegister: false });
+        expect(resolved.source).toBe('registry');
+        expect(resolved.projectRoot).toBe(path.resolve(idless));
+      } finally {
+        process.cwd = originalCwd;
+        CmosDetector.resetInstance();
+      }
+    });
+
+    it('read-classified registry creation defers identified legacy imports until a write context', async () => {
+      const root = makeStore('legacy-identified-read', 'legacy-identified-id');
+      seedLegacyJson(configDir, [{ projectRoot: root }], root);
+
+      const readGraph = (await captureToolCall('read', () => ProjectGraphRegistry.create())).value;
+      expect(readGraph.getByStorePath(root)).toBeNull();
+      expect(readGraph.getDefault()).toBeNull();
+
+      ProjectGraphRegistry.resetInstance();
+      const writeGraph = (await captureToolCall('write', () => ProjectGraphRegistry.create()))
+        .value;
+      expect(writeGraph.getByStorePath(root)).toBe('legacy-identified-id');
+      expect(writeGraph.getDefault()?.project_id).toBe('legacy-identified-id');
     });
   });
 

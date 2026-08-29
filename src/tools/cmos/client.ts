@@ -15,6 +15,7 @@
 import Database, { type Database as DatabaseType, type Statement } from 'better-sqlite3';
 import { CmosDetector, type CmosDetectionResult } from '../../intelligence/cmos-detector';
 import {
+  registerResolvedProjectStore,
   resolveProjectRootEnhanced,
   ProjectResolutionError,
 } from '../../intelligence/project-resolution';
@@ -22,6 +23,8 @@ import type { CmosToolResult, DbHealthResult } from './types';
 import { createError, createSuccess, CmosErrors, CMOS_ERROR_CODES } from './errors';
 import { loadVecExtension } from './vec-loader';
 import { assertJestDbPathIsolated, RealStoreGuardError } from './real-store-guard';
+import { isReadOnlyAgentSession } from './read-only-agent-guard';
+import { currentToolCallActionMode } from './tool-call-context';
 
 // Re-export the resolver for convenience. s80-m01 trimmed the dead JSON
 // `ProjectRegistry` / `RegisteredProject` / `ProjectValidation` /
@@ -85,6 +88,26 @@ export interface CmosDatabaseClientOptions {
 
   /** Enable verbose mode for debugging */
   verbose?: boolean;
+
+  /** Internal resolver probes can suppress registration even inside a write-classified request. */
+  registerProject?: boolean;
+}
+
+/**
+ * Registration is a write precondition, never a side effect of a read.
+ *
+ * Dispatch supplies the fail-closed action classification through AsyncLocalStorage, because the
+ * client is opened several handler layers below the router and concurrent MCP calls must not share
+ * a module-level flag. Direct callers have no action context, so their existing writable-client
+ * behavior remains registration-capable; `readonly: true` is the explicit no-registration signal.
+ * The review role wins over both.
+ */
+function shouldRegisterProject(options: CmosDatabaseClientOptions): boolean {
+  if (options.registerProject === false || options.readonly || isReadOnlyAgentSession()) {
+    return false;
+  }
+  const actionMode = currentToolCallActionMode();
+  return actionMode === undefined || actionMode === 'write';
 }
 
 /**
@@ -128,7 +151,9 @@ export interface MutationResult {
 export class CmosDatabaseClient {
   private db: DatabaseType | null = null;
   private readonly dbPath: string;
-  private readonly options: Required<Omit<CmosDatabaseClientOptions, 'dbPath' | 'projectRoot'>>;
+  private readonly options: Required<
+    Omit<CmosDatabaseClientOptions, 'dbPath' | 'projectRoot' | 'registerProject'>
+  >;
   private statementCache: Map<string, Statement> = new Map();
 
   /**
@@ -173,23 +198,21 @@ export class CmosDatabaseClient {
       if (!dbPath) {
         let projectRoot: string;
 
-        // If explicit projectRoot provided, use it directly
+        // If explicit projectRoot provided, use it directly. Registration is performed below,
+        // after CMOS presence is established, using the same policy as ambient resolution.
         if (options.projectRoot) {
           projectRoot = options.projectRoot;
         } else {
           // Use enhanced resolution (auto-discover → registry → error). s87-m04: this comment
           // used to name an `env` step first. There is none — sprint-53 m02 removed it.
           //
-          // s87-m04 / D-9, recorded where it is reachable: this arm passes
-          // `autoRegister: true`, so resolution here can MINT a project-graph registry row —
-          // including for a read action, before any action-taxonomy check runs. That makes the
-          // read-only agent guard's "No database was opened and no row/credential was mutated"
-          // not literally true on this path. NOT fixed this sprint: it is an input to
-          // SPLIT-THE-PATHS (Arc F sprint 2), which must decide the same question for the
-          // explicit-projectRoot arm, and fixing one half now would prejudge the other.
+          // s88-m08: resolution itself is non-registering. Once detection succeeds below, a
+          // WRITE-classified request registers on this side of the split; a READ-classified,
+          // readonly-client, or review-role request merely resolves. This keeps minting before a
+          // client/transaction exists without turning discovery into a write.
           try {
             const resolution = await resolveProjectRootEnhanced(undefined, {
-              autoRegister: true,
+              autoRegister: false,
               silent: true,
             });
             projectRoot = resolution.projectRoot;
@@ -214,6 +237,24 @@ export class CmosDatabaseClient {
 
         if (!detection.hasDatabase || !detection.databasePath) {
           return createError(CmosErrors.dbNotFound(detection.cmosDirectory));
+        }
+
+        // SPLIT-THE-PATHS (s88-m08): explicit and ambient WRITE opens share one registration
+        // point. `registerStore` is the only path here that may mint metadata.project_id, and it
+        // runs before this client's connection (and therefore before any BEGIN IMMEDIATE). Reads
+        // and the review role never enter it. Unlike the old best-effort auto-discovery write, a
+        // failed write precondition fails loud rather than letting the handler stamp a fallback.
+        if (shouldRegisterProject(options)) {
+          // Preserve the Jest real-store fence across the newly-added registration write. The
+          // ordinary connection checks this again below, but that would be too late if minting
+          // were allowed to touch the store first.
+          assertJestDbPathIsolated(detection.databasePath);
+          // Registered MCP writes are strict: no handler may continue after an identity write
+          // failed. Direct legacy callers have no action context, so retain registerStore's
+          // historical unreadable-store basename fallback unless they explicitly opt in.
+          const requireStoredIdentity =
+            currentToolCallActionMode() === 'write' || options.registerProject === true;
+          await registerResolvedProjectStore(projectRoot, { requireStoredIdentity });
         }
 
         dbPath = detection.databasePath;
@@ -324,11 +365,15 @@ export class CmosDatabaseClient {
       // never happens either way, which is why this went unnoticed.
       //
       // HONEST SCOPE, so this is not read as a bigger rescue than it is: NO `src/` site currently
-      // passes `readonly: true` to this client — all eight read-only opens in the tree are raw
-      // `better-sqlite3` calls. This fix is therefore LATENT, not live. It exists because the
-      // read/write distinction at the client layer is the signal SPLIT-THE-PATHS needs next
-      // sprint, and because a pragma that writes should not run on a connection that declares
-      // it will not write.
+      // passes `readonly: true` to this client — all seven read-only opens in the tree are raw
+      // `better-sqlite3` calls. Census command (prints 7):
+      //   rg -l --glob '*.ts' "import Database.*from 'better-sqlite3'" src |
+      //     xargs rg -U --count-matches 'new Database\([^;]*?\{\s*readonly:\s*true\b' |
+      //     awk -F: '{ total += $NF } END { print total }'
+      // This fix was latent when shipped in s87-m03. s88-m08 now uses that distinction to keep
+      // read-classified/readonly client resolution out of project-identity registration; the
+      // pragma rule remains independently necessary for a connection that declares it will not
+      // write.
       const currentJournalMode = String(
         (this.db.pragma('journal_mode', { simple: true }) as string | undefined) ?? ''
       ).toLowerCase();

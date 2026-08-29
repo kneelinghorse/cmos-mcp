@@ -14,9 +14,12 @@ export type ActionMode = 'read' | 'write';
  * `agentFeedback` arg is passed). It is therefore write-classified and blocked under review;
  * a review agent uses `cmos_review` (a genuine read digest) for cold-start context instead.
  *
- * `cmos_review` and `cmos_status` ARE pure reads of the CMOS store. `cmos_review` additionally
- * touches the *per-user project-graph registry* `last_seen_at` (a separate store, bookkeeping) —
- * that write is suppressed under review at its call site so review mode mutates nothing anywhere.
+ * `cmos_review` and `cmos_status` are admitted as read-classified entry points. That label is a
+ * narrow dispatch/identity-registration decision, NOT a promise that every composed handler is
+ * physically write-free: review/onboard may perform lazy compatibility or reconciliation writes
+ * in an already-open CMOS store. `cmos_review` may also touch an EXISTING per-user graph row's
+ * `last_seen_at` outside the review role. The review role suppresses that graph touch, and s88-m08
+ * suppresses project-identity mint/registration for every read-classified call.
  */
 export const READ_ONLY_TOOLS: ReadonlySet<string> = new Set(['cmos_review', 'cmos_status']);
 

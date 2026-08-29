@@ -15,6 +15,7 @@ import { createError, createSuccess, CmosErrors, VALID_MISSION_STATUSES } from '
 import { getProjectId, tableHasColumn } from './genesis-columns';
 import { frameInlineIfForeign } from '../../intelligence/provenance-frame';
 import { appendWarnings } from './format-warnings';
+import { sprintIdOrderSql } from './sprint-ordering';
 
 /**
  * Mission with parsed JSON fields for return to caller.
@@ -246,7 +247,7 @@ function buildQuery(
   const projectIdExpr = hasProjectId ? 'project_id' : 'NULL AS project_id';
 
   // Main query with ordering and limit
-  // Order by sprint (nulls last), then by id for consistent ordering
+  // Order by canonical sprint number (legacy IDs and nulls last), then by mission ID.
   const sql = `
     SELECT
       id, sprint_id, name, status, completed_at, notes,
@@ -255,8 +256,7 @@ function buildQuery(
     FROM missions
     ${whereClause}
     ORDER BY
-      CASE WHEN sprint_id IS NULL THEN 1 ELSE 0 END,
-      sprint_id DESC,
+      ${sprintIdOrderSql('sprint_id', 'DESC')},
       id ASC
     LIMIT ?
   `;
@@ -339,6 +339,7 @@ export function formatMissionListForLLM(result: CmosToolResult<CmosMissionListRe
 
   if (data.missions.length === 0) {
     lines.push('No missions found matching the filters.');
+    appendWarnings(lines, result);
     return lines.join('\n');
   }
 

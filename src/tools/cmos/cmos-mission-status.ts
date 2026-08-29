@@ -26,6 +26,7 @@ import { activeMissionsAcrossProjects } from '../../intelligence/cross-store-que
 import type { CrossStoreError, CrossStoreQueryResult } from '../../intelligence/cross-store-query';
 import type { ProjectGraphRegistry } from '../../intelligence/project-graph-registry';
 import { appendWarnings } from './format-warnings';
+import { sprintIdOrderSql } from './sprint-ordering';
 
 /**
  * Mission item with sprint context for the status view.
@@ -222,7 +223,7 @@ export async function cmosMissionStatus(
 
       // Fetch In Progress missions (no limit - show all active work)
       const inProgressResult = client.getMany<Mission>(
-        `SELECT * FROM missions WHERE status = 'In Progress' ORDER BY sprint_id DESC, id ASC`
+        `SELECT * FROM missions WHERE status = 'In Progress' ORDER BY ${sprintIdOrderSql('sprint_id', 'DESC')}, id ASC`
       );
       if (!inProgressResult.success) {
         return createError<CmosMissionStatusResult>(
@@ -235,7 +236,7 @@ export async function cmosMissionStatus(
 
       // Fetch Current missions (selected but not started)
       const currentResult = client.getMany<Mission>(
-        `SELECT * FROM missions WHERE status = 'Current' ORDER BY sprint_id DESC, id ASC`
+        `SELECT * FROM missions WHERE status = 'Current' ORDER BY ${sprintIdOrderSql('sprint_id', 'DESC')}, id ASC`
       );
       if (!currentResult.success) {
         return createError<CmosMissionStatusResult>(
@@ -269,7 +270,7 @@ export async function cmosMissionStatus(
       } else {
         // No active sprint - show all queued as fallback
         const queuedResult = client.getMany<Mission>(
-          `SELECT * FROM missions WHERE status = 'Queued' ORDER BY sprint_id DESC, id ASC LIMIT ?`,
+          `SELECT * FROM missions WHERE status = 'Queued' ORDER BY ${sprintIdOrderSql('sprint_id', 'DESC')}, id ASC LIMIT ?`,
           [queuedLimit]
         );
         if (!queuedResult.success) {
@@ -287,7 +288,7 @@ export async function cmosMissionStatus(
       let blockedMissions: StatusMissionItem[] | null = null;
       if (includeBlocked) {
         const blockedResult = client.getMany<Mission>(
-          `SELECT * FROM missions WHERE status = 'Blocked' ORDER BY sprint_id DESC, id ASC`
+          `SELECT * FROM missions WHERE status = 'Blocked' ORDER BY ${sprintIdOrderSql('sprint_id', 'DESC')}, id ASC`
         );
         if (!blockedResult.success) {
           return createError<CmosMissionStatusResult>(

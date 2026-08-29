@@ -71,7 +71,7 @@ import {
   ensureFirehoseEventColumns,
 } from '../../../src/tools/cmos/schema-migrations';
 import type { CmosToolResult } from '../../../src/tools/cmos/types';
-import { seedCmosDb } from '../../helpers/seedCmosDb';
+import { reidentifyCmosTestStore, seedCmosDb } from '../../helpers/seedCmosDb';
 
 const CLOSING_SPRINT = 'sprint-86';
 const OTHER_SPRINT = 'sprint-87';
@@ -106,6 +106,7 @@ async function buildStore(prefix: string): Promise<SeededStore> {
   const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   tmpDirs.push(projectRoot);
   const dbPath = seedCmosDb(projectRoot, { projectName: 's86-m02b sprint close' });
+  reidentifyCmosTestStore(projectRoot);
 
   // No hardcoded dates — everything is relative to now (agents.md: hardcoded timestamps are
   // time-bombs).

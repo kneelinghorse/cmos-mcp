@@ -13,7 +13,7 @@ import { createError, createSuccess, CmosErrors } from './errors';
 import { ensureLearningsTable } from './schema-migrations';
 import { getProjectId } from './genesis-columns';
 import { frameForeignText } from '../../intelligence/provenance-frame';
-import { appendWarnings } from './format-warnings';
+import { appendWarnings, attachWarnings } from './format-warnings';
 
 /**
  * Learning search result.
@@ -121,10 +121,11 @@ export async function cmosLearningsSearch(
     );
   }
 
-  return withClient(
+  const warnings: string[] = [];
+  const result = await withClient(
     (client) => {
       // Sprint 61 m03: lazy-migrate the evergreen column on the search read path.
-      ensureLearningsTable(client);
+      warnings.push(...(ensureLearningsTable(client).warnings ?? []));
 
       const conditions: string[] = [];
       const queryParams: (string | number)[] = [];
@@ -175,13 +176,16 @@ export async function cmosLearningsSearch(
       );
 
       if (!allResult.success || !allResult.data) {
-        return createSuccess<CmosLearningsSearchResult>({
-          query,
-          results: [],
-          totalMatches: 0,
-          limited: false,
-          localProjectId: getProjectId(client),
-        });
+        return createSuccess<CmosLearningsSearchResult>(
+          {
+            query,
+            results: [],
+            totalMatches: 0,
+            limited: false,
+            localProjectId: getProjectId(client),
+          },
+          warnings
+        );
       }
 
       const matched = allResult.data
@@ -214,16 +218,20 @@ export async function cmosLearningsSearch(
         projectId: row.project_id,
       }));
 
-      return createSuccess<CmosLearningsSearchResult>({
-        query,
-        results,
-        totalMatches,
-        limited: totalMatches > limit,
-        localProjectId: getProjectId(client),
-      });
+      return createSuccess<CmosLearningsSearchResult>(
+        {
+          query,
+          results,
+          totalMatches,
+          limited: totalMatches > limit,
+          localProjectId: getProjectId(client),
+        },
+        warnings
+      );
     },
     { projectRoot: params.projectRoot }
   );
+  return attachWarnings(result, warnings);
 }
 
 /**
@@ -262,6 +270,7 @@ export function formatLearningsSearchForLLM(
     lines.push('**Suggestions**:');
     lines.push('  • Try different keywords');
     lines.push('  • Use cmos_learnings list to browse all learnings');
+    appendWarnings(lines, result);
     return lines.join('\n');
   }
 

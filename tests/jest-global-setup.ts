@@ -1,5 +1,5 @@
-// ABOUTME: Jest globalSetup — isolates every test-worker's project-graph registry
-// ABOUTME: under a per-run tmpdir via CMOS_CONFIG_DIR so tests never write to ~/.config/cmos-mcp.
+// ABOUTME: Jest globalSetup — provisions the per-run root used for test-file CMOS config dirs.
+// ABOUTME: Test-file isolation is completed in jest-setup-after-env.ts; teardown removes the root.
 
 import { promises as fs } from 'fs';
 import os from 'os';

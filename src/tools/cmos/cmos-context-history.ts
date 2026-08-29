@@ -319,6 +319,7 @@ export function formatContextHistoryForLLM(
     lines.push('_No snapshots found matching criteria._');
     lines.push('');
     lines.push('Use cmos_context(action="snapshot") to create your first snapshot.');
+    appendWarnings(lines, result);
     return lines.join('\n');
   }
 

@@ -117,7 +117,9 @@ describe('cmos_mission_undepends', () => {
     expect(result.data?.fromId).toBe('m-01');
     expect(result.data?.toId).toBe('m-02');
     expect(result.data?.removedAt).toBeDefined();
-    expect(result.data?.message).toContain('blocks');
+    expect(result.data?.message).toBe(
+      "Removed Blocks dependency: 'm-01' -> 'm-02'. Dependency relationships are recorded for ordering and graph expansion; they are not enforced at mission start or completion."
+    );
 
     // Verify it's actually gone from DB
     const db = new Database(dbPath, { readonly: true });
@@ -192,13 +194,15 @@ describe('cmos_mission_undepends', () => {
           fromId: 'm-01',
           toId: 'm-02',
           removedAt: '2026-03-10T00:00:00Z',
-          message: 'Dependency removed: m-01 no longer blocks m-02',
+          message:
+            "Removed Blocks dependency: 'm-01' -> 'm-02'. Dependency relationships are recorded for ordering and graph expansion; they are not enforced at mission start or completion.",
         },
       };
       const formatted = formatMissionUndependsForLLM(result);
       expect(formatted).toContain('Dependency removed');
       expect(formatted).toContain('m-01');
       expect(formatted).toContain('m-02');
+      expect(formatted).toContain('not enforced at mission start or completion');
     });
 
     it('should format error result', () => {

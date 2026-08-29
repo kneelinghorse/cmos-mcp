@@ -6,7 +6,7 @@ import { withClientValidated } from './client';
 import type { CmosToolResult } from './types';
 import { createError, createSuccess, CmosErrors, CMOS_ERROR_CODES } from './errors';
 import { ensureReviewTimestamps, ensureLearningsTable } from './schema-migrations';
-import { appendWarnings } from './format-warnings';
+import { appendWarnings, attachWarnings } from './format-warnings';
 import { checkWrite } from './write-guard';
 
 /**
@@ -66,7 +66,8 @@ export async function cmosLearningsReaffirm(
     return createError(CmosErrors.missingParameter('learningId'));
   }
 
-  return withClientValidated(
+  const warnings: string[] = [];
+  const result = await withClientValidated(
     (client) => {
       // Sprint 52 m03: ensure last_reviewed_at exists so we can bump it on reaffirm.
       // s86-m03: ensure the evergreen column exists before we read/write it. It is created by a
@@ -74,8 +75,8 @@ export async function cmosLearningsReaffirm(
       // than last_reviewed_at, so reading evergreen with only ensureReviewTimestamps throws
       // `no such column: evergreen` on any store predating s61-m03. Mirrors
       // cmos-learnings-update.ts:85-88, which calls both for the same reason.
-      ensureReviewTimestamps(client);
-      ensureLearningsTable(client);
+      warnings.push(...(ensureReviewTimestamps(client).warnings ?? []));
+      warnings.push(...(ensureLearningsTable(client).warnings ?? []));
 
       const existing = client.getOne<{ id: number; status: string; evergreen: number | null }>(
         'SELECT id, status, evergreen FROM learnings WHERE id = ?',
@@ -134,6 +135,7 @@ export async function cmosLearningsReaffirm(
     },
     { projectRoot: params.projectRoot }
   );
+  return attachWarnings(result, warnings);
 }
 
 export function formatLearningsReaffirmForLLM(
@@ -141,14 +143,14 @@ export function formatLearningsReaffirmForLLM(
 ): string {
   if (!result.success || !result.data) {
     const error = result.error;
-    return [
+    const lines = [
       '❌ Failed to reaffirm learning',
       '',
       `Error: ${error?.message ?? 'Unknown error'}`,
       error?.suggestion ? `Suggestion: ${error.suggestion}` : '',
-    ]
-      .filter(Boolean)
-      .join('\n');
+    ].filter(Boolean);
+    appendWarnings(lines, result);
+    return lines.join('\n');
   }
 
   const d = result.data;

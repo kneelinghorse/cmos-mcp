@@ -44,7 +44,9 @@
  * @module tools/cmos/sync-bootstrap
  */
 
+import * as path from 'path';
 import { withClientAsync, type CmosDatabaseClient } from './client';
+import { registerResolvedProjectStore } from '../../intelligence/project-resolution';
 import { DashboardClient, type SyncProjectStateResult } from './dashboard-client';
 import { createError, createSuccess, CmosErrors } from './errors';
 import type { CmosToolResult } from './types';
@@ -140,6 +142,34 @@ export async function syncBootstrap(
       // Clone identity: stamp rows with the store's project_id, seeding it from the
       // snapshot for a fresh store; never clobber existing identity.
       const projectId = ensureCloneIdentity(db, state, slug, warnings);
+      const persistedProjectId = readMetadataValue(db, 'project_id');
+      if (persistedProjectId !== projectId) {
+        return createError({
+          code: 'DB_CONNECTION_FAILED',
+          message:
+            `Clone identity '${projectId}' was not persisted before registration ` +
+            `(stored=${persistedProjectId ?? 'missing'}).`,
+          suggestion: 'Repair the local metadata table, then retry the clone.',
+        });
+      }
+      try {
+        // This handler is the identity authority for a fresh clone: /state.project.id must win
+        // over a generic UUID. Register only after that row is durable and before entity inserts.
+        const entry = await registerResolvedProjectStore(path.resolve(db.path, '..', '..', '..'), {
+          requireStoredIdentity: true,
+        });
+        if (entry.project_id !== projectId) {
+          throw new Error(
+            `registered identity '${entry.project_id}' does not match clone identity '${projectId}'`
+          );
+        }
+      } catch (error) {
+        return createError({
+          code: 'DB_CONNECTION_FAILED',
+          message: `Failed to register clone identity: ${error instanceof Error ? error.message : String(error)}`,
+          suggestion: 'Resolve the project identity or graph collision, then retry the clone.',
+        });
+      }
 
       const tally: BootstrapTally = { inserted: 0, duplicates: 0, failed: 0 };
       const insertedByType: Record<string, number> = {};
@@ -352,7 +382,7 @@ export async function syncBootstrap(
         warnings: warnings.length > 0 ? warnings : undefined,
       });
     },
-    { projectRoot: params.projectRoot }
+    { projectRoot: params.projectRoot, registerProject: false }
   );
 }
 

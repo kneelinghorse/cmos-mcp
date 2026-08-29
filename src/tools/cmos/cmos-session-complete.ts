@@ -35,8 +35,9 @@ import {
 import { applyLearningReaffirm, sanitizeLearningIds } from './learning-reaffirm';
 import { ensureMissionIdColumn } from './cmos-mission-complete';
 import { recordEmbedding, decisionEmbeddingInput } from '../../intelligence/embedding-pipeline';
-import { appendWarnings, appendWriteFailures } from './format-warnings';
+import { appendWarnings, appendWriteFailures, attachWarnings } from './format-warnings';
 import { checkWrite, type WriteFailure } from './write-guard';
+import { isOpenStatus } from './terminal-status';
 
 /**
  * Result of session complete operation.
@@ -316,13 +317,13 @@ export async function cmosSessionComplete(
   // `missionId` read off each capture, which wins where it exists.
   const callMissionId = params.missionId?.trim() || null;
 
-  return withClientAsync(
+  const warnings: string[] = [];
+  const result = await withClientAsync(
     async (client) => {
       // s86-m02b — SINK HOISTING. `warnings` used to be declared ~250 lines below, after the
       // session_events insert and all four extraction loops, so wiring their failures into it
       // would not have compiled and would have tempted a second array into existence. One sink,
       // declared before anything can write to it.
-      const warnings: string[] = [];
       // Writes this handler attempted and the database rejected. Separate from `warnings`
       // (fork f09): a lost next-step row and a sprint-closeout advisory are different news.
       const writeSink = { failures: [] as WriteFailure[] };
@@ -470,13 +471,17 @@ export async function cmosSessionComplete(
       // only a tiebreaker in the cross-store merge key and both orderings are equally valid
       // within one call — noted so a reviewer does not read it as a regression.
       let nextStepsExtracted = 0;
+      let nextStepsSchemaEnsured = false;
 
       // (a) capture-sourced next-steps FIRST — these can carry a per-capture missionId.
       for (const capture of captures) {
         if (capture.category === 'next-step' && capture.content) {
           const trimmed = capture.content.trim();
           if (!trimmed) continue;
-          ensureNextStepsTable(client);
+          if (!nextStepsSchemaEnsured) {
+            warnings.push(...(ensureNextStepsTable(client).warnings ?? []));
+            nextStepsSchemaEnsured = true;
+          }
           const hash = computeContentHash(trimmed, 'next-step');
           const existing = client.getOne<{ id: number }>(
             `SELECT id FROM next_steps WHERE content_hash = ? AND session_id = ?`,
@@ -520,7 +525,10 @@ export async function cmosSessionComplete(
       // list ENTIRELY — one of the two literal SQL omissions behind #487. It now stamps the
       // call-level missionId, matching the shape of the capture-sourced insert above.
       if (nextSteps && nextSteps.length > 0) {
-        ensureNextStepsTable(client);
+        if (!nextStepsSchemaEnsured) {
+          warnings.push(...(ensureNextStepsTable(client).warnings ?? []));
+          nextStepsSchemaEnsured = true;
+        }
         for (const step of nextSteps) {
           const trimmed = step.trim();
           if (!trimmed) continue;
@@ -564,11 +572,15 @@ export async function cmosSessionComplete(
       // Extract constraints to structured constraints table
       // ============================================================
       let constraintsExtracted = 0;
+      let constraintsSchemaEnsured = false;
       for (const capture of captures) {
         if (capture.category === 'constraint' && capture.content) {
           const trimmed = capture.content.trim();
           if (!trimmed) continue;
-          ensureConstraintsTable(client);
+          if (!constraintsSchemaEnsured) {
+            warnings.push(...(ensureConstraintsTable(client).warnings ?? []));
+            constraintsSchemaEnsured = true;
+          }
           const hash = computeContentHash(trimmed, 'constraint');
           // Dedup: skip if same content already active
           const existing = client.getOne<{ id: number }>(
@@ -631,8 +643,8 @@ export async function cmosSessionComplete(
         );
         const projectDomain = domainResult.success ? (domainResult.data?.value ?? null) : null;
         // s69-m04 — settle the author_* rename before the dedup SELECT/INSERT below.
-        // s86-m02b (fork f23): one of the six migration call sites whose warnings can reach a
-        // rendered answer. A half-applied rename must not be silent.
+        // s86-m02b (fork f23): one of the original six warning splices. s88-m09's semantic
+        // census now guards every reachable migration caller. A half-applied rename is not silent.
         warnings.push(...(ensureAuthorNamespaceColumns(client).warnings ?? []));
         // s85-m04 — DECISIONS-ONLY column guard. strategic_decisions.mission_id rides the v2.1
         // migration, so an un-migrated store lacks it and the INSERT below would throw
@@ -642,7 +654,7 @@ export async function cmosSessionComplete(
         // bans silent fail-open). ensureStrategicDecisionsSchema is plain ALTER ADD COLUMN +
         // CREATE INDEX IF NOT EXISTS (no 12-step rebuild) and this handler opens no
         // transaction, so point-of-use is correct and needs no pre-BEGIN dance.
-        ensureMissionIdColumn(client);
+        warnings.push(...ensureMissionIdColumn(client));
         for (const decisionText of decisionSources) {
           const existing = client.getOne<{ id: number }>(
             'SELECT id FROM strategic_decisions WHERE decision_text = ? AND author_session_id = ?',
@@ -714,11 +726,15 @@ export async function cmosSessionComplete(
           // Apply explicit IDs only on the first pass; later passes use [] so
           // we don't repeatedly bump the same explicit set.
           const explicitForThisPass = i === 0 ? citesLearningIds : [];
-          const reaffirm = await applyLearningReaffirm(client, {
-            explicitIds: explicitForThisPass,
-            newContent: decisionText,
-            reaffirmedAt: now,
-          });
+          const reaffirm = await applyLearningReaffirm(
+            client,
+            {
+              explicitIds: explicitForThisPass,
+              newContent: decisionText,
+              reaffirmedAt: now,
+            },
+            warnings
+          );
           // s86-m02b: see the note in cmos-session-capture.ts — an errored lookup makes these
           // lists incomplete, and the answer must say so rather than imply a clean pass.
           writeSink.failures.push(...reaffirm.writeFailures);
@@ -758,6 +774,10 @@ export async function cmosSessionComplete(
 
       // Sprint closeout guardrail
       if (session.sprint_id) {
+        const sprintResult = client.getOne<{ status: string }>(
+          'SELECT status FROM sprints WHERE id = ?',
+          [session.sprint_id]
+        );
         const totalResult = client.getOne<{ count: number }>(
           'SELECT COUNT(*) as count FROM missions WHERE sprint_id = ?',
           [session.sprint_id]
@@ -767,6 +787,8 @@ export async function cmosSessionComplete(
           [session.sprint_id]
         );
         if (
+          sprintResult.success &&
+          isOpenStatus(sprintResult.data?.status) &&
           totalResult.success &&
           remainingResult.success &&
           totalResult.data &&
@@ -845,6 +867,7 @@ export async function cmosSessionComplete(
     },
     { projectRoot: params.projectRoot }
   );
+  return attachWarnings(result, warnings);
 }
 
 /**
@@ -866,6 +889,7 @@ export function formatSessionCompleteForLLM(
       lines.push(`Suggestion: ${error.suggestion}`);
     }
 
+    appendWarnings(lines, result);
     return lines.join('\n');
   }
 

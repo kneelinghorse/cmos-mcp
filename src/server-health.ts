@@ -142,7 +142,8 @@ export function getServerHealth(): ServerHealthStatus {
         `Server is running stale code. ` +
         `Build at startup: ${startupManifest.buildHash.slice(0, 12)}… (${startupManifest.buildTime}). ` +
         `Current build: ${currentManifest.buildHash.slice(0, 12)}… (${currentManifest.buildTime}). ` +
-        `Drift: ${driftMinutes} minute(s). Restart the MCP server to pick up changes.`;
+        `Drift: ${driftMinutes} minute(s). Start a new IDE/host session or reconnect before ` +
+        `making subsequent MCP calls that must use the current build.`;
     }
   } else if (!startupManifest && !currentManifest) {
     // No manifest at all — can't detect staleness
@@ -151,7 +152,8 @@ export function getServerHealth(): ServerHealthStatus {
     // Server started without manifest, but one exists now
     codeIsCurrent = false;
     stalenessMessage =
-      'Server started before build manifest existed. A build has since occurred. Restart recommended.';
+      'Server started before the build manifest existed, and a build has since occurred. ' +
+      'Start a new IDE/host session or reconnect before making subsequent MCP calls that must use it.';
   }
 
   return {

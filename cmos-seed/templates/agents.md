@@ -4,7 +4,7 @@
 
 **Location**: This file should live at `project-root/agents.md` (NOT in cmos/)
 
-**Purpose**: Guide AI agents when building YOUR APPLICATION CODE.
+**Purpose**: Define repository-wide operating rules, application conventions, and CMOS workflow.
 
 ---
 
@@ -317,10 +317,10 @@ project-root/
 4. Never write application code to `cmos/`
 
 ### When Working on CMOS Operations
-1. Read `cmos/tiers/build.md` for CMOS-specific instructions
-2. Use mission runtime scripts
-3. Update missions and contexts in `cmos/`
-4. Keep application code and CMOS management separate
+1. Read the active `cmos/tiers/{tier}.md` for tier-specific instructions
+2. Use CMOS MCP tools for database-backed mission, session, sprint, and context state
+3. Never edit `cmos/db/cmos.sqlite` or generated export views directly
+4. Keep application code out of `cmos/`; implementation missions still edit application files
 
 ### Before Completing Missions
 - [ ] All application tests pass
@@ -353,9 +353,10 @@ test(auth): add integration tests for OAuth
 ## Notes for AI Agents
 
 ### Context Loading Priority
-1. Load `project-root/agents.md` (THIS FILE) for application work
-2. Load `cmos/tiers/build.md` for CMOS operations
-3. Call `cmos_context(action="view")` for current state and project history
+1. Load `project-root/agents.md` (THIS FILE) for repository-wide rules
+2. Call `cmos_review()` for the normal bounded session opener
+3. Load the active `cmos/tiers/{tier}.md` when tier-specific detail is needed
+4. Call `cmos_context(action="view")` only when deeper context is needed
 
 The `cmos/context/*.json` files are seed snapshots written once at init. The database is the
 source of truth from the first write onward — read state through the tools, not those files.
@@ -389,6 +390,6 @@ Before using this template, update:
 ---
 
 **Template Version**: 2.0  
-**Last Updated**: 2025-11-08  
+**Last Updated**: 2026-08-28
 **Copy to**: `project-root/agents.md` (NOT cmos/)  
 **Customize**: Replace all [placeholders] with your project details

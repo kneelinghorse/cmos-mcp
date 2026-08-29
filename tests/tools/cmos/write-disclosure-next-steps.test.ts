@@ -51,7 +51,7 @@ import { cmosContext, formatContextForLLM } from '../../../src/tools/cmos/cmos-c
 import type { CmosContextParams } from '../../../src/tools/cmos/cmos-context';
 import type { NextStepsResult } from '../../../src/tools/cmos/cmos-next-steps';
 import type { ConstraintsResult } from '../../../src/tools/cmos/cmos-constraints';
-import { seedCmosDb } from '../../helpers/seedCmosDb';
+import { reidentifyCmosTestStore, seedCmosDb } from '../../helpers/seedCmosDb';
 
 /** The heading `appendWriteFailures` renders. Its absence is as load-bearing as its presence. */
 const WRITE_FAILURE_HEADING = 'Write failures (the database rejected these';
@@ -75,6 +75,7 @@ function mkStore(): { projectRoot: string; dbPath: string } {
   const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-m02b-nextsteps-'));
   tmpDirs.push(projectRoot);
   const dbPath = seedCmosDb(projectRoot, { projectName: 'm02b next-steps fixture' });
+  reidentifyCmosTestStore(projectRoot);
   return { projectRoot, dbPath };
 }
 
@@ -372,6 +373,79 @@ describe('s86-m02b — cmos_context(next_steps) / cmos_context(constraints) writ
       expect(text).toContain('DB_QUERY_FAILED');
       expect(text).toContain(FORCED_CONSTRAINTS);
       expect(statusOf(dbPath, 'constraints', id)).toBe('active');
+    });
+  });
+
+  describe('s88-m01 — a rejected per-id write is not also an unmatched id', () => {
+    it('RED: classifies rejections only as failures in both per-id next-step loops', async () => {
+      /**
+       * `countWrite` returns zero for TWO mutually exclusive reasons: the statement ran but its
+       * WHERE matched nothing, or the database rejected the statement. `unmatchedIds` describes
+       * only the first. A rejection must therefore stay solely in `writeFailures`; otherwise the
+       * same id is reported both as "the database said no" and "already resolved / absent".
+       *
+       * One table-driven assertion covers the two independent call sites: `complete` reaches
+       * `transitionNextSteps`, while carry-by-id reaches the separate `carryNextSteps` loop.
+       * Both operations run before the assertion so the RED diff exposes either misclassification.
+       */
+      const { projectRoot, dbPath } = mkStore();
+      const completeId = seedNextStep(dbPath, 'complete rejection', 'pending');
+      const carryId = seedNextStep(dbPath, 'carry rejection', 'pending');
+      forceUpdateFailure(dbPath, 'next_steps', FORCED_NEXT_STEPS);
+
+      const complete = await runContext(projectRoot, {
+        action: 'next_steps',
+        nextStepAction: 'complete',
+        nextStepIds: [completeId],
+      } as Omit<CmosContextParams, 'projectRoot'>);
+      const carry = await runContext(projectRoot, {
+        action: 'next_steps',
+        nextStepAction: 'carry',
+        nextStepIds: [carryId],
+        carryToSprint: 'sprint-99',
+      } as Omit<CmosContextParams, 'projectRoot'>);
+
+      const classifications = [
+        {
+          path: 'transitionNextSteps (complete)',
+          affected: nextStepsData(complete.result).affected,
+          failureOps: nextStepsData(complete.result).writeFailures?.map((failure) => failure.op),
+          unmatchedIds: nextStepsData(complete.result).unmatchedIds,
+          renderedAsFailure: complete.text.includes(WRITE_FAILURE_HEADING),
+          renderedAsUnmatched: complete.text.includes('Not matched'),
+          persistedStatus: statusOf(dbPath, 'next_steps', completeId),
+        },
+        {
+          path: 'carryNextSteps (by id)',
+          affected: nextStepsData(carry.result).affected,
+          failureOps: nextStepsData(carry.result).writeFailures?.map((failure) => failure.op),
+          unmatchedIds: nextStepsData(carry.result).unmatchedIds,
+          renderedAsFailure: carry.text.includes(WRITE_FAILURE_HEADING),
+          renderedAsUnmatched: carry.text.includes('Not matched'),
+          persistedStatus: statusOf(dbPath, 'next_steps', carryId),
+        },
+      ];
+
+      expect(classifications).toEqual([
+        {
+          path: 'transitionNextSteps (complete)',
+          affected: 0,
+          failureOps: [`next_steps.complete #${completeId}`],
+          unmatchedIds: [],
+          renderedAsFailure: true,
+          renderedAsUnmatched: false,
+          persistedStatus: 'pending',
+        },
+        {
+          path: 'carryNextSteps (by id)',
+          affected: 0,
+          failureOps: [`next_steps.carry #${carryId}`],
+          unmatchedIds: [],
+          renderedAsFailure: true,
+          renderedAsUnmatched: false,
+          persistedStatus: 'pending',
+        },
+      ]);
     });
   });
 

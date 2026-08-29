@@ -496,6 +496,7 @@ export function formatSessionSearchForLLM(result: CmosToolResult<CmosSessionSear
     lines.push('  - Try different keywords');
     lines.push('  - Remove filters to broaden search');
     lines.push('  - Use cmos_session(action="list") to browse all sessions');
+    appendWarnings(lines, result);
     return lines.join('\n');
   }
 

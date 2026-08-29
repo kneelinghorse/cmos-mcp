@@ -974,7 +974,7 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "type": "string",
         },
         "type": {
-          "description": "Dependency type for depends action",
+          "description": "Dependency label for depends action. Dependency relationships are recorded for ordering and graph expansion; they are not enforced at mission start or completion.",
           "enum": [
             "Blocks",
             "Requires",
@@ -1305,6 +1305,10 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           },
           "type": "array",
         },
+        "evergreen": {
+          "description": "Whether a learning is exempt from staleness archival. Applies only to category="learning" on the capture action.",
+          "type": "boolean",
+        },
         "evidence": {
           "description": "Array of TraceLab evidence references [{type, id}] for decision captures",
           "items": {
@@ -1337,7 +1341,7 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "type": "integer",
         },
         "missionId": {
-          "description": "Associated mission ID. On capture, stamps the decision/learning/next-step row; on complete, stamps the decisions[] and nextSteps[] rows this call materializes.",
+          "description": "Associated mission ID. On capture, stamps immediate decision/learning rows and preserves provenance for a next-step row materialized at session close; on complete, stamps the decisions[] and nextSteps[] rows this call materializes.",
           "type": "string",
         },
         "nextSteps": {

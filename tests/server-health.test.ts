@@ -209,7 +209,8 @@ describe('server-health', () => {
 
       const health = getServerHealth();
       expect(health.codeIsCurrent).toBe(false);
-      expect(health.stalenessMessage).toContain('Restart recommended');
+      expect(health.stalenessMessage).toMatch(/new .*host session|reconnect/i);
+      expect(health.stalenessMessage).not.toMatch(/restart/i);
     });
 
     it('handles no manifest at all (both startup and current)', () => {

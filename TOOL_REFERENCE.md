@@ -97,7 +97,7 @@ Consolidated mission tool with action parameter support. Actions: list, show, st
 | `action` | string | yes | Mission action: list \| show \| status \| add \| update \| move \| depends \| undepends |
 | `fromId` | string | no | Dependent mission ID for depends/undepends actions |
 | `toId` | string | no | Dependency mission ID for depends/undepends actions |
-| `type` | string | no | Dependency type for depends action |
+| `type` | string | no | Dependency label for depends action. Dependency relationships are recorded for ordering and graph expansion; they are not enforced at mission start or completion. |
 | `projectRoot` | string | no | Project root directory to search for CMOS database (defaults to cwd) |
 
 ### cmos_mission(action="undepends")
@@ -406,11 +406,12 @@ Consolidated session tool with action parameter support. Actions: list, start, c
 | `content` | string | no | Capture content for capture action |
 | `context` | string | no | Additional context for capture action |
 | `expiresAt` | string | no | Optional expiry date for constraint captures (ISO 8601, e.g. "2026-03-20T00:00:00Z"). Applies to capture(category="constraint") and to constraints materialized from that capture at session complete. |
-| `missionId` | string | no | Associated mission ID. On capture, stamps the decision/learning/next-step row; on complete, stamps the decisions[] and nextSteps[] rows this call materializes. |
+| `missionId` | string | no | Associated mission ID. On capture, stamps immediate decision/learning rows and preserves provenance for a next-step row materialized at session close; on complete, stamps the decisions[] and nextSteps[] rows this call materializes. |
 | `evidence` | array | no | Array of TraceLab evidence references [{type, id}] for decision captures |
 | `evidence[].type` | string | yes | Evidence type |
 | `evidence[].id` | string | yes | Evidence identifier |
 | `citesLearningIds` | array | no | Learning IDs this capture/decision cites. Bumps last_reviewed_at on each — applies to capture(category=decision\|learning) and complete(decisions[]). |
+| `evergreen` | boolean | no | Whether a learning is exempt from staleness archival. Applies only to category="learning" on the capture action. |
 | `projectRoot` | string | no | Project root directory to search for CMOS database (defaults to cwd) |
 
 ### cmos_session(action="complete")
@@ -420,7 +421,7 @@ Consolidated session tool with action parameter support. Actions: list, start, c
 | `action` | string | yes | Session action: list \| start \| capture \| complete \| search |
 | `agent` | string | no | Agent identifier for start/capture/complete actions |
 | `sessionId` | string | no | Session ID for capture/complete actions |
-| `missionId` | string | no | Associated mission ID. On capture, stamps the decision/learning/next-step row; on complete, stamps the decisions[] and nextSteps[] rows this call materializes. |
+| `missionId` | string | no | Associated mission ID. On capture, stamps immediate decision/learning rows and preserves provenance for a next-step row materialized at session close; on complete, stamps the decisions[] and nextSteps[] rows this call materializes. |
 | `citesLearningIds` | array | no | Learning IDs this capture/decision cites. Bumps last_reviewed_at on each — applies to capture(category=decision\|learning) and complete(decisions[]). |
 | `summary` | string | no | Session summary for complete action |
 | `nextSteps` | array | no | Next steps for complete action |

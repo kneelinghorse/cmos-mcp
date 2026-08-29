@@ -10,6 +10,7 @@
 
 import { z } from 'zod';
 import { createError, CmosErrors } from './errors';
+import { appendWarnings } from './format-warnings';
 import type { ActionParamMap, CmosToolResult } from './types';
 import {
   cmosDecisionsList,
@@ -321,9 +322,11 @@ export function formatDecisionsForLLM(
       return formatDecisionsBatchUpdateForLLM(
         result as CmosToolResult<CmosDecisionsBatchUpdateResult>
       );
-    default:
-      return result.success
-        ? '✓ Decisions action completed'
-        : '❌ Failed to execute cmos_decisions';
+    default: {
+      if (!result.success) return '❌ Failed to execute cmos_decisions';
+      const lines = ['✓ Decisions action completed'];
+      appendWarnings(lines, result);
+      return lines.join('\n');
+    }
   }
 }

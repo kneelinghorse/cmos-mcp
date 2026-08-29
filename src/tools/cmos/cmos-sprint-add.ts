@@ -14,7 +14,7 @@ import type { CmosToolResult } from './types';
 import { createError, createSuccess, CmosErrors } from './errors';
 import { isOpenStatus } from './terminal-status';
 import { buildDemotionWarning, writeSingleCurrentSprint } from './sprint-current-invariant';
-import { appendWarnings } from './format-warnings';
+import { appendWarnings, attachWarnings } from './format-warnings';
 
 /**
  * Result type for cmos_sprint_add.
@@ -187,10 +187,15 @@ export async function cmosSprintAdd(
 
       const invariant = writeSingleCurrentSprint(client, sprintId, insert);
       if (!invariant.success) {
-        return createError<SprintAddResult>(invariant.error!);
+        return attachWarnings(
+          createError<SprintAddResult>(invariant.error!),
+          invariant.warnings ?? []
+        );
       }
       const warning = buildDemotionWarning(invariant.data!.demoted);
-      return success(warning ? [warning] : undefined);
+      const warnings = [...(invariant.warnings ?? [])];
+      if (warning) warnings.push(warning);
+      return success(warnings.length > 0 ? warnings : undefined);
     },
     { projectRoot: params.projectRoot }
   );
@@ -265,6 +270,7 @@ export function formatSprintAddForLLM(result: CmosToolResult<SprintAddResult>): 
       lines.push(`Suggestion: ${error.suggestion}`);
     }
 
+    appendWarnings(lines, result);
     return lines.join('\n');
   }
 

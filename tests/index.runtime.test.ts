@@ -634,6 +634,150 @@ describe('Mission Protocol entry lifecycle', () => {
     }
   );
 
+  test('CallTool handler preserves request-local identity disclosure when the selected handler throws', async () => {
+    const moduleData = await loadIndexModule();
+    const { indexModule, mockServer } = moduleData;
+    const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const cmosBarrel = await import('../src/tools/cmos');
+    const { recordProjectIdentityDisclosure } = await import('../src/tools/cmos/tool-call-context');
+    const disclosure =
+      'store="/tmp/identityless.sqlite" has NO RECORDED project identity; fallback only';
+    const primitiveDisclosure =
+      'store="/tmp/primitive.sqlite" has NO RECORDED project identity; fallback only';
+    const sharedError = new Error('simulated throw after getProjectId');
+    let invocation = 0;
+    const handlerSpy = jest.spyOn(cmosBarrel, 'cmosContext').mockImplementation(async () => {
+      invocation += 1;
+      if (invocation === 1) recordProjectIdentityDisclosure(disclosure);
+      if (invocation === 3) {
+        recordProjectIdentityDisclosure(primitiveDisclosure);
+        throw 'simulated primitive throw';
+      }
+      throw sharedError;
+    });
+
+    try {
+      indexModule.__test__.registerToolHandlers(createMockContext());
+      const callHandler = mockServer.setRequestHandler.mock.calls[1][1] as (
+        request: any
+      ) => Promise<any>;
+      const result = await callHandler({
+        params: {
+          name: 'cmos_context',
+          arguments: {
+            action: 'view',
+            contextType: 'project_context',
+            projectRoot: '/tmp/identity-disclosure-throw',
+          },
+        },
+      });
+
+      expect(result.isError).toBe(true);
+      expect((result.structuredContent as { warnings?: string[] }).warnings).toEqual([disclosure]);
+      expect((result.content[0] as { text: string }).text).toContain(disclosure);
+
+      const secondResult = await callHandler({
+        params: {
+          name: 'cmos_context',
+          arguments: {
+            action: 'view',
+            contextType: 'project_context',
+            projectRoot: '/tmp/unrelated-second-call',
+          },
+        },
+      });
+
+      expect(secondResult.isError).toBe(true);
+      expect((secondResult.structuredContent as { warnings?: string[] }).warnings).toBeUndefined();
+      expect((secondResult.content[0] as { text: string }).text).not.toContain(disclosure);
+
+      const primitiveResult = await callHandler({
+        params: {
+          name: 'cmos_context',
+          arguments: {
+            action: 'view',
+            contextType: 'project_context',
+            projectRoot: '/tmp/primitive-throw-call',
+          },
+        },
+      });
+      expect((primitiveResult.structuredContent as { warnings?: string[] }).warnings).toEqual([
+        primitiveDisclosure,
+      ]);
+      expect(primitiveResult.isError).toBe(true);
+      expect((primitiveResult.content[0] as { text: string }).text).toContain(
+        'simulated primitive throw'
+      );
+      expect((primitiveResult.content[0] as { text: string }).text).toContain(primitiveDisclosure);
+    } finally {
+      moduleData.cleanup();
+      handlerSpy.mockRestore();
+      consoleSpy.mockRestore();
+    }
+  });
+
+  test('parallel CallTool failures keep disclosures isolated when handlers throw the same Error object', async () => {
+    const moduleData = await loadIndexModule();
+    const { indexModule, mockServer } = moduleData;
+    const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const cmosBarrel = await import('../src/tools/cmos');
+    const { recordProjectIdentityDisclosure } = await import('../src/tools/cmos/tool-call-context');
+    const sharedError = new Error('simulated parallel shared error');
+    const disclosures = {
+      project_context: 'store="/tmp/a.sqlite" has NO RECORDED project identity',
+      master_context: 'store="/tmp/b.sqlite" has NO RECORDED project identity',
+    } as const;
+    let entered = 0;
+    let releaseBoth!: () => void;
+    const bothEntered = new Promise<void>((resolve) => {
+      releaseBoth = resolve;
+    });
+    const handlerSpy = jest.spyOn(cmosBarrel, 'cmosContext').mockImplementation(async (params) => {
+      const contextType = params.contextType as keyof typeof disclosures;
+      recordProjectIdentityDisclosure(disclosures[contextType]);
+      entered += 1;
+      if (entered === 2) releaseBoth();
+      await bothEntered;
+      throw sharedError;
+    });
+
+    try {
+      indexModule.__test__.registerToolHandlers(createMockContext());
+      const callHandler = mockServer.setRequestHandler.mock.calls[1][1] as (
+        request: any
+      ) => Promise<any>;
+      const call = (contextType: keyof typeof disclosures, projectRoot: string) =>
+        callHandler({
+          params: {
+            name: 'cmos_context',
+            arguments: { action: 'view', contextType, projectRoot },
+          },
+        });
+
+      const [resultA, resultB] = await Promise.all([
+        call('project_context', '/tmp/parallel-identity-a'),
+        call('master_context', '/tmp/parallel-identity-b'),
+      ]);
+
+      expect((resultA.structuredContent as { warnings?: string[] }).warnings).toEqual([
+        disclosures.project_context,
+      ]);
+      expect((resultB.structuredContent as { warnings?: string[] }).warnings).toEqual([
+        disclosures.master_context,
+      ]);
+      expect((resultA.content[0] as { text: string }).text).not.toContain(
+        disclosures.master_context
+      );
+      expect((resultB.content[0] as { text: string }).text).not.toContain(
+        disclosures.project_context
+      );
+    } finally {
+      moduleData.cleanup();
+      handlerSpy.mockRestore();
+      consoleSpy.mockRestore();
+    }
+  });
+
   test('registerToolHandlers reports when server context is missing', async () => {
     const moduleData = await loadIndexModule();
     const { indexModule, mockServer, ErrorHandler } = moduleData;

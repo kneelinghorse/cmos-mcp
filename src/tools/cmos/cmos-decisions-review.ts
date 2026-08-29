@@ -75,6 +75,7 @@ export function formatDecisionsReviewForLLM(
   if (data.decisions.length === 0) {
     lines.push('');
     lines.push('✅ No decisions need attention.');
+    appendWarnings(lines, result);
     return lines.join('\n');
   }
 

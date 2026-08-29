@@ -672,6 +672,36 @@ describe('cmos_session_complete', () => {
       );
     });
 
+    it('does not warn when the sprint is already completed', async () => {
+      const db = new Database(dbPath);
+      db.exec(`
+        INSERT INTO sprints (id, title, status, focus)
+        VALUES ('sprint-completed', 'Completed Sprint', 'Completed', 'Already closed');
+        INSERT INTO missions (id, sprint_id, name, status, completed_at)
+        VALUES
+          ('m-completed-01', 'sprint-completed', 'Completed Mission 1', 'Completed', CURRENT_TIMESTAMP),
+          ('m-completed-02', 'sprint-completed', 'Completed Mission 2', 'Completed', CURRENT_TIMESTAMP);
+        INSERT INTO sessions (id, type, title, sprint_id, started_at, status, captures)
+        VALUES ('completed-sprint-session', 'check-in', 'Completed Sprint Session', 'sprint-completed', CURRENT_TIMESTAMP, 'active', '[]');
+      `);
+      db.close();
+
+      CmosDetector.resetInstance();
+
+      const result = await cmosSessionComplete({
+        sessionId: 'completed-sprint-session',
+        summary: 'Session on an already-closed sprint',
+        projectRoot: tempDir,
+      });
+
+      expect(result.success).toBe(true);
+      const warnings = (result as { warnings?: string[] }).warnings ?? [];
+      const sprintCloseoutWarnings = warnings.filter((warning) =>
+        warning.includes('All sprint missions are complete. Consider closing the sprint')
+      );
+      expect(sprintCloseoutWarnings).toHaveLength(0);
+    });
+
     it('does not warn when missions remain incomplete', async () => {
       const db = new Database(dbPath);
       db.exec(`

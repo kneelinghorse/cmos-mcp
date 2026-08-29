@@ -16,6 +16,11 @@ import {
 } from '../../../src/tools/cmos/cmos-db-restore';
 import { CMOS_ERROR_CODES } from '../../../src/tools/cmos/errors';
 import { CmosDetector } from '../../../src/intelligence/cmos-detector';
+import {
+  ProjectGraphRegistry,
+  readStoreIdentity,
+} from '../../../src/intelligence/project-graph-registry';
+import { captureToolCall } from '../../../src/tools/cmos/tool-call-context';
 
 function setupTestProject(): { tempDir: string; dbPath: string } {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-db-restore-test-'));
@@ -47,6 +52,14 @@ function setupTestProject(): { tempDir: string; dbPath: string } {
       content TEXT NOT NULL,
       updated_at TEXT
     );
+
+    CREATE TABLE metadata (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+
+    INSERT INTO metadata (key, value)
+    VALUES ('project_id', 'restore-${path.basename(tempDir)}');
 
     INSERT INTO missions (id, sprint_id, name, status)
     VALUES
@@ -83,6 +96,14 @@ function countMissions(dbPath: string): number {
   const row = db.prepare('SELECT COUNT(*) as count FROM missions').get() as { count: number };
   db.close();
   return row.count;
+}
+
+function copySnapshot(dbPath: string, snapshotId: string): string {
+  const snapshotDirectory = path.join(path.dirname(dbPath), 'snapshots');
+  fs.mkdirSync(snapshotDirectory, { recursive: true });
+  const snapshotPath = path.join(snapshotDirectory, `${snapshotId}.sqlite`);
+  fs.copyFileSync(dbPath, snapshotPath);
+  return snapshotPath;
 }
 
 describe('cmos_db_restore', () => {
@@ -137,6 +158,60 @@ describe('cmos_db_restore', () => {
     expect(restoreResult.data?.backupPath).toBeDefined();
     expect(fs.existsSync(restoreResult.data?.backupPath ?? '')).toBe(true);
     expect(countMissions(restoreResult.data?.backupPath ?? '')).toBe(3);
+  });
+
+  it('reconciles an identity-less legacy snapshot with the active store identity before registration', async () => {
+    const originalIdentity = readStoreIdentity(tempDir)?.project_id;
+    expect(originalIdentity).toBeDefined();
+    const graphBefore = await ProjectGraphRegistry.create();
+    expect(graphBefore.getByStorePath(tempDir)).toBeNull();
+    const snapshotId = 'legacy-identityless-unregistered';
+    const snapshotPath = copySnapshot(dbPath, snapshotId);
+
+    const snapshot = new Database(snapshotPath);
+    snapshot.prepare(`DELETE FROM metadata WHERE key = 'project_id'`).run();
+    snapshot.close();
+
+    const restoreResult = (
+      await captureToolCall('write', () =>
+        cmosDbRestore({ projectRoot: tempDir, snapshotId, confirm: true })
+      )
+    ).value;
+
+    expect(restoreResult.success).toBe(true);
+    const storedIdentity = readStoreIdentity(tempDir)?.project_id;
+    const graph = await ProjectGraphRegistry.create();
+    expect(storedIdentity).toBe(originalIdentity);
+    expect(graph.getByStorePath(tempDir)).toBe(storedIdentity);
+  });
+
+  it('rolls back both database and identity contract when a snapshot claims another project id', async () => {
+    const originalIdentity = readStoreIdentity(tempDir)?.project_id;
+    const graphBefore = await ProjectGraphRegistry.create();
+    expect(graphBefore.getByStorePath(tempDir)).toBeNull();
+    const snapshotId = 'foreign-identity-unregistered';
+    const snapshotPath = copySnapshot(dbPath, snapshotId);
+
+    const snapshot = new Database(snapshotPath);
+    snapshot
+      .prepare(`UPDATE metadata SET value = 'foreign-snapshot-id' WHERE key = 'project_id'`)
+      .run();
+    snapshot.close();
+    addMission(dbPath, 'must-survive-failed-restore');
+
+    const restoreResult = (
+      await captureToolCall('write', () =>
+        cmosDbRestore({ projectRoot: tempDir, snapshotId, confirm: true })
+      )
+    ).value;
+
+    expect(restoreResult.success).toBe(false);
+    expect(restoreResult.error?.code).toBe(CMOS_ERROR_CODES.SNAPSHOT_RESTORE_FAILED);
+    expect(countMissions(dbPath)).toBe(3);
+    const storedIdentity = readStoreIdentity(tempDir)?.project_id;
+    const graph = await ProjectGraphRegistry.create();
+    expect(storedIdentity).toBe(originalIdentity);
+    expect(graph.getByStorePath(tempDir)).toBeNull();
   });
 
   it('returns SNAPSHOT_NOT_FOUND for missing snapshot IDs', async () => {

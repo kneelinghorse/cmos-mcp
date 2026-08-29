@@ -17,6 +17,7 @@ import {
   statusNotInSql,
 } from './terminal-status';
 import { tableHasColumn } from './genesis-columns';
+import { sprintIdOrderSql } from './sprint-ordering';
 
 /** Default threshold: sessions active for >24 hours are stale */
 const STALE_SESSION_HOURS = 24;
@@ -162,7 +163,7 @@ function findOrphanedSprints(client: CmosDatabaseClient): OrphanedSprint[] {
      WHERE ${statusNotInSql('s.status', SPRINT_NO_OPEN_WORK_STATUSES)}
      GROUP BY s.id
      HAVING COUNT(m.id) = 0
-     ORDER BY s.id`
+     ORDER BY ${sprintIdOrderSql('s.id', 'ASC')}`
   );
 
   if (!result.success || !result.data) return [];

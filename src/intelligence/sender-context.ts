@@ -220,7 +220,10 @@ export async function validateProject(
         };
         return { success: true, data: payload };
       },
-      { projectRoot: resolved }
+      // Candidate validation is observation, even when the enclosing tool call is a write.
+      // Without this override, a write request with several rejected MCP roots would mint an
+      // identity into every candidate before the resolver selected one.
+      { projectRoot: resolved, registerProject: false }
     );
 
     if (result.success && result.data) {

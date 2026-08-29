@@ -38,9 +38,10 @@ import {
 import { getServerHealth, getServerProjectRoot } from '../../server-health';
 import { resolveProjectRootEnhanced } from '../../intelligence/project-resolution';
 import * as path from 'path';
-import { appendWarnings, appendWriteFailures } from './format-warnings';
+import { appendWarnings, appendWriteFailures, attachWarnings } from './format-warnings';
 import { isParkedMissionStatus } from './terminal-status';
 import { countWrite, type WriteFailure } from './write-guard';
+import { summarizeSessionCaptures } from './session-capture-state';
 
 type CloseoutContextType = 'master_context' | 'project_context';
 type CloseoutCondensationStrategy = 'none' | 'conservative' | 'auto' | 'aggressive';
@@ -56,6 +57,20 @@ interface SprintMissionKpiRow {
   status: string;
   started_at: string | null;
   completed_at: string | null;
+}
+
+interface ActiveSessionAtCloseRow {
+  id: string;
+  title: string;
+  captures: string | null;
+}
+
+/** An active session directly scoped to the sprint at the instant close began. */
+export interface ActiveSessionAtClose {
+  id: string;
+  title: string;
+  captureCount: number | null;
+  deferredCaptureCount: number | null;
 }
 
 /**
@@ -173,6 +188,12 @@ export interface CmosSprintCompleteResult {
   currentStatus: 'Completed';
   summary: string;
   completedAt: string;
+  /** Active sessions whose own sessions.sprint_id named this sprint when close began. */
+  activeSessionsAtClose: ActiveSessionAtClose[];
+  /** Build timestamp captured by this producing server process, or null without a manifest. */
+  startupBuildTime: string | null;
+  /** Producer build drift in whole minutes; zero when current, null without both manifests. */
+  driftMinutes: number | null;
   readiness: SprintCloseoutReadiness;
   contexts: {
     masterContext: SprintCloseoutContextResult;
@@ -329,9 +350,9 @@ export async function cmosSprintComplete(
   const condensation = params.condensation ?? 'none';
   const targetSizePercent = params.targetSizePercent ?? 60;
 
-  return withClientAsync(
+  const warnings: string[] = [];
+  const result = await withClientAsync(
     async (client) => {
-      const warnings: string[] = [];
       // s86-m02b — writes the closeout attempted and the database rejected. Kept apart from
       // `warnings` on purpose (fork f09): a lost next_steps reconciliation and "your build looks
       // stale" are not the same kind of news, and an operator must be able to tell them apart.
@@ -353,8 +374,8 @@ export async function cmosSprintComplete(
       // transaction), so it MUST run here, before BEGIN, not lazily mid-closeout.
       // Idempotent + marker-gated: a fast no-op on already-migrated stores.
       // s86-m02b (fork f23) — a migration that half-applies is the purest form of this
-      // sprint's defect class, and this is one of only six call sites whose warnings can
-      // reach a rendered answer. Splice them rather than letting them die in the result.
+      // sprint's defect class. This was one of the original six warning splices; s88-m09's
+      // semantic census now guards every reachable migration caller.
       warnings.push(...(ensureFirehoseEventColumns(client).warnings ?? []));
       // s69-m04 — settle the author_* namespace before BEGIN too. Its ALTERs are
       // transaction-safe (no 12-step rebuild), but ensuring it pre-BEGIN keeps the
@@ -463,6 +484,45 @@ export async function cmosSprintComplete(
             'Use cmos_sprint with action="show" to review the closed sprint. No further closeout is needed.',
         });
       }
+
+      // Capture the exact direct-membership set before any closeout writes begin. Do not infer
+      // membership through session_missions: an unscoped session that happened to touch one
+      // sprint mission is not a session the sprint owns. This read stays inside the same
+      // BEGIN IMMEDIATE transaction as the close so the receipt describes one stable boundary.
+      const activeSessionsResult = client.getMany<ActiveSessionAtCloseRow>(
+        `SELECT id, title, captures
+         FROM sessions
+         WHERE sprint_id = ? AND status = 'active'
+         ORDER BY started_at ASC, id ASC`,
+        [sprintId]
+      );
+      if (!activeSessionsResult.success) {
+        return fail({
+          code: CMOS_ERROR_CODES.DB_QUERY_FAILED,
+          message:
+            `Failed to query active sessions for sprint '${sprintId}': ` +
+            `${activeSessionsResult.error?.message ?? 'unknown database error'}`,
+          suggestion: 'Check database connectivity and the sessions schema before retrying.',
+        });
+      }
+
+      const activeSessionsAtClose: ActiveSessionAtClose[] = (activeSessionsResult.data ?? []).map(
+        (session) => {
+          const summary = summarizeSessionCaptures(session.captures);
+          if (summary.malformed) {
+            warnings.push(
+              `Active session '${session.id}' has malformed or non-array captures JSON; ` +
+                'captureCount and deferredCaptureCount are unknown.'
+            );
+          }
+          return {
+            id: session.id,
+            title: session.title,
+            captureCount: summary.captureCount,
+            deferredCaptureCount: summary.deferredCaptureCount,
+          };
+        }
+      );
 
       const missionsResult = client.getMany<SprintMissionRow>(
         'SELECT id, status, notes FROM missions WHERE sprint_id = ? ORDER BY id ASC',
@@ -743,6 +803,24 @@ export async function cmosSprintComplete(
         warnings.push('Auto database snapshot after sprint completion failed.');
       }
 
+      // One health read supplies the whole producer receipt. Keep this independent of the
+      // managed project's type/root: these fields describe the process producing the answer,
+      // while the stale-code WARNING below remains scoped to that process's own project.
+      const serverHealth = getServerHealth();
+      const startupBuildTime = serverHealth.startupBuild?.buildTime ?? null;
+      let driftMinutes: number | null = null;
+      if (serverHealth.startupBuild && serverHealth.currentBuild) {
+        if (serverHealth.codeIsCurrent) {
+          driftMinutes = 0;
+        } else {
+          const startupTimeMs = Date.parse(serverHealth.startupBuild.buildTime);
+          const currentTimeMs = Date.parse(serverHealth.currentBuild.buildTime);
+          if (!Number.isNaN(startupTimeMs) && !Number.isNaN(currentTimeMs)) {
+            driftMinutes = Math.round((currentTimeMs - startupTimeMs) / 60000);
+          }
+        }
+      }
+
       // s87-m02 (FORK-4b) — EACH TABLE REPORTS ITS OWN OUTCOME. This line used to read
       // `archiveResult.success ? archiveResult.decisionsArchived : 0` for BOTH counts, so a
       // failure on the learnings arm reported `Archived: 0 decisions` about decisions that had
@@ -764,6 +842,9 @@ export async function cmosSprintComplete(
         currentStatus: 'Completed',
         summary,
         completedAt,
+        activeSessionsAtClose,
+        startupBuildTime,
+        driftMinutes,
         readiness,
         contexts: {
           masterContext: {
@@ -832,13 +913,20 @@ export async function cmosSprintComplete(
             }
             const serverRoot = getServerProjectRoot();
             if (serverRoot && path.resolve(serverRoot) === path.resolve(freshnessRoot)) {
-              const health = getServerHealth();
               if (
-                health.startupBuild != null &&
-                health.codeIsCurrent === false &&
-                health.stalenessMessage
+                serverHealth.startupBuild != null &&
+                serverHealth.currentBuild != null &&
+                serverHealth.codeIsCurrent === false
               ) {
-                warnings.push(health.stalenessMessage);
+                warnings.push(
+                  `Server is running stale code. ` +
+                    `Build at startup: ${serverHealth.startupBuild.buildHash.slice(0, 12)}… ` +
+                    `(${serverHealth.startupBuild.buildTime}). ` +
+                    `Current build: ${serverHealth.currentBuild.buildHash.slice(0, 12)}… ` +
+                    `(${serverHealth.currentBuild.buildTime}). ` +
+                    `Drift: ${driftMinutes === null ? 'unknown' : `${driftMinutes} minute(s)`}. ` +
+                    'Start a new host session or reconnect to use the current build.'
+                );
               }
             }
           }
@@ -862,6 +950,7 @@ export async function cmosSprintComplete(
     },
     { projectRoot: params.projectRoot }
   );
+  return attachWarnings(result, warnings);
 }
 
 /**
@@ -895,8 +984,9 @@ function buildStaleAdvisory(report: BuildFreshnessReport): string {
     `Advisory: this project's build looks stale — ${report.reason ?? 'src newer than build'}` +
     // s86-m05: one wording for both situations — `npm run build` only exists in a source
     // checkout, so a packaged install needs the reinstall arm named.
-    `${examples}. Rebuild from source (npm run build) or reinstall the package, then restart ` +
-    `the MCP server if the running code should reflect these changes. This does not block sprint close.`
+    `${examples}. Rebuild from source (npm run build) or reinstall the package, then start a new ` +
+    `host session or reconnect if subsequent tool calls should use these changes. ` +
+    `This does not block sprint close.`
   );
 }
 
@@ -1463,7 +1553,7 @@ function archiveSprintDecisionsAndLearnings(
   // rows. Ensure it exists first. s69-m04 renamed it session_id → author_session_id;
   // ensureAuthorNamespaceColumns (run pre-BEGIN at the top of this handler) has
   // already settled the rename, and ensureArchivalColumns is now rename-aware.
-  ensureArchivalColumns(client);
+  warnings.push(...(ensureArchivalColumns(client).warnings ?? []));
 
   // s87-m02 — REQUIRED BY `LEARNINGS_WHERE`, and it is not defensive padding. `evergreen` is
   // absent from `cmos-seed/db/schema.sql` entirely (`grep -n evergreen` returns nothing), so
@@ -1664,10 +1754,31 @@ export function formatSprintCompleteForLLM(
       lines.push(`Suggestion: ${error.suggestion}`);
     }
 
+    appendWarnings(lines, result);
     return lines.join('\n');
   }
 
   const data = result.data;
+  const runtimeBuildAtClose =
+    data.startupBuildTime === null
+      ? 'unavailable (no startup manifest; drift unavailable)'
+      : `${data.startupBuildTime}; drift ${
+          data.driftMinutes === null ? 'unavailable' : `${data.driftMinutes} minute(s)`
+        }`;
+  const activeSessionsAtClose =
+    data.activeSessionsAtClose.length === 0
+      ? ['Active sessions at close: none']
+      : [
+          `Active sessions at close: ${data.activeSessionsAtClose.length}`,
+          ...data.activeSessionsAtClose.map(
+            (session) =>
+              `  - ${session.id} (${session.title}): ` +
+              `${session.captureCount === null ? 'unknown' : session.captureCount} capture(s), ` +
+              `${
+                session.deferredCaptureCount === null ? 'unknown' : session.deferredCaptureCount
+              } deferred`
+          ),
+        ];
   const lines = [
     `✓ Sprint '${data.sprintId}' completed`,
     '',
@@ -1681,6 +1792,8 @@ export function formatSprintCompleteForLLM(
     `Archived: ${data.lifecycle.decisionsArchived} decisions${formatArchivedIds(data.lifecycle.archivedDecisionIds)}, ${data.lifecycle.learningsArchived} learnings${formatArchivedIds(data.lifecycle.learningIds)}`,
     `Pre-close snapshot (undo handle): ${data.lifecycle.preCloseSnapshotId ?? 'FAILED — this close is not reversible from a snapshot'}`,
     `DB snapshot: ${data.lifecycle.dbSnapshotId ?? 'failed'}`,
+    `Runtime build at close: ${runtimeBuildAtClose}`,
+    ...activeSessionsAtClose,
     '',
     `master_context: ${data.contexts.masterContext.beforeSize.sizeKb.toFixed(2)}KB → ${data.contexts.masterContext.afterSize.sizeKb.toFixed(2)}KB, cleared ${data.contexts.masterContext.nextStepsCleared} next step(s)`,
     `project_context: ${data.contexts.projectContext.beforeSize.sizeKb.toFixed(2)}KB → ${data.contexts.projectContext.afterSize.sizeKb.toFixed(2)}KB, cleared ${data.contexts.projectContext.nextStepsCleared} next step(s)`,

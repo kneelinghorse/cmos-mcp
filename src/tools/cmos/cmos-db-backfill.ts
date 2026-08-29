@@ -27,9 +27,11 @@ import { DashboardClient } from './dashboard-client';
 import { createError, createSuccess, CmosErrors } from './errors';
 import type { CmosToolResult } from './types';
 import { migrateContentHash, computeContentHash } from './schema-migrations';
-import { appendWarnings } from './format-warnings';
+import { appendWarnings, attachWarnings } from './format-warnings';
 import { checkWrite } from './write-guard';
 import { deriveProjectSlug } from './project-identity';
+import { sprintIdOrderSql } from './sprint-ordering';
+import { registerResolvedProjectStore } from '../../intelligence/project-resolution';
 
 /**
  * s86-m01 — write diagnostics straight to fd 2 instead of through the global
@@ -335,9 +337,32 @@ export async function cmosDbBackfill(
   }
   const dashboardClient = clientResult.data;
 
-  return withClientAsync(
+  const migrationWarnings: string[] = [];
+  const result = await withClientAsync<CmosDbBackfillResult>(
     async (db) => {
+      // Backfill owns a legacy identity-repair sequence (dashboard_slug before directory). Suppress
+      // the generic pre-open UUID mint, perform that authoritative repair first, then register
+      // before any dashboard publish. No transaction is open, so the registration connection
+      // cannot recreate the lock inversion s88-m08 removes.
       const identity = getProjectIdentity(db);
+      const resolvedProjectRoot = path.resolve(db.path, '..', '..', '..');
+      try {
+        const entry = await registerResolvedProjectStore(resolvedProjectRoot, {
+          requireStoredIdentity: true,
+        });
+        if (entry.project_id !== identity.projectId) {
+          throw new Error(
+            `registered identity '${entry.project_id}' does not match repaired identity ` +
+              `'${identity.projectId}'`
+          );
+        }
+      } catch (error) {
+        return createError({
+          code: 'DB_CONNECTION_FAILED',
+          message: `Failed to register project before backfill: ${error instanceof Error ? error.message : String(error)}`,
+          suggestion: 'Resolve the project identity or graph collision, then retry the backfill.',
+        });
+      }
       const previousCursor = getCursor(db);
       // force=true bypasses the large-delta guard but still resumes from the cursor.
       // Starting from scratch on every force run means the timeout always hits the same
@@ -415,6 +440,7 @@ export async function cmosDbBackfill(
 
       // Ensure content_hash columns exist and are populated
       const contentHashMigration = migrateContentHash(db);
+      migrationWarnings.push(...(contentHashMigration.warnings ?? []));
 
       const warnings: string[] = [];
       // s81-m01: surface the file-sync→event-replay fallback (captured above) so the
@@ -455,7 +481,9 @@ export async function cmosDbBackfill(
       };
 
       // 1. Sprints
-      const sprintsResult = db.getMany<SprintRow>(`SELECT * FROM sprints ORDER BY id`);
+      const sprintsResult = db.getMany<SprintRow>(
+        `SELECT * FROM sprints ORDER BY ${sprintIdOrderSql('id', 'ASC')}`
+      );
       if (sprintsResult.success && sprintsResult.data) {
         for (const sprint of sprintsResult.data) {
           const ts = sprint.start_date ?? sprint.end_date ?? new Date().toISOString();
@@ -968,8 +996,9 @@ export async function cmosDbBackfill(
         warnings: finalWarnings.length > 0 ? finalWarnings : undefined,
       });
     },
-    { projectRoot: params.projectRoot }
+    { projectRoot: params.projectRoot, registerProject: false }
   );
+  return attachWarnings(result, migrationWarnings);
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -1453,7 +1482,11 @@ export function formatPgOrphanReportForLLM(result: CmosToolResult<PgOrphanReport
 
   const d = result.data!;
   if (d.totalOrphans === 0) {
-    return `PG Orphan Check (${d.projectSlug}): No orphans found across ${d.tablesChecked.length} tables.`;
+    const lines = [
+      `PG Orphan Check (${d.projectSlug}): No orphans found across ${d.tablesChecked.length} tables.`,
+    ];
+    appendWarnings(lines, result);
+    return lines.join('\n');
   }
 
   const lines = [`PG Orphan Report (${d.projectSlug}): ${d.totalOrphans} orphan(s) found`, ''];

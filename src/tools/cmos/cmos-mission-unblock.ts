@@ -18,7 +18,7 @@ import {
   VALID_STATE_TRANSITIONS,
 } from './errors';
 import { ensureMissionTimestamps } from './schema-migrations';
-import { appendWarnings } from './format-warnings';
+import { appendWarnings, attachWarnings } from './format-warnings';
 import { checkWrite } from './write-guard';
 
 /**
@@ -162,10 +162,9 @@ export async function cmosMissionUnblock(
   const missionId = params.missionId.trim();
   const targetStatus: MissionStatus = params.targetStatus ?? 'In Progress';
 
-  return withClientValidated(
+  const warnings: string[] = [];
+  const result = await withClientValidated(
     (client) => {
-      const warnings: string[] = [];
-
       // Query mission by ID
       const missionResult = client.getOne<Mission>(
         `
@@ -249,7 +248,7 @@ export async function cmosMissionUnblock(
         : `[Unblocked] Blocker resolved`;
 
       // Ensure timestamp columns exist (migration)
-      ensureMissionTimestamps(client);
+      warnings.push(...(ensureMissionTimestamps(client).warnings ?? []));
 
       const updateResult = client.execute(
         `
@@ -318,6 +317,7 @@ export async function cmosMissionUnblock(
     },
     { projectRoot: params.projectRoot }
   );
+  return attachWarnings(result, warnings);
 }
 
 /**
@@ -348,6 +348,7 @@ export function formatMissionUnblockForLLM(result: CmosToolResult<MissionUnblock
       lines.push(`Suggestion: ${error.suggestion}`);
     }
 
+    appendWarnings(lines, result);
     return lines.join('\n');
   }
 

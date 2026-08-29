@@ -35,7 +35,7 @@
 ### "I'm starting a build session"
 
 1. Use [Build Session Prompt](./build-session-prompt.md) as your template
-2. Follow: onboard → status → start → execute → complete
+2. Follow: review → status → start → execute → complete
 
 ### "I'm planning a sprint"
 
@@ -65,6 +65,7 @@ Build work: implementing features, writing code. Managed via `cmos_mission` (que
 
 ### Contexts
 
+- **project_identity**: Stable identity and foundational-document registry
 - **project_context**: Current session state, working memory
 - **master_context**: Project history, decisions, constraints
 
@@ -76,9 +77,9 @@ SQLite at `cmos/db/cmos.sqlite` is source of truth. All operations via MCP tools
 
 ## MCP Tools Quick Reference
 
-CMOS-MCP provides **15 consolidated tools** for complete project management. Every tool
-below selects its operation with an `action` parameter, except `cmos_review`,
-`cmos_agent_onboard` and `cmos_status`, which take only `projectRoot`.
+CMOS-MCP provides **15 consolidated tools** for complete project management. The selected calls
+below use an `action` parameter except `cmos_review`, `cmos_agent_onboard`, and `cmos_status`,
+which take no `action` parameter.
 
 ```
 # Onboarding
@@ -115,7 +116,7 @@ cmos_sprint(action="complete", sprintId="...")                # Close a sprint
 cmos_context(action="view")                                   # View context
 cmos_context(action="snapshot", ...)                          # Create snapshot
 cmos_context(action="history")                                # View timeline
-cmos_context(action="update")                                 # Aggregate sessions into context
+cmos_context(action="update")                                 # Backfill constraint captures
 
 # Decisions and learnings
 cmos_decisions(action="list")                                 # List decisions
@@ -129,6 +130,6 @@ cmos_db(action="snapshot")                                    # Snapshot the dat
 
 ---
 
-**Last Updated**: 2025-12-29
+**Last Updated**: 2026-08-28
 **Schema Version**: 2.1 (MCP-first)
 **Tool Count**: 15 consolidated tools

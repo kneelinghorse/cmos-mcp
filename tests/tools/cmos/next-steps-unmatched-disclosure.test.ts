@@ -60,8 +60,8 @@ function seed(): void {
   db.exec(`
     CREATE TABLE next_steps (
       id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT NOT NULL, sprint_id TEXT,
-      session_id TEXT, status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL,
-      resolved_at TEXT, carried_to_sprint TEXT
+      session_id TEXT, mission_id TEXT, status TEXT NOT NULL DEFAULT 'pending',
+      created_at TEXT NOT NULL, resolved_at TEXT, carried_to_sprint TEXT, content_hash TEXT
     );
     CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     INSERT INTO metadata (key, value) VALUES ('project_name', 'm06 fixture');

@@ -19,7 +19,7 @@ import {
 } from '../../intelligence/content-sanitizer';
 import { ensureMissionTimestamps } from './schema-migrations';
 import { recordEmbedding, missionEmbeddingInput } from '../../intelligence/embedding-pipeline';
-import { appendWarnings } from './format-warnings';
+import { appendWarnings, attachWarnings } from './format-warnings';
 import { checkWrite } from './write-guard';
 
 /**
@@ -243,10 +243,9 @@ export async function cmosMissionAdd(
     return createError(CmosErrors.invalidParameter('status', status, VALID_MISSION_STATUSES));
   }
 
-  return withClientAsync(
+  const warnings: string[] = [];
+  const result = await withClientAsync(
     async (client) => {
-      const warnings: string[] = [];
-
       // Verify sprint exists
       const sprintResult = client.getOne<Sprint>('SELECT id, title FROM sprints WHERE id = ?', [
         sprintId,
@@ -291,7 +290,7 @@ export async function cmosMissionAdd(
           : null;
 
       // Ensure timestamp columns exist (migration)
-      ensureMissionTimestamps(client);
+      warnings.push(...(ensureMissionTimestamps(client).warnings ?? []));
 
       // Insert new mission with created_at timestamp
       const createdAt = new Date().toISOString();
@@ -403,6 +402,7 @@ export async function cmosMissionAdd(
     },
     { projectRoot: params.projectRoot }
   );
+  return attachWarnings(result, warnings);
 }
 
 /**
@@ -421,6 +421,7 @@ export function formatMissionAddForLLM(result: CmosToolResult<MissionAddResult>)
       lines.push(`Suggestion: ${error.suggestion}`);
     }
 
+    appendWarnings(lines, result);
     return lines.join('\n');
   }
 

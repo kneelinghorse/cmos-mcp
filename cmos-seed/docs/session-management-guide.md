@@ -130,34 +130,28 @@ cmos_session(action="list", type="planning")     // Filter by type
 
 ## Keeping Context Fresh
 
-After completing sessions, decisions and learnings are stored in the database. To aggregate recent session captures into `master_context` for strategic memory:
+Session completion already persists structured decisions and learnings, routes constraint/context/
+next-step captures, updates the working contexts, and snapshots them. Use aggregate update only as
+a recovery/backfill path for constraint captures that were not incorporated into `master_context`:
 
 ```
-cmos_context(action="update")
+cmos_context(action="update", since="<ISO timestamp>")
 ```
 
 This tool:
 
-- Scans completed sessions since last context update
-- Extracts decisions, learnings, and constraints
-- Updates master_context with aggregated insights
-- Creates automatic snapshot for history
+- Scans constraint captures, optionally bounded by `since`
+- Adds previously unaggregated constraints to `master_context`
+- Creates a snapshot only when it changes `master_context`
 
-**When to use**:
+Decisions and learnings are table-backed when captured; this action does not re-aggregate them.
+Normal completed sessions need no follow-up update call.
 
-- After completing multiple planning sessions
-- At sprint boundaries
-- Before onboarding a new agent
-- When master_context feels stale
-
-**Workflow Example**:
+**Recovery example**:
 
 ```
-# Complete several planning sessions
-cmos_session(action="complete", summary="Sprint planning complete")
-
-# Later, aggregate insights into master_context
-cmos_context(action="update")
+# Backfill constraint captures from a known point
+cmos_context(action="update", since="2026-08-01T00:00:00Z")
 
 # View updated context
 cmos_context(action="view", contextType="master_context")
@@ -165,4 +159,4 @@ cmos_context(action="view", contextType="master_context")
 
 ---
 
-**Last Updated**: 2025-12-29
+**Last Updated**: 2026-08-28

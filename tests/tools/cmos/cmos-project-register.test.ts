@@ -7,10 +7,14 @@
  */
 
 import { promises as fs } from 'fs';
+import Database from 'better-sqlite3';
 import os from 'os';
 import path from 'path';
 import { CmosDetector } from '../../../src/intelligence/cmos-detector';
-import { ProjectGraphRegistry } from '../../../src/intelligence/project-graph-registry';
+import {
+  ProjectGraphRegistry,
+  readStoreIdentity,
+} from '../../../src/intelligence/project-graph-registry';
 import {
   cmosProjectRegister,
   cmosProjectRegisterToolDefinition,
@@ -27,7 +31,9 @@ async function ensureCmosDatabase(workspace: string): Promise<string> {
   const dbPath = path.join(workspace, 'cmos', 'db');
   await fs.mkdir(dbPath, { recursive: true });
   const sqlitePath = path.join(dbPath, 'cmos.sqlite');
-  await fs.writeFile(sqlitePath, 'pragma user_version = 1;\n');
+  const db = new Database(sqlitePath);
+  db.exec(`CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
+  db.close();
   return sqlitePath;
 }
 
@@ -124,6 +130,22 @@ describe('cmos_project_register', () => {
 
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe(CMOS_ERROR_CODES.MISSING_PARAMETER);
+    });
+
+    it('fails loud and creates no graph row when project identity cannot be persisted', async () => {
+      const dbDir = path.join(workspace, 'cmos', 'db');
+      await fs.mkdir(dbDir, { recursive: true });
+      const db = new Database(path.join(dbDir, 'cmos.sqlite'));
+      db.exec(`CREATE TABLE metadata (key TEXT PRIMARY KEY)`);
+      db.close();
+      CmosDetector.resetInstance();
+
+      const result = await cmosProjectRegister({ projectRoot: workspace });
+
+      expect(result.success).toBe(false);
+      expect(readStoreIdentity(workspace)).toBeNull();
+      const graph = await ProjectGraphRegistry.create();
+      expect(graph.getByStorePath(workspace)).toBeNull();
     });
   });
 

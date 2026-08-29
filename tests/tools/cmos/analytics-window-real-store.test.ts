@@ -43,8 +43,12 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
+import { withClient } from '../../../src/tools/cmos/client';
+import { createSuccess } from '../../../src/tools/cmos/errors';
 import { cmosSprintAnalytics } from '../../../src/tools/cmos/cmos-sprint-analytics';
-import { seedCmosDb } from '../../helpers/seedCmosDb';
+import { cmosSprintList } from '../../../src/tools/cmos/cmos-sprint-list';
+import { resolveCurrentSprintId } from '../../../src/tools/cmos/current-sprint';
+import { reidentifyCmosTestStore, seedCmosDb } from '../../helpers/seedCmosDb';
 
 const REPO_ROOT = path.resolve(__dirname, '../../..');
 const LIVE_DB = path.join(REPO_ROOT, 'cmos', 'db', 'cmos.sqlite');
@@ -69,7 +73,69 @@ function copyLiveStore(): string {
     const src = `${LIVE_DB}${suffix}`;
     if (fs.existsSync(src)) fs.copyFileSync(src, path.join(dbDir, `cmos.sqlite${suffix}`));
   }
+  reidentifyCmosTestStore(projectRoot);
   return projectRoot;
+}
+
+/** Independent JS oracle for the source SQL contract; BigInt avoids SQLite INTEGER limits. */
+function orderSprintIds(ids: string[], direction: 'ASC' | 'DESC'): string[] {
+  const directionFactor = direction === 'ASC' ? 1 : -1;
+  const canonical = /^sprint-(\d+)$/;
+
+  return [...ids].sort((left, right) => {
+    const leftMatch = canonical.exec(left);
+    const rightMatch = canonical.exec(right);
+    if (leftMatch && !rightMatch) return -1;
+    if (!leftMatch && rightMatch) return 1;
+    if (leftMatch && rightMatch) {
+      const leftNumber = BigInt(leftMatch[1]);
+      const rightNumber = BigInt(rightMatch[1]);
+      if (leftNumber !== rightNumber) {
+        return (leftNumber < rightNumber ? -1 : 1) * directionFactor;
+      }
+    }
+    return Buffer.compare(Buffer.from(left), Buffer.from(right)) * directionFactor;
+  });
+}
+
+const CANONICAL_ASC = [
+  'sprint-01',
+  'sprint-1',
+  ...Array.from({ length: 11 }, (_, index) => `sprint-${index + 95}`),
+];
+const CANONICAL_DESC = [...CANONICAL_ASC].reverse();
+const NONCONFORMING_ASC = ['PT-SP1', 'S1', 'iso-final'];
+const NONCONFORMING_DESC = [...NONCONFORMING_ASC].reverse();
+
+/**
+ * A disk-backed SQLite store whose IDs cross the two-to-three-digit boundary and include
+ * shapes measured in the registered fleet. Every date/activity value is deliberately equal:
+ * the only fact under test is the sprint-ID ordering tie-break, not date precedence.
+ */
+function seedSprintOrderingStore(): { projectRoot: string; dbPath: string } {
+  const projectRoot = mkTmp('cmos-m02-sprint-order-');
+  const dbPath = seedCmosDb(projectRoot, { projectName: 'Sprint Ordering Fixture' });
+  reidentifyCmosTestStore(projectRoot);
+  const db = new Database(dbPath);
+  const addSprint = db.prepare(
+    `INSERT INTO sprints (id, title, status, start_date, end_date)
+     VALUES (?, ?, 'Completed', '2026-08-28', '2026-08-28')`
+  );
+  const addMission = db.prepare(
+    `INSERT INTO missions (id, sprint_id, name, status, started_at, completed_at)
+     VALUES (?, ?, ?, 'Completed', '2026-08-27T00:00:00Z', '2026-08-28T00:00:00Z')`
+  );
+  const ids = [...CANONICAL_ASC, ...NONCONFORMING_ASC];
+
+  db.transaction(() => {
+    ids.forEach((sprintId, index) => {
+      addSprint.run(sprintId, `Ordering fixture ${index}`);
+      addMission.run(`ordering-mission-${index}`, sprintId, `Ordering mission ${index}`);
+    });
+  })();
+  db.close();
+
+  return { projectRoot, dbPath };
 }
 
 describe('analytics window — real-store positive fire (s86-m05)', () => {
@@ -83,26 +149,17 @@ describe('analytics window — real-store positive fire (s86-m05)', () => {
   it('returns the NEWEST sprints for a bounded call, not the oldest', () => {
     const projectRoot = copyLiveStore();
 
-    // Ground the expectation in the copy itself rather than in a hardcoded id list, so this
-    // assertion keeps meaning as sprints are added. The pre-fix behaviour is computed here too,
-    // which is what makes the final assertion a statement about DIRECTION and not about ids.
+    // Ground both ends of the numeric ordering in the copy rather than hardcoded IDs, so this
+    // assertion keeps meaning as sprints are added and proves the selected window's direction.
     const db = new Database(path.join(projectRoot, 'cmos', 'db', 'cmos.sqlite'), {
       readonly: true,
     });
-    const newestFive = db
-      .prepare(
-        `SELECT sprint_id FROM sprint_summary WHERE status IN ('Completed','Active')
-         ORDER BY sprint_id DESC LIMIT 5`
-      )
+    const eligibleIds = db
+      .prepare(`SELECT sprint_id FROM sprint_summary WHERE status IN ('Completed','Active')`)
       .all()
       .map((r) => (r as { sprint_id: string }).sprint_id);
-    const oldestFive = db
-      .prepare(
-        `SELECT sprint_id FROM sprint_summary WHERE status IN ('Completed','Active')
-         ORDER BY sprint_id ASC LIMIT 5`
-      )
-      .all()
-      .map((r) => (r as { sprint_id: string }).sprint_id);
+    const newestFive = orderSprintIds(eligibleIds, 'DESC').slice(0, 5);
+    const oldestFive = orderSprintIds(eligibleIds, 'ASC').slice(0, 5);
     db.close();
 
     return cmosSprintAnalytics({ projectRoot, limit: 5 }).then((result) => {
@@ -130,24 +187,96 @@ describe('analytics window — real-store positive fire (s86-m05)', () => {
     });
   });
 
-  it('leaves the unlimited call unchanged (limitClause is empty, outer ASC preserves order)', async () => {
+  it('returns the unlimited history oldest-first under the numeric contract', async () => {
     const projectRoot = copyLiveStore();
     const db = new Database(path.join(projectRoot, 'cmos', 'db', 'cmos.sqlite'), {
       readonly: true,
     });
-    const allAsc = db
-      .prepare(
-        `SELECT sprint_id FROM sprint_summary WHERE status IN ('Completed','Active')
-         ORDER BY sprint_id ASC`
-      )
+    const eligibleIds = db
+      .prepare(`SELECT sprint_id FROM sprint_summary WHERE status IN ('Completed','Active')`)
       .all()
       .map((r) => (r as { sprint_id: string }).sprint_id);
+    const allAsc = orderSprintIds(eligibleIds, 'ASC');
     db.close();
 
     const result = await cmosSprintAnalytics({ projectRoot });
     expect(result.data?.sprints.map((s) => s.sprintId)).toEqual(allAsc);
     expect(result.data?.window.requestedLimit).toBeNull();
     expect(result.data?.window.sprintCount).toBe(allAsc.length);
+  });
+});
+
+describe('sprint-id numeric ordering contract (s88-m02)', () => {
+  it('returns the true newest five canonical sprints after the sequence crosses 100', async () => {
+    const { projectRoot, dbPath } = seedSprintOrderingStore();
+    const db = new Database(dbPath, { readonly: true });
+
+    // Anti-vacuity: this is the exact current bounded-window key, and it demonstrably selects
+    // 95..99 instead of 101..105 on this store. The public assertion below must disagree.
+    const lexicalNewestFive = db
+      .prepare(
+        `SELECT sprint_id FROM sprint_summary WHERE status IN ('Completed','Active')
+         ORDER BY sprint_id DESC LIMIT 5`
+      )
+      .all()
+      .map((row) => (row as { sprint_id: string }).sprint_id);
+    db.close();
+    expect(lexicalNewestFive).toEqual([
+      'sprint-99',
+      'sprint-98',
+      'sprint-97',
+      'sprint-96',
+      'sprint-95',
+    ]);
+
+    const result = await cmosSprintAnalytics({ projectRoot, limit: 5 });
+
+    expect(result.success).toBe(true);
+    // Analytics restores oldest-first order after choosing the newest bounded window.
+    expect(result.data?.sprints.map((sprint) => sprint.sprintId)).toEqual([
+      'sprint-101',
+      'sprint-102',
+      'sprint-103',
+      'sprint-104',
+      'sprint-105',
+    ]);
+  });
+
+  it('uses canonical numeric ASC order before the fleet-shaped analytics fallback bucket', async () => {
+    const { projectRoot } = seedSprintOrderingStore();
+    const analytics = await cmosSprintAnalytics({ projectRoot });
+
+    expect(analytics.success).toBe(true);
+    expect(analytics.data?.sprints.map((sprint) => sprint.sprintId)).toEqual([
+      ...CANONICAL_ASC,
+      ...NONCONFORMING_ASC,
+    ]);
+  });
+
+  it('uses canonical numeric DESC order before the fleet-shaped list fallback bucket', async () => {
+    const { projectRoot } = seedSprintOrderingStore();
+
+    // start_date is identical for every row, so list's only remaining ordering key is the
+    // shared DESC sprint-id contract. Assert IDs only; list formatting/count semantics are not
+    // part of this regression.
+    const list = await cmosSprintList({ projectRoot, limit: 100 });
+    expect(list.success).toBe(true);
+    expect(list.data?.sprints.map((sprint) => sprint.id)).toEqual([
+      ...CANONICAL_DESC,
+      ...NONCONFORMING_DESC,
+    ]);
+  });
+
+  it('does not let a fleet-shaped ID displace the newest canonical current sprint', async () => {
+    const { dbPath } = seedSprintOrderingStore();
+
+    // Every mission has the same completion timestamp, isolating current-sprint's final DESC
+    // tie-break. A fleet-shaped fallback ID must not displace the newest canonical sprint.
+    const current = await withClient((client) => createSuccess(resolveCurrentSprintId(client)), {
+      dbPath,
+    });
+    expect(current.success).toBe(true);
+    expect(current.data).toBe('sprint-105');
   });
 });
 
@@ -165,6 +294,7 @@ describe('analytics trend invariance under a bounded window (s86-m05)', () => {
   it('reports the same velocity direction bounded and unbounded', async () => {
     const projectRoot = mkTmp('cmos-m05-trend-');
     const dbPath = seedCmosDb(projectRoot, { projectName: 'Trend Fixture' });
+    reidentifyCmosTestStore(projectRoot);
 
     const db = new Database(dbPath);
     // Ten sprints, each with TEN missions of which n are Completed: sprint-01 completes 1 of 10,

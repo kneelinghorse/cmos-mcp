@@ -127,7 +127,11 @@ export async function cmosProjectRegister(
     const graph = await ProjectGraphRegistry.create();
     const wasAlreadyRegistered = graph.getByStorePath(resolvedPath) !== null;
     const hadId = readStoreIdentity(resolvedPath) !== null;
-    const entry = graph.registerStore(resolvedPath, { name, setAsDefault });
+    const entry = graph.registerStore(resolvedPath, {
+      name,
+      setAsDefault,
+      requireStoredIdentity: true,
+    });
 
     const metadataRepaired = !hadId && readStoreIdentity(resolvedPath) !== null;
     const isDefault = graph.getDefault()?.project_id === entry.project_id;

@@ -36,7 +36,7 @@ import {
   cmosSessionCapture,
   formatSessionCaptureForLLM,
 } from '../../../src/tools/cmos/cmos-session-capture';
-import { seedCmosDb } from '../../helpers/seedCmosDb';
+import { reidentifyCmosTestStore, seedCmosDb } from '../../helpers/seedCmosDb';
 
 const REPO_ROOT = path.resolve(__dirname, '../../..');
 const LIVE_DB = path.join(REPO_ROOT, 'cmos', 'db', 'cmos.sqlite');
@@ -64,6 +64,7 @@ function copyLiveStore(): string {
     const src = `${LIVE_DB}${suffix}`;
     if (fs.existsSync(src)) fs.copyFileSync(src, path.join(dbDir, `cmos.sqlite${suffix}`));
   }
+  reidentifyCmosTestStore(projectRoot);
   return projectRoot;
 }
 
@@ -237,6 +238,7 @@ describe('s86-m02b real-store fire: a failed decision INSERT is named, not calle
     // the cases where the fixture is a faithful stand-in — proven, not assumed.
     const projectRoot = mkTmp('cmos-m02b-fixture-');
     const dbPath = seedCmosDb(projectRoot, { projectName: 'm02b fixture' });
+    reidentifyCmosTestStore(projectRoot);
 
     const db = new Database(dbPath);
     try {

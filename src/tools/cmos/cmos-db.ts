@@ -10,6 +10,7 @@
 
 import { z } from 'zod';
 import { createError, CmosErrors } from './errors';
+import { appendWarnings } from './format-warnings';
 import type { ActionParamMap, CmosToolResult } from './types';
 import {
   cmosDbHealth,
@@ -312,7 +313,11 @@ export function formatDbForLLM(
       return formatSyncPullForLLM(result as CmosToolResult<SyncPullResult>);
     case 'clone':
       return formatSyncBootstrapForLLM(result as CmosToolResult<SyncBootstrapResult>);
-    default:
-      return result.success ? '✓ Database action completed' : '❌ Failed to execute cmos_db';
+    default: {
+      if (!result.success) return '❌ Failed to execute cmos_db';
+      const lines = ['✓ Database action completed'];
+      appendWarnings(lines, result);
+      return lines.join('\n');
+    }
   }
 }

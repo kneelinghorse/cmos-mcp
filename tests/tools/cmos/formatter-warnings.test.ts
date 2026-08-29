@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-// ABOUTME: s86-m02 Step-1 gate — every LEAF format*ForLLM must render the ENVELOPE channel
-// ABOUTME: (result.warnings) via appendWarnings. Rule-derived from the AST. Zero allowlist entries.
+// ABOUTME: Every LEAF format*ForLLM render path must render the ENVELOPE warning channel.
+// ABOUTME: AST-derived candidate, dispatcher, error-preamble, and return-dominance rules; no allowlist.
 
 /**
  * Sprint 86 m02 — make the warnings channel real.
@@ -24,6 +24,19 @@
  *   - Decision #978's **58** corrected the first omission but inherited that double-count.
  * The measured number wins (success criterion 3).
  *
+ * s88-m09 RETURN-PATH CENSUS (2026-08-28). The old backlog shape count — "70 of 76 leaf
+ * formatters have >1 terminal return but only one appendWarnings" — did not measure coverage:
+ * one append can dominate every success return, and a second return can be a deliberate
+ * INVALID_ACTION/error preamble. The executable rule below supersedes that shape heuristic while
+ * preserving the s86 baseline above. Fresh census: 87 declarations / 10 dispatchers / 77 leaves /
+ * 1 non-envelope structural exclusion / 86 envelope formatters (76 leaves + 10 dispatchers).
+ * Their 265 owned terminal returns classify structurally as 91 deliberate `!result.success`
+ * error preambles, 71 direct delegations, and 103 genuine render modes. The dispatcher-aware RED
+ * was 93/103 genuine returns warning-dominated; the fixed contract is 103/103. The 10 extra final
+ * error preambles are the explicit failure halves split out of the former mixed dispatcher
+ * fallback ternaries; that source rewrite is why the final denominator is 265 rather than the
+ * pre-fix RED's 255.
+ *
  * DISCRIMINATION IS BY RULE, NOT BY ALLOWLIST (Process Hardening #2). This file contains no
  * allowlist of exempt formatters. Three rules do all the work:
  *
@@ -39,25 +52,31 @@
  *                    (cmos-session.ts -> cmos-session-start.ts), and a per-file sibling set
  *                    selects exactly ONE of them. The callee need NOT be exported: requiring that
  *                    selects nine and misses formatMessageForLLM, whose seven delegates are all
- *                    private. Dispatchers are exempt so a warning renders EXACTLY ONCE.
- *                    Do NOT restate this as "EVERY return is a delegating call" — measured, zero
- *                    formatters satisfy that: all 10 routers carry two non-delegating returns
- *                    (an INVALID_ACTION preamble and a `default:` arm).
+ *                    private. Direct delegations are exempt so a warning renders EXACTLY ONCE at
+ *                    the leaf; the dispatcher itself is NOT wholesale exempt. Its INVALID_ACTION
+ *                    and explicit failure returns classify as error preambles, while each
+ *                    non-delegating success fallback must render. Do NOT restate this as "EVERY
+ *                    return is a delegating call" — measured, zero formatters satisfy that.
  *   3. LEAF        — everything else. A leaf must call `appendWarnings`, UNLESS it takes no
  *                    `CmosToolResult` parameter at all, in which case it is a STRUCTURAL
  *                    EXCLUSION and this file PRINTS IT BY NAME rather than skipping it silently.
  *
- * The envelope parameter is located BY TYPE, never by position: of the 86 declarations, 73 take it
+ * The envelope parameter is located BY TYPE, never by position: of the 87 declarations, 74 take it
  * at index 0, 12 at index 1 (the `(action, result)` router-leaf shape), and 1 not at all. A
  * positional rule would silently exempt those 12. (Decision #978's 66/12 split counted only the 78
  * EXPORTED declarations that have an envelope; the 7 private cmos-message formatters all take it
- * at index 0, and 66 + 7 = 73.) `locateEnvelopeParam` is exercised against both shapes below.
+ * at index 0, and 66 + 7 = 73. s86-m08 then added one exported index-0 formatter, producing the
+ * current 74/12/1 split.) `locateEnvelopeParam` is exercised against both shapes below.
  *
  * FALSE-NEGATIVE PROFILE (what this gate CANNOT see — stated so the green is honest):
- *   - PRESENCE, NOT POSITION or REACHABILITY. It asserts the call exists in the body. A call
- *     placed inside an unreachable branch, or after an early `return`, still passes. Position is
- *     deliberately not asserted: cmos-session-start.ts:469 renders warnings mid-body and pushes
- *     more lines after it; mandating last-statement would reorder shipped output for no benefit.
+ *   - SYNTACTIC DOMINANCE, NOT A CONTROL-FLOW GRAPH. Every genuine return now requires a direct
+ *     earlier `appendWarnings` statement in its block or an ancestor block AND that specific
+ *     return must join the append's buffer; a later return of the right buffer cannot rescue an
+ *     earlier return of a different one. A call after an early return or hidden in a conditional
+ *     no longer passes. The rule can still false-RED a logically dominating helper/conditional,
+ *     so the shipped convention stays a direct append statement. It deliberately does not require
+ *     appendWarnings to be the final statement: cmos-session-start.ts renders warnings mid-body
+ *     and pushes more lines afterward.
  *   - INDIRECTION. `appendWarnings` located by callee IDENTIFIER text. A formatter that wraps it
  *     in a local helper, or calls it through an alias, reads as not calling it (false RED, which
  *     is safe) — but a formatter that calls a DIFFERENT function named `appendWarnings` would
@@ -86,7 +105,15 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as ts from 'typescript';
 import type { CmosToolResult } from '../../../src/tools/cmos/types';
+import { formatContextForLLM } from '../../../src/tools/cmos/cmos-context';
+import { formatDbForLLM } from '../../../src/tools/cmos/cmos-db';
+import { formatDecisionsForLLM } from '../../../src/tools/cmos/cmos-decisions';
+import { formatLearningsForLLM } from '../../../src/tools/cmos/cmos-learnings';
+import { formatMissionForLLM } from '../../../src/tools/cmos/cmos-mission';
+import { formatMissionTransitionForLLM } from '../../../src/tools/cmos/cmos-mission-transition';
+import { formatProjectForLLM } from '../../../src/tools/cmos/cmos-project';
 import { formatSessionForLLM } from '../../../src/tools/cmos/cmos-session';
+import { formatSprintForLLM } from '../../../src/tools/cmos/cmos-sprint';
 import { formatMessageForLLM } from '../../../src/tools/cmos/cmos-message';
 import { formatSyncPullForLLM } from '../../../src/tools/cmos/sync-pull';
 import { formatSyncHealthForLLM } from '../../../src/tools/cmos/sync-health-check';
@@ -175,6 +202,16 @@ function isDispatcher(decl: ts.FunctionDeclaration, siblingNames: ReadonlySet<st
   return delegating;
 }
 
+/** A dispatcher return delegated to another formatter, and therefore rendered by that callee. */
+function isDelegatingReturn(
+  statement: ts.ReturnStatement,
+  siblingNames: ReadonlySet<string>
+): boolean {
+  if (!statement.expression || !ts.isCallExpression(statement.expression)) return false;
+  const callee = statement.expression.expression;
+  return ts.isIdentifier(callee) && siblingNames.has(callee.text);
+}
+
 /**
  * Locate the envelope parameter BY TYPE. Returns its index, or -1 when the signature carries no
  * `CmosToolResult` at all (the structural-exclusion case). Matching is on the type NODE, so it
@@ -225,31 +262,166 @@ function callsAppendWarnings(decl: ts.FunctionDeclaration): boolean {
   return appendWarningsCalls(decl).length > 0;
 }
 
-/**
- * True when `name` is joined into a string somewhere in this body — `name.join(...)`, including
- * through a trailing `.trim()` / `.filter(Boolean)` chain. Used to prove the buffer a formatter
- * appends warnings TO is the buffer it actually RETURNS.
- */
-function isJoinedInBody(decl: ts.FunctionDeclaration, name: string): boolean {
-  let joined = false;
+/** Return statements owned by this formatter, excluding returns inside nested callbacks. */
+function ownedReturns(decl: ts.FunctionDeclaration): ts.ReturnStatement[] {
+  const returns: ts.ReturnStatement[] = [];
   const visit = (node: ts.Node): void => {
-    if (joined) return;
+    if (ts.isFunctionLike(node) && node !== decl) return;
+    if (ts.isReturnStatement(node)) returns.push(node);
+    ts.forEachChild(node, visit);
+  };
+  if (decl.body) ts.forEachChild(decl.body, visit);
+  return returns;
+}
+
+function containsNode(container: ts.Node, target: ts.Node): boolean {
+  return container.pos <= target.pos && target.end <= container.end;
+}
+
+/**
+ * Deliberate error preambles are classified by effect, not by line or formatter name: a return
+ * in the THEN branch of an `if` that tests `!<envelope>.success`. A successful empty/no-op mode
+ * does not match this rule and therefore still has to render warnings.
+ */
+function isErrorPreambleReturn(
+  decl: ts.FunctionDeclaration,
+  statement: ts.ReturnStatement,
+  envelopeName: string
+): boolean {
+  for (let current = statement.parent; current && current !== decl; current = current.parent) {
+    if (!ts.isIfStatement(current) || !containsNode(current.thenStatement, statement)) continue;
+    let testsFailure = false;
+    const visit = (node: ts.Node): void => {
+      if (
+        ts.isPrefixUnaryExpression(node) &&
+        node.operator === ts.SyntaxKind.ExclamationToken &&
+        ts.isPropertyAccessExpression(node.operand) &&
+        ts.isIdentifier(node.operand.expression) &&
+        node.operand.expression.text === envelopeName &&
+        node.operand.name.text === 'success'
+      ) {
+        testsFailure = true;
+        return;
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(current.expression);
+    if (testsFailure) return true;
+  }
+  return false;
+}
+
+interface WarningAppend {
+  readonly call: ts.CallExpression;
+  readonly sink: string;
+}
+
+function directEnvelopeWarningAppend(
+  statement: ts.Statement,
+  envelopeName: string
+): WarningAppend | undefined {
+  if (
+    !ts.isExpressionStatement(statement) ||
+    !ts.isCallExpression(statement.expression) ||
+    !ts.isIdentifier(statement.expression.expression) ||
+    statement.expression.expression.text !== 'appendWarnings'
+  ) {
+    return undefined;
+  }
+  const [sink] = statement.expression.arguments;
+  if (
+    !sink ||
+    !ts.isIdentifier(sink) ||
+    !statement.expression.arguments.some(
+      (argument) => ts.isIdentifier(argument) && argument.text === envelopeName
+    )
+  ) {
+    return undefined;
+  }
+  return { call: statement.expression, sink: sink.text };
+}
+
+/**
+ * Conservative dominance rule: collect direct appendWarnings calls that are earlier statements
+ * in this return's block or in an ancestor block. Calls hidden in a conditional do not count.
+ */
+function dominatingWarningAppends(
+  decl: ts.FunctionDeclaration,
+  statement: ts.ReturnStatement,
+  envelopeName: string
+): WarningAppend[] {
+  const appends: WarningAppend[] = [];
+  let child: ts.Node = statement;
+  for (let current = statement.parent; current && current !== decl; current = current.parent) {
+    if (!ts.isBlock(current)) continue;
+    const holder = current.statements.find((candidate) => containsNode(candidate, child));
+    if (!holder) continue;
+    const holderIndex = current.statements.indexOf(holder);
+    for (const candidate of current.statements.slice(0, holderIndex)) {
+      const append = directEnvelopeWarningAppend(candidate, envelopeName);
+      if (append) appends.push(append);
+    }
+    child = current;
+  }
+  return appends;
+}
+
+/**
+ * The identifier-backed buffers joined by THIS return — `name.join(...)`, including through a
+ * trailing `.trim()` / `.filter(Boolean)` chain. Looking only at this return is load-bearing: a
+ * later `return a.join(...)` cannot make an earlier `return b.join(...)` warning-safe.
+ */
+function joinedBuffersReturnedBy(statement: ts.ReturnStatement): ReadonlySet<string> {
+  const joined = new Set<string>();
+  const visit = (node: ts.Node): void => {
     if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
       if (node.expression.name.text === 'join') {
         let base: ts.Expression = node.expression.expression;
         while (ts.isCallExpression(base) && ts.isPropertyAccessExpression(base.expression)) {
           base = base.expression.expression;
         }
-        if (ts.isIdentifier(base) && base.text === name) {
-          joined = true;
-          return;
-        }
+        if (ts.isIdentifier(base)) joined.add(base.text);
       }
     }
     ts.forEachChild(node, visit);
   };
-  ts.forEachChild(decl, visit);
+  if (statement.expression) visit(statement.expression);
   return joined;
+}
+
+function warningSinkReachesReturn(
+  decl: ts.FunctionDeclaration,
+  statement: ts.ReturnStatement,
+  envelopeName: string
+): boolean {
+  const returnedBuffers = joinedBuffersReturnedBy(statement);
+  return dominatingWarningAppends(decl, statement, envelopeName).some((append) =>
+    returnedBuffers.has(append.sink)
+  );
+}
+
+interface FormatterReturnCoverage {
+  readonly formatter: Formatter;
+  readonly statement: ts.ReturnStatement;
+  readonly errorPreamble: boolean;
+  readonly delegated: boolean;
+  readonly warningDominated: boolean;
+}
+
+function classifyFormatterReturns(
+  formatter: Formatter,
+  siblingNames: ReadonlySet<string>
+): FormatterReturnCoverage[] {
+  const envelopeIndex = locateEnvelopeParam(formatter.decl);
+  if (envelopeIndex === -1) return [];
+  const envelopeName = (formatter.decl.parameters[envelopeIndex].name as ts.Identifier).text;
+  return ownedReturns(formatter.decl).map((statement) => ({
+    formatter,
+    statement,
+    errorPreamble: isErrorPreambleReturn(formatter.decl, statement, envelopeName),
+    delegated: isDelegatingReturn(statement, siblingNames),
+    warningDominated: warningSinkReachesReturn(formatter.decl, statement, envelopeName),
+  }));
 }
 
 // --- the sweep, run once ------------------------------------------------------------------
@@ -278,7 +450,13 @@ const dispatchers = formatters.filter((f) => isDispatcher(f.decl, declaredNames)
 const leaves = formatters.filter((f) => !dispatchers.includes(f));
 const exclusions = leaves.filter((f) => locateEnvelopeParam(f.decl) === -1);
 const mustRender = leaves.filter((f) => locateEnvelopeParam(f.decl) !== -1);
+const envelopeFormatters = formatters.filter((f) => locateEnvelopeParam(f.decl) !== -1);
 const notRendering = mustRender.filter((f) => !callsAppendWarnings(f.decl));
+const returnCoverage = envelopeFormatters.flatMap((formatter) =>
+  classifyFormatterReturns(formatter, declaredNames)
+);
+const genuineRenderReturns = returnCoverage.filter((row) => !row.errorPreamble && !row.delegated);
+const uncoveredGenuineReturns = genuineRenderReturns.filter((row) => !row.warningDominated);
 
 const at = (f: Formatter): string => `${f.name} (${f.file}:${f.line})`;
 
@@ -331,14 +509,53 @@ describe('s86-m02 Step 1 — the envelope warnings channel is universal', () => 
     expect(mustRender).toHaveLength(EXPECTED_LEAVES - exclusions.length);
   });
 
-  it('passes the ENVELOPE parameter, and appends to a buffer the formatter actually returns', () => {
+  it('renders warnings on every non-delegating success return, excluding error preambles by rule', () => {
+    const errorPreambles = returnCoverage.filter((row) => row.errorPreamble);
+    const delegatedReturns = returnCoverage.filter((row) => row.delegated);
+    // eslint-disable-next-line no-console
+    console.log(
+      `[formatter-warning-return-census] declarations=${formatters.length} ` +
+        `dispatchers=${dispatchers.length} leaves=${leaves.length} ` +
+        `envelopeFormatters=${envelopeFormatters.length} envelopeLeaves=${mustRender.length} ` +
+        `terminalReturns=${returnCoverage.length} errorPreambles=${errorPreambles.length} ` +
+        `delegatedReturns=${delegatedReturns.length} ` +
+        `genuineRenderReturns=${genuineRenderReturns.length} ` +
+        `covered=${genuineRenderReturns.length - uncoveredGenuineReturns.length} ` +
+        `uncovered=${uncoveredGenuineReturns.length}`
+    );
+
+    expect({
+      terminalReturns: returnCoverage.length,
+      errorPreambles: errorPreambles.length,
+      delegatedReturns: delegatedReturns.length,
+      genuineRenderReturns: genuineRenderReturns.length,
+    }).toEqual({
+      terminalReturns: 265,
+      errorPreambles: 91,
+      delegatedReturns: 71,
+      genuineRenderReturns: 103,
+    });
+    expect(
+      uncoveredGenuineReturns.map(
+        ({ formatter, statement }) =>
+          `${at(formatter)} -> return:${
+            formatter.decl
+              .getSourceFile()
+              .getLineAndCharacterOfPosition(statement.getStart(formatter.decl.getSourceFile()))
+              .line + 1
+          }`
+      )
+    ).toEqual([]);
+  });
+
+  it('passes the ENVELOPE parameter, and each append reaches a return of that same buffer', () => {
     // Presence alone is not enough. Two ways to satisfy the rule above and still render nothing:
     // hand appendWarnings a DIFFERENT `CmosToolResult`-shaped value than the one the caller
     // passed, or append into a scratch array that is never joined into the return. Both would
     // leave a green gate over a dead channel — this mission's whole subject.
     const wrongEnvelope: string[] = [];
     const orphanSink: string[] = [];
-    for (const f of mustRender) {
+    for (const f of envelopeFormatters) {
       const envelopeName = (f.decl.parameters[locateEnvelopeParam(f.decl)].name as ts.Identifier)
         .text;
       for (const call of appendWarningsCalls(f.decl)) {
@@ -348,8 +565,19 @@ describe('s86-m02 Step 1 — the envelope warnings channel is universal', () => 
             `${at(f)} → passes '${envelope?.getText()}', expected '${envelopeName}'`
           );
         }
-        if (!sink || !ts.isIdentifier(sink) || !isJoinedInBody(f.decl, sink.text)) {
-          orphanSink.push(`${at(f)} → appends to '${sink?.getText()}', which is never joined`);
+        const reachesReturn =
+          sink &&
+          ts.isIdentifier(sink) &&
+          ownedReturns(f.decl).some(
+            (statement) =>
+              dominatingWarningAppends(f.decl, statement, envelopeName).some(
+                (append) => append.call === call
+              ) && joinedBuffersReturnedBy(statement).has(sink.text)
+          );
+        if (!reachesReturn) {
+          orphanSink.push(
+            `${at(f)} → appends to '${sink?.getText()}', which reaches no return of that buffer`
+          );
         }
       }
     }
@@ -410,11 +638,77 @@ describe('s86-m02 Step 1 — the envelope warnings channel is universal', () => 
     ]);
   });
 
+  it("does not exempt a dispatcher's non-delegating success fallback", () => {
+    const fixture = ts.createSourceFile(
+      'fixture.ts',
+      `
+        function formatLeafForLLM(result: CmosToolResult<A>): string {
+          const lines: string[] = [];
+          appendWarnings(lines, result);
+          return lines.join('\\n');
+        }
+        export function formatRouterForLLM(
+          action: string,
+          result: CmosToolResult<A>
+        ): string {
+          if (!result.success) {
+            const lines = ['failed'];
+            return lines.join('\\n');
+          }
+          switch (action) {
+            case 'known':
+              return formatLeafForLLM(result);
+            default:
+              return 'completed';
+          }
+        }
+      `,
+      ts.ScriptTarget.Latest,
+      true
+    );
+    const found = collectFormatters(fixture, 'fixture.ts');
+    const names = new Set(found.map((f) => f.name));
+    const router = found.find((f) => f.name === 'formatRouterForLLM')!;
+    expect(
+      classifyFormatterReturns(router, names).map(
+        ({ errorPreamble, delegated, warningDominated }) => ({
+          errorPreamble,
+          delegated,
+          warningDominated,
+        })
+      )
+    ).toEqual([
+      { errorPreamble: true, delegated: false, warningDominated: false },
+      { errorPreamble: false, delegated: true, warningDominated: false },
+      { errorPreamble: false, delegated: false, warningDominated: false },
+    ]);
+  });
+
+  it('does not let append-to-a / return-b pass because a later return joins a', () => {
+    const fixture = ts.createSourceFile(
+      'fixture.ts',
+      `
+        export function formatMismatchedForLLM(result: CmosToolResult<A>): string {
+          const a: string[] = [];
+          const b: string[] = [];
+          appendWarnings(a, result);
+          if (result.data?.empty) return b.join('\\n');
+          return a.join('\\n');
+        }
+      `,
+      ts.ScriptTarget.Latest,
+      true
+    );
+    const [formatter] = collectFormatters(fixture, 'fixture.ts');
+    const rows = classifyFormatterReturns(formatter, new Set([formatter.name]));
+    expect(rows.map((row) => row.warningDominated)).toEqual([false, true]);
+  });
+
   it('does NOT use the "every return delegates" rule, which selects zero formatters', () => {
     // Kept as an executable note: all 10 routers carry non-delegating returns (an INVALID_ACTION
-    // preamble and a `default:` arm), so the stricter phrasing two critics proposed would exempt
-    // nothing and demand appendWarnings inside the routers — reintroducing the double-render
-    // those critics were trying to prevent.
+    // preamble plus explicit failure and warning-rendering success returns in `default:`), so the
+    // stricter phrasing two critics proposed would exempt nothing and demand appendWarnings on
+    // delegated paths too — reintroducing the double-render those critics were trying to prevent.
     const everyReturnDelegates = (f: Formatter): boolean => {
       const names = siblingsByFile.get(f.file) as ReadonlySet<string>;
       const returns: ts.ReturnStatement[] = [];
@@ -457,6 +751,95 @@ function occurrences(haystack: string, needle: string): number {
 describe('s86-m02 Step 1 — the channel renders exactly once, through the real entrypoint', () => {
   const ENVELOPE_WARNING =
     'This decision was captured without a missionId while 2 mission(s) are open: s86-m02 (In Progress).';
+
+  const dispatcherFallbacks: ReadonlyArray<{
+    readonly name: string;
+    readonly format: (result: CmosToolResult<unknown>) => string;
+    readonly success: string;
+    readonly failure: string;
+  }> = [
+    {
+      name: 'context',
+      format: (result) => formatContextForLLM(undefined, result as never),
+      success: '✓ Context action completed',
+      failure: '❌ Failed to execute cmos_context',
+    },
+    {
+      name: 'db',
+      format: (result) => formatDbForLLM(undefined, result as never),
+      success: '✓ Database action completed',
+      failure: '❌ Failed to execute cmos_db',
+    },
+    {
+      name: 'decisions',
+      format: (result) => formatDecisionsForLLM(undefined, result as never),
+      success: '✓ Decisions action completed',
+      failure: '❌ Failed to execute cmos_decisions',
+    },
+    {
+      name: 'learnings',
+      format: (result) => formatLearningsForLLM(undefined, result as never),
+      success: '✓ Learnings action completed',
+      failure: '❌ Failed to execute cmos_learnings',
+    },
+    {
+      name: 'message',
+      format: (result) => formatMessageForLLM(undefined, result as never),
+      success: 'Message action completed',
+      failure: 'Failed to execute cmos_message',
+    },
+    {
+      name: 'mission transition',
+      format: (result) => formatMissionTransitionForLLM(undefined, result as never),
+      success: '✓ Mission transition completed',
+      failure: '❌ Failed to execute cmos_mission_transition',
+    },
+    {
+      name: 'mission',
+      format: (result) => formatMissionForLLM(undefined, result as never),
+      success: '✓ Mission action completed',
+      failure: '❌ Failed to execute cmos_mission',
+    },
+    {
+      name: 'project',
+      format: (result) => formatProjectForLLM(undefined, result as never),
+      success: '✓ Project action completed',
+      failure: '❌ Failed to execute cmos_project',
+    },
+    {
+      name: 'session',
+      format: (result) => formatSessionForLLM(undefined, result as never),
+      success: '✓ Session action completed',
+      failure: '❌ Failed to execute cmos_session',
+    },
+    {
+      name: 'sprint',
+      format: (result) => formatSprintForLLM(undefined, result as never),
+      success: '✓ Sprint action completed',
+      failure: '❌ Failed to execute cmos_sprint',
+    },
+  ];
+
+  it('renders every dispatcher success fallback once without changing warning-free text', () => {
+    for (const fallback of dispatcherFallbacks) {
+      const clean = fallback.format({ success: true, data: {} });
+      expect(`${fallback.name}: ${clean}`).toBe(`${fallback.name}: ${fallback.success}`);
+
+      const warned = fallback.format({
+        success: true,
+        data: {},
+        warnings: [ENVELOPE_WARNING],
+      });
+      expect(warned.startsWith(fallback.success)).toBe(true);
+      expect(occurrences(warned, ENVELOPE_WARNING)).toBe(1);
+
+      const failed = fallback.format({
+        success: false,
+        error: { code: 'DB_QUERY_FAILED', message: 'forced failure' },
+      });
+      expect(`${fallback.name}: ${failed}`).toBe(`${fallback.name}: ${fallback.failure}`);
+    }
+  });
 
   it('renders an envelope warning EXACTLY ONCE through the formatSessionForLLM dispatcher', () => {
     // Asserted through the dispatcher, not the leaf: src/index.ts calls the dispatcher, so a

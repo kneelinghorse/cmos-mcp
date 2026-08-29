@@ -186,6 +186,7 @@ export function formatProjectValidateForLLM(result: CmosToolResult<ProjectValida
     lines.push('📋 No projects to validate');
     lines.push('');
     lines.push('Use cmos_project(action="register") to add a project.');
+    appendWarnings(lines, result);
     return lines.join('\n');
   }
 

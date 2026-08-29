@@ -18,6 +18,7 @@ import * as path from 'path';
 import { syncBootstrap, formatSyncBootstrapForLLM } from '../../../src/tools/cmos/sync-bootstrap';
 import { syncPull } from '../../../src/tools/cmos/sync-pull';
 import { CmosDetector } from '../../../src/intelligence/cmos-detector';
+import { ProjectGraphRegistry } from '../../../src/intelligence/project-graph-registry';
 
 // ─── Fetch mock ────────────────────────────────────────────────────────────────
 
@@ -387,6 +388,8 @@ describe('syncBootstrap (Sprint 71 m03)', () => {
     expect(meta('dashboard_slug')).toBe(SLUG);
     expect(meta('dashboard_project_id')).toBe('proj-shared');
     expect(meta('project_id')).toBe('proj-shared');
+    const graph = await ProjectGraphRegistry.create();
+    expect(graph.getByStorePath(tempDir)).toBe('proj-shared');
   });
 
   // ─── Collab marker (Sprint 71 m04, Fork A) ─────────────────────────────────────
@@ -499,6 +502,9 @@ describe('syncBootstrap (Sprint 71 m03)', () => {
     const result = await syncBootstrap({ projectRoot: tempDir });
     expect(result.success).toBe(false);
     expect(result.error?.code).toBe('MISSING_PARAMETER');
+    expect(meta('project_id')).toBeUndefined();
+    const graph = await ProjectGraphRegistry.create();
+    expect(graph.getByStorePath(tempDir)).toBeNull();
   });
 
   it('errors when the /state fetch fails', async () => {
@@ -506,6 +512,69 @@ describe('syncBootstrap (Sprint 71 m03)', () => {
     stateStatus = 500;
     const result = await syncBootstrap({ projectRoot: tempDir, slug: SLUG });
     expect(result.success).toBe(false);
+    expect(meta('project_id')).toBeUndefined();
+    const graph = await ProjectGraphRegistry.create();
+    expect(graph.getByStorePath(tempDir)).toBeNull();
+  });
+
+  it('rejects a live identity collision before inserting any cloned entity', async () => {
+    createFreshStore();
+    const incumbentRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-bootstrap-incumbent-'));
+    try {
+      const incumbentDbDir = path.join(incumbentRoot, 'cmos', 'db');
+      fs.mkdirSync(incumbentDbDir, { recursive: true });
+      const incumbentDb = new Database(path.join(incumbentDbDir, 'cmos.sqlite'));
+      incumbentDb.exec(seedSchema);
+      incumbentDb
+        .prepare(`INSERT OR REPLACE INTO metadata (key, value) VALUES ('project_id', ?)`)
+        .run('proj-shared');
+      incumbentDb.close();
+
+      const graph = await ProjectGraphRegistry.create();
+      const incumbent = graph.registerStore(incumbentRoot, { requireStoredIdentity: true });
+      expect(incumbent.project_id).toBe('proj-shared');
+
+      const result = await syncBootstrap({ projectRoot: tempDir, slug: SLUG });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('DB_CONNECTION_FAILED');
+      expect(meta('project_id')).toBe('proj-shared');
+      expect(graph.getByStorePath(tempDir)).toBeNull();
+
+      const db = openDb();
+      const counts = {
+        sprints: (db.prepare('SELECT COUNT(*) AS count FROM sprints').get() as { count: number })
+          .count,
+        missions: (db.prepare('SELECT COUNT(*) AS count FROM missions').get() as { count: number })
+          .count,
+        sessions: (db.prepare('SELECT COUNT(*) AS count FROM sessions').get() as { count: number })
+          .count,
+        decisions: (
+          db.prepare('SELECT COUNT(*) AS count FROM strategic_decisions').get() as {
+            count: number;
+          }
+        ).count,
+        learnings: (
+          db.prepare('SELECT COUNT(*) AS count FROM learnings').get() as { count: number }
+        ).count,
+        dependencies: (
+          db.prepare('SELECT COUNT(*) AS count FROM mission_dependencies').get() as {
+            count: number;
+          }
+        ).count,
+      };
+      db.close();
+      expect(counts).toEqual({
+        sprints: 0,
+        missions: 0,
+        sessions: 0,
+        decisions: 0,
+        learnings: 0,
+        dependencies: 0,
+      });
+    } finally {
+      fs.rmSync(incumbentRoot, { recursive: true, force: true });
+    }
   });
 
   // ─── Formatter ──────────────────────────────────────────────────────────────────

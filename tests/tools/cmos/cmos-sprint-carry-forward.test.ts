@@ -16,6 +16,7 @@ import {
   CMOS_SPRINT_ACTIONS,
 } from '../../../src/tools/cmos/cmos-sprint';
 import { CmosDetector } from '../../../src/intelligence/cmos-detector';
+import { ProjectGraphRegistry } from '../../../src/intelligence/project-graph-registry';
 import type { SprintCarryForwardResult } from '../../../src/tools/cmos/cmos-sprint-carry-forward';
 
 // Mock the DashboardClient to avoid real HTTP calls
@@ -478,6 +479,14 @@ describe('cmos_sprint carry_forward action', () => {
 
     expect(result.success).toBe(false);
     expect(result.error?.message).toContain('not found');
+    const db = new Database(dbPath, { readonly: true });
+    const projectId = db.prepare(`SELECT value FROM metadata WHERE key = 'project_id'`).get() as
+      | { value: string }
+      | undefined;
+    db.close();
+    expect(projectId).toBeUndefined();
+    const graph = await ProjectGraphRegistry.create();
+    expect(graph.getByStorePath(tempDir)).toBeNull();
   });
 
   it('handles sprint with no carry-forwards', async () => {

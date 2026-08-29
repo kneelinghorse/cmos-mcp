@@ -7,13 +7,13 @@
  *
  * `getProjectId` falls back to the literal `'unknown-project'` when a store records no identity.
  * Ruling #736 approved that fallback over throwing, on the premise that "every real store carries
- * a non-empty project_id, so the fallback never fires in production". MEASURED 2026-08-27,
- * read-only, with its command:
+ * a non-empty project_id, so the fallback never fires in production". REMEASURED 2026-08-28
+ * with immutable SQLite inspection (#1038), using this fleet-discovery command:
  *
  *     find ~ -maxdepth 7 -path '*&#47;cmos/db/cmos.sqlite' -not -path '*&#47;node_modules/*'
  *
- * → 45 stores; 33 resolve via a recorded `project_id`; 12 collapse to the literal; 1
- * (`semantic-contract`) cannot be classified read-only at all. The fallback fires on twelve, and
+ * → #1038's immutable remeasurement: 45 stores; 32 resolve via a recorded `project_id`; 13
+ * collapse to the literal; 0 are unclassifiable. The fallback fires on thirteen, and
  * has already fired in production: `derekn.com`'s store carries 217 rows stamped with the literal
  * across six tables.
  *
@@ -46,11 +46,10 @@
  * ═══════════════════════════════════════════════════════════════════════════════════════════════
  *
  * EVERY REAL-CLIENT CONSTRUCTION BELOW PASSES AN EXPLICIT `dbPath`, AND THAT IS NOT STYLE (D-9).
- * `client.ts`'s no-explicit-root arm calls `resolveProjectRootEnhanced(undefined, {autoRegister:
- * true})`, which reaches `graph.registerStore(cwd)` → `mintProjectId`, which WRITES to
- * `~/.config/cmos-mcp/project-graph.sqlite`. A test that constructed the client without a dbPath
- * would mint a registry row and fail this mission's own no-write gate for a reason having nothing
- * to do with the code under test.
+ * At s87-m04 shipment, `client.ts`'s no-explicit-root arm auto-registered the CWD and could mint;
+ * explicit dbPath isolated this disclosure test from that independent write. Sprint 88 m08 later
+ * split resolution from registration, but dbPath remains the sharpest way for this historical
+ * no-identity-write gate to bypass all project-root policy and test only `getProjectId`.
  */
 
 import { afterAll, describe, expect, it } from '@jest/globals';
@@ -185,7 +184,7 @@ describe('s87-m04 — an unrecorded identity is disclosed per store, and named h
 
   it('RED (c): a store carrying the literal renders UNATTRIBUTED — and is STILL fenced', () => {
     // BOTH halves, and the second is the load-bearing one. De-fencing on the literal would
-    // de-fence genuinely FOREIGN content: a pull-merged row from any of the twelve collapsing
+    // de-fence genuinely FOREIGN content: a pull-merged row from any of the thirteen collapsing
     // stores also carries it. The standing bias is stated twice in this codebase —
     // "fence-more, never fence-less".
     const rendered = frameInlineIfForeign(
@@ -256,7 +255,7 @@ describe('s87-m04 — an unrecorded identity is disclosed per store, and named h
   }, 60_000);
 
   /**
-   * THE CUT-7 GATE, stated as a NO-WRITE rule rather than a directory rule.
+   * THE CUT-7 GATE, stated as a NO-DIRECT-IDENTITY-WRITE rule rather than a directory rule.
    *
    * An earlier form of this criterion asserted the mission's diff touches no file under
    * `src/intelligence/` — which the mission's own NON-CUTTABLE step makes impossible, since the
@@ -264,7 +263,7 @@ describe('s87-m04 — an unrecorded identity is disclosed per store, and named h
    * fails deterministically when its mission succeeds is the same defect class as one that cannot
    * fail. Both plan-time critic lenses found that independently.
    */
-  describe('CUT 7 — this mission ships NO identity write, asserted mechanically', () => {
+  describe('CUT 7 — this mission adds NO direct identity-write effect, asserted mechanically', () => {
     /**
      * The diff attributable to THIS MISSION, pinned to its own commit range.
      *
@@ -281,6 +280,8 @@ describe('s87-m04 — an unrecorded identity is disclosed per store, and named h
      */
     const M04_RANGE_START = '1a54a79'; // s87-m03's commit
     const M04_RANGE_END = '564a2a6'; // s87-m04's commit
+    const OC1_RANGE_START = 'c1fa8d6'; // commit immediately before the OC-1 repair
+    const OC1_RANGE_END = '8ef5f2e'; // the OC-1 repair
 
     /**
      * s87-m08 — RESOLVE THE RANGE BEFORE DIFFING IT, so an environment that cannot see m04's
@@ -292,8 +293,8 @@ describe('s87-m04 — an unrecorded identity is disclosed per store, and named h
      * that quietly passes when it cannot observe its subject is the defect this sprint is about,
      * and a skipped gate reports green.
      */
-    function missionDiff(): string {
-      for (const sha of [M04_RANGE_START, M04_RANGE_END]) {
+    function commitRangeDiff(start: string, end: string): string {
+      for (const sha of [start, end]) {
         try {
           execFileSync('git', ['cat-file', '-e', `${sha}^{commit}`], {
             cwd: REPO_ROOT,
@@ -301,16 +302,83 @@ describe('s87-m04 — an unrecorded identity is disclosed per store, and named h
           });
         } catch {
           throw new Error(
-            `commit ${sha} is not present in this clone, so CUT-7 cannot observe m04's diff. ` +
+            `commit ${sha} is not present in this clone, so CUT-7 cannot observe the pinned ` +
+              `${start}..${end} diff. ` +
               `This is a SHALLOW-CHECKOUT problem, not a code problem: set fetch-depth: 0 on ` +
               `actions/checkout. Refusing to report green on an unobserved criterion.`
           );
         }
       }
-      return execFileSync('git', ['diff', '-U0', `${M04_RANGE_START}..${M04_RANGE_END}`], {
+      return execFileSync('git', ['diff', '-U0', `${start}..${end}`], {
         cwd: REPO_ROOT,
         encoding: 'utf8',
       });
+    }
+
+    function missionDiff(): string {
+      return commitRangeDiff(M04_RANGE_START, M04_RANGE_END);
+    }
+
+    function forbiddenIdentityWriteAdditions(diff: string): string[] {
+      // Classify the forbidden DIRECT EFFECT, not a list of four historical spellings. Added
+      // lines that are consecutive in one diff hunk are normalized together, so formatting an
+      // SQL statement over several lines does not hide it. The SQL shape catches identity-bearing
+      // writes even when the table is interpolated; the graph shape catches the two APIs whose
+      // contract is to mint/register project identity.
+      //
+      // FALSE-NEGATIVE PROFILE. This is a diff-text gate, not whole-program effect analysis. It
+      // does not infer an indirect call through an innocently named pre-existing wrapper, SQL
+      // assembled from non-consecutive additions/unchanged context, computed subject names that
+      // contain no identity-bearing token, or a new write API outside the two named graph calls.
+      // Those are the exact complement of "direct effect visible in consecutive added src/scripts
+      // code" in the scope sentence above. Comments are excluded by rule because this mission had
+      // to explain the forbidden effect in prose.
+      const identityWriteEffects = [
+        /\b(?:INSERT(?:\s+OR\s+\w+)?\s+INTO|REPLACE\s+INTO|UPDATE)\b[^;]{0,500}?\b(?:metadata|project_id|project_name|tracelab_project_id|cmos_address)\b/gi,
+        /\b(?:mintProjectId|registerStore)\s*\(/g,
+      ];
+      let currentFile = '';
+      const offenders: string[] = [];
+      let addedBlock: string[] = [];
+
+      const flushAddedBlock = (): void => {
+        if (addedBlock.length === 0 || !/^(src|scripts)\//.test(currentFile)) {
+          addedBlock = [];
+          return;
+        }
+        const normalized = addedBlock.join(' ').replace(/\s+/g, ' ').trim();
+        for (const effect of identityWriteEffects) {
+          for (const match of normalized.matchAll(effect)) {
+            offenders.push(`${currentFile}: ${match[0]}`);
+          }
+        }
+        addedBlock = [];
+      };
+
+      for (const line of diff.split('\n')) {
+        const header = line.match(/^\+\+\+ b\/(.+)$/);
+        if (header) {
+          flushAddedBlock();
+          currentFile = header[1];
+          continue;
+        }
+        if (line.startsWith('+') && !line.startsWith('+++')) {
+          const t = line.slice(1).trim();
+          if (
+            t &&
+            !t.startsWith('//') &&
+            !t.startsWith('/*') &&
+            !t.startsWith('*') &&
+            !t.startsWith('--')
+          ) {
+            addedBlock.push(t);
+          }
+        } else {
+          flushAddedBlock();
+        }
+      }
+      flushAddedBlock();
+      return offenders;
     }
 
     it('(a) touches no identity-resolution or minting surface', () => {
@@ -334,23 +402,7 @@ describe('s87-m04 — an unrecorded identity is disclosed per store, and named h
       //    criterion.
       // 2. COMMENTS ARE EXCLUDED. This mission's whole job is to describe the fallback honestly,
       //    so it necessarily discusses minting in prose. Code is what may not do it.
-      let currentFile = '';
-      const offenders: string[] = [];
-      for (const line of missionDiff().split('\n')) {
-        const header = line.match(/^\+\+\+ b\/(.+)$/);
-        if (header) {
-          currentFile = header[1];
-          continue;
-        }
-        if (!line.startsWith('+') || line.startsWith('+++')) continue;
-        if (!/^(src|scripts)\//.test(currentFile)) continue;
-        const t = line.slice(1).trim();
-        if (!t || t.startsWith('//') || t.startsWith('*') || t.startsWith('--')) continue;
-        if (/mintProjectId|registerStore|INTO metadata|UPDATE metadata/.test(t)) {
-          offenders.push(`${currentFile}: ${t}`);
-        }
-      }
-      expect(offenders).toEqual([]);
+      expect(forbiddenIdentityWriteAdditions(missionDiff())).toEqual([]);
 
       // ANTI-VACUITY: the scanner must actually be reading src/ lines, or it proves nothing.
       const srcAdds = missionDiff()
@@ -367,6 +419,48 @@ describe('s87-m04 — an unrecorded identity is disclosed per store, and named h
           { file: '', n: 0 }
         ).n;
       expect(srcAdds).toBeGreaterThan(0);
+    });
+
+    it('(b1) ANTI-VACUITY: catches an effect-shaped project identity write', () => {
+      const planted = [
+        'diff --git a/scripts/planted.ts b/scripts/planted.ts',
+        '+++ b/scripts/planted.ts',
+        '+db.prepare(`UPDATE ${table} SET project_id = ?`).run(projectId);',
+      ].join('\n');
+
+      expect(forbiddenIdentityWriteAdditions(planted)).toEqual([
+        'scripts/planted.ts: UPDATE ${table} SET project_id',
+      ]);
+    });
+
+    it('(b1a) ANTI-VACUITY: catches the same identity write when its SQL spans lines', () => {
+      const planted = [
+        'diff --git a/scripts/planted.ts b/scripts/planted.ts',
+        '+++ b/scripts/planted.ts',
+        '+db.prepare(`',
+        '+  UPDATE ${table}',
+        '+  SET project_id = ?',
+        '+  WHERE legacy = 1',
+        '+`).run(projectId);',
+      ].join('\n');
+
+      expect(forbiddenIdentityWriteAdditions(planted)).toHaveLength(1);
+    });
+
+    it('(b1b) ANTI-VACUITY: catches direct SQL assembled across adjacent string literals', () => {
+      const planted = [
+        'diff --git a/scripts/planted.ts b/scripts/planted.ts',
+        '+++ b/scripts/planted.ts',
+        "+db.prepare('UPDATE ' + table + ' SET project_id = ?').run(projectId);",
+      ].join('\n');
+
+      expect(forbiddenIdentityWriteAdditions(planted)).toHaveLength(1);
+    });
+
+    it('(b2) POSITIVE FIRE: catches the identity rewrite in the pinned OC-1 commit', () => {
+      expect(
+        forbiddenIdentityWriteAdditions(commitRangeDiff(OC1_RANGE_START, OC1_RANGE_END))
+      ).toEqual(['scripts/repair-unknown-project.ts: UPDATE ${table} SET project_id']);
     });
 
     it('(c) the only src/intelligence/ file it touches is the tag constructor', () => {

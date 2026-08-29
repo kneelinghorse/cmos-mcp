@@ -12,9 +12,10 @@ import { z } from 'zod';
 import { withClient } from './client';
 import type { CmosToolResult } from './types';
 import { createError, createSuccess } from './errors';
-import { appendWarnings } from './format-warnings';
+import { appendWarnings, attachWarnings } from './format-warnings';
 import { ensureSprintSummaryView } from './schema-migrations';
-import { parkedColumn, withViewContext } from './sprint-summary-read';
+import { sprintIdOrderSql } from './sprint-ordering';
+import { parkedColumn } from './sprint-summary-read';
 
 /**
  * Sprint list item with mission statistics.
@@ -166,12 +167,14 @@ export async function cmosSprintList(
 ): Promise<CmosToolResult<CmosSprintListResult>> {
   const limit = params.limit ?? 20;
 
-  return withClient(
+  const warnings: string[] = [];
+  const result = await withClient(
     (client) => {
       // s86-m08: bring a pre-migration store's sprint_summary up to the current counting
       // rule before reading it. No-op (zero writes) once current; never destroys a
       // same-named base table; a read-only store surfaces a warning instead of throwing.
       const viewMigration = ensureSprintSummaryView(client);
+      warnings.push(...(viewMigration.warnings ?? []));
 
       // Build query dynamically based on filters
       const { sql, countSql, queryParams } = buildQuery(
@@ -184,10 +187,7 @@ export async function cmosSprintList(
       const countResult = client.getOne<{ count: number }>(countSql, queryParams.slice(0, -1));
       if (!countResult.success || !countResult.data) {
         return createError<CmosSprintListResult>(
-          withViewContext(
-            countResult.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to get sprint count' },
-            viewMigration
-          )
+          countResult.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to get sprint count' }
         );
       }
       const totalCount = countResult.data.count;
@@ -196,10 +196,7 @@ export async function cmosSprintList(
       const sprintsResult = client.getMany<SprintSummaryRow>(sql, queryParams);
       if (!sprintsResult.success || !sprintsResult.data) {
         return createError<CmosSprintListResult>(
-          withViewContext(
-            sprintsResult.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to get sprints' },
-            viewMigration
-          )
+          sprintsResult.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to get sprints' }
         );
       }
 
@@ -223,6 +220,7 @@ export async function cmosSprintList(
     },
     { projectRoot: params.projectRoot }
   );
+  return attachWarnings(result, warnings);
 }
 
 /**
@@ -258,7 +256,7 @@ function buildQuery(
     ORDER BY
       CASE WHEN start_date IS NULL THEN 1 ELSE 0 END,
       start_date DESC,
-      sprint_id DESC
+      ${sprintIdOrderSql('sprint_id', 'DESC')}
     LIMIT ?
   `;
 
@@ -303,6 +301,7 @@ export function formatSprintListForLLM(result: CmosToolResult<CmosSprintListResu
       lines.push(`Suggestion: ${error.suggestion}`);
     }
 
+    appendWarnings(lines, result);
     return lines.join('\n');
   }
 
@@ -319,6 +318,7 @@ export function formatSprintListForLLM(result: CmosToolResult<CmosSprintListResu
 
   if (data.sprints.length === 0) {
     lines.push('No sprints found matching the filters.');
+    appendWarnings(lines, result);
     return lines.join('\n');
   }
 

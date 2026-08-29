@@ -48,7 +48,14 @@ async function createCmosDatabase(workspace: string): Promise<string> {
       type TEXT,
       content TEXT
     );
+    CREATE TABLE IF NOT EXISTS metadata (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
   `);
+  db.prepare("INSERT INTO metadata (key, value) VALUES ('project_id', ?)").run(
+    `test-${path.basename(workspace)}`
+  );
   db.close();
 
   return dbPath;

@@ -171,6 +171,45 @@ export function seedCmosDb(projectRoot: string, options: SeedCmosDbOptions = {})
   return dbPath;
 }
 
+/**
+ * Give an independently-writable test store its own durable project identity.
+ *
+ * Real-store tests copy one source database into several temp project roots. Those copies are
+ * separate projects for the duration of the test, so retaining the source project_id would model
+ * an invalid state: two live stores claiming one identity. Keep metadata and the canonical
+ * project_identity context aligned; historical provenance rows deliberately remain historical.
+ */
+export function reidentifyCmosTestStore(
+  projectRoot: string,
+  projectId = `test-${path.basename(path.resolve(projectRoot))}`
+): string {
+  const dbPath = path.join(projectRoot, 'cmos', 'db', 'cmos.sqlite');
+  const db = new Database(dbPath);
+  try {
+    db.transaction(() => {
+      db.prepare(`INSERT OR REPLACE INTO metadata (key, value) VALUES ('project_id', ?)`).run(
+        projectId
+      );
+
+      const context = db
+        .prepare(`SELECT content FROM contexts WHERE id = 'project_identity'`)
+        .get() as { content: string } | undefined;
+      if (context) {
+        const parsed = JSON.parse(context.content) as Record<string, unknown>;
+        parsed.project_id = projectId;
+        parsed.updated_at = new Date().toISOString();
+        db.prepare(
+          `UPDATE contexts SET content = ?, updated_at = ? WHERE id = 'project_identity'`
+        ).run(JSON.stringify(parsed), parsed.updated_at);
+      }
+    })();
+  } finally {
+    db.close();
+  }
+  CmosDetector.resetInstance();
+  return projectId;
+}
+
 export async function createSeededCmosProject(
   options: SeedCmosDbOptions = {},
   prefix = 'cmos-seeded-'

@@ -16,7 +16,7 @@ import { withClient, type CmosDatabaseClient } from './client';
 import type { CmosToolResult } from './types';
 import { createError, createSuccess, CmosErrors } from './errors';
 import { ensureNextStepsTable, type NextStepStatus } from './schema-migrations';
-import { appendWarnings, appendWriteFailures } from './format-warnings';
+import { appendWarnings, appendWriteFailures, attachWarnings } from './format-warnings';
 import { countWrite, type WriteFailure } from './write-guard';
 
 /**
@@ -116,9 +116,10 @@ export async function cmosNextSteps(
     });
   }
 
-  return withClient(
+  const migrationWarnings: string[] = [];
+  const result = await withClient(
     (client) => {
-      ensureNextStepsTable(client);
+      migrationWarnings.push(...(ensureNextStepsTable(client).warnings ?? []));
 
       switch (action) {
         case 'list':
@@ -138,6 +139,7 @@ export async function cmosNextSteps(
     },
     { projectRoot: params.projectRoot }
   );
+  return attachWarnings(result, migrationWarnings);
 }
 
 interface NextStepRow {
@@ -232,7 +234,7 @@ function transitionNextSteps(
     // s87-m06: that zero is now NAMED rather than merely not-counted. It is the value countWrite
     // already returns; nothing new is computed.
     const changed = countWrite(result, writeSink, `${op} #${id}`);
-    if (changed === 0) unmatchedIds.push(id);
+    if (result.success && (result.data?.changes ?? 0) === 0) unmatchedIds.push(id);
     affected += changed;
   }
 
@@ -281,7 +283,7 @@ function carryNextSteps(
     // Caller-supplied id: a zero from a WHERE that matched no transitionable row is ordinary and
     // is not a write failure. s87-m06 names it instead of discarding it.
     const changed = countWrite(result, writeSink, `next_steps.carry #${id}`);
-    if (changed === 0) unmatchedIds.push(id);
+    if (result.success && (result.data?.changes ?? 0) === 0) unmatchedIds.push(id);
     affected += changed;
   }
 

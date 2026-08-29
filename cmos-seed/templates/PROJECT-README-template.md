@@ -59,14 +59,14 @@
 
 ## Project Management with CMOS
 
-This project uses CMOS for mission-based development workflow.
+This project uses CMOS for project memory and the workflow selected by its active tier.
 
 **For contributors**:
 - Mission tracking, project history and session logs all live in `cmos/db/cmos.sqlite`
 
 **For AI agents**:
 - Application code guidance: See `agents.md` (this project root)
-- CMOS operations guidance: See `cmos/tiers/build.md`
+- CMOS operations guidance: See the active `cmos/tiers/{tier}.md`
 - Build session prompts: See `cmos/docs/build-session-prompt.md`
 
 **CMOS operations** (via the CMOS MCP tools, from an agent session):
@@ -100,9 +100,8 @@ cmos_db(action="health")
 The `cmos/` directory contains project management infrastructure:
 - Mission and sprint tracking
 - Context and session history
-- Planning and orchestration scripts
+- Tier guides, templates, foundational documents, and CMOS documentation
 
 **Do not write application code in `cmos/`** - it's for project management only.
 
 See `cmos/README.md` for CMOS-specific documentation.
-

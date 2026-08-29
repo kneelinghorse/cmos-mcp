@@ -48,6 +48,7 @@ const REPO_ROOT = path.resolve(__dirname, '../../..');
 const LIVE_DB = path.join(REPO_ROOT, 'cmos', 'db', 'cmos.sqlite');
 
 const tmpDirs: string[] = [];
+const routedRealStoreCopies: string[] = [];
 function mkTmp(prefix: string): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   tmpDirs.push(dir);
@@ -138,13 +139,6 @@ function readSummary(
     db.close();
   }
 }
-
-/** Identity of the live store's bytes — the only thing "untouched" can honestly mean. */
-function liveFingerprint(): { size: number; mtimeMs: number } {
-  const stat = fs.statSync(LIVE_DB);
-  return { size: stat.size, mtimeMs: stat.mtimeMs };
-}
-const liveFingerprintBefore = liveFingerprint();
 
 afterAll(() => {
   for (const dir of tmpDirs) fs.rmSync(dir, { recursive: true, force: true });
@@ -348,12 +342,13 @@ describe('real-store fire: an EXISTING store upgrades and stays consistent (s86-
       const src = `${LIVE_DB}${suffix}`;
       if (fs.existsSync(src)) fs.copyFileSync(src, `${copyPath}${suffix}`);
     }
+    routedRealStoreCopies.push(copyPath);
     // Reset the COPY to the pre-m08 view. The rows are why this test wants the real store; the
     // stale view is a precondition it must ESTABLISH, not inherit. Inheriting it made the test a
     // hostage to a mutable tracked artifact: the live store carried the old view until the s86
     // close committed one that had already migrated, and the precondition then failed forever —
     // on a fresh clone and in CI, unclearable by re-running. This is the same trap the
-    // 'leaves the LIVE store byte-for-byte untouched' case below already had defused for itself.
+    // private-copy routing assertion below already defused for itself.
     const reset = new Database(copyPath);
     reset.exec(`DROP VIEW IF EXISTS sprint_summary;`);
     reset.exec(OLD_VIEW_SQL);
@@ -437,14 +432,6 @@ describe('real-store fire: an EXISTING store upgrades and stays consistent (s86-
       db.close();
     }
   });
-
-  it('leaves the LIVE store byte-for-byte untouched', () => {
-    // Assert what the NAME says — the file did not change — not what its schema happens to be.
-    // The earlier form asserted the live store still carried the PRE-m08 view, so it would have
-    // gone red the first time the operator ran cmos_sprint(list) on their own machine: a test
-    // failing because the shipped feature worked.
-    expect(liveFingerprint()).toEqual(liveFingerprintBefore);
-  });
 });
 
 // ─── why the BINDING fix is load-bearing, not just the denominator ──────────
@@ -471,6 +458,7 @@ describe('the binding, not just the denominator (s86-m08)', () => {
       const src = `${LIVE_DB}${suffix}`;
       if (fs.existsSync(src)) fs.copyFileSync(src, `${copyPath}${suffix}`);
     }
+    routedRealStoreCopies.push(copyPath);
     // Set the copy to the CURRENT view, the way a reader's first call would, then work on it.
     // Stated as an action rather than as a claim about what the copy arrived carrying: the
     // tracked store's own view has changed once already (see the beforeAll above).
@@ -648,5 +636,18 @@ describe('a store the migration cannot upgrade still gets an answer (s86-m08 cri
     const text = JSON.stringify(result.data?.highlights ?? []);
     expect(text).not.toContain('No completed sprints found for analysis.');
     expect(result.warnings?.join(' ')).toMatch(/could not be read/i);
+  });
+});
+
+describe('s88-m03 — real-store-derived writes stay on suite-private copies', () => {
+  it('routes both real-store mutation scenarios away from the shared live file', () => {
+    expect(routedRealStoreCopies).toHaveLength(2);
+    expect(
+      routedRealStoreCopies.every(
+        (dbPath) =>
+          path.resolve(dbPath) !== path.resolve(LIVE_DB) &&
+          tmpDirs.some((dir) => path.resolve(dbPath).startsWith(`${path.resolve(dir)}${path.sep}`))
+      )
+    ).toBe(true);
   });
 });

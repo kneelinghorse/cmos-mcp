@@ -374,6 +374,38 @@ describe('cmos_mission_complete lifecycle hooks', () => {
     expect(sprintCloseoutWarnings[0]).toContain('cmos_sprint(action="complete")');
   });
 
+  it('does not warn to close a sprint that is already completed', async () => {
+    const db = new Database(testDb.dbPath);
+    db.exec(`
+      INSERT INTO sprints (id, title, focus, status)
+      VALUES ('sprint-completed', 'Completed Sprint', 'Already closed', 'Completed');
+      INSERT INTO missions (id, sprint_id, name, status, objective)
+      VALUES (
+        'm-completed-sprint',
+        'sprint-completed',
+        'Final mission in completed sprint',
+        'In Progress',
+        'Finish work without reopening sprint closeout'
+      );
+    `);
+    db.close();
+
+    CmosDetector.resetInstance();
+
+    const result = await cmosMissionComplete({
+      projectRoot: testDb.tempDir,
+      missionId: 'm-completed-sprint',
+      notes: 'Final work completed after sprint close',
+      decisions: ['Preserve completed sprint status'],
+    });
+
+    expect(result.success).toBe(true);
+    const sprintCloseoutWarnings = (result.warnings ?? []).filter((warning) =>
+      warning.includes('cmos_sprint(action="complete")')
+    );
+    expect(sprintCloseoutWarnings).toHaveLength(0);
+  });
+
   it('does not warn about sprint closeout when other missions remain', async () => {
     // m-a1 is one of two missions in sprint-a
     const result = await cmosMissionComplete({

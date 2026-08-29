@@ -20,7 +20,7 @@ import {
   ensureConstraintEvergreen,
   type ConstraintStatus,
 } from './schema-migrations';
-import { appendWarnings, appendWriteFailures } from './format-warnings';
+import { appendWarnings, appendWriteFailures, attachWarnings } from './format-warnings';
 import { countWrite, type WriteFailure } from './write-guard';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -150,13 +150,14 @@ export async function cmosConstraints(
     });
   }
 
-  return withClient(
+  const migrationWarnings: string[] = [];
+  const result = await withClient(
     (client) => {
-      ensureConstraintsTable(client);
+      migrationWarnings.push(...(ensureConstraintsTable(client).warnings ?? []));
       // Sprint 82 m01: ensure last_reviewed_at exists so review/reaffirm can read+bump it.
-      ensureConstraintReviewTimestamp(client);
+      migrationWarnings.push(...(ensureConstraintReviewTimestamp(client).warnings ?? []));
       // s84-m05: ensure the durable `evergreen` flag column exists (excluded from staleness).
-      ensureConstraintEvergreen(client);
+      migrationWarnings.push(...(ensureConstraintEvergreen(client).warnings ?? []));
 
       switch (action) {
         case 'list':
@@ -179,6 +180,7 @@ export async function cmosConstraints(
     },
     { projectRoot: params.projectRoot }
   );
+  return attachWarnings(result, migrationWarnings);
 }
 
 function listConstraints(

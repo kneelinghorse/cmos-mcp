@@ -13,7 +13,7 @@ import type { CmosToolResult, Sprint } from './types';
 import { createError, createSuccess, CmosErrors, CMOS_ERROR_CODES } from './errors';
 import { isOpenStatus } from './terminal-status';
 import { buildDemotionWarning, writeSingleCurrentSprint } from './sprint-current-invariant';
-import { appendWarnings } from './format-warnings';
+import { appendWarnings, attachWarnings } from './format-warnings';
 
 /**
  * Fields that can be updated on a sprint.
@@ -250,10 +250,15 @@ export async function cmosSprintUpdate(
 
       const invariant = writeSingleCurrentSprint(client, sprintId, applyUpdate);
       if (!invariant.success) {
-        return createError<SprintUpdateResult>(invariant.error!);
+        return attachWarnings(
+          createError<SprintUpdateResult>(invariant.error!),
+          invariant.warnings ?? []
+        );
       }
       const warning = buildDemotionWarning(invariant.data!.demoted);
-      return success(warning ? [warning] : undefined);
+      const warnings = [...(invariant.warnings ?? [])];
+      if (warning) warnings.push(warning);
+      return success(warnings.length > 0 ? warnings : undefined);
     },
     { projectRoot: params.projectRoot }
   );
@@ -275,6 +280,7 @@ export function formatSprintUpdateForLLM(result: CmosToolResult<SprintUpdateResu
       lines.push(`Suggestion: ${error.suggestion}`);
     }
 
+    appendWarnings(lines, result);
     return lines.join('\n');
   }
 

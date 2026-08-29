@@ -21,7 +21,7 @@ import {
   AGENT_FEEDBACK_STATUSES,
   type AgentFeedbackStatus,
 } from './schema-migrations';
-import { appendWarnings } from './format-warnings';
+import { appendWarnings, attachWarnings } from './format-warnings';
 
 /** Valid actions on the cmos_feedback consolidated tool. */
 export const CMOS_FEEDBACK_ACTIONS = ['list', 'triage', 'resolve', 'archive'] as const;
@@ -208,9 +208,10 @@ export async function cmosFeedback(
   params: CmosFeedbackParams
 ): Promise<CmosToolResult<CmosFeedbackResult>> {
   const action = params.action;
-  return withClientValidated<CmosFeedbackResult>(
+  const warnings: string[] = [];
+  const result = await withClientValidated<CmosFeedbackResult>(
     (client) => {
-      ensureAgentFeedbackTable(client);
+      warnings.push(...(ensureAgentFeedbackTable(client).warnings ?? []));
 
       if (action === 'list') {
         const status = params.status ?? 'open';
@@ -352,6 +353,7 @@ export async function cmosFeedback(
     },
     { projectRoot: params.projectRoot }
   );
+  return attachWarnings(result, warnings);
 }
 
 export function formatFeedbackForLLM(

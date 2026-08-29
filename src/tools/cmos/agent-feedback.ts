@@ -46,7 +46,7 @@ export function recordAgentFeedback(
     return { feedbackId: null, sanitizedFields: [], warnings: [] };
   }
 
-  ensureAgentFeedbackTable(client);
+  const warnings = [...(ensureAgentFeedbackTable(client).warnings ?? [])];
 
   const sanitizedFields: SanitizedFieldReport[] = [];
   const sanitation = sanitizeContentField(trimmed);
@@ -59,7 +59,7 @@ export function recordAgentFeedback(
 
   const cleaned = sanitation.cleaned;
   if (!cleaned) {
-    return { feedbackId: null, sanitizedFields, warnings: [] };
+    return { feedbackId: null, sanitizedFields, warnings };
   }
 
   const now = new Date().toISOString();
@@ -78,7 +78,6 @@ export function recordAgentFeedback(
     ]
   );
 
-  const warnings: string[] = [];
   checkWrite(insertResult, warnings, 'agent feedback insert');
 
   const feedbackId =

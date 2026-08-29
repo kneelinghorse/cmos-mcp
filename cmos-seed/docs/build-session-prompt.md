@@ -11,22 +11,24 @@
 ```
 We're running a CMOS build session. If anything is unclear, pause and ask before proceeding.
 
-CMOS uses MCP tools for database operations. Start by getting context:
+CMOS uses MCP tools for database operations. Open the session with the bundled review tool:
 
-1. ONBOARD: Call cmos_agent_onboard() to get project state
-   - Verify project identity (project_id, project_name)
-   - Check you're working on the correct project database
-2. HEALTH CHECK: Call cmos_db(action="health") to verify database
-3. LOAD RULES: Read cmos/tiers/build.md for project rules
+1. REVIEW: Call cmos_review() to get a ≤4KB project digest
+   - Returns project identity, current sprint, project-scoped work queue,
+     recent decisions, freshness, and top-3 next_actions
+   - Replaces the older onboard + context view + mission status opener
+2. LOAD RULES: Read agents.md for repository rules
 
 Then run missions in a loop:
 
 1. SELECT NEXT: Call cmos_mission(action="status") to see work queue
    - Priority: In Progress → Current → Queued
+   - Pass includeBlocked=true to surface blocked work
 
 2. START: Call cmos_mission_transition(action="start", missionId="<id>")
    - Logs start event to database
    - Transitions to In Progress
+   - Surfaces relevant past decisions via FTS5
 
 3. EXECUTE: Actually implement the work
    - Write real code, not stubs
@@ -37,6 +39,7 @@ Then run missions in a loop:
 4. COMPLETE: Call cmos_mission_transition(action="complete", missionId="<id>", notes="<what was done>")
    - Marks completed in database
    - Logs completion event
+   - Optionally pass decisions=["..."] and agentFeedback="..." when the host preserves structured arguments
 
 5. VERIFY: Call cmos_mission(action="status") to confirm state
 
@@ -52,11 +55,12 @@ Loop until all missions complete or you need to pause.
 ```
 CMOS build loop:
 
-1. Status: cmos_mission(action="status")
-2. Start: cmos_mission_transition(action="start", missionId="...")
-3. Execute: Implement fully, test thoroughly
-4. Complete: cmos_mission_transition(action="complete", missionId="...", notes="...")
-5. Repeat
+1. Review: cmos_review()
+2. Status: cmos_mission(action="status", includeBlocked=true)
+3. Start: cmos_mission_transition(action="start", missionId="...")
+4. Execute: Implement fully, test thoroughly
+5. Complete: cmos_mission_transition(action="complete", missionId="...", notes="...")
+6. Repeat
 ```
 
 ---
@@ -66,8 +70,8 @@ CMOS build loop:
 **Database First**:
 
 - SQLite is source of truth
-- All state managed via MCP tools
-- No file mirrors to maintain
+- Database-backed operational state is managed via MCP tools
+- Registered foundational documents remain durable files; generated exports are views
 
 **Validation Checkpoints**:
 
@@ -104,17 +108,10 @@ If mission blocks, document needs, end session.
 ```
 You: [Paste Session Initialization Prompt]
 
-Agent: Loaded. Running cmos_agent_onboard()... Found next mission: s16-m01
+Agent: Loaded. Running cmos_review()... Found next mission: s16-m01
 
-You: Go ahead
-
-Agent: [Starts, implements, tests, completes, validates]
-       Next mission: s16-m02. Ready to start?
-
-You: Yes
-
-Agent: [Starts, implements, tests, completes, validates]
-       Next mission: s16-m03. Ready?
+Agent: [Starts, implements, tests, completes, validates; continues through the queue]
+       Next mission: s16-m03.
 
 You: Pause there, let's review
 ```
@@ -123,15 +120,15 @@ You: Pause there, let's review
 
 ## Project Identity Validation
 
-The onboard response includes project identity:
+The review response includes project identity:
 
-- `project.id` - Unique project identifier
 - `project.name` - Human-readable project name
-- `project.tracelabProjectId` - Linked TraceLab project (if any)
+- `project.cmos_address` - Canonical CMOS address when configured
+- `localProjectId` - Identifier recorded by the local store
 
 **Verify you're working on the correct project** before executing missions. If the project identity doesn't match your expectations, you may have the wrong database.
 
 ---
 
-**Last Updated**: 2025-12-29
+**Last Updated**: 2026-08-28
 **For**: Build session mission loops

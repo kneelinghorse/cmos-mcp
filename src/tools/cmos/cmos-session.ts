@@ -10,6 +10,7 @@
 
 import { z } from 'zod';
 import { createError, CmosErrors, VALID_SESSION_TYPES } from './errors';
+import { appendWarnings } from './format-warnings';
 import type { ActionParamMap, CmosToolResult } from './types';
 import {
   cmosSessionList,
@@ -71,6 +72,7 @@ export const CMOS_SESSION_ACTION_PARAMS: ActionParamMap<CmosSessionAction, CmosS
     'missionId',
     'evidence',
     'citesLearningIds',
+    'evergreen',
     'projectRoot',
   ],
   complete: [
@@ -162,7 +164,7 @@ export const cmosSessionSchema = z
       .string()
       .optional()
       .describe(
-        'Associated mission ID. On capture, stamps the decision/learning/next-step row; on complete, stamps the decisions[] and nextSteps[] rows this call materializes.'
+        'Associated mission ID. On capture, stamps immediate decision/learning rows and preserves provenance for a next-step row materialized at session close; on complete, stamps the decisions[] and nextSteps[] rows this call materializes.'
       ),
     evidence: z
       .array(z.object({ type: z.string(), id: z.string() }))
@@ -173,6 +175,12 @@ export const cmosSessionSchema = z
       .optional()
       .describe(
         'Learning IDs this capture/decision cites. Bumps last_reviewed_at on each — applies to capture(category=decision|learning) and complete(decisions[]).'
+      ),
+    evergreen: z
+      .boolean()
+      .optional()
+      .describe(
+        'Whether a learning is exempt from staleness archival. Applies only to category="learning" on the capture action.'
       ),
     // complete params
     summary: z
@@ -277,7 +285,7 @@ export const cmosSessionToolDefinition = {
       missionId: {
         type: 'string',
         description:
-          'Associated mission ID. On capture, stamps the decision/learning/next-step row; on complete, stamps the decisions[] and nextSteps[] rows this call materializes.',
+          'Associated mission ID. On capture, stamps immediate decision/learning rows and preserves provenance for a next-step row materialized at session close; on complete, stamps the decisions[] and nextSteps[] rows this call materializes.',
       },
       evidence: {
         type: 'array',
@@ -296,6 +304,11 @@ export const cmosSessionToolDefinition = {
         items: { type: 'integer', minimum: 1 },
         description:
           'Learning IDs this capture/decision cites. Bumps last_reviewed_at on each — applies to capture(category=decision|learning) and complete(decisions[]).',
+      },
+      evergreen: {
+        type: 'boolean',
+        description:
+          'Whether a learning is exempt from staleness archival. Applies only to category="learning" on the capture action.',
       },
       summary: { type: 'string', description: 'Session summary for complete action' },
       nextSteps: {
@@ -374,6 +387,7 @@ export async function cmosSession(
         evidence: params.evidence,
         agent: params.agent,
         citesLearningIds: params.citesLearningIds,
+        evergreen: params.evergreen,
         projectRoot: params.projectRoot,
       } as CmosSessionCaptureParams);
     case 'complete': {
@@ -454,7 +468,11 @@ export function formatSessionForLLM(
       return formatSessionCompleteForLLM(result as CmosToolResult<CmosSessionCompleteResult>);
     case 'search':
       return formatSessionSearchForLLM(result as CmosToolResult<CmosSessionSearchResult>);
-    default:
-      return result.success ? '✓ Session action completed' : '❌ Failed to execute cmos_session';
+    default: {
+      if (!result.success) return '❌ Failed to execute cmos_session';
+      const lines = ['✓ Session action completed'];
+      appendWarnings(lines, result);
+      return lines.join('\n');
+    }
   }
 }

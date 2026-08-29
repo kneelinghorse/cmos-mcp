@@ -14,6 +14,7 @@
 import { promises as fs } from 'fs';
 import os from 'os';
 import path from 'path';
+import Database from 'better-sqlite3';
 
 import { CmosDetector } from '../../src/intelligence/cmos-detector';
 import { ProjectGraphRegistry } from '../../src/intelligence/project-graph-registry';
@@ -22,6 +23,7 @@ import {
   resolveProjectRootPath,
   ProjectResolutionError,
 } from '../../src/intelligence/project-resolution';
+import { seedCmosDb } from '../helpers/seedCmosDb';
 
 async function createTempWorkspace(prefix: string): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -91,8 +93,8 @@ describe('resolveProjectRootEnhanced (graph-native)', () => {
     expect(result.projectRoot).toBe(workspace);
   });
 
-  it('step 3: auto-registers discovered project into the GRAPH', async () => {
-    await ensureCmosDatabase(workspace);
+  it('step 3: auto-registers a discovered store that already records identity into the GRAPH', async () => {
+    seedCmosDb(workspace, { projectId: 'resolver-id', projectName: 'resolver-project' });
     process.cwd = () => workspace;
 
     const result = await resolveProjectRootEnhanced(undefined, {
@@ -104,7 +106,31 @@ describe('resolveProjectRootEnhanced (graph-native)', () => {
 
     // Verify it landed in the graph registry (not a JSON file).
     const graph = ProjectGraphRegistry.getInstance({ configDir });
-    expect(graph.getByStorePath(workspace)).not.toBeNull();
+    expect(graph.getByStorePath(workspace)).toBe('resolver-id');
+  });
+
+  it('step 3: auto-discovery does not mint or register an identity-less store', async () => {
+    const dbPath = seedCmosDb(workspace, { projectId: '', projectName: 'identityless' });
+    process.cwd = () => workspace;
+
+    const result = await resolveProjectRootEnhanced(undefined, {
+      autoRegister: true,
+      silent: true,
+    });
+    expect(result.source).toBe('auto-discover');
+    expect(result.autoRegistered).toBeUndefined();
+
+    const graph = ProjectGraphRegistry.getInstance({ configDir });
+    expect(graph.getByStorePath(workspace)).toBeNull();
+    const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    try {
+      const row = db.prepare("SELECT value FROM metadata WHERE key = 'project_id'").get() as
+        | { value: string }
+        | undefined;
+      expect(row?.value ?? '').toBe('');
+    } finally {
+      db.close();
+    }
   });
 
   it('step 4: falls back to the graph default project', async () => {

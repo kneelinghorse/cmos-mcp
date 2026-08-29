@@ -10,6 +10,7 @@
 
 import { z } from 'zod';
 import { createError, CmosErrors } from './errors';
+import { appendWarnings } from './format-warnings';
 import type { ActionParamMap, CmosToolResult } from './types';
 import {
   cmosLearningsList,
@@ -333,9 +334,11 @@ export function formatLearningsForLLM(
       return formatLearningsUpdateForLLM(result as CmosToolResult<CmosLearningsUpdateResult>);
     case 'reaffirm':
       return formatLearningsReaffirmForLLM(result as CmosToolResult<CmosLearningsReaffirmResult>);
-    default:
-      return result.success
-        ? '✓ Learnings action completed'
-        : '❌ Failed to execute cmos_learnings';
+    default: {
+      if (!result.success) return '❌ Failed to execute cmos_learnings';
+      const lines = ['✓ Learnings action completed'];
+      appendWarnings(lines, result);
+      return lines.join('\n');
+    }
   }
 }

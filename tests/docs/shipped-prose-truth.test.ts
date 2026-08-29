@@ -83,6 +83,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as ts from 'typescript';
 import { CMOS_TOOL_DEFINITIONS } from '../../src/tools/cmos';
+import { lastUpdatedBodyChangeFindings } from './last-updated-body-oracle';
+import { inspectNpmPack, toPackagePath } from './npm-pack-inspection';
 
 const REPO_ROOT = path.resolve(__dirname, '../..');
 const r = (...p: string[]): string => path.join(REPO_ROOT, ...p);
@@ -92,9 +94,9 @@ const r = (...p: string[]): string => path.join(REPO_ROOT, ...p);
  *
  * The two roles of files[] are different and conflating them was a plan-time defect caught by a
  * critic: files[] is the REACHABILITY ORACLE (what actually ships), but it cannot be the TARGET
- * SET, because `cmos-seed` is a files[] entry and that would drag in cmos-seed/docs/** — six
- * files whose stale stamps this sprint is explicitly forbidden to fix. A gate specified RED on a
- * surface nobody may repair is exactly how a gate acquires an allowlist.
+ * SET because directory entries mix prose with schemas and configuration. Every shipped prose
+ * subtree in scope is named below, so a newly noticed subtree cannot remain absent from both the
+ * targets and exclusions.
  */
 const PUBLIC_TARGETS = [
   'README.md',
@@ -138,35 +140,34 @@ const SEED_DOC_TARGETS = fs
   .map((f) => `cmos-seed/docs/${f}`)
   .sort();
 
-const TARGETS = [...PUBLIC_TARGETS, ...SEED_DOC_TARGETS, ...presentPrivateTargets];
+/**
+ * s88-m03 — both templates ship inside package.json's `cmos-seed` entry and are copied into every
+ * initialized project. They were previously absent from BOTH the targets and exclusions: the
+ * exact undeclared-scope failure this instrument's header says it prevents.
+ */
+const SEED_TEMPLATE_TARGETS = fs
+  .readdirSync(r('cmos-seed/templates'))
+  .filter((f) => f.endsWith('.md'))
+  .map((f) => `cmos-seed/templates/${f}`)
+  .sort();
+
+/** Tier guides are executable agent instruction prose, not inert configuration. */
+const SEED_TIER_TARGETS = fs
+  .readdirSync(r('cmos-seed/tiers'))
+  .filter((f) => f.endsWith('.md'))
+  .map((f) => `cmos-seed/tiers/${f}`)
+  .sort();
+
+const TARGETS = [
+  ...PUBLIC_TARGETS,
+  ...SEED_DOC_TARGETS,
+  ...SEED_TEMPLATE_TARGETS,
+  ...SEED_TIER_TARGETS,
+  ...presentPrivateTargets,
+];
 
 /** Excluded from the target set, each with the RULE that excludes it. Printed, never silent. */
 const EXCLUSIONS: Array<{ pathGlob: string; reason: string }> = [
-  {
-    // s87-m04 — NARROWED. This used to exclude cmos-seed/docs/** ENTIRELY, on the grounds that the
-    // whole directory carried stale stamps a gate could only green with an allowlist entry. That
-    // reasoning is right about the DATE stamps and wrong about everything else in those files, and
-    // the difference is whether an oracle exists.
-    //
-    // NOW IN SCOPE (an oracle exists): identifiers — a column, table or field name the seed docs
-    // teach can be checked against cmos-seed/db/schema.sql, which is generated from the same
-    // constant the tarball ships. Measured cost of the widening: exactly ONE new finding,
-    // sqlite-schema-reference.md documenting telemetry_events.event_data where the schema declares
-    // `payload`. A consumer following that doc gets `no such column`.
-    //
-    // STILL EXCLUDED (no oracle): the six **Last Updated** date stamps. The existing arm's oracle
-    // is "not older than the newest CHANGELOG release", and applying it here makes all six red
-    // with exactly one cheap remedy — bump the date. That is a claim the file was reviewed, made
-    // by the act of not reviewing it: this sprint's own defect class inside its own gate. #539
-    // carries them, re-scoped: the stamp is the OUTPUT of a per-file content review, not a
-    // substitute for one. They ship stale in this release, and the close says so.
-    pathGlob: 'cmos-seed/docs/** — DATE STAMPS ONLY',
-    reason:
-      'The six **Last Updated** stamps in cmos-seed/docs/** have NO ORACLE: the only cheap way to ' +
-      'green them is to bump a date on a document nobody re-read, which asserts a review by not ' +
-      'doing one. Identifier claims in those same files ARE checked (s87-m04) against the ' +
-      'generated seed schema. Carried by #539 as a per-file content review, not a stamp bump.',
-  },
   {
     pathGlob: 'cmos/planning/**',
     reason:
@@ -179,7 +180,19 @@ const EXCLUSIONS: Array<{ pathGlob: string; reason: string }> = [
       'A release history. Every entry describes the surface AT THAT VERSION; identifiers removed ' +
       'since are supposed to still appear under their old release heading.',
   },
+  {
+    pathGlob: 'cmos-seed/foundational-docs/**',
+    reason:
+      'Fill-in-the-blank project scaffolds. Tokens such as `operation_name` and `tool_name` are ' +
+      'deliberate consumer placeholders, not claims that those identifiers exist in CMOS.',
+  },
 ];
+
+function isExplicitlyExcluded(rel: string): boolean {
+  return EXCLUSIONS.some(({ pathGlob }) =>
+    pathGlob.endsWith('/**') ? rel.startsWith(pathGlob.slice(0, -2)) : rel === pathGlob
+  );
+}
 
 // ─── Resolution corpus: what a token may resolve AGAINST ─────────────────────
 
@@ -548,11 +561,19 @@ describe('shipped-prose truth (s86-m05 Instrument 3)', () => {
     );
 
     expect(EXCLUSIONS.every((e) => e.reason.length > 40)).toBe(true);
-    // The exclusions are scope statements, never individual findings.
-    // s87-m04 INVERTED: cmos-seed/docs/** is now IN the target set for identifier claims. Only
-    // its date stamps stay out, and the exclusion entry above says so in those words.
+    // The exclusions are scope statements, never individual findings. Seed docs are targets for
+    // identifier claims here and their eight date stamps are gated by the always-running arm.
     expect(TARGETS.some((t) => t.startsWith('cmos-seed/docs/'))).toBe(true);
     expect(TARGETS.some((t) => t.startsWith('cmos/planning/'))).toBe(false);
+  });
+
+  it('accounts for every shipped Markdown file under cmos-seed', () => {
+    const shippedSeedMarkdown = walkFiles(r('cmos-seed'), '.md')
+      .map((absolute) => toPackagePath(path.relative(REPO_ROOT, absolute)))
+      .sort();
+    expect(
+      shippedSeedMarkdown.filter((rel) => !TARGETS.includes(rel) && !isExplicitlyExcluded(rel))
+    ).toEqual([]);
   });
 
   it('reads every target document (the sweep must not be silently vacuous)', () => {
@@ -941,7 +962,7 @@ describePrivate('build-session-prompt ↔ agents.md process-hardening parity (s8
     //   OUTSIDE — `1. **Title** — …`   (agents.md's practices, and the prompt's nested
     //                                   6-path fixture checklist)
     //   INSIDE  — `**1. Title — …**`   (the prompt's practices)
-    // Matching both shapes in both files double-counts the prompt: it returns 12, the six
+    // Matching both shapes in both files double-counts the prompt: it returns 13, the seven
     // practices PLUS the six checklist items nested inside practice 4. Which shape a file uses
     // is decided by its FIRST numbered item in the section — practice 1 — so the shape is read
     // off the document rather than assumed per-file.
@@ -954,7 +975,7 @@ describePrivate('build-session-prompt ↔ agents.md process-hardening parity (s8
     return [...section.matchAll(pattern)].map((m) => `${m[1]}. ${m[2].trim()}`);
   };
 
-  it('carries six numbered practices, at parity with agents.md', () => {
+  it('carries seven numbered practices, at parity with agents.md', () => {
     // agents.md says "Full text + evidence lives in build-session-prompt.md" — so the cited
     // authority must not be the weaker of the two documents.
     const agentsPractices = processHardeningPractices(fs.readFileSync(r('agents.md'), 'utf8'));
@@ -962,8 +983,8 @@ describePrivate('build-session-prompt ↔ agents.md process-hardening parity (s8
 
     // Premise check: the extractor found a Process Hardening section in BOTH files. Without
     // this, two empty lists would compare equal and the parity assertion would be vacuous.
-    expect(agentsPractices.length).toBe(6);
-    expect(promptPractices.length).toBe(6);
+    expect(agentsPractices.length).toBe(7);
+    expect(promptPractices.length).toBe(7);
 
     // Same practices, same order — compared by NUMBER and by the leading words of the title,
     // so a reworded title does not fail but a DROPPED or REORDERED practice does.
@@ -1009,13 +1030,24 @@ describePrivate('build-session-prompt ↔ agents.md process-hardening parity (s8
 });
 
 /**
- * s87-m04 — ARC F ITEM 3, THE HALF THAT HAS AN ORACLE.
+ * s87-m04 + s88-m03 + s88-m07 — ARC F ITEM 3, ALL BOLD SHIPPED SEED-MARKDOWN STAMPS.
  *
- * #1009's enumeration named the seed's stale version stamps as an Arc F item. Two of the ten are
- * checkable against something the tarball itself ships, and those two are gated here. The six
- * **Last Updated** date stamps are NOT, and are cut with their cost stated (#539): their only
- * available oracle makes all six red with one cheap remedy — bump the date — which asserts that a
- * document was reviewed by the act of not reviewing it.
+ * #1009's enumeration named the seed's stale stamps as an Arc F item. The schema-version and tool-
+ * count claims are checkable against something the tarball itself ships. s88-m03 performed the
+ * required per-file review and corrected all eight bold **Last Updated** stamps in shipped seed
+ * Markdown. s88-m07 replaces its release-date proxy with the body-change oracle: git is available
+ * at TEST time, so a stamp must be at least as recent as the file's latest non-stamp body change.
+ * Stamp-only edits are ignored. A real temporary npm tarball supplies the files and stamp bytes.
+ * The oracle follows committed renames, compares merge diffs per parent, and treats a tracked
+ * working-tree body edit as a change today. It fails loudly when a file is untracked, history is
+ * shallow/unavailable, or a file's lineage combines a committed rename with a merge — git --follow
+ * cannot prove per-parent paths for that bounded composition, so it is never allowed to silently
+ * green. It runs in both source repositories;
+ * a public-mirror transport commit therefore counts at that repository's committer date. This is a
+ * necessary freshness relation, not proof that a human reviewed the prose: a dishonest stamp-only
+ * bump remains outside what git can establish. Lowercase prose-like source-code comments are
+ * outside this deliberately bold-Markdown contract, and date-only stamps cannot distinguish two
+ * body edits made on the same calendar day.
  *
  * ALWAYS-RUNNING, NEVER `inPublicMirror`-GATED, AND THAT IS THE TRAP THIS AVOIDS. The existing
  * **Last Updated** arm below is declared `(inPublicMirror ? it.skip : it)` and loops
@@ -1024,7 +1056,7 @@ describePrivate('build-session-prompt ↔ agents.md process-hardening parity (s8
  * to that arm would have left the public stamps unchecked in the one repo an external consumer
  * reads. Separate `it`, no skip, no PRIVATE_TARGETS entry.
  */
-describe('s87-m04: the seed ships stamps that describe the seed (Arc F item 3, gateable half)', () => {
+describe('the seed ships stamps that describe the seed (s87-m04 + s88-m03 + s88-m07)', () => {
   /** The schema version the SHIPPED seed actually seeds. Read from the generated file, not typed. */
   function seededSchemaVersion(): string {
     const sql = fs.readFileSync(r('cmos-seed/db/schema.sql'), 'utf8');
@@ -1036,7 +1068,14 @@ describe('s87-m04: the seed ships stamps that describe the seed (Arc F item 3, g
   }
 
   function stampsIn(rel: string, label: string): Array<{ rel: string; value: string }> {
-    const content = fs.readFileSync(r(rel), 'utf8');
+    return stampsInContent(rel, label, fs.readFileSync(r(rel), 'utf8'));
+  }
+
+  function stampsInContent(
+    rel: string,
+    label: string,
+    content: string
+  ): Array<{ rel: string; value: string }> {
     const re = new RegExp(`\\*\\*${label}\\*\\*:\\s*([^\\n]+)`, 'g');
     const out: Array<{ rel: string; value: string }> = [];
     let m: RegExpExecArray | null;
@@ -1044,8 +1083,65 @@ describe('s87-m04: the seed ships stamps that describe the seed (Arc F item 3, g
     return out;
   }
 
-  /** Every shipped seed markdown file, root README included. */
-  const SEED_MD = ['cmos-seed/README.md', ...SEED_DOC_TARGETS];
+  /** Every Markdown file under package.json's shipped `cmos-seed` directory entry. */
+  const SEED_MD = walkFiles(r('cmos-seed'), '.md')
+    .map((absolute) => toPackagePath(path.relative(REPO_ROOT, absolute)))
+    .sort();
+
+  const PACKED = inspectNpmPack(REPO_ROOT);
+
+  const shipsInPackage = (rel: string): boolean => PACKED.files.has(rel);
+
+  it('records that the old private-only Last Updated arm covered zero tarball stamps', () => {
+    // Anti-vacuity on both sides: the old arm named exactly two paths, and neither appears in the
+    // real npm tarball. In this private source tree both paths carry a stamp; the public mirror
+    // deliberately lacks both files, so opening them there would recreate the scope bug.
+    expect(PRIVATE_TARGETS).toHaveLength(2);
+    expect(PRIVATE_TARGETS.filter(shipsInPackage)).toEqual([]);
+    if (!inPublicMirror) {
+      expect(PRIVATE_TARGETS.flatMap((rel) => stampsIn(rel, 'Last Updated'))).toHaveLength(2);
+    }
+  });
+
+  it('checks the eight bold Last Updated stamps in actual packed seed Markdown', () => {
+    const stamps = [...PACKED.seedMarkdown].flatMap(([rel, content]) =>
+      stampsInContent(rel, 'Last Updated', content)
+    );
+    const expectedStampPaths = [
+      'cmos-seed/README.md',
+      'cmos-seed/docs/README.md',
+      'cmos-seed/docs/agents-md-guide.md',
+      'cmos-seed/docs/build-session-prompt.md',
+      'cmos-seed/docs/getting-started.md',
+      'cmos-seed/docs/session-management-guide.md',
+      'cmos-seed/docs/sqlite-schema-reference.md',
+      'cmos-seed/templates/agents.md',
+    ].sort();
+
+    // The count is a regression floor, not prose: six docs + the seed README + templates/agents.md.
+    // Both template files are also ordinary identifier/contradiction targets even though only one
+    // currently carries a date stamp.
+    expect(stamps).toHaveLength(8);
+    expect(stamps.map((stamp) => stamp.rel).sort()).toEqual(expectedStampPaths);
+    expect([...PACKED.seedMarkdown.keys()].sort()).toEqual(SEED_MD);
+    expect(stamps.every((stamp) => shipsInPackage(stamp.rel))).toBe(true);
+    expect(SEED_TEMPLATE_TARGETS).toHaveLength(2);
+    expect(SEED_TEMPLATE_TARGETS.every((rel) => TARGETS.includes(rel))).toBe(true);
+    expect(SEED_TEMPLATE_TARGETS.every(shipsInPackage)).toBe(true);
+
+    const malformed = stamps
+      .filter((stamp) => !/^\d{4}-\d{2}-\d{2}$/.test(stamp.value))
+      .map((stamp) => `${stamp.rel} has malformed Last Updated value "${stamp.value}"`);
+    expect(malformed).toEqual([]);
+
+    const stale = lastUpdatedBodyChangeFindings(REPO_ROOT, stamps);
+    expect(stale).toEqual([]);
+
+    const future = stamps
+      .filter((stamp) => new Date(stamp.value).getTime() > Date.now() + 24 * 60 * 60 * 1000)
+      .map((stamp) => `${stamp.rel} has future Last Updated value "${stamp.value}"`);
+    expect(future).toEqual([]);
+  });
 
   it('every **Schema Version** stamp in the shipped seed names the version the seed seeds', () => {
     const expected = seededSchemaVersion();

@@ -10,6 +10,7 @@
 
 import { z } from 'zod';
 import { createError, CmosErrors } from './errors';
+import { appendWarnings } from './format-warnings';
 import type { ActionParamMap, CmosToolResult } from './types';
 import {
   cmosContextView,
@@ -665,7 +666,11 @@ export function formatContextForLLM(
       return formatConstraintsForLLM(result as CmosToolResult<ConstraintsResult>);
     case 'search':
       return formatContextSearchForLLM(result as CmosToolResult<ContextSearchResult>);
-    default:
-      return result.success ? '✓ Context action completed' : '❌ Failed to execute cmos_context';
+    default: {
+      if (!result.success) return '❌ Failed to execute cmos_context';
+      const lines = ['✓ Context action completed'];
+      appendWarnings(lines, result);
+      return lines.join('\n');
+    }
   }
 }

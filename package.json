@@ -1,6 +1,6 @@
 {
   "name": "@aquex/cmos-mcp",
-  "version": "2.7.0",
+  "version": "2.8.0",
   "description": "MCP server for CMOS — typed, safe, SQLite-backed project management for AI agents",
   "repository": {
     "type": "git",
@@ -68,6 +68,7 @@
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
     "test:performance": "RUN_PERF_ASSERTS=1 jest --coverage=false tests/tools/cmos/e2e-lifecycle.test.ts",
+    "test:identity-real-store": "jest --testMatch '**/*.fire.ts' --runTestsByPath tests/private/identity-registration-real-store.fire.ts --runInBand --coverage=false",
     "test:e2e-firstrun": "jest --config jest.e2e.config.js --runInBand",
     "verify:dist": "npx ts-node scripts/verify-dist.ts",
     "build": "tsc && node scripts/generate-build-manifest.js && node scripts/generate-tool-reference.js",

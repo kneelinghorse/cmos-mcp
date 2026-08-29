@@ -16,7 +16,7 @@ import { frameForeignText } from '../../intelligence/provenance-frame';
 import { learningsTaggedAcrossProjects } from '../../intelligence/cross-store-queries';
 import type { CrossStoreError, CrossStoreQueryResult } from '../../intelligence/cross-store-query';
 import type { ProjectGraphRegistry } from '../../intelligence/project-graph-registry';
-import { appendWarnings } from './format-warnings';
+import { appendWarnings, attachWarnings } from './format-warnings';
 
 /**
  * Learning record surfaced to clients.
@@ -133,11 +133,12 @@ export async function cmosLearningsList(
   const pageSize = params.pageSize ?? 20;
   const offset = (page - 1) * pageSize;
 
-  return withClient(
+  const warnings: string[] = [];
+  const result = await withClient(
     (client) => {
       // Sprint 61 m03: lazy-migrate the evergreen column on read paths so
       // un-migrated DBs don't hit `no such column: evergreen`.
-      ensureLearningsTable(client);
+      warnings.push(...(ensureLearningsTable(client).warnings ?? []));
 
       const conditions: string[] = [];
       const queryParams: (string | number)[] = [];
@@ -234,17 +235,21 @@ export async function cmosLearningsList(
             }))
           : [];
 
-      return createSuccess<CmosLearningsListResult>({
-        learnings,
-        totalCount,
-        page,
-        pageSize,
-        hasMore: offset + learnings.length < totalCount,
-        localProjectId: getProjectId(client),
-      });
+      return createSuccess<CmosLearningsListResult>(
+        {
+          learnings,
+          totalCount,
+          page,
+          pageSize,
+          hasMore: offset + learnings.length < totalCount,
+          localProjectId: getProjectId(client),
+        },
+        warnings
+      );
     },
     { projectRoot: params.projectRoot }
   );
+  return attachWarnings(result, warnings);
 }
 
 /**
@@ -348,6 +353,7 @@ export function formatLearningsListForLLM(result: CmosToolResult<CmosLearningsLi
 
   if (data.learnings.length === 0) {
     lines.push('No learnings found matching the criteria.');
+    appendWarnings(lines, result);
     return lines.join('\n');
   }
 

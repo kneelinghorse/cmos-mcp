@@ -10,6 +10,7 @@
 
 import { z } from 'zod';
 import { createError, CmosErrors } from './errors';
+import { appendWarnings } from './format-warnings';
 import type { ActionParamMap, CmosToolResult } from './types';
 import {
   cmosMissionList,
@@ -48,6 +49,7 @@ import {
 import {
   cmosMissionDepends,
   formatMissionDependsForLLM,
+  MISSION_DEPENDENCY_DISCLOSURE,
   type CmosMissionDependsParams,
   type MissionDependsResult,
 } from './cmos-mission-depends';
@@ -187,7 +189,7 @@ export const cmosMissionSchema = z
     type: z
       .enum(['Blocks', 'Requires', 'Enables'])
       .optional()
-      .describe('Dependency type for depends action'),
+      .describe(`Dependency label for depends action. ${MISSION_DEPENDENCY_DISCLOSURE}`),
     projectRoot: z
       .string()
       .optional()
@@ -320,7 +322,7 @@ export const cmosMissionToolDefinition = {
       type: {
         type: 'string',
         enum: ['Blocks', 'Requires', 'Enables'],
-        description: 'Dependency type for depends action',
+        description: `Dependency label for depends action. ${MISSION_DEPENDENCY_DISCLOSURE}`,
       },
       acrossProjects: {
         type: 'boolean',
@@ -469,7 +471,11 @@ export function formatMissionForLLM(
       return formatMissionDependsForLLM(result as CmosToolResult<MissionDependsResult>);
     case 'undepends':
       return formatMissionUndependsForLLM(result as CmosToolResult<MissionUndependsResult>);
-    default:
-      return result.success ? '✓ Mission action completed' : '❌ Failed to execute cmos_mission';
+    default: {
+      if (!result.success) return '❌ Failed to execute cmos_mission';
+      const lines = ['✓ Mission action completed'];
+      appendWarnings(lines, result);
+      return lines.join('\n');
+    }
   }
 }

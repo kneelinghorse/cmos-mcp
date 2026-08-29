@@ -126,6 +126,7 @@ export async function pushMutableStatus(
   // (1) Pull-before-push: converge the local base BEFORE we edit. A pull failure
   // aborts the push rather than risk clobbering an unseen newer remote value.
   let pulledBeforePush = false;
+  const warnings: string[] = [];
   if (!params.skipPull) {
     const pull = await syncPull({ projectRoot: params.projectRoot, slug: params.slug });
     if (!pull.success) {
@@ -139,10 +140,11 @@ export async function pushMutableStatus(
         suggestion: 'Resolve the dashboard connectivity/auth error and retry.',
       });
     }
+    warnings.push(...(pull.data?.warnings ?? []));
     pulledBeforePush = true;
   }
 
-  return withClientAsync(
+  const result = await withClientAsync<PushMutableStatusResult>(
     async (db) => {
       const slug = params.slug ?? readDashboardSlug(db);
       if (!slug) {
@@ -250,6 +252,10 @@ export async function pushMutableStatus(
     },
     { projectRoot: params.projectRoot }
   );
+
+  return warnings.length > 0
+    ? { ...result, warnings: [...warnings, ...(result.warnings ?? [])] }
+    : result;
 }
 
 function readMetaValue(db: CmosDatabaseClient, key: string): string | null {
@@ -263,7 +269,9 @@ export function formatPushMutableStatusForLLM(
   result: CmosToolResult<PushMutableStatusResult>
 ): string {
   if (!result.success) {
-    return `Mutable push failed: ${result.error?.message ?? 'Unknown error'}`;
+    const lines = [`Mutable push failed: ${result.error?.message ?? 'Unknown error'}`];
+    appendWarnings(lines, result);
+    return lines.join('\n');
   }
   const d = result.data!;
   const lines = [

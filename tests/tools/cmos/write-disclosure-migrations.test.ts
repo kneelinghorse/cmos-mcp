@@ -55,12 +55,11 @@
  * behaviour — a failed RENAME REJECTS the `cmos_session(capture)` promise instead of surfacing
  * in its text — so the divergence is recorded rather than papered over.
  *
- * WHAT THE STRUCTURAL HALF CANNOT SEE. The call-site assertions in the second describe block are
- * text-matched, per the criterion's explicit allowance, so they are blind to a splice written
- * with a different argument name than `client`, spread across lines, or routed through a helper.
- * They prove the six known sites are still wired and that no SEVENTH inline splice appeared;
- * they do not prove no splice can ever hide. The AST assertions (optional `warnings`, no
- * exported sink parameter, zero discarded `client.execute` results) are exact.
+ * CONSUMER COMPLETENESS lives in migration-warning-reachability.test.ts. Its TypeChecker census
+ * resolves exported MigrationResult-compatible producers (including subtype returns), resolves
+ * their shipped callers by symbol, and verifies every reachable answer consumes `.warnings`.
+ * The historical text assertions below retain the original six regression anchors only; they no
+ * longer pretend that six was the whole consumer surface.
  */
 
 import { afterAll, describe, expect, it } from '@jest/globals';
@@ -74,12 +73,16 @@ import {
   cmosSessionCapture,
   formatSessionCaptureForLLM,
 } from '../../../src/tools/cmos/cmos-session-capture';
+import {
+  cmosLearningsList,
+  formatLearningsListForLLM,
+} from '../../../src/tools/cmos/cmos-learnings-list';
 import { CmosDatabaseClient } from '../../../src/tools/cmos/client';
 import {
   AUTHOR_NAMESPACE_SCHEMA_VERSION,
   ensureAuthorNamespaceColumns,
 } from '../../../src/tools/cmos/schema-migrations';
-import { seedCmosDb } from '../../helpers/seedCmosDb';
+import { reidentifyCmosTestStore, seedCmosDb } from '../../helpers/seedCmosDb';
 
 const SRC_ROOT = path.resolve(__dirname, '../../../src');
 const MIGRATIONS_FILE = path.join(SRC_ROOT, 'tools/cmos/schema-migrations.ts');
@@ -114,6 +117,7 @@ afterAll(() => {
 function newProject(prefix: string): { projectRoot: string; dbPath: string } {
   const projectRoot = mkTmp(prefix);
   const dbPath = seedCmosDb(projectRoot, { projectName: 'm02b migration warnings' });
+  reidentifyCmosTestStore(projectRoot);
   return { projectRoot, dbPath };
 }
 
@@ -217,6 +221,33 @@ function parse(file: string): ts.SourceFile {
 // ───────────────────────────────────────────────────────────────────────────────
 
 describe('s86-m02b f23: a half-applied migration is named in the cmos_session(capture) text', () => {
+  it('an empty learnings list stays successful and renders its real-SQLite migration warning', async () => {
+    const { projectRoot, dbPath } = newProject('cmos-m09-learning-list-warning-');
+    const collidedIndex = 'idx_learnings_status';
+    const db = new Database(dbPath);
+    try {
+      db.exec(`DROP INDEX ${collidedIndex}`);
+      db.exec(`CREATE VIEW ${collidedIndex} AS SELECT 1 AS collided`);
+    } finally {
+      db.close();
+    }
+
+    // This is deliberately the empty-success render mode. It proves both halves of the route:
+    // the handler must splice MigrationResult.warnings, and the formatter must not return before
+    // appendWarnings merely because the result set is empty.
+    const result = await cmosLearningsList({ projectRoot });
+    expect(result.success).toBe(true);
+    expect(result.data?.learnings).toEqual([]);
+    const warnings = (result.warnings ?? []).filter((warning) => warning.includes(collidedIndex));
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('DB_QUERY_FAILED');
+
+    const text = formatLearningsListForLLM(result);
+    expect(text).toContain('No learnings found matching the criteria.');
+    expect(text).toContain('Warnings:');
+    expect(countOccurrences(text, warnings[0])).toBe(1);
+  });
+
   it('a forced DDL failure inside ensureAuthorNamespaceColumns appears in the ANSWER TEXT', async () => {
     const { projectRoot, dbPath } = newProject('cmos-m02b-mig-fire-');
 
@@ -464,9 +495,8 @@ describe('s86-m02b f23: the structural shape of the migration warnings channel',
     expect(source).toMatch(/import \{ checkWrite, countWrite \} from '\.\/write-guard';/);
   });
 
-  it('exactly the SIX sink-bearing call sites splice the returned warnings', () => {
-    // Fork f23's consumer side. Only these six have a sink that reaches a rendered answer; the
-    // count is the assertion, because "at least one" would pass a partially-reverted splice.
+  it('retains the original six sink-bearing warning splices', () => {
+    // Fork f23's original consumer-side regression anchors. The semantic census owns completeness.
     const expected: ReadonlyArray<{ file: string; splices: ReadonlyArray<[string, number]> }> = [
       {
         file: 'tools/cmos/cmos-sprint-complete.ts',
@@ -504,43 +534,15 @@ describe('s86-m02b f23: the structural shape of the migration warnings channel',
       }
     }
     expect(total).toBe(6);
-
-    // Completeness: no seventh splice hiding in another file.
-    const allFiles: string[] = [];
-    const walk = (dir: string): void => {
-      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-        const full = path.join(dir, entry.name);
-        if (entry.isDirectory()) walk(full);
-        else if (entry.name.endsWith('.ts')) allFiles.push(full);
-      }
-    };
-    walk(SRC_ROOT);
-    const splicing = allFiles.filter((f) =>
-      /warnings\.push\(\.\.\.\((?:ensure|migrate)[A-Za-z]*\(client\)\.warnings \?\? \[\]\)\)/.test(
-        fs.readFileSync(f, 'utf8')
-      )
-    );
-    expect(splicing.map((f) => path.relative(SRC_ROOT, f)).sort()).toEqual([
-      'tools/cmos/cmos-session-capture.ts',
-      'tools/cmos/cmos-session-complete.ts',
-      'tools/cmos/cmos-sprint-complete.ts',
-    ]);
   });
 
-  it('the non-consumers still do not splice, and the doc block separates CANNOT from NOT-YET', () => {
-    // Neither of these files splices today. The reason DIFFERS between them, and the whole point
-    // of this assertion is that the doc block must not blur the two:
-    //   - fts5-retriever / genesis-columns / staleness-detection have no envelope on their own
-    //     return type (RankedResult[], GenesisStamp, StalenessResult) — group C, "no answer to
-    //     attach to".
-    //   - sprint-current-invariant sits on the cmos_sprint(add|update) WRITE path whose answers
-    //     already render warnings — group B, reachable but not yet wired. It was previously
-    //     mis-filed as structural; if a later sprint wires it, this list is where that lands.
+  it('only carrier-less consumer modules remain unspliced, and the doc names that class', () => {
+    // These modules have no envelope on their own return type (RankedResult[], GenesisStamp,
+    // StalenessResult) — group C, "no answer to attach to". Reachable group B is now wired.
     for (const file of [
       'tools/cmos/fts5-retriever.ts',
       'tools/cmos/genesis-columns.ts',
       'tools/cmos/staleness-detection.ts',
-      'tools/cmos/sprint-current-invariant.ts',
     ]) {
       const source = fs.readFileSync(path.join(SRC_ROOT, file), 'utf8');
       expect({ file, splices: countOccurrences(source, '.warnings ?? []') }).toEqual({
@@ -549,11 +551,10 @@ describe('s86-m02b f23: the structural shape of the migration warnings channel',
       });
     }
 
-    // The reach map must carry BOTH classes by name — a doc that only names the unreachable ones
-    // reads as "the job is done", which is the same defect this mission exists to remove.
+    // The migration module's reach map must still name the structurally unreachable class.
     const migrations = fs.readFileSync(MIGRATIONS_FILE, 'utf8');
-    expect(migrations).toContain('UNSPLICED BUT REACHABLE');
-    expect(migrations).toContain('NO ANSWER TO ATTACH TO');
+    expect(migrations).toContain('STRUCTURAL RESIDUALS');
+    expect(migrations).toContain('no answer warning carrier');
     // migrateStrategicDecisionsV21 is reachable via ensureStrategicDecisionsSchema →
     // ensureMissionIdColumn; the old "test-only / ZERO call sites in src/" claim was false.
     expect(migrations).toContain('this helper is NOT test-only');

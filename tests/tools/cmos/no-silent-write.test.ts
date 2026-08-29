@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
-// ABOUTME: s86-m02b no-silent-write gate — every `client.execute(...)` result in src/ must be
-// ABOUTME: INSPECTED, so no CMOS answer reports a count or a state derived from intent, not fact.
+// ABOUTME: No-silent-write gate — every `client.execute(...)` and `client.raw(...)` result in
+// ABOUTME: src/ must be inspected, so CMOS reports facts rather than intended writes.
 
 /**
  * Sprint 86 m02b — "say only what you know", enforced on the write side.
  *
- * THE RULE. A `.execute(...)` call returns `CmosToolResult<{changes, lastInsertRowid}>`. Its
- * `success` flag is the only evidence that the statement ran. Code that discards it, or folds it
- * into a counter with no negative arm, produces an ANSWER THAT ASSERTS SOMETHING NOT SO —
- * `nextStepsReconciled: 4` when the UPDATE errored, `"Extraction skipped"` when an INSERT failed.
- * This gate makes that shape unrepresentable.
+ * THE RULE. Both `.execute(...)` and `.raw(...)` return a `CmosToolResult` envelope. Its `success`
+ * flag is the only evidence that the statement ran. Code that discards it, or folds it into a
+ * counter/object list with no negative arm, produces an ANSWER THAT ASSERTS SOMETHING NOT SO —
+ * `nextStepsReconciled: 4` when the UPDATE errored, or `alreadyCurrent: true` when a raw CREATE
+ * VIRTUAL TABLE failed. This gate makes that shape unrepresentable.
  *
  * MEASURED PRE-FIX RED BASELINE: 99 violations = 44 discarded + 49 bound-with-no-negative-arm +
  * 6 console-only. Separately and NOT counted as violations: 3 SQL-verb exemptions and 2 delegated
@@ -22,6 +22,20 @@
  * statement, yet a negative arm forty lines later, on the SAME name after a REBINDING, appeared to
  * discharge it. This gate attributes discharge PER BINDING (see DischargeWindow), which sees it.
  * 99 - 98 = that one site.
+ *
+ * s88-m09 RAW BASELINE, RE-DERIVED BEFORE THE FIX: 18 production code calls = 9 discarded +
+ * 5 bound-with-no-negative-arm + 4 inspected. All 18 were in schema-migrations.ts. The exact
+ * publishable command excludes the doc-comment occurrence of `client.raw()`:
+ *
+ *   rg -n --glob '*.ts' --pcre2 '^(?!\s*(?://|/\*|\*)).*\.raw\s*\(' src \
+ *     | tee /dev/stderr | wc -l
+ *
+ * CURRENT POST-FIX SHAPE: 5 production calls, still all in schema-migrations.ts. Two are the
+ * centralized `ensureVirtualTableObject` / `ensureSchemaTrigger` calls nested directly in
+ * `checkWrite`; three have explicit negative arms. The 14 baseline violations therefore no
+ * longer exist as individual raw sites. The fourth formerly inspected site — the decisions_fts
+ * virtual-table CREATE — also moved into the guarded helper so its failure is diagnostic rather
+ * than merely returning `alreadyCurrent: false`.
  *
  * DISCRIMINATION IS BY RULE, NOT BY ALLOWLIST (Process Hardening #2, agents.md). There is no
  * allowlist file and no per-site exemption list anywhere in this suite. The ONE exemption —
@@ -45,10 +59,11 @@
  *     the operator nothing. So does an arm that pushes a warning into a sink no formatter
  *     renders. The gate is a floor, not a proof of disclosure.
  *  2. RAW better-sqlite3 IS INVISIBLE. `db.prepare(...).run()` — used at cmos-project-init.ts
- *     (the fresh-store bootstrap, ~:479-508) and throughout tests/ — is not a `.execute` call and
- *     is never walked. That is OUT OF SCOPE BY CONSTRUCTION, not by oversight: `.run()` THROWS on
- *     failure rather than returning a result envelope, so it is a different failure mode with a
- *     different remedy (try/catch), and a rule that conflated them would be wrong about both.
+ *     (the fresh-store bootstrap, ~:479-508) and throughout tests/ — is not a client envelope
+ *     call and is never walked. That is OUT OF SCOPE BY CONSTRUCTION, not by oversight: `.run()`
+ *     THROWS on failure rather than returning a result envelope, so it is a different failure
+ *     mode with a different remedy (try/catch). `CmosDatabaseClient.raw(...)` DOES return an
+ *     envelope and is covered by the same rule as `.execute(...)`.
  *  3. THE CONSOLE-ONLY TIGHTENING IS A HEURISTIC OVER ARM CONTENT. An arm whose entire body is a
  *     `console.*` call does not count as inspection — that rule is what catches the six
  *     session_events sites, and without it this gate is green while durable provenance is lost.
@@ -67,8 +82,8 @@
  *     function bodies, so an inner closure that happens to use the same parameter name can
  *     discharge an outer site. Scoping is by enclosing function and binding position, not by
  *     true lexical resolution.
- *  9. `client['execute'](…)` (element access) is not a candidate — `isExecuteCall` requires a
- *     PropertyAccessExpression. Plain, non-dynamic, and invisible.
+ *  9. `client['execute'](…)` / `client['raw'](…)` (element access) is not a candidate —
+ *     `isWriteEnvelopeCall` requires a PropertyAccessExpression. Plain, non-dynamic, invisible.
  * 10. THE SWEEP COVERS `src/` ONLY. `scripts/` is not walked, and it contains bare discarded
  *     writes today. That is why this mission's `scripts/measure-cross-store-baseline.ts` fix had
  *     to be made and tested BY HAND — no gate protects it.
@@ -78,7 +93,8 @@
  *     baseline.ts `safeCount`, cmos-session-complete.ts persistContext's existence SELECT)
  *     precisely BECAUSE no gate will catch a regression there.
  *  5. DYNAMIC DISPATCH IS INVISIBLE. A write reached through a callback, a method looked up on a
- *     record, or any indirection that does not spell `.execute(` in the source is not a candidate.
+ *     record, or any indirection that does not spell `.execute(` / `.raw(` in the source is not
+ *     a candidate.
  *  6. IT SAYS NOTHING ABOUT A WRITE THAT SUCCEEDS WITH THE WRONG VALUE. `success: true` on an
  *     UPDATE that matched the wrong rows is, to this gate, a clean write.
  *  7. IT CANNOT JUDGE WHETHER `changes === 0` IS MEANINGFUL. A zero from a WHERE that matched
@@ -97,8 +113,8 @@ const SRC_ROOT = path.resolve(__dirname, '../../../src');
 const REPO_ROOT = path.resolve(__dirname, '../../..');
 
 /**
- * The client wrapper itself is where `.execute` is DEFINED — its own internal calls are the
- * implementation of the envelope, not consumers of it.
+ * The client wrapper itself is where `.execute` / `.raw` are DEFINED — its own internal calls are
+ * the implementation of the envelope, not consumers of it.
  */
 const WRAPPER_RELATIVE = path.join('tools', 'cmos', 'client.ts');
 
@@ -169,12 +185,12 @@ function walk(node: ts.Node, visit: (n: ts.Node) => void): void {
   node.forEachChild((child) => walk(child, visit));
 }
 
-/** `client.execute(...)` — any receiver, method name `execute`. */
-function isExecuteCall(node: ts.Node): node is ts.CallExpression {
+/** Any receiver whose property name is an envelope-returning write method. */
+function isWriteEnvelopeCall(node: ts.Node): node is ts.CallExpression {
   return (
     ts.isCallExpression(node) &&
     ts.isPropertyAccessExpression(node.expression) &&
-    node.expression.name.text === 'execute'
+    (node.expression.name.text === 'execute' || node.expression.name.text === 'raw')
   );
 }
 
@@ -444,7 +460,7 @@ function classifyBoundSite(
 
 // ── the sweep ──────────────────────────────────────────────────────────────────────────────
 
-/** Classify every `.execute(...)` in one source text. Exported shape used by the fixture tests. */
+/** Classify every `.execute(...)` / `.raw(...)` in one source text. */
 function collectWriteSites(relPath: string, text: string): WriteSite[] {
   const sf = parse(relPath, text);
   const sites: WriteSite[] = [];
@@ -467,7 +483,7 @@ function collectWriteSites(relPath: string, text: string): WriteSite[] {
   };
 
   walk(sf, (node) => {
-    if (!isExecuteCall(node)) return;
+    if (!isWriteEnvelopeCall(node)) return;
 
     const sql = staticSqlPrefix(node.arguments[0]);
     const parent = effectiveParent(node);
@@ -543,7 +559,7 @@ function collectWriteSites(relPath: string, text: string): WriteSite[] {
           file: relPath,
           line,
           bucket: 'unclassified',
-          detail: `execute() result in an unrecognised position (parent: ${
+          detail: `write-envelope result in an unrecognised position (parent: ${
             parent ? ts.SyntaxKind[parent.kind] : 'none'
           }) — extend the classifier rather than ignoring it`,
         },
@@ -683,7 +699,7 @@ function render(sites: readonly WriteSite[]): string {
 
 // ── the gate ───────────────────────────────────────────────────────────────────────────────
 
-describe('no-silent-write: every execute() result is inspected', () => {
+describe('no-silent-write: every execute() and raw() result is inspected', () => {
   const { sites, violations } = sweep();
 
   /**
@@ -704,7 +720,7 @@ describe('no-silent-write: every execute() result is inspected', () => {
     expect(sites.length).toBeGreaterThan(100);
   });
 
-  it('classifies every execute() call — an unrecognised shape fails loudly', () => {
+  it('classifies every envelope-returning write call — an unrecognised shape fails loudly', () => {
     // Asserting on the RENDERED list, not the count, so the failure message names the sites.
     // (`expect(render(x) && x.length).toBe(0)` looks equivalent and is not: for an empty list
     // `'' && 0` is `''`, so it can never pass. Exactly the kind of assertion this mission exists
@@ -737,6 +753,28 @@ describe('no-silent-write: every execute() result is inspected', () => {
 });
 
 describe('no-silent-write: the rule bites on synthetic shapes', () => {
+  it('applies the same rule to raw DDL without a per-site allowlist', () => {
+    const source = `
+      export function f(client: any, warnings: string[]) {
+        client.raw('CREATE TRIGGER discarded AFTER INSERT ON t BEGIN SELECT 1; END');
+        const folded = client.raw('CREATE VIRTUAL TABLE folded USING fts5(content)');
+        if (folded.success) {
+          return 'created';
+        }
+        checkWrite(
+          client.raw('CREATE VIRTUAL TABLE guarded USING fts5(content)'),
+          warnings,
+          'guarded virtual table'
+        );
+      }
+    `;
+    expect(collectWriteSites('fixture.ts', source).map((s) => s.bucket)).toEqual([
+      'discarded',
+      'no-negative-arm',
+      'inspected',
+    ]);
+  });
+
   it('still catches a bare non-transaction execute inside a catch clause', () => {
     const source = `
       export function f(client: any) {

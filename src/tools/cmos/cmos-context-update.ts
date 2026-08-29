@@ -943,13 +943,15 @@ export function formatContextUpdateForLLM(result: CmosToolResult<CmosContextUpda
   const data = result.data;
 
   if (!data.contextUpdated) {
-    return [
+    const lines = [
       '📝 **Context Update**',
       '',
       `Sessions processed: ${data.sessionsProcessed}`,
       '',
       data.message,
-    ].join('\n');
+    ];
+    appendWarnings(lines, result);
+    return lines.join('\n');
   }
 
   const lines = [
