@@ -23,24 +23,29 @@
  * `tests/e2e/*.e2e.ts`. So this is the only place in the repo where "against the rebuilt dist/"
  * is a statement that can be true. Locally: `npm run build && npm run test:e2e-firstrun`.
  *
- * NO SILENT FAIL-OPEN (agents.md Process Hardening #4). A missing dist/ or a missing live store
- * FAILS this suite loudly. It never skips — a skipped positive-fire test reports green while
- * proving nothing, which is the defect class this sprint exists to close.
+ * NO SILENT FAIL-OPEN (agents.md Process Hardening #4). A missing dist/ or live store FAILS in
+ * the private tree. Only a structurally identified public mirror skips, and the shared helper
+ * prints the evidence and reason it scoped out.
  *
  * NEVER AGAINST THE LIVE FILE. The server is pointed at an `mkdtempSync` copy.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from '@jest/globals';
+import { afterAll, beforeAll, expect, it } from '@jest/globals';
 import Database from 'better-sqlite3';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
+import { requiresPrivateEvidence } from '../helpers/public-mirror';
 import { connectStdioServer, type StdioHarness } from './stdio-harness';
 
 const REPO_ROOT = path.resolve(__dirname, '../..');
 const DIST_ENTRY = path.join(REPO_ROOT, 'dist', 'index.js');
-const LIVE_DB = path.join(REPO_ROOT, 'cmos', 'db', 'cmos.sqlite');
+const PRIVATE = requiresPrivateEvidence({
+  reason:
+    'This built-server analytics E2E derives its scratch project from the private live CMOS store.',
+  paths: { liveDb: 'cmos/db/cmos.sqlite' },
+});
 
 const tmpDirs: string[] = [];
 function mkTmp(prefix: string): string {
@@ -55,7 +60,7 @@ function copyLiveStore(): string {
   const dbDir = path.join(projectRoot, 'cmos', 'db');
   fs.mkdirSync(dbDir, { recursive: true });
   for (const suffix of ['', '-wal', '-shm']) {
-    const src = `${LIVE_DB}${suffix}`;
+    const src = `${PRIVATE.paths.liveDb}${suffix}`;
     if (fs.existsSync(src)) fs.copyFileSync(src, path.join(dbDir, `cmos.sqlite${suffix}`));
   }
   return projectRoot;
@@ -82,7 +87,7 @@ function orderSprintIds(ids: string[], direction: 'ASC' | 'DESC'): string[] {
   });
 }
 
-describe('analytics window over stdio against the built dist (s86-m05)', () => {
+PRIVATE.describe('analytics window over stdio against the built dist (s86-m05)', () => {
   let harness: StdioHarness;
   let projectRoot: string;
   let newestFive: string[];
@@ -96,8 +101,10 @@ describe('analytics window over stdio against the built dist (s86-m05)', () => {
           `run \`npm run build\` first. It must not skip — a skipped transport test proves nothing.`
       );
     }
-    if (!fs.existsSync(LIVE_DB)) {
-      throw new Error(`live store not found at ${LIVE_DB}; the real-store arm cannot run.`);
+    if (!fs.existsSync(PRIVATE.paths.liveDb)) {
+      throw new Error(
+        `private live store not found at ${PRIVATE.paths.liveDb}; absence fails here unless the shared helper identified a structural public mirror.`
+      );
     }
 
     projectRoot = copyLiveStore();

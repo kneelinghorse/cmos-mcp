@@ -83,6 +83,19 @@
  *     read as calling it (false GREEN).
  *   - EMPTY-SINK. It cannot prove the warning was ever PUSHED. A handler that never populates
  *     result.warnings renders nothing and passes. The write side is s86-m02b's job.
+ *   - WARNING-PRODUCER CENSUS. The latent-dropper census recognizes direct `attachWarnings`
+ *     identifier calls and `{ ...result, warnings }` spreads only. Aliases/wrappers, direct
+ *     assignments, and renamed spread sources are invisible. Current direct assignments are
+ *     success-only helper definitions, not formatter-facing error producers.
+ *   - LOOSE ERROR-PREAMBLE CONDITIONS. Classification asks whether an `if` condition CONTAINS
+ *     `!<envelope>.success`, not whether failure is required. The current
+ *     `!result.success || !result.data` shape can therefore classify a success:true/falsy-data
+ *     return as an error preamble. No tool formatter receives that shape today; the assertion
+ *     below pins the condition set so a second satisfiable shape cannot appear silently.
+ *   - ERROR-PREAMBLE WARNINGS ARE EXEMPT. A classified error preamble need not render
+ *     `result.warnings`, even when a handler can attach warnings to an error envelope. The known
+ *     latent dropping formatters are derived and pinned below; reachability remains a separate
+ *     reviewer obligation rather than something this AST gate proves.
  *   - DYNAMIC DISPATCH. A formatter reached only through a computed reference is neither
  *     classified as a dispatcher's delegate nor excluded — it is simply a leaf, which is the
  *     conservative reading.
@@ -279,15 +292,17 @@ function containsNode(container: ts.Node, target: ts.Node): boolean {
 }
 
 /**
- * Deliberate error preambles are classified by effect, not by line or formatter name: a return
- * in the THEN branch of an `if` that tests `!<envelope>.success`. A successful empty/no-op mode
- * does not match this rule and therefore still has to render warnings.
+ * Deliberate error preambles are classified by syntax, not by line or formatter name: a return
+ * in the THEN branch of an `if` whose condition contains `!<envelope>.success`. Containment does
+ * not imply failure is required: `!result.success || !result.data` also matches on a successful
+ * envelope with falsy data. The false-negative profile and assertion below make that looseness
+ * explicit.
  */
-function isErrorPreambleReturn(
+function errorPreambleCondition(
   decl: ts.FunctionDeclaration,
   statement: ts.ReturnStatement,
   envelopeName: string
-): boolean {
+): ts.Expression | undefined {
   for (let current = statement.parent; current && current !== decl; current = current.parent) {
     if (!ts.isIfStatement(current) || !containsNode(current.thenStatement, statement)) continue;
     let testsFailure = false;
@@ -306,9 +321,62 @@ function isErrorPreambleReturn(
       ts.forEachChild(node, visit);
     };
     visit(current.expression);
-    if (testsFailure) return true;
+    if (testsFailure) return current.expression;
   }
-  return false;
+  return undefined;
+}
+
+interface TruthPossibilities {
+  readonly canBeTrue: boolean;
+  readonly canBeFalse: boolean;
+}
+
+/** Evaluate boolean reachability after fixing `<envelope>.success` to true. */
+function truthWithSuccessfulEnvelope(
+  expression: ts.Expression,
+  envelopeName: string
+): TruthPossibilities {
+  if (ts.isParenthesizedExpression(expression)) {
+    return truthWithSuccessfulEnvelope(expression.expression, envelopeName);
+  }
+  if (
+    ts.isPropertyAccessExpression(expression) &&
+    ts.isIdentifier(expression.expression) &&
+    expression.expression.text === envelopeName &&
+    expression.name.text === 'success'
+  ) {
+    return { canBeTrue: true, canBeFalse: false };
+  }
+  if (
+    ts.isPrefixUnaryExpression(expression) &&
+    expression.operator === ts.SyntaxKind.ExclamationToken
+  ) {
+    const operand = truthWithSuccessfulEnvelope(expression.operand, envelopeName);
+    return { canBeTrue: operand.canBeFalse, canBeFalse: operand.canBeTrue };
+  }
+  if (ts.isBinaryExpression(expression)) {
+    const left = truthWithSuccessfulEnvelope(expression.left, envelopeName);
+    const right = truthWithSuccessfulEnvelope(expression.right, envelopeName);
+    if (expression.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken) {
+      return {
+        canBeTrue: left.canBeTrue && right.canBeTrue,
+        canBeFalse: left.canBeFalse || right.canBeFalse,
+      };
+    }
+    if (expression.operatorToken.kind === ts.SyntaxKind.BarBarToken) {
+      return {
+        canBeTrue: left.canBeTrue || right.canBeTrue,
+        canBeFalse: left.canBeFalse && right.canBeFalse,
+      };
+    }
+  }
+  if (expression.kind === ts.SyntaxKind.TrueKeyword) {
+    return { canBeTrue: true, canBeFalse: false };
+  }
+  if (expression.kind === ts.SyntaxKind.FalseKeyword) {
+    return { canBeTrue: false, canBeFalse: true };
+  }
+  return { canBeTrue: true, canBeFalse: true };
 }
 
 interface WarningAppend {
@@ -404,6 +472,8 @@ interface FormatterReturnCoverage {
   readonly formatter: Formatter;
   readonly statement: ts.ReturnStatement;
   readonly errorPreamble: boolean;
+  readonly errorPreambleCondition: string | null;
+  readonly reachableOnSuccess: boolean;
   readonly delegated: boolean;
   readonly warningDominated: boolean;
 }
@@ -415,13 +485,19 @@ function classifyFormatterReturns(
   const envelopeIndex = locateEnvelopeParam(formatter.decl);
   if (envelopeIndex === -1) return [];
   const envelopeName = (formatter.decl.parameters[envelopeIndex].name as ts.Identifier).text;
-  return ownedReturns(formatter.decl).map((statement) => ({
-    formatter,
-    statement,
-    errorPreamble: isErrorPreambleReturn(formatter.decl, statement, envelopeName),
-    delegated: isDelegatingReturn(statement, siblingNames),
-    warningDominated: warningSinkReachesReturn(formatter.decl, statement, envelopeName),
-  }));
+  return ownedReturns(formatter.decl).map((statement) => {
+    const condition = errorPreambleCondition(formatter.decl, statement, envelopeName);
+    return {
+      formatter,
+      statement,
+      errorPreamble: condition !== undefined,
+      errorPreambleCondition: condition?.getText() ?? null,
+      reachableOnSuccess:
+        condition !== undefined && truthWithSuccessfulEnvelope(condition, envelopeName).canBeTrue,
+      delegated: isDelegatingReturn(statement, siblingNames),
+      warningDominated: warningSinkReachesReturn(formatter.decl, statement, envelopeName),
+    };
+  });
 }
 
 // --- the sweep, run once ------------------------------------------------------------------
@@ -455,6 +531,63 @@ const notRendering = mustRender.filter((f) => !callsAppendWarnings(f.decl));
 const returnCoverage = envelopeFormatters.flatMap((formatter) =>
   classifyFormatterReturns(formatter, declaredNames)
 );
+const looseErrorPreambles = returnCoverage.filter(
+  (row) => row.errorPreamble && row.reachableOnSuccess
+);
+
+function canAttachEnvelopeWarnings(file: string): boolean {
+  const sf = parse(file);
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isCallExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === 'attachWarnings'
+    ) {
+      found = true;
+      return;
+    }
+    if (ts.isObjectLiteralExpression(node)) {
+      const spreadsResult = node.properties.some(
+        (property) =>
+          ts.isSpreadAssignment(property) &&
+          ts.isIdentifier(property.expression) &&
+          property.expression.text === 'result'
+      );
+      const carriesWarnings = node.properties.some(
+        (property) =>
+          (ts.isShorthandPropertyAssignment(property) && property.name.text === 'warnings') ||
+          (ts.isPropertyAssignment(property) && property.name.getText(sf) === 'warnings')
+      );
+      if (spreadsResult && carriesWarnings) {
+        found = true;
+        return;
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return found;
+}
+
+const warningEnvelopeFiles = new Set(
+  listTsFiles(CMOS_ROOT)
+    .filter(canAttachEnvelopeWarnings)
+    .map((file) => path.relative(CMOS_ROOT, file))
+);
+const warningEnvelopeFormatters = formatters.filter((formatter) =>
+  warningEnvelopeFiles.has(formatter.file)
+);
+const latentWarningDroppers = [
+  ...new Set(
+    returnCoverage
+      .filter(
+        (row) =>
+          row.errorPreamble && !row.warningDominated && warningEnvelopeFiles.has(row.formatter.file)
+      )
+      .map((row) => `${path.basename(row.formatter.file, '.ts')}::${row.formatter.name}`)
+  ),
+].sort();
 const genuineRenderReturns = returnCoverage.filter((row) => !row.errorPreamble && !row.delegated);
 const uncoveredGenuineReturns = genuineRenderReturns.filter((row) => !row.warningDominated);
 
@@ -546,6 +679,27 @@ describe('s86-m02 Step 1 — the envelope warnings channel is universal', () => 
           }`
       )
     ).toEqual([]);
+  });
+
+  it('pins loose error-preamble syntax and the latent warning-dropping formatter set', () => {
+    expect({
+      warningEnvelopeModules: warningEnvelopeFiles.size,
+      modulesWithFormatters: new Set(warningEnvelopeFormatters.map((formatter) => formatter.file))
+        .size,
+      formatters: warningEnvelopeFormatters.length,
+    }).toEqual({ warningEnvelopeModules: 27, modulesWithFormatters: 25, formatters: 28 });
+    expect(
+      [...new Set(looseErrorPreambles.map((row) => row.errorPreambleCondition))].sort()
+    ).toEqual(['!result.success || !result.data']);
+    expect(latentWarningDroppers).toEqual([
+      'cmos-db-backfill::formatBackfillForLLM',
+      'cmos-db-backfill::formatPgOrphanReportForLLM',
+      'cmos-db-backfill::formatPurgeForLLM',
+      'cmos-db-backfill::formatReconciliationForLLM',
+      'cmos-learnings-list::formatLearningsListForLLM',
+      'cmos-learnings-search::formatLearningsSearchForLLM',
+      'cmos-sprint-analytics::formatSprintAnalyticsForLLM',
+    ]);
   });
 
   it('passes the ENVELOPE parameter, and each append reaches a return of that same buffer', () => {

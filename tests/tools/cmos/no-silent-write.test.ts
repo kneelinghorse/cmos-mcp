@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
-// ABOUTME: No-silent-write gate — every `client.execute(...)` and `client.raw(...)` result in
-// ABOUTME: src/ must be inspected, so CMOS reports facts rather than intended writes.
+// ABOUTME: No-silent-write gate — every client execute/raw/transaction result in src/ must be
+// ABOUTME: inspected, so CMOS reports facts rather than intended writes.
 
 /**
  * Sprint 86 m02b — "say only what you know", enforced on the write side.
  *
- * THE RULE. Both `.execute(...)` and `.raw(...)` return a `CmosToolResult` envelope. Its `success`
- * flag is the only evidence that the statement ran. Code that discards it, or folds it into a
- * counter/object list with no negative arm, produces an ANSWER THAT ASSERTS SOMETHING NOT SO —
- * `nextStepsReconciled: 4` when the UPDATE errored, or `alreadyCurrent: true` when a raw CREATE
- * VIRTUAL TABLE failed. This gate makes that shape unrepresentable.
+ * THE RULE. `.execute(...)`, `.raw(...)`, and `.transaction(...)` return a `CmosToolResult`
+ * envelope. Its `success` flag is the only evidence that the statement or atomic unit ran. Code
+ * that discards it, or folds it into a counter/object list with no negative arm, produces an
+ * ANSWER THAT ASSERTS SOMETHING NOT SO — `nextStepsReconciled: 4` when the UPDATE errored,
+ * `alreadyCurrent: true` when a raw CREATE VIRTUAL TABLE failed, or “all writes landed” after a
+ * transaction rolled back. This gate makes that shape unrepresentable.
  *
  * MEASURED PRE-FIX RED BASELINE: 99 violations = 44 discarded + 49 bound-with-no-negative-arm +
  * 6 console-only. Separately and NOT counted as violations: 3 SQL-verb exemptions and 2 delegated
@@ -82,19 +83,24 @@
  *     function bodies, so an inner closure that happens to use the same parameter name can
  *     discharge an outer site. Scoping is by enclosing function and binding position, not by
  *     true lexical resolution.
- *  9. `client['execute'](…)` / `client['raw'](…)` (element access) is not a candidate —
- *     `isWriteEnvelopeCall` requires a PropertyAccessExpression. Plain, non-dynamic, invisible.
+ *  9. `client['execute'](…)` / `client['raw'](…)` / `client['transaction'](…)` (element access)
+ *     is not a candidate — `isWriteEnvelopeCall` requires a PropertyAccessExpression. Plain,
+ *     non-dynamic, invisible.
  * 10. THE SWEEP COVERS `src/` ONLY. `scripts/` is not walked, and it contains bare discarded
  *     writes today. That is why this mission's `scripts/measure-cross-store-baseline.ts` fix had
  *     to be made and tested BY HAND — no gate protects it.
+ * 11. `pragma()` RETURNS NO ENVELOPE. `CmosDatabaseClient.pragma()` returns `unknown` (and bare
+ *     `undefined` when its connection fails), so this result-envelope classifier cannot cover
+ *     it. Its 5 src/ consumers are schema-migrations.ts:1854-1856 and :1907-1908; only the
+ *     `foreign_keys` read verifies a value. That complement needs a different rule if it grows.
  *  4. THE READ SIDE IS NOT WALKED AT ALL. `getOne` / `getMany` have the identical defect —
  *     a failed SELECT that reads as "no rows" — and this gate says nothing about them (fork f10).
  *     Two read-side sites were fixed by hand in this mission (scripts/measure-cross-store-
  *     baseline.ts `safeCount`, cmos-session-complete.ts persistContext's existence SELECT)
  *     precisely BECAUSE no gate will catch a regression there.
  *  5. DYNAMIC DISPATCH IS INVISIBLE. A write reached through a callback, a method looked up on a
- *     record, or any indirection that does not spell `.execute(` / `.raw(` in the source is not
- *     a candidate.
+ *     record, or any indirection that does not spell `.execute(` / `.raw(` / `.transaction(` in
+ *     the source is not a candidate.
  *  6. IT SAYS NOTHING ABOUT A WRITE THAT SUCCEEDS WITH THE WRONG VALUE. `success: true` on an
  *     UPDATE that matched the wrong rows is, to this gate, a clean write.
  *  7. IT CANNOT JUDGE WHETHER `changes === 0` IS MEANINGFUL. A zero from a WHERE that matched
@@ -113,8 +119,8 @@ const SRC_ROOT = path.resolve(__dirname, '../../../src');
 const REPO_ROOT = path.resolve(__dirname, '../../..');
 
 /**
- * The client wrapper itself is where `.execute` / `.raw` are DEFINED — its own internal calls are
- * the implementation of the envelope, not consumers of it.
+ * The client wrapper itself is where `.execute` / `.raw` / `.transaction` are DEFINED — its own
+ * internal calls are the implementation of the envelope, not consumers of it.
  */
 const WRAPPER_RELATIVE = path.join('tools', 'cmos', 'client.ts');
 
@@ -190,7 +196,9 @@ function isWriteEnvelopeCall(node: ts.Node): node is ts.CallExpression {
   return (
     ts.isCallExpression(node) &&
     ts.isPropertyAccessExpression(node.expression) &&
-    (node.expression.name.text === 'execute' || node.expression.name.text === 'raw')
+    (node.expression.name.text === 'execute' ||
+      node.expression.name.text === 'raw' ||
+      node.expression.name.text === 'transaction')
   );
 }
 
@@ -460,7 +468,7 @@ function classifyBoundSite(
 
 // ── the sweep ──────────────────────────────────────────────────────────────────────────────
 
-/** Classify every `.execute(...)` / `.raw(...)` in one source text. */
+/** Classify every `.execute(...)` / `.raw(...)` / `.transaction(...)` in one source text. */
 function collectWriteSites(relPath: string, text: string): WriteSite[] {
   const sf = parse(relPath, text);
   const sites: WriteSite[] = [];
@@ -699,7 +707,7 @@ function render(sites: readonly WriteSite[]): string {
 
 // ── the gate ───────────────────────────────────────────────────────────────────────────────
 
-describe('no-silent-write: every execute() and raw() result is inspected', () => {
+describe('no-silent-write: every execute(), raw(), and transaction() result is inspected', () => {
   const { sites, violations } = sweep();
 
   /**
@@ -753,6 +761,28 @@ describe('no-silent-write: every execute() and raw() result is inspected', () =>
 });
 
 describe('no-silent-write: the rule bites on synthetic shapes', () => {
+  it('rejects a discarded transaction envelope even when its inner write is inspected', () => {
+    const source = `
+      export function f(client: any) {
+        client.transaction(() => {
+          const result = client.execute(
+            'UPDATE missions SET status = ? WHERE id = ?',
+            ['Done', 'm1']
+          );
+          if (!result.success) {
+            throw new Error('inner write failed');
+          }
+          return true;
+        });
+        return 'all writes landed';
+      }
+    `;
+    expect(collectWriteSites('fixture.ts', source).map((site) => site.bucket)).toEqual([
+      'discarded',
+      'inspected',
+    ]);
+  });
+
   it('applies the same rule to raw DDL without a per-site allowlist', () => {
     const source = `
       export function f(client: any, warnings: string[]) {

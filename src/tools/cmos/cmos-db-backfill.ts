@@ -1535,7 +1535,12 @@ export async function cmosDbPurge(params: {
       message:
         'Purge requires explicit confirmation. Pass confirm=true to proceed. ' +
         'This will delete ALL mirrored data for this project from the PG mirror.',
-      suggestion: 'Call cmos_db(action="purge", confirm=true) to proceed.',
+      // s89-m08: the oracle executed this remedy from the state that emitted it and it REFUSED
+      // with DASHBOARD_NOT_CONFIGURED. The remedy is conditional on a configured dashboard mirror
+      // and the string did not say so, so it read as an unconditional instruction (T4).
+      suggestion:
+        'Call cmos_db(action="purge", confirm=true) to proceed — it only runs if this project ' +
+        'has a configured dashboard mirror.',
     });
   }
 

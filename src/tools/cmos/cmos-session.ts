@@ -10,6 +10,7 @@
 
 import { z } from 'zod';
 import { createError, CmosErrors, VALID_SESSION_TYPES } from './errors';
+import { findWrongTypedStringParam } from './param-type-guard';
 import { appendWarnings } from './format-warnings';
 import type { ActionParamMap, CmosToolResult } from './types';
 import {
@@ -353,6 +354,18 @@ export async function cmosSession(
       CmosErrors.invalidAction('cmos_session', actionValue, CMOS_SESSION_ACTIONS)
     );
   }
+
+  // s89-m08 — ONE schema-driven boundary guard, placed immediately after action normalisation so
+  // no handler can be reached with a wrong-typed published string parameter. It reads this tool's
+  // OWN shipped inputSchema and its OWN per-action applicability contract, so it can drift from
+  // neither, and it is scoped to the parameters THIS action actually uses. See param-type-guard.ts
+  // for the 714-triple measurement, the action-scoping evidence, and the null rationale.
+  const wrongTypedParam = findWrongTypedStringParam(
+    cmosSessionToolDefinition.inputSchema,
+    CMOS_SESSION_ACTION_PARAMS[actionValue],
+    params
+  );
+  if (wrongTypedParam) return createError<CmosSessionResult>(wrongTypedParam);
 
   switch (actionValue) {
     case 'list':

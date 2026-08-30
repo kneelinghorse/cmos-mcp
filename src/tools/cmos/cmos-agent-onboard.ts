@@ -21,7 +21,8 @@ import {
 } from './self-capture-guard';
 import { CMOS_PROJECT_ROOT_ENV } from './client';
 import type { CmosToolResult, Mission, Session, SanitizedFieldReport } from './types';
-import { createSuccess } from './errors';
+import { createError, createSuccess } from './errors';
+import { findWrongTypedStringParam } from './param-type-guard';
 import { recordAgentFeedback } from './agent-feedback';
 import { DashboardClient, type DashboardMessage } from './dashboard-client';
 import { attributionSource } from './cmos-message';
@@ -522,6 +523,18 @@ export const cmosAgentOnboardToolDefinition = {
 export async function cmosAgentOnboard(
   params: InternalCmosAgentOnboardParams = {}
 ): Promise<CmosToolResult<CmosAgentOnboardResult>> {
+  // s89-m08 — ONE schema-driven boundary guard, placed at the router entry so no handler can be
+  // reached with a wrong-typed published string parameter. It reads this tool's OWN shipped
+  // inputSchema, so it cannot drift from what is published. This tool is ACTION-LESS, so every
+  // published string parameter applies. See param-type-guard.ts for the 714-triple measurement,
+  // the action-scoping evidence, and the null rationale.
+  const wrongTypedParam = findWrongTypedStringParam(
+    cmosAgentOnboardToolDefinition.inputSchema,
+    undefined,
+    params
+  );
+  if (wrongTypedParam) return createError<CmosAgentOnboardResult>(wrongTypedParam);
+
   return withClientAsync(
     async (client) => {
       const warnings: string[] = [];

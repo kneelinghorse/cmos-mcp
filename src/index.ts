@@ -504,7 +504,13 @@ export function buildToolExecutionErrorResult(
     error: {
       code: CMOS_ERROR_CODES.TOOL_EXECUTION_ERROR,
       message: `The '${toolName}' tool failed with an unhandled internal error: ${detail}`,
-      suggestion: `This is an internal error, not an input-validation problem — retry the call; if it persists, capture the tool inputs and report this${correlationSuffix}.`,
+      // s89-m08 CLASS 3. This used to open "This is an internal error, not an input-validation
+      // problem". That is a UNIVERSAL claim about the CAUSE, made by a catch-all boundary that
+      // has only an unhandled exception and a correlationId and cannot know it — and it was
+      // measurably FALSE for the whole wrong-typed-parameter class (42 triples), where the cause
+      // was exactly an input-validation problem. It also prescribed "retry the call", a loop with
+      // no exit for any deterministic fault. Say only what this frame knows.
+      suggestion: `The tool raised an exception this boundary did not expect, so the cause is not classified here; the message above is the raw failure. If it repeats with the same inputs, it is deterministic — capture the tool inputs and report this${correlationSuffix}.`,
     },
   };
 
@@ -1076,7 +1082,7 @@ async function initializeServer(): Promise<MissionProtocolContext> {
   try {
     console.error(`[INFO] Initializing MCP server...`);
     const context = await contextBuilder();
-    console.error(`[INFO] CMOS schema version: ${CMOS_SCHEMA_VERSION}`);
+    console.error(`[INFO] CMOS bundled seed schema version: ${CMOS_SCHEMA_VERSION}`);
     console.error(`[INFO] Default intelligence model: ${context.defaultModel}`);
 
     // Sprint 53 m02 / m04: startup diagnostic for attribution. `SERVER_INSTALL_ROOT`

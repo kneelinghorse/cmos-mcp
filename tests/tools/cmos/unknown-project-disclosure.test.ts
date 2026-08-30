@@ -52,30 +52,90 @@
  * no-identity-write gate to bypass all project-root policy and test only `getProjectId`.
  */
 
-import { afterAll, describe, expect, it } from '@jest/globals';
+import { afterAll, beforeAll, describe, expect, it } from '@jest/globals';
 import Database from 'better-sqlite3';
 import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
+import { requiresPrivateEvidence } from '../../helpers/public-mirror';
 import { CmosDatabaseClient } from '../../../src/tools/cmos/client';
 import { getProjectId } from '../../../src/tools/cmos/genesis-columns';
+import {
+  CMOS_CONFIG_DIR_ENV,
+  ProjectGraphRegistry,
+} from '../../../src/intelligence/project-graph-registry';
 import {
   frameInlineIfForeign,
   provenanceTag,
   UNRECORDED_PROJECT_ID,
 } from '../../../src/intelligence/provenance-frame';
+import { isJestAllowedDbPath } from '../../../src/tools/cmos/real-store-guard';
 
 const REPO_ROOT = path.resolve(__dirname, '../../..');
 const SEED_SCHEMA = path.join(REPO_ROOT, 'cmos-seed', 'db', 'schema.sql');
 const LIVE_DB = path.join(REPO_ROOT, 'cmos', 'db', 'cmos.sqlite');
-const REGISTRY = path.join(os.homedir(), '.config', 'cmos-mcp', 'project-graph.sqlite');
+const PRIVATE_HISTORY = requiresPrivateEvidence({
+  reason: 'private source-history ranges for the historical CUT-7 proof',
+  revisions: {
+    m04Start: '1a54a79',
+    m04End: '564a2a6',
+    oc1Start: 'c1fa8d6',
+    oc1End: '8ef5f2e',
+  },
+});
+const historyDescribe = PRIVATE_HISTORY.describe;
+
+/** Resolve the registry this Jest process would actually write to. */
+function registryPathForThisRun(): string {
+  return path.join(
+    process.env[CMOS_CONFIG_DIR_ENV] ?? path.join(os.homedir(), '.config', 'cmos-mcp'),
+    'project-graph.sqlite'
+  );
+}
+
+/** An absent registry or an as-yet-uninitialized schema contains zero project rows. */
+function registryRowCount(registryPath: string): number {
+  if (!fs.existsSync(registryPath)) return 0;
+  const db = new Database(registryPath, { readonly: true });
+  try {
+    const { n: projectsTables } = db
+      .prepare(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'projects'`)
+      .get() as { n: number };
+    if (projectsTables === 0) return 0;
+    return (db.prepare('SELECT COUNT(*) AS n FROM projects').get() as { n: number }).n;
+  } finally {
+    db.close();
+  }
+}
 
 const tmpDirs: string[] = [];
+const routedDbPaths: string[] = [];
+let registryRowsBefore = 0;
 afterAll(() => {
-  for (const d of tmpDirs) fs.rmSync(d, { recursive: true, force: true });
+  try {
+    ProjectGraphRegistry.resetInstance();
+    const registryPath = registryPathForThisRun();
+    expect(isJestAllowedDbPath(registryPath)).toBe(true);
+    expect(registryRowCount(registryPath)).toBe(registryRowsBefore);
+    // Each construction is checked synchronously by recordRoutedDbPath. Recheck the routes that
+    // actually ran without assuming Jest selected every test in this file.
+    expect(routedDbPaths.every((dbPath) => isSuitePrivateStorePath(dbPath))).toBe(true);
+  } finally {
+    ProjectGraphRegistry.resetInstance();
+    for (const d of tmpDirs) fs.rmSync(d, { recursive: true, force: true });
+  }
 });
+
+function isSuitePrivateStorePath(dbPath: string): boolean {
+  return path.resolve(dbPath) !== path.resolve(LIVE_DB) && isJestAllowedDbPath(dbPath);
+}
+
+function recordRoutedDbPath(dbPath: string): void {
+  expect(isSuitePrivateStorePath(dbPath)).toBe(true);
+  routedDbPaths.push(dbPath);
+}
 
 /** A store with a metadata table and NO recorded identity. */
 function identitylessStore(label: string): string {
@@ -88,6 +148,7 @@ function identitylessStore(label: string): string {
     CREATE TABLE missions (id TEXT PRIMARY KEY, name TEXT, status TEXT);
   `);
   db.close();
+  recordRoutedDbPath(dbPath);
   return dbPath;
 }
 
@@ -107,7 +168,45 @@ function captureStderr(fn: () => void): string {
   return chunks.join('');
 }
 
+/**
+ * Sprint 89 m01 — shared-mutable-resource gate sweep, published before this edit.
+ *
+ * Scope: this file mints no new row into the project-graph registry selected by
+ * `CMOS_CONFIG_DIR`, and every store path this file routes to a client is a Jest-owned path.
+ * The whole-tree predicate was run over all 228 test files. Its semantic result is 3 defective
+ * files / 8 test gates: this `(d)` gate; six skip-on-absence router-param gates (handed to m06 by
+ * the authoritative mission objective); and the separate vacuous size assertion in
+ * cmos-review-drift-selfperturbation (repaired in m01). The strict live-root arm found 9 files.
+ *
+ * Predicate arms (all `rg -n --glob '*.test.ts' ... tests`): `homedir`; `process.env.HOME`;
+ * `.config/cmos-mcp`; absolute non-temp paths; strict REPO_ROOT/PROJECT_ROOT live-store joins;
+ * `existsSync(...) return`; skip selectors; env-guarded returns; mtime/stat assertions; direct
+ * Database opens on live/registry path names; and `delete process.env.CMOS_CONFIG_DIR`.
+ * Every other hit was classified genuinely fine: comment/fake-payload literals; recursive-walker
+ * terminators; explicit mirror/live-provider skips; fail-loud live-copy sources; readonly stable-
+ * schema checks; suite-owned before/after deltas; and captured-then-restored config env changes.
+ *
+ * False-negative profile — the complements are deliberate and named:
+ * - Registry file: a production path that bypasses `CMOS_CONFIG_DIR`, or passes another explicit
+ *   configDir, is invisible here. `(d0)` proves this file's ordinary seam is isolated.
+ * - Mint: COUNT(*) sees INSERT/removal deltas, not UPDATE/touch/archive of an existing row.
+ * - Routed paths: only client paths explicitly pushed by this file are covered; a hidden
+ *   auto-resolution path is the real-store guard's responsibility.
+ * - File scope: this gate covers this test file. The published 228-file sweep covers the class.
+ */
 describe('s87-m04 — an unrecorded identity is disclosed per store, and named honestly', () => {
+  beforeAll(() => {
+    const configDir = process.env[CMOS_CONFIG_DIR_ENV];
+    if (!configDir) {
+      throw new Error(`${CMOS_CONFIG_DIR_ENV} must isolate this test before registry inspection`);
+    }
+    const registryPath = path.join(configDir, 'project-graph.sqlite');
+    if (!isJestAllowedDbPath(registryPath)) {
+      throw new Error(`refusing to inspect non-isolated Jest registry: ${registryPath}`);
+    }
+    registryRowsBefore = registryRowCount(registryPathForThisRun());
+  });
+
   it('RED (a): THREE identity-less stores in ONE process yield THREE disclosures, each naming its own store', async () => {
     const paths = ['alpha', 'bravo', 'charlie'].map((l) => identitylessStore(l));
 
@@ -231,6 +330,7 @@ describe('s87-m04 — an unrecorded identity is disclosed per store, and named h
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-s87m04-seeded-'));
     tmpDirs.push(dir);
     const dbPath = path.join(dir, 'cmos.sqlite');
+    recordRoutedDbPath(dbPath);
     const db = new Database(dbPath);
     try {
       db.exec(fs.readFileSync(SEED_SCHEMA, 'utf8'));
@@ -263,7 +363,7 @@ describe('s87-m04 — an unrecorded identity is disclosed per store, and named h
    * fails deterministically when its mission succeeds is the same defect class as one that cannot
    * fail. Both plan-time critic lenses found that independently.
    */
-  describe('CUT 7 — this mission adds NO direct identity-write effect, asserted mechanically', () => {
+  historyDescribe('CUT 7 — no direct identity-write effect, asserted mechanically', () => {
     /**
      * The diff attributable to THIS MISSION, pinned to its own commit range.
      *
@@ -278,11 +378,6 @@ describe('s87-m04 — an unrecorded identity is disclosed per store, and named h
      * Pinned to m04's own commits. If m04 is ever amended or rebased these SHAs move with it,
      * and the range — not the working tree — is what the criterion has always meant.
      */
-    const M04_RANGE_START = '1a54a79'; // s87-m03's commit
-    const M04_RANGE_END = '564a2a6'; // s87-m04's commit
-    const OC1_RANGE_START = 'c1fa8d6'; // commit immediately before the OC-1 repair
-    const OC1_RANGE_END = '8ef5f2e'; // the OC-1 repair
-
     /**
      * s87-m08 — RESOLVE THE RANGE BEFORE DIFFING IT, so an environment that cannot see m04's
      * commits says so instead of dying on git's "unknown revision" prose.
@@ -316,7 +411,7 @@ describe('s87-m04 — an unrecorded identity is disclosed per store, and named h
     }
 
     function missionDiff(): string {
-      return commitRangeDiff(M04_RANGE_START, M04_RANGE_END);
+      return commitRangeDiff(PRIVATE_HISTORY.revisions.m04Start, PRIVATE_HISTORY.revisions.m04End);
     }
 
     function forbiddenIdentityWriteAdditions(diff: string): string[] {
@@ -459,7 +554,9 @@ describe('s87-m04 — an unrecorded identity is disclosed per store, and named h
 
     it('(b2) POSITIVE FIRE: catches the identity rewrite in the pinned OC-1 commit', () => {
       expect(
-        forbiddenIdentityWriteAdditions(commitRangeDiff(OC1_RANGE_START, OC1_RANGE_END))
+        forbiddenIdentityWriteAdditions(
+          commitRangeDiff(PRIVATE_HISTORY.revisions.oc1Start, PRIVATE_HISTORY.revisions.oc1End)
+        )
       ).toEqual(['scripts/repair-unknown-project.ts: UPDATE ${table} SET project_id']);
     });
 
@@ -469,21 +566,48 @@ describe('s87-m04 — an unrecorded identity is disclosed per store, and named h
       expect(intelligence.every((f) => f === 'src/intelligence/provenance-frame.ts')).toBe(true);
     });
 
-    it('(d) leaves the live store AND the project-graph registry untouched', () => {
-      // Conjunct (d) is why every client construction above passes an explicit dbPath (D-9).
-      const live = fs.statSync(LIVE_DB);
-      expect(live.size).toBeGreaterThan(0);
+    it('(d0) the harness gives this file an isolated CMOS_CONFIG_DIR', () => {
+      const dir = process.env[CMOS_CONFIG_DIR_ENV];
+      expect(dir).toBeDefined();
+      // Named home-path comparison only: this assertion never opens the operator registry.
+      expect(path.resolve(dir!)).not.toBe(
+        path.resolve(path.join(os.homedir(), '.config', 'cmos-mcp'))
+      );
+    });
 
-      if (!fs.existsSync(REGISTRY)) return; // no registry on this machine — nothing to protect
-      const db = new Database(REGISTRY, { readonly: true });
+    it('(d) the client-route oracle rejects LIVE_DB and accepts a Jest-owned path', () => {
+      // recordRoutedDbPath applies this oracle immediately to every real client route; the
+      // order-independent afterAll gate rechecks whichever routes a filtered Jest run selected
+      // and compares the final registry count with the beforeAll baseline.
+      expect(isSuitePrivateStorePath(LIVE_DB)).toBe(false);
+      expect(
+        isSuitePrivateStorePath(path.join(os.tmpdir(), 'cmos-s89-private-fire', 'cmos.sqlite'))
+      ).toBe(true);
+    });
+
+    it('(d1) ANTI-VACUITY: a real mint moves an absent registry from zero to one', async () => {
+      const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-s89-registry-fire-'));
+      tmpDirs.push(configDir);
+      const registryPath = path.join(configDir, 'project-graph.sqlite');
+      expect(fs.existsSync(registryPath)).toBe(false);
+      const before = registryRowCount(registryPath);
+      expect(before).toBe(0);
+
+      ProjectGraphRegistry.resetInstance();
       try {
-        const { n } = db.prepare('SELECT COUNT(*) AS n FROM projects').get() as { n: number };
-        // Measured at build time: 21 registered projects, all active. The assertion is that this
-        // suite did not ADD one — a mint would show up here as a 22nd row.
-        expect(n).toBe(21);
+        const registry = await ProjectGraphRegistry.create({ configDir });
+        registry.register({
+          project_id: 'anti-vacuity-fire',
+          store_path: path.join(configDir, 'store'),
+          name: 'anti-vacuity fire',
+        });
       } finally {
-        db.close();
+        ProjectGraphRegistry.resetInstance();
       }
+
+      const after = registryRowCount(registryPath);
+      expect(after - before).toBe(1);
+      expect(after).not.toBe(before);
     });
   });
 });

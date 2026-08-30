@@ -46,15 +46,36 @@ import {
   type StoreStatFn,
 } from '../../../src/tools/cmos/cmos-review';
 import { openStoreReadOnly } from '../../../src/intelligence/cross-store-query';
+import { isJestAllowedDbPath } from '../../../src/tools/cmos/real-store-guard';
+import { requiresPrivateEvidence } from '../../helpers/public-mirror';
 
-const REPO_ROOT = path.resolve(__dirname, '../../..');
-const LIVE_DB = path.join(REPO_ROOT, 'cmos', 'db', 'cmos.sqlite');
+const PRIVATE = requiresPrivateEvidence({
+  reason:
+    'The drift self-perturbation fires derive aged suite-private copies from the private live CMOS store; the mutation-path oracle remains portable.',
+  paths: { liveDb: 'cmos/db/cmos.sqlite' },
+});
 const MS_PER_DAY = 1000 * 60 * 60 * 24;
 
 const tmpDirs: string[] = [];
+const routedDbPaths: string[] = [];
 afterAll(() => {
-  for (const d of tmpDirs) fs.rmSync(d, { recursive: true, force: true });
+  try {
+    // Each construction is checked synchronously by recordRoutedDbPath. Recheck the routes that
+    // actually ran without assuming Jest selected every test in this file.
+    expect(routedDbPaths.every((dbPath) => isSuitePrivateStorePath(dbPath))).toBe(true);
+  } finally {
+    for (const d of tmpDirs) fs.rmSync(d, { recursive: true, force: true });
+  }
 });
+
+function isSuitePrivateStorePath(dbPath: string): boolean {
+  return path.resolve(dbPath) !== path.resolve(PRIVATE.paths.liveDb) && isJestAllowedDbPath(dbPath);
+}
+
+function recordRoutedDbPath(dbPath: string): void {
+  expect(isSuitePrivateStorePath(dbPath)).toBe(true);
+  routedDbPaths.push(dbPath);
+}
 
 const statFn: StoreStatFn = (filePath) => {
   try {
@@ -77,7 +98,8 @@ function agedStoreCopy(ageDays: number): { root: string; dbPath: string } {
   const dbDir = path.join(root, 'cmos', 'db');
   fs.mkdirSync(dbDir, { recursive: true });
   const dbPath = path.join(dbDir, 'cmos.sqlite');
-  fs.copyFileSync(LIVE_DB, dbPath);
+  recordRoutedDbPath(dbPath);
+  fs.copyFileSync(PRIVATE.paths.liveDb, dbPath);
   // Sidecars deliberately NOT copied: a store at rest has none, and their absence is what makes
   // the fan-out's own open observable as a change.
 
@@ -123,7 +145,7 @@ function probeStore(root: string): number | null {
   }
 }
 
-describe('s87-m03 — the drift instrument must not read evidence it created', () => {
+PRIVATE.describe('s87-m03 — the drift instrument must not read evidence it created', () => {
   it('THE MECHANISM: opening the store moves the file mtime the OLD signal read', () => {
     const { root, dbPath } = agedStoreCopy(90);
 
@@ -242,10 +264,17 @@ describe('s87-m03 — the drift instrument must not read evidence it created', (
     expect(partition.reachable).toBe(1);
     expect(partition.drift!.stale[0].reason).toContain('freshness unknown');
   }, 60_000);
+});
 
-  it('the LIVE store was never written to by this suite', () => {
-    // Every fire above runs on a copy. Asserted rather than intended.
-    const stat = fs.statSync(LIVE_DB);
-    expect(stat.size).toBeGreaterThan(0);
+describe('s87-m03 — mutation-path oracle remains portable', () => {
+  it('rejects the private live DB and accepts a Jest-owned path', () => {
+    // recordRoutedDbPath applies this oracle immediately to every real mutation target; afterAll
+    // rechecks whichever targets a filtered Jest run selected.
+    // Every write, utimes call, and sidecar removal above derives from agedStoreCopy's dbPath.
+    // Complement: a future mutation path that bypasses agedStoreCopy must register its target.
+    expect(isSuitePrivateStorePath(PRIVATE.paths.liveDb)).toBe(false);
+    expect(
+      isSuitePrivateStorePath(path.join(os.tmpdir(), 'cmos-s89-private-fire', 'cmos.sqlite'))
+    ).toBe(true);
   });
 });

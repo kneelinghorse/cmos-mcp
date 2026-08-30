@@ -150,11 +150,16 @@ import { cmosSession } from '../../../src/tools/cmos/cmos-session';
 import { cmosSprint } from '../../../src/tools/cmos/cmos-sprint';
 import { CMOS_TOOL_DEFINITIONS } from '../../../src/tools/cmos';
 import { classifyAction } from '../../../src/tools/cmos/action-taxonomy';
+import { requiresPrivateEvidence } from '../../helpers/public-mirror';
 import { reidentifyCmosTestStore } from '../../helpers/seedCmosDb';
 
 const REPO_ROOT = path.resolve(__dirname, '../../..');
-const LIVE_DB = path.join(REPO_ROOT, 'cmos', 'db', 'cmos.sqlite');
 const SRC_ROOT = path.join(REPO_ROOT, 'src');
+const PRIVATE = requiresPrivateEvidence({
+  reason:
+    'The remedy matrix and its write-route proof derive suite-private copies from the private live CMOS store; the static prescription arms remain portable.',
+  paths: { liveDb: 'cmos/db/cmos.sqlite' },
+});
 
 /** The mission row every cell drives. Its status is SET per cell; nothing about it is inherited. */
 const DRIVER_MISSION_ID = 'B1.1';
@@ -201,16 +206,18 @@ function storeBundleDigest(dbPath: string): string {
   return hash.digest('hex');
 }
 
-/** Freeze the shared source once. No test handler receives this path. */
-beforeAll(() => {
+/** Freeze the shared source lazily for private evidence blocks. No handler receives this path. */
+function initializePrivateSource(): void {
+  if (privateSourceDb) return;
   const privateRoot = mkTmp('cmos-s88m03-private-source-');
   privateSourceDb = path.join(privateRoot, 'cmos', 'db', 'cmos.sqlite');
-  copyStoreBundle(LIVE_DB, privateSourceDb);
+  copyStoreBundle(PRIVATE.paths.liveDb, privateSourceDb);
   privateSourceDigest = storeBundleDigest(privateSourceDb);
-});
+}
 
 /** Give each scenario its own writable copy of the suite-private frozen source. */
 function copyFrozenStore(prefix: string): { projectRoot: string; dbPath: string } {
+  initializePrivateSource();
   if (!privateSourceDb) throw new Error('suite-private source was not initialized');
   const projectRoot = mkTmp(prefix);
   const dbPath = path.join(projectRoot, 'cmos', 'db', 'cmos.sqlite');
@@ -593,7 +600,7 @@ const PUBLISHED_STATUSES = new Set([
   'Deferred',
 ]);
 
-describe('s87-m01 ARM 1 — the mission-transition remedy matrix (real-store copy)', () => {
+PRIVATE.describe('s87-m01 ARM 1 — the mission-transition remedy matrix (real-store copy)', () => {
   beforeAll(async () => {
     const { projectRoot, dbPath } = copyFrozenStore('cmos-s87m01-matrix-');
 
@@ -1027,7 +1034,7 @@ describe('s87-m01 ARM 3 — every parameter an agent-facing cmos_*() call names 
   });
 });
 
-describe('s88-m03 — the suite routes writes only to copies it owns', () => {
+describe('s88-m03 — the content oracle remains portable', () => {
   it('the content oracle survives a content-preserving external timestamp write', () => {
     const dir = mkTmp('cmos-s88m03-concurrent-writer-');
     const file = path.join(dir, 'shared.sqlite');
@@ -1040,13 +1047,18 @@ describe('s88-m03 — the suite routes writes only to copies it owns', () => {
     expect(after.mtimeMs).not.toBe(before.mtimeMs);
     expect(storeBundleDigest(file)).toBe(digest);
   });
+});
+
+PRIVATE.describe('s88-m03 — the suite routes writes only to copies it owns', () => {
+  beforeAll(initializePrivateSource);
 
   it('the frozen source is unchanged and every writable route is a further private copy', () => {
     expect(routedDbPaths.length).toBeGreaterThanOrEqual(3);
     expect(storeBundleDigest(privateSourceDb)).toBe(privateSourceDigest);
     expect(
       routedDbPaths.every(
-        (dbPath) => path.resolve(dbPath) !== path.resolve(LIVE_DB) && dbPath !== privateSourceDb
+        (dbPath) =>
+          path.resolve(dbPath) !== path.resolve(PRIVATE.paths.liveDb) && dbPath !== privateSourceDb
       )
     ).toBe(true);
   });

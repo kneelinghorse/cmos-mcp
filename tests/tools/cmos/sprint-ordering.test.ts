@@ -1,19 +1,36 @@
 // SPDX-License-Identifier: Apache-2.0
 // ABOUTME: Locks the shared sprint-ID SQL order across numeric, legacy, and NULL values.
-// ABOUTME: Proves the fragment rejects untrusted SQL expressions and directions.
+// ABOUTME: Covers fleet near-misses and proves rejection of untrusted expressions/directions.
 
 import Database from 'better-sqlite3';
 
 import { sprintIdOrderSql } from '../../../src/tools/cmos/sprint-ordering';
 
 describe('sprintIdOrderSql', () => {
-  it('orders canonical IDs numerically before deterministic legacy and NULL buckets', () => {
+  it('orders canonical IDs numerically before deterministic fleet-legacy and NULL buckets', () => {
     const db = new Database(':memory:');
     db.exec('CREATE TABLE values_to_order (sprint_id TEXT)');
     const insert = db.prepare('INSERT INTO values_to_order (sprint_id) VALUES (?)');
-    [null, 'iso-final', 'PT-SP1', 'sprint-100', 'sprint-99', 'sprint-1', 'sprint-01'].forEach(
-      (id) => insert.run(id)
-    );
+    [
+      null,
+      'iso-final',
+      'PT-SP1',
+      'S1',
+      'S2',
+      'S10',
+      'Sprint 01',
+      'Sprint 30',
+      // The first three are the fleet-observed mutation killers for the numeric-only guard;
+      // sprint-research-01 exercises the broader legacy fallback but fails the first GLOB itself.
+      'sprint-101-cleanup',
+      'sprint-68-5',
+      'sprint-73-hotfix',
+      'sprint-research-01',
+      'sprint-100',
+      'sprint-99',
+      'sprint-1',
+      'sprint-01',
+    ].forEach((id) => insert.run(id));
 
     const ordered = (direction: 'ASC' | 'DESC'): Array<string | null> =>
       db
@@ -29,7 +46,16 @@ describe('sprintIdOrderSql', () => {
       'sprint-99',
       'sprint-100',
       'PT-SP1',
+      'S1',
+      'S10',
+      'S2',
+      'Sprint 01',
+      'Sprint 30',
       'iso-final',
+      'sprint-101-cleanup',
+      'sprint-68-5',
+      'sprint-73-hotfix',
+      'sprint-research-01',
       null,
     ]);
     expect(ordered('DESC')).toEqual([
@@ -37,10 +63,21 @@ describe('sprintIdOrderSql', () => {
       'sprint-99',
       'sprint-1',
       'sprint-01',
+      'sprint-research-01',
+      'sprint-73-hotfix',
+      'sprint-68-5',
+      'sprint-101-cleanup',
       'iso-final',
+      'Sprint 30',
+      'Sprint 01',
+      'S2',
+      'S10',
+      'S1',
       'PT-SP1',
       null,
     ]);
+    // `S1 < S10 < S2` is contract-conformant: legacy IDs are binary-deterministic, not numeric.
+    // The zero-padded `Sprint 01`..`Sprint 30` family happens to share numeric and binary order.
     db.close();
   });
 

@@ -55,6 +55,7 @@
 import { z } from 'zod';
 import type { ActionParamMap, CmosToolError, CmosToolResult } from './types';
 import { createError, createSuccess, CmosErrors } from './errors';
+import { findWrongTypedStringParam } from './param-type-guard';
 import {
   CredentialStore,
   type KeySource,
@@ -508,6 +509,18 @@ export async function cmosAuth(
       CmosErrors.invalidAction('cmos_auth', actionValue, CMOS_AUTH_ACTIONS)
     );
   }
+
+  // s89-m08 — ONE schema-driven boundary guard, placed immediately after action normalisation so
+  // no handler can be reached with a wrong-typed published string parameter. It reads this tool's
+  // OWN shipped inputSchema and its OWN per-action applicability contract, so it can drift from
+  // neither, and it is scoped to the parameters THIS action actually uses. See param-type-guard.ts
+  // for the 714-triple measurement, the action-scoping evidence, and the null rationale.
+  const wrongTypedParam = findWrongTypedStringParam(
+    cmosAuthToolDefinition.inputSchema,
+    CMOS_AUTH_ACTION_PARAMS[actionValue],
+    params
+  );
+  if (wrongTypedParam) return createError<CmosAuthResult>(wrongTypedParam);
 
   const store = deps.store ?? (await CredentialStore.create());
   const clientResolver = deps.clientResolver ?? defaultDashboardClientResolver;

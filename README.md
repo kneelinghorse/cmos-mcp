@@ -209,7 +209,7 @@ Every tool returns a uniform envelope:
 }
 ```
 
-`code` is machine-readable, `message` is human-readable, `suggestion` is a concrete next step. Validation errors carry `validValues`; state errors carry `currentState`.
+`code` is machine-readable, `message` is human-readable, `suggestion` is a concrete next step. Validation errors carry `validValues` (a `string[]`). State errors can carry `currentState`: generally a status string when the relevant mission, session, or sprint state is available, and — on `SESSION_ALREADY_ACTIVE` only — an object `{ id, type, title, startedAt, captureCount }`. Branch on `code` before reading it.
 
 ## Safety
 
@@ -240,7 +240,8 @@ npm run build
 npm test
 ```
 
-Pre-commit hooks run lint + format via husky/lint-staged. CI enforces lint + tests + snapshots.
+Pre-commit hooks run lint + format via husky/lint-staged. This public repository is a code mirror;
+release validation and npm publishing run from the private source.
 
 ## License
 

@@ -1806,6 +1806,52 @@ async function main(): Promise<void> {
       messageSrc.includes('response.messageId'),
       'reading only response.id yields undefined on the send route'
     );
+
+    // ── s89-m08: ARC F ITEM 1 — the wrong-typed published string parameter, ASSERTED ON THE
+    //     ARTIFACT, not just on the in-process routers (s87-m01 hole 8).
+    //
+    //     RED against the SHIPPED 2.8.0 artifact, measured over stdio: `cmos_mission(action="show",
+    //     missionId: 12345)` returned isError with code TOOL_EXECUTION_ERROR, the message
+    //     "params.missionId.trim is not a function", and the suggestion "This is an internal error,
+    //     not an input-validation problem — retry the call". Both halves were false: the cause WAS
+    //     input validation, and "retry the call" is a loop with no exit. 42 (tool, action,
+    //     declared-string-parameter) triples crashed this way (decision #1117).
+    //
+    //     The in-process gate is tests/tools/cmos/suggestion-oracle.test.ts; this is the dist leg.
+    for (const [tool, args, field] of [
+      ['cmos_mission', { action: 'show', missionId: 12345 }, 'missionId'],
+      ['cmos_mission_transition', { action: 'start', missionId: 12345 }, 'missionId'],
+      ['cmos_sprint', { action: 'show', sprintId: 12345 }, 'sprintId'],
+    ] as Array<[string, Record<string, unknown>, string]>) {
+      const wrongTyped = await h.callTool(tool, { ...args, projectRoot: projectDir });
+      const envelope = (
+        wrongTyped as { structuredContent?: { error?: { code?: string; field?: string } } }
+      ).structuredContent?.error;
+      const text = textOf(wrongTyped);
+      check(
+        `s89-m08: dist ${tool} refuses a wrong-typed ${field} as INVALID_PARAMETER naming the field`,
+        envelope?.code === 'INVALID_PARAMETER' && envelope.field === field,
+        `got code=${envelope?.code} field=${envelope?.field}; text="${text.slice(0, 160).replace(/\n/g, ' ')}"`
+      );
+      check(
+        `s89-m08: dist ${tool} no longer answers a wrong-typed ${field} with a .trim crash`,
+        !text.includes('.trim is not a function'),
+        text.slice(0, 200).replace(/\n/g, ' ')
+      );
+      check(
+        `s89-m08: dist ${tool} never claims "not an input-validation problem" for this input`,
+        !text.includes('not an input-validation problem'),
+        text.slice(0, 200).replace(/\n/g, ' ')
+      );
+    }
+
+    // The catch-all boundary's own string must not reassert a cause it cannot know, ANYWHERE in
+    // the shipped bundle — asserted on the compiled bytes so a reverted src/ reword is caught.
+    check(
+      's89-m08: the shipped bundle contains no "not an input-validation problem" claim',
+      !codeOf('../../index.js').includes('not an input-validation problem'),
+      'the catch-all boundary still asserts a cause it has no way to determine'
+    );
   } finally {
     await h.close();
     for (const dir of tmpDirs) {

@@ -9,10 +9,21 @@
 import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
+import { requiresPrivateEvidence } from '../helpers/public-mirror';
 
 const ROOT = path.resolve(__dirname, '../..');
 const CLOSE_SOURCE = 'src/tools/cmos/cmos-sprint-complete.ts';
 const PRE_M02_PARENT = '7843dfcc9aaebe7eeb482b5dbf9566eab425e4e8';
+const PRIVATE = requiresPrivateEvidence({
+  reason: 'private closeout instructions and private source-history boundary',
+  paths: {
+    agents: 'agents.md',
+    buildSessionPrompt: 'cmos/docs/build-session-prompt.md',
+  },
+  revisions: {
+    preM02Parent: '188d9e3^',
+  },
+});
 
 type FrozenReceipt = Readonly<{
   success: true;
@@ -111,19 +122,21 @@ describe('sprint-close caller protocol', () => {
     const receipt = frozenReceipt({ archivedDecisionIds: [41, 42], learningIds: [] });
     expect(() => assertAuditableSprintCloseReceipt(receipt)).not.toThrow();
   });
+});
 
+PRIVATE.describe('private sprint-close caller protocol evidence', () => {
   it('pins 7843dfc as the pre-m02 parent and proves the old/current source boundary', () => {
-    const resolvedParent = execFileSync('git', ['rev-parse', '188d9e3^'], {
-      cwd: ROOT,
-      encoding: 'utf8',
-    }).trim();
-    expect(resolvedParent).toBe(PRE_M02_PARENT);
+    expect(PRIVATE.revisions.preM02Parent).toBe(PRE_M02_PARENT);
 
-    const oldSource = execFileSync('git', ['show', `${PRE_M02_PARENT}:${CLOSE_SOURCE}`], {
-      cwd: ROOT,
-      encoding: 'utf8',
-      maxBuffer: 4 * 1024 * 1024,
-    });
+    const oldSource = execFileSync(
+      'git',
+      ['show', `${PRIVATE.revisions.preM02Parent}:${CLOSE_SOURCE}`],
+      {
+        cwd: ROOT,
+        encoding: 'utf8',
+        maxBuffer: 4 * 1024 * 1024,
+      }
+    );
     expect(oldSource).not.toMatch(/\barchivedDecisionIds\b/);
     expect(oldSource).not.toMatch(/\blearningIds\b/);
 
@@ -133,10 +146,10 @@ describe('sprint-close caller protocol', () => {
   });
 
   it.each([
-    ['agents.md', '### Sprint Closeout Discipline (advisory build-freshness)'],
-    ['cmos/docs/build-session-prompt.md', '### Sprint Closeout (advisory build-freshness)'],
-  ])('documents fail-loud pre-m02 receipt handling in %s', (relativePath, heading) => {
-    const document = fs.readFileSync(path.join(ROOT, relativePath), 'utf8');
+    [PRIVATE.paths.agents, '### Sprint Closeout Discipline (advisory build-freshness)'],
+    [PRIVATE.paths.buildSessionPrompt, '### Sprint Closeout (advisory build-freshness)'],
+  ])('documents fail-loud pre-m02 receipt handling in %s', (documentPath, heading) => {
+    const document = fs.readFileSync(documentPath, 'utf8');
     const section = extractSection(document, heading);
 
     expect(section).not.toBe('');

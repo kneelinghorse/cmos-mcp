@@ -8,6 +8,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { describe, expect, it } from '@jest/globals';
+import { requiresPrivateEvidence } from '../../helpers/public-mirror';
 import { createSeededCmosProject } from '../../helpers/seedCmosDb';
 import {
   cmosMissionDependsSchema,
@@ -22,13 +23,14 @@ import { cmosMissionTransition } from '../../../src/tools/cmos/cmos-mission-tran
 
 const REPO_ROOT = path.resolve(__dirname, '../../..');
 const TOOL_REFERENCE_PATH = path.join(REPO_ROOT, 'TOOL_REFERENCE.md');
-const PRIVATE_DB_PATH = path.join(REPO_ROOT, 'cmos', 'db', 'cmos.sqlite');
-const PRIVATE_PROMPT_PATH = path.join(REPO_ROOT, 'cmos', 'docs', 'build-session-prompt.md');
-const PRIVATE_CLI_PATH = path.join(REPO_ROOT, 'cmos', 'cli.py');
-const PRIVATE_PATHS = [PRIVATE_DB_PATH, PRIVATE_PROMPT_PATH, PRIVATE_CLI_PATH];
-const presentPrivatePaths = PRIVATE_PATHS.filter((file) => fs.existsSync(file));
-const inPublicMirror = presentPrivatePaths.length === 0;
-const privateDescribe = inPublicMirror ? describe.skip : describe;
+const PRIVATE = requiresPrivateEvidence({
+  reason: 'private dependency documentation, CLI, and historical edge store',
+  paths: {
+    liveDb: 'cmos/db/cmos.sqlite',
+    buildSessionPrompt: 'cmos/docs/build-session-prompt.md',
+    cli: 'cmos/cli.py',
+  },
+});
 
 const EXPECTED_DISCLOSURE =
   'Dependency relationships are recorded for ordering and graph expansion; they are not enforced at mission start or completion.';
@@ -283,29 +285,31 @@ describe('s88-m06 dependency-ordering contract', () => {
   });
 
   it('keeps the three private evidence inputs together or visibly scopes them out', () => {
-    expect([0, PRIVATE_PATHS.length]).toContain(presentPrivatePaths.length);
+    expect([0, Object.keys(PRIVATE.relativePaths).length]).toContain(
+      PRIVATE.availableRelativePaths.length
+    );
   });
 });
 
-privateDescribe('s88-m06 private dependency evidence', () => {
+PRIVATE.describe('s88-m06 private dependency evidence', () => {
   it('corrects the active build-session prompt rather than promising a queue gate', () => {
-    const prompt = fs.readFileSync(PRIVATE_PROMPT_PATH, 'utf8');
+    const prompt = fs.readFileSync(PRIVATE.paths.buildSessionPrompt, 'utf8');
     expect(prompt).toContain(EXPECTED_DISCLOSURE);
     expect(prompt).not.toMatch(FALSE_ENFORCEMENT_PROMISE);
   });
 
   it('keeps the private CLI help and receipt honest about recorded-only relationships', () => {
-    const cli = fs.readFileSync(PRIVATE_CLI_PATH, 'utf8');
+    const cli = fs.readFileSync(PRIVATE.paths.cli, 'utf8');
     expect(cli).toContain(EXPECTED_DISCLOSURE);
     expect(cli).not.toContain('help="Mission that blocks another"');
     expect(cli).not.toContain('help="Mission that is blocked"');
   });
 
   it('retains exactly the six s85-m05 Requires edges and their historical statuses', async () => {
-    const hashBefore = sha256(PRIVATE_DB_PATH);
+    const hashBefore = sha256(PRIVATE.paths.liveDb);
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dependency-evidence-'));
     const copyPath = path.join(tempDir, 'cmos.sqlite');
-    const source = new Database(PRIVATE_DB_PATH, { readonly: true, fileMustExist: true });
+    const source = new Database(PRIVATE.paths.liveDb, { readonly: true, fileMustExist: true });
     try {
       await source.backup(copyPath);
     } finally {
@@ -339,6 +343,6 @@ privateDescribe('s88-m06 private dependency evidence', () => {
     } finally {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
-    expect(sha256(PRIVATE_DB_PATH)).toBe(hashBefore);
+    expect(sha256(PRIVATE.paths.liveDb)).toBe(hashBefore);
   });
 });

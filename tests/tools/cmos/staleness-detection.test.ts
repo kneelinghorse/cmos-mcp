@@ -215,6 +215,46 @@ describe('staleness-detection', () => {
     expect(active[0].decision_text).toBe('Recent decision');
   });
 
+  it.each([
+    {
+      branch: 'completed-sprint fallback',
+      currentStatus: 'Completed',
+      historicalStatus: 'Completed',
+    },
+    { branch: 'active-sprint query', currentStatus: 'Active', historicalStatus: 'Current' },
+  ])('uses the highest canonical sprint in the $branch after a historical insert', async (row) => {
+    const currentSprint = DEFAULT_STALENESS_THRESHOLD + 5;
+    const db = new Database(dbPath);
+    const insertSprint = db.prepare(`INSERT INTO sprints (id, title, status) VALUES (?, ?, ?)`);
+    for (let sprint = 1; sprint <= currentSprint; sprint += 1) {
+      if (sprint === 3) continue;
+      insertSprint.run(
+        `sprint-${sprint}`,
+        `Sprint ${sprint}`,
+        sprint === currentSprint ? row.currentStatus : 'Completed'
+      );
+    }
+    // A backfilled historical row has the newest rowid but is not the newest sprint.
+    insertSprint.run('sprint-3', 'Sprint 3', row.historicalStatus);
+    db.close();
+
+    seedDecisions([{ text: 'Old decision', sprintId: 'sprint-2' }]);
+
+    const result = await runWithClient((client) =>
+      detectAndFlagStaleness(client, { threshold: DEFAULT_STALENESS_THRESHOLD })
+    );
+
+    expect({
+      currentSprintNumber: result.currentSprintNumber,
+      cutoffSprintNumber: result.cutoffSprintNumber,
+      decisionsFlagged: result.decisionsFlagged,
+    }).toEqual({
+      currentSprintNumber: currentSprint,
+      cutoffSprintNumber: currentSprint - DEFAULT_STALENESS_THRESHOLD,
+      decisionsFlagged: 1,
+    });
+  });
+
   it('does not flag a stale-sprint decision when last_reviewed_at is recent', async () => {
     seedSprints(DEFAULT_STALENESS_THRESHOLD + 5);
 

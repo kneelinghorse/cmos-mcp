@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 # ABOUTME: Append-only mirror of this PRIVATE tree's committed source (minus PRIVATE_PATHS and
-# ABOUTME: internal docs) to the PUBLIC repo github.com/kneelinghorse/cmos-mcp, with a hard leak-guard.
+# ABOUTME: nested private-source exclusions) to github.com/kneelinghorse/cmos-mcp, with a leak-guard.
 #
 # Strategy (s73 design §3, decisions #812/#819): this repo stays private and is the sole npm-publish
-# source; the public repo is a CODE mirror of everything EXCEPT PRIVATE_PATHS. The mirror is
+# source; the public repo is a CODE mirror of everything except PRIVATE_PATHS and DOCS_EXCLUDES.
 # APPEND-ONLY — it never force-pushes and never rewrites history. `package.json` is already the
 # canonical public form (set by m04), so this script COPIES it; it does not rewrite name/version.
 #
@@ -24,7 +24,7 @@ PUBLIC_BRANCH="${PUBLIC_BRANCH:-main}"
 # Top-level paths that must NEVER reach the public repo. The leak-assert below is load-bearing.
 PRIVATE_PATHS=( cmos analysis artifacts tmp SESSIONS.jsonl agents.md CLAUDE.md ecosystem.config.js )
 
-# Internal planning-adjacent docs nested under the otherwise-public docs/ tree (s73-m05 review):
+# Nested private-source exclusions under otherwise-public trees: the private npm-publish workflow,
 # sprint planning, an internal strategy survey, and the private dashboard's PG-mirror schema (moat).
 # s77-m09 purged the stale pre-Great-Deletion docs (mission-protocol/domain-pack/quality/versioning/
 # extension/intelligence guides, the discovery/ snapshots, and the whitepaper); s80-m08 also
@@ -32,6 +32,7 @@ PRIVATE_PATHS=( cmos analysis artifacts tmp SESSIONS.jsonl agents.md CLAUDE.md e
 # removed. The only genuine public reference left under docs/ is getting-started.md (the
 # authoritative per-action tool reference is the generated top-level TOOL_REFERENCE.md).
 DOCS_EXCLUDES=(
+  .github/workflows/publish.yml
   docs/specs/sprint-15-revised-missions.md
   docs/specs/phase2-pg-mirror-schema.md
   docs/survey-2026-03-29.md
@@ -57,7 +58,7 @@ echo "→ materializing this tree's committed files (git archive HEAD)"
 mkdir -p "$STAGE"
 git archive --format=tar HEAD | tar -x -C "$STAGE"
 
-# Build the rsync exclude list: top-level private paths + nested internal docs. Anchored ('/x')
+# Build the rsync exclude list: top-level private paths + nested private-source exclusions. Anchored ('/x')
 # so e.g. --exclude=/cmos matches only the top-level dir. /.git is excluded AND (via plain --delete,
 # which protects excludes) preserved in the destination — do NOT use --delete-excluded here (it would
 # delete the destination .git).
@@ -65,11 +66,11 @@ RSYNC_EXCLUDES=( "--exclude=/.git" )
 for p in "${PRIVATE_PATHS[@]}";  do RSYNC_EXCLUDES+=( "--exclude=/$p" ); done
 for d in "${DOCS_EXCLUDES[@]}";  do RSYNC_EXCLUDES+=( "--exclude=/$d" ); done
 
-echo "→ rsync staged source into the public clone (minus private paths + internal docs)"
+echo "→ rsync staged source into the public clone (minus private paths + nested exclusions)"
 rsync -a --delete "${RSYNC_EXCLUDES[@]}" "$STAGE"/ "$PUB"/
 
 # Belt-and-suspenders: explicitly remove any excluded path that PRE-EXISTED in the public clone.
-# --exclude protects such files from rsync --delete, so without this an internal doc already committed
+# --exclude protects such files from rsync --delete, so without this a nested exclusion already committed
 # to public would silently persist. Removing them here records the deletion in the forward commit
 # (append-only — a normal commit, never a history rewrite).
 for p in "${PRIVATE_PATHS[@]}" "${DOCS_EXCLUDES[@]}"; do rm -rf "${PUB:?}/$p"; done
@@ -79,14 +80,14 @@ for p in "${PRIVATE_PATHS[@]}" "${DOCS_EXCLUDES[@]}"; do rm -rf "${PUB:?}/$p"; d
 find "$PUB" -path "$PUB/.git" -prune -o -name '.env' -print -o \( -name '.env.*' ! -name '.env.template' \) -print 2>/dev/null \
   | while IFS= read -r f; do rm -f "$f"; done
 
-# ── Hard leak-assert — abort if ANY private path, *.sqlite DB, .env, or internal doc survived ──
+# ── Hard leak-assert — abort if any private path, nested exclusion, DB, or .env survived ──────
 LEAK=0
 for p in "${PRIVATE_PATHS[@]}"; do [[ -e "$PUB/$p" ]] && { echo "LEAK: private path $p"; LEAK=1; }; done
-for d in "${DOCS_EXCLUDES[@]}";  do [[ -e "$PUB/$d" ]] && { echo "LEAK: internal doc $d"; LEAK=1; }; done
+for d in "${DOCS_EXCLUDES[@]}";  do [[ -e "$PUB/$d" ]] && { echo "LEAK: nested exclusion $d"; LEAK=1; }; done
 if find "$PUB" -path "$PUB/.git" -prune -o \( -name '*.sqlite*' -o -name '*.db*' \) -print | grep -q .; then echo "LEAK: a database file (*.sqlite/*.db — the tree carries cmos/db/cmos.sqlite AND cmos/db/cmos.db)"; LEAK=1; fi
 if find "$PUB" -path "$PUB/.git" -prune -o \( -name '.env' -o \( -name '.env.*' ! -name '.env.template' \) \) -print | grep -q .; then echo "LEAK: a real .env file"; LEAK=1; fi
 [[ "$LEAK" -eq 0 ]] || { echo "ABORT: private content present in the staged public tree — refusing to mirror"; exit 1; }
-echo "✓ leak-guard passed: no PRIVATE_PATHS, *.sqlite, .env, or internal docs in the staged tree"
+echo "✓ leak-guard passed: no PRIVATE_PATHS, nested exclusions, *.sqlite, or .env in the staged tree"
 
 cd "$PUB"
 git add -A
@@ -96,7 +97,7 @@ PRIVATE_SHA="$(cd "$REPO_ROOT" && git rev-parse --short HEAD)"
 git commit --quiet -m "release $VERSION
 
 Mirrored from the private @aquex/cmos-mcp source at $PRIVATE_SHA.
-Excludes private paths (cmos/, analysis/, artifacts/, …) and internal planning docs."
+Excludes private paths (cmos/, analysis/, artifacts/, …) and nested private-source files."
 
 if [[ "${DRY_RUN:-0}" == "1" ]]; then
   echo

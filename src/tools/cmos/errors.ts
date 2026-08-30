@@ -285,7 +285,14 @@ export const CmosErrors = {
     return {
       code: CMOS_ERROR_CODES.CONTEXT_NOT_FOUND,
       message: `Context '${contextType}' not found`,
-      suggestion: 'Use cmos_context(action="view") to list available contexts',
+      // s89-m08: this used to prescribe `cmos_context(action="view")` "to list available contexts".
+      // The oracle executed that from the state this error is raised in and it returned the SAME
+      // CONTEXT_NOT_FOUND — a remedy that reproduces the refusal. There is no listing action:
+      // `view` reads ONE context and needs the very row that is missing. The recognized types are
+      // already carried in `validValues`, so say what is true and prescribe nothing that loops.
+      suggestion:
+        'The recognized context types are listed in validValues. If the type is right, then this ' +
+        'store has no row for it and the row must be recreated before it can be read.',
       validValues: VALID_CONTEXT_TYPES as unknown as string[],
     };
   },

@@ -6,7 +6,12 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { CmosDatabaseClient } from '../../../src/tools/cmos/client';
-import { ensureVectorStorage } from '../../../src/tools/cmos/schema-migrations';
+import {
+  ensureVectorStorage,
+  VECTOR_STORAGE_SCHEMA_VERSION,
+} from '../../../src/tools/cmos/schema-migrations';
+
+const VECTOR_STORAGE_MARKER_KEY = 'vector_storage_columns';
 
 // ─── Test helpers ────────────────────────────────────────────────────────────
 
@@ -53,6 +58,22 @@ function makeTempDb(): { tempDir: string; dbPath: string } {
 
 function cleanup(tempDir: string): void {
   fs.rmSync(tempDir, { recursive: true, force: true });
+}
+
+function readMetadata(client: CmosDatabaseClient, key: string): string | undefined {
+  return client.getOne<{ value: string }>('SELECT value FROM metadata WHERE key = ?', [key]).data
+    ?.value;
+}
+
+function writeMetadata(client: CmosDatabaseClient, key: string, value: string): void {
+  expect(
+    client.execute('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)', [key, value])
+      .success
+  ).toBe(true);
+}
+
+function deleteMetadata(client: CmosDatabaseClient, key: string): void {
+  expect(client.execute('DELETE FROM metadata WHERE key = ?', [key]).success).toBe(true);
 }
 
 /** Pack a 384-element Float32Array into a Buffer for sqlite-vec storage. */
@@ -151,14 +172,11 @@ describe('ensureVectorStorage', () => {
       }
     });
 
-    it('bumps schema_version metadata to 2.3', () => {
+    it('stamps its own 2.3 marker and raises the shared label to at least 2.3', () => {
       ensureVectorStorage(client);
 
-      const row = client.getOne<{ value: string }>(
-        "SELECT value FROM metadata WHERE key='schema_version'",
-        []
-      );
-      expect(row.data?.value).toBe('2.3');
+      expect(readMetadata(client, VECTOR_STORAGE_MARKER_KEY)).toBe(VECTOR_STORAGE_SCHEMA_VERSION);
+      expect(readMetadata(client, 'schema_version')).toBe(VECTOR_STORAGE_SCHEMA_VERSION);
     });
 
     it('returns a MigrationResult listing created objects', () => {
@@ -201,22 +219,16 @@ describe('ensureVectorStorage', () => {
       expect(second.indexesCreated).toEqual([]);
     });
 
-    it('does not double-bump schema_version on re-run', () => {
+    it('does not double-stamp its completion marker on re-run', () => {
       ensureVectorStorage(client);
       ensureVectorStorage(client);
 
-      const row = client.getOne<{ value: string }>(
-        "SELECT value FROM metadata WHERE key='schema_version'",
-        []
-      );
-      expect(row.data?.value).toBe('2.3');
+      expect(readMetadata(client, VECTOR_STORAGE_MARKER_KEY)).toBe(VECTOR_STORAGE_SCHEMA_VERSION);
     });
 
-    it('does not downgrade a newer schema_version marker', () => {
+    it('does not downgrade a newer shared high-water label', () => {
       ensureVectorStorage(client);
-      expect(
-        client.execute("UPDATE metadata SET value = '2.4' WHERE key = 'schema_version'", []).success
-      ).toBe(true);
+      writeMetadata(client, 'schema_version', '2.4');
 
       expect(ensureVectorStorage(client)).toEqual({
         columnsAdded: [],
@@ -225,12 +237,8 @@ describe('ensureVectorStorage', () => {
         alreadyCurrent: true,
         warnings: [],
       });
-      expect(
-        client.getOne<{ value: string }>(
-          "SELECT value FROM metadata WHERE key = 'schema_version'",
-          []
-        ).data?.value
-      ).toBe('2.4');
+      expect(readMetadata(client, 'schema_version')).toBe('2.4');
+      expect(readMetadata(client, VECTOR_STORAGE_MARKER_KEY)).toBe(VECTOR_STORAGE_SCHEMA_VERSION);
     });
 
     it.each([
@@ -240,7 +248,6 @@ describe('ensureVectorStorage', () => {
         insertSql:
           "INSERT INTO learnings (content, created_at) VALUES ('current marker repair sentinel', '2026-08-28T00:00:00Z')",
         matchTerm: 'sentinel',
-        schemaVersion: '2.3',
       },
       {
         sourceTable: 'missions',
@@ -248,21 +255,16 @@ describe('ensureVectorStorage', () => {
         insertSql:
           "INSERT INTO missions (id, name, status) VALUES ('s99-m99', 'current marker repair sentinel', 'Queued')",
         matchTerm: 'sentinel',
-        schemaVersion: '2.4',
       },
     ])(
-      'repairs an empty $ftsTable index even when schema_version is already $schemaVersion',
-      ({ sourceTable, ftsTable, insertSql, matchTerm, schemaVersion }) => {
+      'repairs an empty $ftsTable index even when the vector marker is current',
+      ({ sourceTable, ftsTable, insertSql, matchTerm }) => {
         expect(ensureVectorStorage(client).warnings).toEqual([]);
         expect(client.raw(insertSql).success).toBe(true);
         expect(
           client.execute(`INSERT INTO ${ftsTable}(${ftsTable}) VALUES(?)`, ['delete-all']).success
         ).toBe(true);
-        expect(
-          client.execute("UPDATE metadata SET value = ? WHERE key = 'schema_version'", [
-            schemaVersion,
-          ]).success
-        ).toBe(true);
+        writeMetadata(client, VECTOR_STORAGE_MARKER_KEY, VECTOR_STORAGE_SCHEMA_VERSION);
         expect(
           client.getOne<{ count: number }>(`SELECT COUNT(*) AS count FROM ${sourceTable}`, []).data
             ?.count
@@ -283,12 +285,7 @@ describe('ensureVectorStorage', () => {
           client.getMany(`SELECT rowid FROM ${ftsTable} WHERE ${ftsTable} MATCH ?`, [matchTerm])
             .data
         ).toHaveLength(1);
-        expect(
-          client.getOne<{ value: string }>(
-            "SELECT value FROM metadata WHERE key = 'schema_version'",
-            []
-          ).data?.value
-        ).toBe(schemaVersion);
+        expect(readMetadata(client, VECTOR_STORAGE_MARKER_KEY)).toBe(VECTOR_STORAGE_SCHEMA_VERSION);
         expect(ensureVectorStorage(client)).toEqual({
           columnsAdded: [],
           indexesCreated: [],
@@ -346,10 +343,7 @@ describe('ensureVectorStorage', () => {
 
         expect(client.raw('DROP TABLE decisions_vec').success).toBe(true);
         expect(client.raw(collisionSql).success).toBe(true);
-        expect(
-          client.execute("UPDATE metadata SET value = '2.1' WHERE key = 'schema_version'", [])
-            .success
-        ).toBe(true);
+        deleteMetadata(client, VECTOR_STORAGE_MARKER_KEY);
 
         const result = ensureVectorStorage(client);
 
@@ -368,12 +362,8 @@ describe('ensureVectorStorage', () => {
         );
         expect(object.data?.type).toBe(objectType);
         expect(object.data?.sql).not.toMatch(/CREATE\s+VIRTUAL\s+TABLE/i);
-        expect(
-          client.getOne<{ value: string }>(
-            "SELECT value FROM metadata WHERE key = 'schema_version'",
-            []
-          ).data?.value
-        ).toBe('2.1');
+        expect(readMetadata(client, VECTOR_STORAGE_MARKER_KEY)).toBeUndefined();
+        expect(readMetadata(client, 'schema_version')).toBe(VECTOR_STORAGE_SCHEMA_VERSION);
       }
     );
 
@@ -388,9 +378,7 @@ describe('ensureVectorStorage', () => {
           )
         `).success
       ).toBe(true);
-      expect(
-        client.execute("UPDATE metadata SET value = '2.4' WHERE key = 'schema_version'", []).success
-      ).toBe(true);
+      deleteMetadata(client, VECTOR_STORAGE_MARKER_KEY);
 
       expect(ensureVectorStorage(client)).toEqual({
         columnsAdded: [],
@@ -407,12 +395,7 @@ describe('ensureVectorStorage', () => {
           []
         ).data?.sql
       ).toContain('other_id INTEGER PRIMARY KEY');
-      expect(
-        client.getOne<{ value: string }>(
-          "SELECT value FROM metadata WHERE key = 'schema_version'",
-          []
-        ).data?.value
-      ).toBe('2.4');
+      expect(readMetadata(client, VECTOR_STORAGE_MARKER_KEY)).toBeUndefined();
     });
 
     it('rejects a same-named trigger with the wrong target behavior', () => {
@@ -425,9 +408,7 @@ describe('ensureVectorStorage', () => {
           END
         `).success
       ).toBe(true);
-      expect(
-        client.execute("UPDATE metadata SET value = '2.4' WHERE key = 'schema_version'", []).success
-      ).toBe(true);
+      deleteMetadata(client, VECTOR_STORAGE_MARKER_KEY);
 
       expect(ensureVectorStorage(client)).toEqual({
         columnsAdded: [],
@@ -444,6 +425,7 @@ describe('ensureVectorStorage', () => {
           []
         ).data?.sql
       ).toContain('SELECT 1');
+      expect(readMetadata(client, VECTOR_STORAGE_MARKER_KEY)).toBeUndefined();
     });
 
     it('does not stamp a partial store current until a missing source table is restored', () => {
@@ -455,24 +437,16 @@ describe('ensureVectorStorage', () => {
       expect(first.warnings).toEqual([
         "ALTER TABLE strategic_decisions ADD COLUMN last_embedded_hash blocked: DB_SCHEMA_MISMATCH — Source table 'strategic_decisions' does not exist.",
       ]);
-      expect(
-        client.getOne<{ value: string }>(
-          "SELECT value FROM metadata WHERE key = 'schema_version'",
-          []
-        ).data?.value
-      ).toBe('2.1');
+      expect(readMetadata(client, VECTOR_STORAGE_MARKER_KEY)).toBeUndefined();
+      expect(readMetadata(client, 'schema_version')).toBe(VECTOR_STORAGE_SCHEMA_VERSION);
 
       const stillPartial = ensureVectorStorage(client);
       expect(stillPartial.alreadyCurrent).toBe(false);
       expect(stillPartial.columnsAdded).toEqual([]);
       expect(stillPartial.indexesCreated).toEqual([]);
       expect(stillPartial.warnings).toEqual(first.warnings);
-      expect(
-        client.getOne<{ value: string }>(
-          "SELECT value FROM metadata WHERE key = 'schema_version'",
-          []
-        ).data?.value
-      ).toBe('2.1');
+      expect(readMetadata(client, VECTOR_STORAGE_MARKER_KEY)).toBeUndefined();
+      expect(readMetadata(client, 'schema_version')).toBe(VECTOR_STORAGE_SCHEMA_VERSION);
 
       expect(
         client.raw(`
@@ -492,12 +466,8 @@ describe('ensureVectorStorage', () => {
         alreadyCurrent: false,
         warnings: [],
       });
-      expect(
-        client.getOne<{ value: string }>(
-          "SELECT value FROM metadata WHERE key = 'schema_version'",
-          []
-        ).data?.value
-      ).toBe('2.3');
+      expect(readMetadata(client, VECTOR_STORAGE_MARKER_KEY)).toBe(VECTOR_STORAGE_SCHEMA_VERSION);
+      expect(readMetadata(client, 'schema_version')).toBe(VECTOR_STORAGE_SCHEMA_VERSION);
       expect(ensureVectorStorage(client)).toEqual({
         columnsAdded: [],
         indexesCreated: [],
@@ -537,12 +507,8 @@ describe('ensureVectorStorage', () => {
           []
         ).data
       ).toEqual([]);
-      expect(
-        client.getOne<{ value: string }>(
-          "SELECT value FROM metadata WHERE key = 'schema_version'",
-          []
-        ).data?.value
-      ).toBe('2.1');
+      expect(readMetadata(client, VECTOR_STORAGE_MARKER_KEY)).toBeUndefined();
+      expect(readMetadata(client, 'schema_version')).toBe(VECTOR_STORAGE_SCHEMA_VERSION);
 
       expect(
         client.raw(`
@@ -586,12 +552,8 @@ describe('ensureVectorStorage', () => {
           []
         ).data
       ).toHaveLength(1);
-      expect(
-        client.getOne<{ value: string }>(
-          "SELECT value FROM metadata WHERE key = 'schema_version'",
-          []
-        ).data?.value
-      ).toBe('2.3');
+      expect(readMetadata(client, VECTOR_STORAGE_MARKER_KEY)).toBe(VECTOR_STORAGE_SCHEMA_VERSION);
+      expect(readMetadata(client, 'schema_version')).toBe(VECTOR_STORAGE_SCHEMA_VERSION);
 
       expect(ensureVectorStorage(client)).toEqual({
         columnsAdded: [],
@@ -602,13 +564,13 @@ describe('ensureVectorStorage', () => {
       });
     });
 
-    it('retries a failed schema_version write after all storage objects already exist', () => {
+    it('retries a failed vector marker write after all storage objects already exist', () => {
       expect(
         client.raw(`
-          CREATE TRIGGER block_vector_schema_version BEFORE INSERT ON metadata
-          WHEN NEW.key = 'schema_version'
+          CREATE TRIGGER block_vector_storage_marker BEFORE INSERT ON metadata
+          WHEN NEW.key = '${VECTOR_STORAGE_MARKER_KEY}'
           BEGIN
-            SELECT RAISE(FAIL, 'schema version blocked');
+            SELECT RAISE(FAIL, 'vector storage marker blocked');
           END;
         `).success
       ).toBe(true);
@@ -635,7 +597,7 @@ describe('ensureVectorStorage', () => {
         'missions_fts_update',
       ]);
       expect(first.warnings).toEqual([
-        "metadata.schema_version = '2.3' failed: DB_QUERY_FAILED — Query failed: schema version blocked",
+        "metadata.vector_storage_columns marker = '2.3' failed: DB_QUERY_FAILED — Query failed: vector storage marker blocked",
       ]);
       expect(
         client.getMany<{ name: string }>(
@@ -660,14 +622,10 @@ describe('ensureVectorStorage', () => {
           []
         ).data?.count
       ).toBe(6);
-      expect(
-        client.getOne<{ value: string }>(
-          "SELECT value FROM metadata WHERE key = 'schema_version'",
-          []
-        ).data?.value
-      ).toBe('2.1');
+      expect(readMetadata(client, VECTOR_STORAGE_MARKER_KEY)).toBeUndefined();
+      expect(readMetadata(client, 'schema_version')).toBe(VECTOR_STORAGE_SCHEMA_VERSION);
 
-      expect(client.raw('DROP TRIGGER block_vector_schema_version').success).toBe(true);
+      expect(client.raw('DROP TRIGGER block_vector_storage_marker').success).toBe(true);
       const second = ensureVectorStorage(client);
 
       expect(second).toEqual({
@@ -677,12 +635,8 @@ describe('ensureVectorStorage', () => {
         alreadyCurrent: false,
         warnings: [],
       });
-      expect(
-        client.getOne<{ value: string }>(
-          "SELECT value FROM metadata WHERE key = 'schema_version'",
-          []
-        ).data?.value
-      ).toBe('2.3');
+      expect(readMetadata(client, VECTOR_STORAGE_MARKER_KEY)).toBe(VECTOR_STORAGE_SCHEMA_VERSION);
+      expect(readMetadata(client, 'schema_version')).toBe(VECTOR_STORAGE_SCHEMA_VERSION);
       expect(ensureVectorStorage(client).alreadyCurrent).toBe(true);
     });
 

@@ -48,10 +48,14 @@ import { createSuccess } from '../../../src/tools/cmos/errors';
 import { cmosSprintAnalytics } from '../../../src/tools/cmos/cmos-sprint-analytics';
 import { cmosSprintList } from '../../../src/tools/cmos/cmos-sprint-list';
 import { resolveCurrentSprintId } from '../../../src/tools/cmos/current-sprint';
+import { requiresPrivateEvidence } from '../../helpers/public-mirror';
 import { reidentifyCmosTestStore, seedCmosDb } from '../../helpers/seedCmosDb';
 
-const REPO_ROOT = path.resolve(__dirname, '../../..');
-const LIVE_DB = path.join(REPO_ROOT, 'cmos', 'db', 'cmos.sqlite');
+const PRIVATE = requiresPrivateEvidence({
+  reason:
+    'The analytics positive fire derives a suite-private copy from the private live CMOS store; the ordering fixtures below are portable.',
+  paths: { liveDb: 'cmos/db/cmos.sqlite' },
+});
 
 const tmpDirs: string[] = [];
 function mkTmp(prefix: string): string {
@@ -70,7 +74,7 @@ function copyLiveStore(): string {
   const dbDir = path.join(projectRoot, 'cmos', 'db');
   fs.mkdirSync(dbDir, { recursive: true });
   for (const suffix of ['', '-wal', '-shm']) {
-    const src = `${LIVE_DB}${suffix}`;
+    const src = `${PRIVATE.paths.liveDb}${suffix}`;
     if (fs.existsSync(src)) fs.copyFileSync(src, path.join(dbDir, `cmos.sqlite${suffix}`));
   }
   reidentifyCmosTestStore(projectRoot);
@@ -138,12 +142,12 @@ function seedSprintOrderingStore(): { projectRoot: string; dbPath: string } {
   return { projectRoot, dbPath };
 }
 
-describe('analytics window — real-store positive fire (s86-m05)', () => {
+PRIVATE.describe('analytics window — real-store positive fire (s86-m05)', () => {
   // NO SILENT FAIL-OPEN (agents.md Process Hardening #4). If the live store is not where this
   // test expects it, that is a failure of the test's premise and must be visible — not a skip
   // that reports green while proving nothing.
   it('has the live store it claims to be testing against', () => {
-    expect(fs.existsSync(LIVE_DB)).toBe(true);
+    expect(fs.existsSync(PRIVATE.paths.liveDb)).toBe(true);
   });
 
   it('returns the NEWEST sprints for a bounded call, not the oldest', () => {

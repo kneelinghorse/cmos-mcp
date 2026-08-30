@@ -49,7 +49,8 @@ import { statSync } from 'fs';
 import * as path from 'path';
 import { z } from 'zod';
 import type { CmosToolResult } from './types';
-import { createSuccess } from './errors';
+import { createError, createSuccess } from './errors';
+import { findWrongTypedStringParam } from './param-type-guard';
 import { cmosAgentOnboard, type CmosAgentOnboardResult } from './cmos-agent-onboard';
 import type { SelfCaptureGap } from './self-capture-guard';
 import { cmosMissionStatus, type StatusMissionItem } from './cmos-mission-status';
@@ -347,6 +348,18 @@ export async function cmosReview(
   // inputSchema (it must never reach the MCP boundary).
   internalOpts: { registry?: ProjectGraphRegistry } = {}
 ): Promise<CmosToolResult<CmosReviewResult>> {
+  // s89-m08 — ONE schema-driven boundary guard, placed at the router entry so no handler can be
+  // reached with a wrong-typed published string parameter. It reads this tool's OWN shipped
+  // inputSchema, so it cannot drift from what is published. This tool is ACTION-LESS, so every
+  // published string parameter applies. See param-type-guard.ts for the 714-triple measurement,
+  // the action-scoping evidence, and the null rationale.
+  const wrongTypedParam = findWrongTypedStringParam(
+    cmosReviewToolDefinition.inputSchema,
+    undefined,
+    params
+  );
+  if (wrongTypedParam) return createError<CmosReviewResult>(wrongTypedParam);
+
   // Direct callers do not pass through the MCP dispatcher, but this action-less tool is still
   // intrinsically read-classified. Establish the same request-local registration policy here so
   // its nested onboard/status client opens cannot infer write permission from an absent context.

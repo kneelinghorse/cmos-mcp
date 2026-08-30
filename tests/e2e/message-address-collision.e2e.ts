@@ -22,21 +22,27 @@
  * port and writes its own CMOS_CONFIG_DIR under os.tmpdir(). The real
  * ~/.config/cmos-mcp/credentials.json holds live `cmk_` secrets and is never read or written.
  *
- * NO SILENT FAIL-OPEN. A missing dist/ or live store FAILS loudly; this suite never skips.
+ * NO SILENT FAIL-OPEN. A missing dist/ or live store FAILS in the private tree. Only a
+ * structurally identified public mirror skips, and the shared helper prints why.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from '@jest/globals';
+import { afterAll, beforeAll, expect, it } from '@jest/globals';
 import Database from 'better-sqlite3';
 import * as http from 'http';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
+import { requiresPrivateEvidence } from '../helpers/public-mirror';
 import { connectStdioServer, type StdioHarness } from './stdio-harness';
 
 const REPO_ROOT = path.resolve(__dirname, '../..');
 const DIST_ENTRY = path.join(REPO_ROOT, 'dist', 'index.js');
-const LIVE_DB = path.join(REPO_ROOT, 'cmos', 'db', 'cmos.sqlite');
+const PRIVATE = requiresPrivateEvidence({
+  reason:
+    'This built-server messaging E2E derives its scratch project from the private live CMOS store.',
+  paths: { liveDb: 'cmos/db/cmos.sqlite' },
+});
 
 const PRO_ID = 'c02ea1cb-3db7-40b0-a263-7d17ef2a656f';
 const MCP_ID = 'ec2b4987-dbc1-4f16-946e-9843c4080ac1';
@@ -57,7 +63,7 @@ function scratchProject(prefix: string): string {
   const dbDir = path.join(projectRoot, 'cmos', 'db');
   fs.mkdirSync(dbDir, { recursive: true });
   for (const suffix of ['', '-wal', '-shm']) {
-    const src = `${LIVE_DB}${suffix}`;
+    const src = `${PRIVATE.paths.liveDb}${suffix}`;
     if (fs.existsSync(src)) fs.copyFileSync(src, path.join(dbDir, `cmos.sqlite${suffix}`));
   }
   const db = new Database(path.join(dbDir, 'cmos.sqlite'));
@@ -252,7 +258,7 @@ async function connect(opts: {
   });
 }
 
-describe('cmos_message address collision + unread badge over stdio (s86-m07)', () => {
+PRIVATE.describe('cmos_message address collision + unread badge over stdio (s86-m07)', () => {
   beforeAll(() => {
     if (!fs.existsSync(DIST_ENTRY)) {
       throw new Error(
@@ -260,8 +266,10 @@ describe('cmos_message address collision + unread badge over stdio (s86-m07)', (
           `\`npm run build\` first. It must not skip — a skipped transport test proves nothing.`
       );
     }
-    if (!fs.existsSync(LIVE_DB)) {
-      throw new Error(`live store not found at ${LIVE_DB}; the scratch project cannot be built.`);
+    if (!fs.existsSync(PRIVATE.paths.liveDb)) {
+      throw new Error(
+        `private live store not found at ${PRIVATE.paths.liveDb}; absence fails here unless the shared helper identified a structural public mirror.`
+      );
     }
   });
 

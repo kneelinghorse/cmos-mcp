@@ -85,6 +85,68 @@ function getTableColumns(client: CmosDatabaseClient, tableName: string): Set<str
   return new Set(result.data.map((row) => row.name));
 }
 
+function parseSchemaVersion(value: string | undefined): readonly [number, number] | null {
+  const parsed = /^(\d+)\.(\d+)$/.exec(value ?? '');
+  return parsed ? [Number(parsed[1]), Number(parsed[2])] : null;
+}
+
+function schemaVersionIsLower(current: string | undefined, target: string): boolean {
+  const currentParts = parseSchemaVersion(current);
+  const targetParts = parseSchemaVersion(target);
+  if (!targetParts) return false;
+  if (!currentParts) return true;
+  return (
+    currentParts[0] < targetParts[0] ||
+    (currentParts[0] === targetParts[0] && currentParts[1] < targetParts[1])
+  );
+}
+
+function stampSchemaVersionAtLeast(
+  client: CmosDatabaseClient,
+  version: string,
+  warnings: string[]
+): void {
+  const targetParts = parseSchemaVersion(version);
+  if (!targetParts) return;
+
+  const current = client.getOne<{ value: string }>(
+    "SELECT value FROM metadata WHERE key = 'schema_version'",
+    []
+  );
+  if (!current.success) {
+    warnings.push(
+      `metadata.schema_version read failed: ${current.error?.code ?? 'DB_ERROR'} — ${current.error?.message ?? 'unknown'}`
+    );
+    return;
+  }
+  if (!schemaVersionIsLower(current.data?.value, version)) return;
+
+  // Keep the comparison and replacement in one SQLite statement. The read above is only a
+  // fast-path/error-disclosure probe: another connection may raise the label after it returns,
+  // so the mutation must re-check the current row atomically before replacing it.
+  const result = client.execute(
+    `INSERT OR REPLACE INTO metadata (key, value) SELECT 'schema_version', ?
+     WHERE NOT EXISTS (
+       SELECT 1 FROM metadata
+       WHERE key = 'schema_version'
+         AND value <> ''
+         AND value NOT GLOB '*[^0-9.]*'
+         AND length(value) - length(replace(value, '.', '')) = 1
+         AND instr(value, '.') > 1
+         AND instr(value, '.') < length(value)
+         AND (
+           CAST(substr(value, 1, instr(value, '.') - 1) AS INTEGER) > ?
+           OR (
+             CAST(substr(value, 1, instr(value, '.') - 1) AS INTEGER) = ?
+             AND CAST(substr(value, instr(value, '.') + 1) AS INTEGER) >= ?
+           )
+         )
+     )`,
+    [version, targetParts[0], targetParts[0], targetParts[1]]
+  );
+  checkWrite(result, warnings, `metadata.schema_version -> ${version}`);
+}
+
 /**
  * Ensure a column exists on a table, adding it via ALTER TABLE if missing.
  * Returns true if the column was added, false if it already existed.
@@ -236,11 +298,7 @@ export function migrateStrategicDecisionsV21(client: CmosDatabaseClient): Migrat
   }
 
   // Update schema version in metadata
-  const versionResult = client.execute(
-    "INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_version', '2.1')",
-    []
-  );
-  checkWrite(versionResult, warnings, "metadata.schema_version = '2.1'");
+  stampSchemaVersionAtLeast(client, '2.1', warnings);
 
   return {
     columnsAdded,
@@ -510,11 +568,7 @@ export function migrateContentHash(client: CmosDatabaseClient): MigrationResult 
   }
 
   if (columnsAdded.length > 0) {
-    const versionResult = client.execute(
-      "INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_version', '2.2')",
-      []
-    );
-    checkWrite(versionResult, warnings, "metadata.schema_version = '2.2'");
+    stampSchemaVersionAtLeast(client, '2.2', warnings);
   }
 
   return {
@@ -1122,7 +1176,7 @@ function readMigrationCount(
 
 /**
  * Ensure one external-content FTS5 table, its three source triggers, and its initial/retry rebuild.
- * `forceRebuild` is the durable retry signal used by vector storage while schema_version is stale.
+ * `forceRebuild` is the durable retry signal used by vector storage while its own marker is stale.
  * Without it, a docsize/source count mismatch detects a prior decisions_fts rebuild failure.
  */
 function ensureExternalFts(
@@ -1335,6 +1389,11 @@ export function ensureAgentFeedbackTable(client: CmosDatabaseClient): MigrationR
   };
 }
 
+/** Schema generation owned by the vector-retrieval storage migration. */
+export const VECTOR_STORAGE_SCHEMA_VERSION = '2.3';
+/** Completion marker written only after the vector-retrieval substrate is ready. */
+const VECTOR_STORAGE_MARKER_KEY = 'vector_storage_columns';
+
 /**
  * Ensure the vector retrieval substrate exists (Sprint 66 m02).
  *
@@ -1342,7 +1401,14 @@ export function ensureAgentFeedbackTable(client: CmosDatabaseClient): MigrationR
  * `last_embedded_hash` skip-on-no-op tracking column to each source table,
  * and brings FTS5 to parity by adding `learnings_fts` + `missions_fts` plus
  * INSERT/DELETE/UPDATE triggers that mirror the existing `decisions_fts`
- * pattern. Bumps `schema_version` to `2.3` on first successful application.
+ * pattern. Writes its own `vector_storage_columns` completion marker after a
+ * successful application and monotonically heals the shared high-water label.
+ *
+ * `metadata.schema_version` is a NON-AUTHORITATIVE, MONOTONIC HIGH-WATER LABEL: the highest
+ * migration generation any migration on this store has reported reaching. It is NOT a ladder
+ * position and NOT proof that any lower generation's structures exist (measured: 2 of 21 real
+ * fleet stores read 2.4 with zero vec0/FTS objects). NO CODE MAY BRANCH ON IT. Every migration
+ * that needs a completion signal owns its OWN marker key in `metadata`.
  *
  * Layout decisions and rationale: cmos/planning/adr/s66-vector-retrieval.md.
  *
@@ -1359,16 +1425,16 @@ export function ensureVectorStorage(client: CmosDatabaseClient): MigrationResult
   let didWork = false;
   let allReady = true;
 
-  const schemaVersion = client.getOne<{ value: string }>(
-    "SELECT value FROM metadata WHERE key = 'schema_version'",
+  const metadata = client.getMany<{ key: string; value: string }>(
+    `SELECT key, value FROM metadata
+     WHERE key IN ('vector_storage_columns', 'schema_version', 'firehose_event_columns')`,
     []
   );
-  const versionMatch = /^(\d+)\.(\d+)$/.exec(schemaVersion.data?.value ?? '');
+  const metadataValues = new Map(
+    (metadata.success ? (metadata.data ?? []) : []).map((row) => [row.key, row.value])
+  );
   const markerCurrent =
-    schemaVersion.success &&
-    versionMatch !== null &&
-    (Number(versionMatch[1]) > 2 ||
-      (Number(versionMatch[1]) === 2 && Number(versionMatch[2]) >= 3));
+    metadataValues.get(VECTOR_STORAGE_MARKER_KEY) === VECTOR_STORAGE_SCHEMA_VERSION;
 
   // ─── Vector tables (vec0) ────────────────────────────────────────────────
 
@@ -1565,20 +1631,36 @@ export function ensureVectorStorage(client: CmosDatabaseClient): MigrationResult
   // rebuilds above and retry this write. Only a warning-free, structurally ready store may claim
   // vector schema 2.3.
   if (!markerCurrent && allReady && warnings.length === 0) {
-    const versionResult = client.execute(
-      "INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_version', '2.3')",
+    const markerResult = client.execute(
+      `INSERT OR REPLACE INTO metadata (key, value) VALUES ('${VECTOR_STORAGE_MARKER_KEY}', '${VECTOR_STORAGE_SCHEMA_VERSION}')`,
       []
     );
-    if (checkWrite(versionResult, warnings, "metadata.schema_version = '2.3'")) {
+    if (
+      checkWrite(
+        markerResult,
+        warnings,
+        `metadata.${VECTOR_STORAGE_MARKER_KEY} marker = '${VECTOR_STORAGE_SCHEMA_VERSION}'`
+      )
+    ) {
       didWork = true;
     }
   }
+
+  const alreadyCurrent = markerCurrent && allReady && !didWork && warnings.length === 0;
+  const firehoseVersion = metadataValues.get('firehose_event_columns');
+  const labelVersion =
+    firehoseVersion && schemaVersionIsLower(VECTOR_STORAGE_SCHEMA_VERSION, firehoseVersion)
+      ? firehoseVersion
+      : VECTOR_STORAGE_SCHEMA_VERSION;
+
+  // Label healing is deliberately last and does not affect storage readiness or work accounting.
+  stampSchemaVersionAtLeast(client, labelVersion, warnings);
 
   return {
     columnsAdded,
     indexesCreated,
     rowsUpdated,
-    alreadyCurrent: markerCurrent && allReady && !didWork && warnings.length === 0,
+    alreadyCurrent,
     warnings,
   };
 }
@@ -2305,11 +2387,7 @@ export function ensureFirehoseEventColumns(client: CmosDatabaseClient): Migratio
     []
   );
   checkWrite(markerResult, warnings, `metadata.${FIREHOSE_MARKER_KEY} marker`);
-  const versionResult = client.execute(
-    `INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_version', '${FIREHOSE_SCHEMA_VERSION}')`,
-    []
-  );
-  checkWrite(versionResult, warnings, `metadata.schema_version = '${FIREHOSE_SCHEMA_VERSION}'`);
+  stampSchemaVersionAtLeast(client, FIREHOSE_SCHEMA_VERSION, warnings);
 
   return {
     columnsAdded,

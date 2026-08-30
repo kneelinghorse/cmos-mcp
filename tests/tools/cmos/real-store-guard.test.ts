@@ -14,10 +14,12 @@ import {
 } from '../../../src/tools/cmos/real-store-guard';
 import { CmosDatabaseClient } from '../../../src/tools/cmos/client';
 
-// The real dogfood store at the repo root — the exact path the guard must
-// refuse to open under Jest (decision #754).
-const REPO_ROOT = path.resolve(__dirname, '../../..');
-const REAL_STORE = path.join(REPO_ROOT, 'cmos', 'db', 'cmos.sqlite');
+// A deterministic path outside os.tmpdir() exercises the same guard boundary as
+// the private dogfood store without assuming the repository checkout itself is
+// outside tmpdir. Public-mirror verification intentionally stages the repo under
+// tmpdir, where a repo-relative sentinel would be allowed by design.
+const NON_TMP_ROOT = path.join(path.parse(os.tmpdir()).root, 'cmos-real-store-guard-outside-tmp');
+const NON_TMP_STORE = path.join(NON_TMP_ROOT, 'cmos', 'db', 'cmos.sqlite');
 
 describe('real-store isolation guard (s70-m01)', () => {
   const savedWorkerId = process.env.JEST_WORKER_ID;
@@ -31,8 +33,8 @@ describe('real-store isolation guard (s70-m01)', () => {
   });
 
   describe('isJestAllowedDbPath (pure predicate, no DB open, no JEST gate)', () => {
-    test('rejects the repo real dogfood store path', () => {
-      expect(isJestAllowedDbPath(REAL_STORE)).toBe(false);
+    test('rejects a deterministic path outside tmpdir', () => {
+      expect(isJestAllowedDbPath(NON_TMP_STORE)).toBe(false);
     });
 
     test('allows an existing path under os.tmpdir()', () => {
@@ -75,33 +77,33 @@ describe('real-store isolation guard (s70-m01)', () => {
     });
 
     test('honors an explicit allowlist entry covering the path', () => {
-      expect(isJestAllowedDbPath(REAL_STORE, [REPO_ROOT])).toBe(true);
+      expect(isJestAllowedDbPath(NON_TMP_STORE, [NON_TMP_ROOT])).toBe(true);
     });
 
     test('does not consult JEST_WORKER_ID (stays pure when the var is unset)', () => {
       delete process.env.JEST_WORKER_ID;
-      expect(isJestAllowedDbPath(REAL_STORE)).toBe(false);
+      expect(isJestAllowedDbPath(NON_TMP_STORE)).toBe(false);
     });
   });
 
   describe('assertJestDbPathIsolated (JEST_WORKER_ID-gated guard)', () => {
-    test('under a simulated worker id, throws on the real store path, naming it', () => {
+    test('under a simulated worker id, throws on a non-tmpdir path, naming it', () => {
       process.env.JEST_WORKER_ID = '1';
-      expect(() => assertJestDbPathIsolated(REAL_STORE)).toThrow(/real-store-guard/);
-      expect(() => assertJestDbPathIsolated(REAL_STORE)).toThrow(REAL_STORE);
+      expect(() => assertJestDbPathIsolated(NON_TMP_STORE)).toThrow(/real-store-guard/);
+      expect(() => assertJestDbPathIsolated(NON_TMP_STORE)).toThrow(NON_TMP_STORE);
     });
 
     test('throws a typed RealStoreGuardError so wrapping callers can re-throw it', () => {
       process.env.JEST_WORKER_ID = '1';
-      expect(() => assertJestDbPathIsolated(REAL_STORE)).toThrow(RealStoreGuardError);
+      expect(() => assertJestDbPathIsolated(NON_TMP_STORE)).toThrow(RealStoreGuardError);
     });
 
     test('rejecting a non-tmpdir path does not create/open the DB file', () => {
       process.env.JEST_WORKER_ID = '1';
-      // A phantom repo-relative path: if the guard opened it, better-sqlite3
+      // A phantom non-tmpdir path: if the guard opened it, better-sqlite3
       // would create the file. It must reject by string alone and leave the
       // filesystem untouched — proving "without opening it" (decision #754).
-      const phantom = path.join(REPO_ROOT, 'cmos', 'db', `phantom-${process.pid}.sqlite`);
+      const phantom = path.join(NON_TMP_ROOT, 'cmos', 'db', `phantom-${process.pid}.sqlite`);
       expect(fs.existsSync(phantom)).toBe(false);
       expect(() => assertJestDbPathIsolated(phantom)).toThrow(/real-store-guard/);
       expect(fs.existsSync(phantom)).toBe(false);
@@ -115,7 +117,7 @@ describe('real-store isolation guard (s70-m01)', () => {
 
     test('is a strict no-op when JEST_WORKER_ID is unset (production path)', () => {
       delete process.env.JEST_WORKER_ID;
-      expect(() => assertJestDbPathIsolated(REAL_STORE)).not.toThrow();
+      expect(() => assertJestDbPathIsolated(NON_TMP_STORE)).not.toThrow();
     });
   });
 
@@ -135,17 +137,17 @@ describe('real-store isolation guard (s70-m01)', () => {
     });
   });
 
-  describe('CmosDatabaseClient.create() fails loud on a real-store path (no masking)', () => {
+  describe('CmosDatabaseClient.create() fails loud on a non-tmpdir path (no masking)', () => {
     test('rejects with RealStoreGuardError instead of a DB_CONNECTION_FAILED result', async () => {
       process.env.JEST_WORKER_ID = '1';
       // Regression: create() wraps ensureConnection() in a try/catch that maps
       // errors to a DB_CONNECTION_FAILED result. The guard throw must NOT be
       // masked into a (success:false) result a test could tolerate — it must
       // propagate so a leak fails loud. (decision #754)
-      await expect(CmosDatabaseClient.create({ dbPath: REAL_STORE })).rejects.toThrow(
+      await expect(CmosDatabaseClient.create({ dbPath: NON_TMP_STORE })).rejects.toThrow(
         RealStoreGuardError
       );
-      await expect(CmosDatabaseClient.create({ dbPath: REAL_STORE })).rejects.toThrow(
+      await expect(CmosDatabaseClient.create({ dbPath: NON_TMP_STORE })).rejects.toThrow(
         /real-store-guard/
       );
     });

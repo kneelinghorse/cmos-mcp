@@ -79,10 +79,12 @@
  */
 
 import { describe, expect, it } from '@jest/globals';
+import Database from 'better-sqlite3';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as ts from 'typescript';
 import { CMOS_TOOL_DEFINITIONS } from '../../src/tools/cmos';
+import { requiresPrivateEvidence } from '../helpers/public-mirror';
 import { lastUpdatedBodyChangeFindings } from './last-updated-body-oracle';
 import { inspectNpmPack, toPackagePath } from './npm-pack-inspection';
 
@@ -119,10 +121,15 @@ const PUBLIC_TARGETS = [
  * every private target missing together. A partially-missing set means a file was deleted or
  * moved for some other reason, and that fails loudly. Whatever is skipped is PRINTED.
  */
-const PRIVATE_TARGETS = ['agents.md', 'cmos/docs/build-session-prompt.md'];
-
-const presentPrivateTargets = PRIVATE_TARGETS.filter((p) => fs.existsSync(r(p)));
-const inPublicMirror = presentPrivateTargets.length === 0;
+const PRIVATE = requiresPrivateEvidence({
+  reason: 'private authority documents and private source-history provenance',
+  paths: {
+    agents: 'agents.md',
+    buildSessionPrompt: 'cmos/docs/build-session-prompt.md',
+  },
+});
+const PRIVATE_TARGETS = Object.values(PRIVATE.relativePaths);
+const presentPrivateTargets = PRIVATE.availableRelativePaths;
 
 /**
  * s87-m04 — the seed's own documentation, swept for IDENTIFIER claims.
@@ -548,6 +555,302 @@ function sweepContradictions(): Finding[] {
   return findings;
 }
 
+// ─── Role-bearing claims ─────────────────────────────────────────────────────
+
+/**
+ * s89-m02 — ROLE-BEARING SHIPPED PROSE.
+ *
+ * Scope and false-negative profile are one document, per decision #1063. This arm checks only
+ * roles with a shipped mechanical oracle:
+ *
+ * R1 COLUMN-OF-TABLE — simple Markdown pipe tables whose header has exactly one cell containing
+ * "column" and whose data row starts with one backticked table/view name. The named object's
+ * columns come from executing cmos-seed/db/schema.sql in memory and reading PRAGMA table_info.
+ * R2 EXECUTABLE SQL — semicolon-delimited statements in sql fences are prepared, never executed,
+ * against that same seed-schema database.
+ * R3 TOOL/ACTION — call-like prose in the form cmos_name(action="value"...), with action first,
+ * is checked against CMOS_TOOL_DEFINITIONS and the named tool's action enum.
+ *
+ * ROLE_COMPLEMENT below is binding, not an allowlist: each unchecked role states why this parser
+ * cannot adjudicate it honestly. In particular, R1 does not infer arbitrary prose or non-pipe
+ * tables; R2 does not understand statements constructed across fences or runtime-only schema;
+ * and R3 does not claim actionless calls, JSON/MCP syntax, action after another argument, or
+ * dynamic action prose. A real identifier in a false semantic claim can still pass every arm.
+ */
+
+interface TargetDocument {
+  rel: string;
+  content: string;
+}
+
+interface ColumnRoleSweep {
+  objectCount: number;
+  keyColumnTableCount: number;
+  claimCount: number;
+  findings: Finding[];
+}
+
+interface SqlRoleSweep {
+  statementCount: number;
+  findings: Finding[];
+}
+
+interface ToolActionRoleSweep {
+  claimCount: number;
+  findings: Finding[];
+}
+
+interface RoleToolDefinition {
+  name: string;
+  inputSchema: {
+    properties?: Record<string, { enum?: readonly unknown[] }>;
+  };
+}
+
+const ROLE_TOOL_DEFINITIONS = CMOS_TOOL_DEFINITIONS as unknown as readonly RoleToolDefinition[];
+
+const ROLE_COMPLEMENT: ReadonlyArray<{ role: string; reason: string }> = [
+  {
+    role: 'dotted table.column references in prose',
+    reason:
+      'The measured shipped dotted forms are metadata key references, not columns; treating them ' +
+      'as columns would make the arm suppress its only current examples rather than verify them.',
+  },
+  {
+    role: 'table existence asserted in free prose',
+    reason:
+      'The measured examples are deliberately hedged future/runtime tables, so a truthful check ' +
+      'needs a hedge grammar that this structural Markdown-table predicate does not possess.',
+  },
+  {
+    role: 'runtime-migration-only columns and tables',
+    reason:
+      'The oracle is the seed schema shipped beside the document; migration-only names require ' +
+      'running their named migration, never silently widening the oracle or adding an allowlist.',
+  },
+  {
+    role: 'semantics of an identifier that really exists',
+    reason:
+      'Role membership is not behavioural truth: a real column can still be described falsely, ' +
+      'and none of the available structural oracles can prove arbitrary prose semantics.',
+  },
+  {
+    role: 'tool/action claims outside cmos_name(action="value"...) syntax',
+    reason:
+      'Actionless calls, JSON or MCP payloads, action after another argument, and dynamically ' +
+      'described actions are outside the deliberately narrow first-argument call-like grammar.',
+  },
+  {
+    role: 'Markdown tables outside the simple pipe-table grammar',
+    reason:
+      'Multiline cells, embedded pipes, HTML tables, and omitted leading pipes need a real ' +
+      'Markdown parser; splitting those forms as ordinary rows would manufacture false claims.',
+  },
+  {
+    role: 'SQL assembled across fences or dependent on runtime-only state',
+    reason:
+      'The oracle prepares complete semicolon-delimited fence statements against the day-zero ' +
+      'seed schema and cannot validate fragments or state supplied by later runtime migrations.',
+  },
+];
+
+/**
+ * Authored per-target regression floors. Summing only TARGETS makes mirror scope explicit:
+ * 243 shared claims + 36 agents.md + 70 private build-session claims = 349 in this checkout,
+ * while the staged public mirror derives 243 because both private targets are absent.
+ */
+const TOOL_ACTION_CLAIM_FLOORS: Readonly<Record<string, number>> = {
+  'README.md': 13,
+  'SECURITY.md': 13,
+  'docs/getting-started.md': 22,
+  'TOOL_REFERENCE.md': 85,
+  'cmos-seed/README.md': 5,
+  'cmos-seed/docs/README.md': 32,
+  'cmos-seed/docs/agents-md-guide.md': 1,
+  'cmos-seed/docs/build-session-prompt.md': 8,
+  'cmos-seed/docs/getting-started.md': 22,
+  'cmos-seed/docs/session-management-guide.md': 19,
+  'cmos-seed/docs/sqlite-schema-reference.md': 0,
+  'cmos-seed/templates/PROJECT-README-template.md': 3,
+  'cmos-seed/templates/agents.md': 1,
+  'cmos-seed/tiers/build.md': 13,
+  'cmos-seed/tiers/general.md': 3,
+  'cmos-seed/tiers/managed.md': 3,
+  'agents.md': 36,
+  'cmos/docs/build-session-prompt.md': 70,
+};
+
+function targetDocuments(): TargetDocument[] {
+  return TARGETS.map((rel) => ({ rel, content: fs.readFileSync(r(rel), 'utf8') }));
+}
+
+function markdownTableCells(line: string): string[] | null {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith('|')) return null;
+  return trimmed
+    .replace(/^\|/, '')
+    .replace(/\|$/, '')
+    .split('|')
+    .map((value) => value.trim());
+}
+
+function isMarkdownTableSeparator(line: string): boolean {
+  const cells = markdownTableCells(line);
+  return cells !== null && cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+
+function seedSchemaColumns(): { objectCount: number; columns: Map<string, Set<string>> } {
+  const db = new Database(':memory:');
+  try {
+    db.exec(fs.readFileSync(r('cmos-seed/db/schema.sql'), 'utf8'));
+    const objects = db
+      .prepare("SELECT name FROM sqlite_master WHERE type IN ('table', 'view') ORDER BY name")
+      .all() as Array<{ name: string }>;
+    const columns = new Map<string, Set<string>>();
+    for (const { name } of objects) {
+      const rows = db.prepare(`PRAGMA table_info(${JSON.stringify(name)})`).all() as Array<{
+        name: string;
+      }>;
+      columns.set(name, new Set(rows.map((row) => row.name)));
+    }
+    return { objectCount: objects.length, columns };
+  } finally {
+    db.close();
+  }
+}
+
+function sweepColumnRoles(documents: readonly TargetDocument[]): ColumnRoleSweep {
+  const oracle = seedSchemaColumns();
+  const findings: Finding[] = [];
+  let keyColumnTableCount = 0;
+  let claimCount = 0;
+
+  for (const { rel, content } of documents) {
+    const lines = content.split('\n');
+    for (let headerLine = 0; headerLine < lines.length - 1; headerLine += 1) {
+      const headerCells = markdownTableCells(lines[headerLine]);
+      if (headerCells === null || !isMarkdownTableSeparator(lines[headerLine + 1])) continue;
+      const columnIndexes = headerCells
+        .map((cell, index) => (/\bcolumns?\b/i.test(cell) ? index : -1))
+        .filter((index) => index >= 0);
+      if (columnIndexes.length !== 1) continue;
+
+      keyColumnTableCount += 1;
+      const columnIndex = columnIndexes[0];
+      for (
+        let rowLine = headerLine + 2;
+        rowLine < lines.length && markdownTableCells(lines[rowLine]) !== null;
+        rowLine += 1
+      ) {
+        const cells = markdownTableCells(lines[rowLine]) ?? [];
+        const tableMatch = (cells[0] ?? '').match(/^`([^`]*)`$/);
+        if (!tableMatch) continue;
+        const table = tableMatch[1];
+        const claimedColumns = [...(cells[columnIndex] ?? '').matchAll(/`([^`]*)`/g)].map(
+          (match) => match[1]
+        );
+        claimCount += claimedColumns.length;
+        const actualColumns = oracle.columns.get(table);
+        if (!actualColumns) {
+          findings.push({
+            where: `${rel}:${rowLine + 1}`,
+            message:
+              `${rel}:${rowLine + 1} assigns ${claimedColumns.length} column claim(s) to ` +
+              `\`${table}\`, but the shipped seed schema has no table or view by that name.`,
+          });
+          continue;
+        }
+        for (const column of claimedColumns) {
+          if (actualColumns.has(column)) continue;
+          findings.push({
+            where: `${rel}:${rowLine + 1}`,
+            message:
+              `${rel}:${rowLine + 1} assigns \`${column}\` as a column of \`${table}\`; the ` +
+              `shipped seed schema instead exposes [${[...actualColumns].sort().join(', ')}].`,
+          });
+        }
+      }
+    }
+  }
+
+  return { objectCount: oracle.objectCount, keyColumnTableCount, claimCount, findings };
+}
+
+function sweepSqlRoles(documents: readonly TargetDocument[]): SqlRoleSweep {
+  const db = new Database(':memory:');
+  const findings: Finding[] = [];
+  let statementCount = 0;
+  try {
+    db.exec(fs.readFileSync(r('cmos-seed/db/schema.sql'), 'utf8'));
+    for (const { rel, content } of documents) {
+      for (const fence of content.matchAll(/```sql\s*\n([\s\S]*?)```/gi)) {
+        const statements = fence[1]
+          .split(';')
+          .map((statement) => statement.trim())
+          .filter(Boolean);
+        for (const statement of statements) {
+          statementCount += 1;
+          try {
+            db.prepare(`${statement};`);
+          } catch (error) {
+            findings.push({
+              where: rel,
+              message: `${rel} contains SQL the shipped seed schema rejects: ${String(error)}`,
+            });
+          }
+        }
+      }
+    }
+  } finally {
+    db.close();
+  }
+  return { statementCount, findings };
+}
+
+function sweepToolActionRoles(documents: readonly TargetDocument[]): ToolActionRoleSweep {
+  const definitions = new Map(
+    ROLE_TOOL_DEFINITIONS.map((definition) => [definition.name, definition])
+  );
+  const findings: Finding[] = [];
+  let claimCount = 0;
+  const pattern = /\b(cmos_[A-Za-z0-9_-]*)\s*\(\s*action\s*=\s*["']([^"']*)["']/g;
+
+  for (const { rel, content } of documents) {
+    for (const match of content.matchAll(pattern)) {
+      claimCount += 1;
+      const line = content.slice(0, match.index).split('\n').length;
+      const definition = definitions.get(match[1]);
+      if (!definition) {
+        findings.push({
+          where: `${rel}:${line}`,
+          message: `${rel}:${line} names unknown CMOS tool \`${match[1]}\`.`,
+        });
+        continue;
+      }
+      const validActions = definition.inputSchema.properties?.action?.enum;
+      if (!validActions?.includes(match[2])) {
+        findings.push({
+          where: `${rel}:${line}`,
+          message:
+            `${rel}:${line} names unknown action \`${match[2]}\` for \`${match[1]}\`; valid ` +
+            `actions are [${(validActions ?? []).join(', ')}].`,
+        });
+      }
+    }
+  }
+  return { claimCount, findings };
+}
+
+function expectedToolActionClaimFloor(): number {
+  return TARGETS.reduce((sum, rel) => {
+    const floor = TOOL_ACTION_CLAIM_FLOORS[rel];
+    if (floor === undefined) {
+      throw new Error(`No authored tool/action claim floor for target ${rel}`);
+    }
+    return sum + floor;
+  }, 0);
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 describe('shipped-prose truth (s86-m05 Instrument 3)', () => {
@@ -582,25 +885,8 @@ describe('shipped-prose truth (s86-m05 Instrument 3)', () => {
     expect(total).toBeGreaterThanOrEqual(50);
   });
 
-  it('handles the public mirror without either throwing or skipping silently', () => {
-    // The mirror deletes agents.md and cmos/ but keeps tests/, so this file runs there too.
-    // Partial absence is NOT a mirrored checkout — it is a moved or deleted file, and it fails.
-    if (!inPublicMirror && presentPrivateTargets.length !== PRIVATE_TARGETS.length) {
-      throw new Error(
-        `Private targets are partially missing: present=[${presentPrivateTargets.join(', ')}], ` +
-          `expected all of [${PRIVATE_TARGETS.join(', ')}]. In the public mirror ALL of them are ` +
-          `absent together; a partial set means one was moved or deleted. Fix the path or update ` +
-          `PRIVATE_TARGETS — do not let this gate quietly stop checking a document.`
-      );
-    }
-    if (inPublicMirror) {
-      // eslint-disable-next-line no-console
-      console.log(
-        `Public mirror detected — skipping ${PRIVATE_TARGETS.join(', ')} (deleted by ` +
-          `scripts/mirror-to-public.sh PRIVATE_PATHS). Every other target is still swept.`
-      );
-    }
-    // The public half is never skippable: those files ship in the tarball.
+  it('leaves mirror classification to the shared helper while keeping public targets mandatory', () => {
+    expect([0, PRIVATE_TARGETS.length]).toContain(presentPrivateTargets.length);
     for (const rel of PUBLIC_TARGETS) expect(fs.existsSync(r(rel))).toBe(true);
   });
 
@@ -679,6 +965,141 @@ describe('shipped-prose truth (s86-m05 Instrument 3)', () => {
   });
 });
 
+describe('role-bearing shipped prose (s89-m02)', () => {
+  it('prints the checkable roles and their declared complement', () => {
+    const printed = ROLE_COMPLEMENT.map(
+      ({ role, reason }) => `  UNCHECKED ROLE ${role}\n    reason: ${reason}`
+    );
+    // eslint-disable-next-line no-console
+    console.log(`Role-bearing claim complement:\n${printed.join('\n')}`);
+    expect(ROLE_COMPLEMENT.length).toBeGreaterThanOrEqual(7);
+    for (const entry of ROLE_COMPLEMENT) expect(entry.reason.length).toBeGreaterThan(40);
+  });
+
+  it('R1 checks every claimed Markdown-table column against the named seed-schema object', () => {
+    const result = sweepColumnRoles(targetDocuments());
+    // eslint-disable-next-line no-console
+    console.log(
+      `R1 column roles: ${result.objectCount} oracle objects, ` +
+        `${result.keyColumnTableCount} Key-Columns table(s), ${result.claimCount} claims`
+    );
+    expect(result.objectCount).toBe(26);
+    expect(result.keyColumnTableCount).toBeGreaterThanOrEqual(1);
+    expect(result.claimCount).toBeGreaterThanOrEqual(65);
+    expect(result.findings.map((finding) => finding.message)).toEqual([]);
+  });
+
+  it('R1 catches the exact decision-column regression in memory', () => {
+    const documents = targetDocuments();
+    const target = documents.find(({ rel }) => rel === 'cmos-seed/docs/sqlite-schema-reference.md');
+    expect(target).toBeDefined();
+    const needle = '`decision_text`, `status`';
+    expect((target?.content.split(needle).length ?? 1) - 1).toBe(1);
+    const mutated = documents.map((document) =>
+      document.rel === target?.rel
+        ? { ...document, content: document.content.replace(needle, '`decision`, `status`') }
+        : document
+    );
+    const findings = sweepColumnRoles(mutated).findings;
+    expect(findings).toHaveLength(1);
+    expect(findings[0].message).toContain('strategic_decisions');
+    expect(findings[0].message).toContain('`decision`');
+    expect(findings[0].message).toContain('decision_text');
+  });
+
+  it('R1 reports an unknown first-cell table instead of silently skipping it', () => {
+    const result = sweepColumnRoles([
+      {
+        rel: 'fixture.md',
+        content:
+          '| Object | Key Columns |\n' +
+          '| --- | --- |\n' +
+          '| `not_a_seed_object` | `id` |\n' +
+          '| `Strategic-Decisions` | `id` |\n',
+      },
+    ]);
+    expect(result.claimCount).toBe(2);
+    expect(result.findings).toHaveLength(2);
+    const messages = result.findings.map((finding) => finding.message).join('\n');
+    expect(messages).toContain('not_a_seed_object');
+    expect(messages).toContain('Strategic-Decisions');
+    expect(messages).toContain('no table or view');
+  });
+
+  it('R1 captures malformed role values before validating them', () => {
+    const result = sweepColumnRoles([
+      {
+        rel: 'fixture.md',
+        content:
+          '| Object | Key Columns |\n' +
+          '| --- | --- |\n' +
+          '| `strategic_decisions` | `Decision`, `decision-text`, `` |\n',
+      },
+    ]);
+    expect(result.claimCount).toBe(3);
+    expect(result.findings).toHaveLength(3);
+    const messages = result.findings.map((finding) => finding.message).join('\n');
+    expect(messages).toContain('`Decision`');
+    expect(messages).toContain('`decision-text`');
+    expect(messages).toContain('``');
+  });
+
+  it('R2 prepares every fenced SQL statement without executing it', () => {
+    const result = sweepSqlRoles(targetDocuments());
+    // eslint-disable-next-line no-console
+    console.log(`R2 executable SQL: ${result.statementCount} statements prepared`);
+    expect(result.statementCount).toBeGreaterThanOrEqual(12);
+    expect(result.findings.map((finding) => finding.message)).toEqual([]);
+
+    const bad = sweepSqlRoles([
+      {
+        rel: 'fixture.md',
+        content: '```sql\nSELECT missing_role_column FROM strategic_decisions;\n```',
+      },
+    ]);
+    expect(bad.statementCount).toBe(1);
+    expect(bad.findings).toHaveLength(1);
+    expect(bad.findings[0].message).toContain('missing_role_column');
+  });
+
+  it('R3 validates every call-like tool/action claim at its derived target-set floor', () => {
+    const floor = expectedToolActionClaimFloor();
+    const result = sweepToolActionRoles(targetDocuments());
+    // eslint-disable-next-line no-console
+    console.log(
+      `R3 tool/action roles: ${result.claimCount} claims, derived floor ${floor}, ` +
+        `${presentPrivateTargets.length}/${PRIVATE_TARGETS.length} private targets present`
+    );
+    expect(result.claimCount).toBeGreaterThanOrEqual(floor);
+    expect(result.findings.map((finding) => finding.message)).toEqual([]);
+  });
+
+  it('R3 distinguishes an unknown tool from an unknown action', () => {
+    const result = sweepToolActionRoles([
+      {
+        rel: 'fixture.md',
+        content: [
+          'cmos_missing(action="list")',
+          "cmos_review(action='missing')",
+          'cmos_Project(action="list")',
+          'cmos_review(action="Init")',
+          'cmos_review(action="in-it")',
+          'cmos_review(action="")',
+        ].join('\n'),
+      },
+    ]);
+    expect(result.claimCount).toBe(6);
+    expect(result.findings).toHaveLength(6);
+    const messages = result.findings.map((finding) => finding.message).join('\n');
+    expect(messages).toContain('unknown CMOS tool `cmos_missing`');
+    expect(messages).toContain('unknown CMOS tool `cmos_Project`');
+    expect(messages).toContain('unknown action `missing`');
+    expect(messages).toContain('unknown action `Init`');
+    expect(messages).toContain('unknown action `in-it`');
+    expect(messages).toContain('unknown action ``');
+  });
+});
+
 // ─── agents.md environment-variable read set, derived mechanically ───────────
 
 /**
@@ -734,7 +1155,7 @@ function deriveEnvReads(root: string): Set<string> {
 
 /** The CMOS_* names agents.md lists, split by which subsection they appear under. */
 function agentsMdEnvSections(): { server: string[]; scripts: string[] } {
-  const content = fs.readFileSync(r('agents.md'), 'utf8');
+  const content = fs.readFileSync(PRIVATE.paths.agents, 'utf8');
   // Read the FENCED BLOCK under the heading, not the whole section. Prose around the block
   // legitimately mentions other variables (the note that CMOS_PROJECT_ROOT is optional), and
   // counting those would make the assertion depend on the surrounding wording rather than on
@@ -757,11 +1178,11 @@ function agentsMdEnvSections(): { server: string[]; scripts: string[] } {
 
 /**
  * PRIVATE-REPO ONLY. These blocks read agents.md and cmos/docs/build-session-prompt.md, both of
- * which scripts/mirror-to-public.sh deletes while still mirroring tests/. `describe.skip` in the
- * mirror is a SCOPE statement, not a silent pass: the block above fails loudly if the private
- * targets are only PARTIALLY missing, and prints what it skipped when they are all absent.
+ * which scripts/mirror-to-public.sh deletes while still mirroring tests/. The shared wrapper's
+ * mirror skip is a SCOPE statement, not a silent pass: partial/private absence fails loudly, and
+ * a genuine structural mirror prints exactly what it skipped without evaluating this callback.
  */
-const describePrivate = inPublicMirror ? describe.skip : describe;
+const describePrivate = PRIVATE.describe;
 
 describePrivate('agents.md environment-variable block is derived, not maintained (s86-m05)', () => {
   const srcReads = deriveEnvReads('src');
@@ -871,11 +1292,10 @@ describe('shipped-document stamps and citations (s86-m05)', () => {
     expect(verified).toBeGreaterThanOrEqual(Math.max(...cited));
   });
 
-  (inPublicMirror ? it.skip : it)(
-    'stamps agents.md and build-session-prompt.md at the package version',
-    () => {
-      const agents = fs.readFileSync(r('agents.md'), 'utf8');
-      const prompt = fs.readFileSync(r('cmos/docs/build-session-prompt.md'), 'utf8');
+  PRIVATE.describe('private authority-document stamps', () => {
+    it('stamps agents.md and build-session-prompt.md at the package version', () => {
+      const agents = fs.readFileSync(PRIVATE.paths.agents, 'utf8');
+      const prompt = fs.readFileSync(PRIVATE.paths.buildSessionPrompt, 'utf8');
 
       const agentsVersion = agents.match(/\*\*Version\*\*:\s*([0-9]+\.[0-9]+\.[0-9]+)/);
       expect(agentsVersion?.[1]).toBe(PKG.version);
@@ -885,12 +1305,9 @@ describe('shipped-document stamps and citations (s86-m05)', () => {
       const promptVersion = prompt.match(/\*\*CMOS Version\*\*:\s*([0-9]+\.[0-9]+)/);
       expect(promptVersion).not.toBeNull();
       expect(PKG.version.startsWith(`${promptVersion?.[1]}.`)).toBe(true);
-    }
-  );
+    });
 
-  (inPublicMirror ? it.skip : it)(
-    'stamps Last Updated no earlier than the release whose content the file documents',
-    () => {
+    it('stamps Last Updated no earlier than the release whose content the file documents', () => {
       // WHAT THIS ASSERTS, stated plainly because an earlier revision's NAME promised more than
       // its body delivered: it claimed "not older than the newest sprint the file documents" and
       // then only checked that the date parsed and was not in the future — a bar a 2020 stamp
@@ -907,8 +1324,11 @@ describe('shipped-document stamps and citations (s86-m05)', () => {
       const releaseDate = new Date((release as RegExpMatchArray)[2]).getTime();
       expect(Number.isNaN(releaseDate)).toBe(false);
 
-      for (const rel of PRIVATE_TARGETS) {
-        const content = fs.readFileSync(r(rel), 'utf8');
+      for (const [rel, absolute] of [
+        [PRIVATE.relativePaths.agents, PRIVATE.paths.agents],
+        [PRIVATE.relativePaths.buildSessionPrompt, PRIVATE.paths.buildSessionPrompt],
+      ] as const) {
+        const content = fs.readFileSync(absolute, 'utf8');
         const stamp = content.match(/\*\*Last Updated\*\*:\s*(\d{4}-\d{2}-\d{2})/);
         expect(stamp).not.toBeNull();
         const stamped = new Date((stamp as RegExpMatchArray)[1]).getTime();
@@ -926,12 +1346,12 @@ describe('shipped-document stamps and citations (s86-m05)', () => {
         // …and not in the future.
         expect(stamped).toBeLessThanOrEqual(Date.now() + 24 * 60 * 60 * 1000);
       }
-    }
-  );
+    });
+  });
 });
 
 describePrivate('build-session-prompt ↔ agents.md process-hardening parity (s86-m05, #500)', () => {
-  const promptPath = r('cmos/docs/build-session-prompt.md');
+  const promptPath = PRIVATE.paths.buildSessionPrompt;
 
   /**
    * The Process Hardening section of one document, as its numbered practice titles.
@@ -948,16 +1368,22 @@ describePrivate('build-session-prompt ↔ agents.md process-hardening parity (s8
    * span, build-session-prompt.md puts it inside — so both shapes are accepted, but ONLY within
    * the Process Hardening section of each file.
    */
-  const processHardeningPractices = (content: string): string[] => {
+  const processHardeningSection = (content: string): string => {
     const start = content.search(/^#{2,3}\s+Process Hardening/m);
-    if (start === -1) return [];
+    if (start === -1) return '';
     // Slice past the whole heading LINE. Advancing by one character leaves `## …` behind when
     // the heading was `### …`, which matches the section-END pattern at offset 0 and yields an
     // empty section — silently, and the parity assertion would then compare [] to [].
     const afterHeading = content.indexOf('\n', start);
     const rest = content.slice(afterHeading === -1 ? start : afterHeading + 1);
     const end = rest.search(/^#{2,3}\s/m);
-    const section = end === -1 ? rest : rest.slice(0, end);
+    return end === -1 ? rest : rest.slice(0, end);
+  };
+
+  const processHardeningPracticeBlocks = (
+    content: string
+  ): Array<{ readonly number: number; readonly title: string; readonly body: string }> => {
+    const section = processHardeningSection(content);
     // Two shapes exist and each document uses ONE of them for its practices:
     //   OUTSIDE — `1. **Title** — …`   (agents.md's practices, and the prompt's nested
     //                                   6-path fixture checklist)
@@ -972,25 +1398,167 @@ describePrivate('build-session-prompt ↔ agents.md process-hardening parity (s8
     const firstInside = section.search(/^\*\*\d\.\s+/m);
     const usesInside = firstInside !== -1 && (firstOutside === -1 || firstInside < firstOutside);
     const pattern = usesInside ? INSIDE : OUTSIDE;
-    return [...section.matchAll(pattern)].map((m) => `${m[1]}. ${m[2].trim()}`);
+    const matches = [...section.matchAll(pattern)];
+    return matches.map((match, index) => ({
+      number: Number(match[1]),
+      title: match[2].trim(),
+      body: section.slice(
+        match.index,
+        index + 1 < matches.length ? matches[index + 1].index : section.length
+      ),
+    }));
   };
 
-  it('carries seven numbered practices, at parity with agents.md', () => {
+  const processHardeningPractices = (content: string): string[] =>
+    processHardeningPracticeBlocks(content).map(
+      (practice) => `${practice.number}. ${practice.title}`
+    );
+
+  const markdownSection = (content: string, heading: string): string => {
+    const start = content.indexOf(heading);
+    if (start === -1) return '';
+    const rest = content.slice(start + heading.length);
+    const end = rest.search(/^###\s+/m);
+    return end === -1 ? rest : rest.slice(0, end);
+  };
+
+  it('carries nine numbered practices, at parity with agents.md', () => {
     // agents.md says "Full text + evidence lives in build-session-prompt.md" — so the cited
     // authority must not be the weaker of the two documents.
-    const agentsPractices = processHardeningPractices(fs.readFileSync(r('agents.md'), 'utf8'));
+    const agentsPractices = processHardeningPractices(
+      fs.readFileSync(PRIVATE.paths.agents, 'utf8')
+    );
     const promptPractices = processHardeningPractices(fs.readFileSync(promptPath, 'utf8'));
 
     // Premise check: the extractor found a Process Hardening section in BOTH files. Without
     // this, two empty lists would compare equal and the parity assertion would be vacuous.
-    expect(agentsPractices.length).toBe(7);
-    expect(promptPractices.length).toBe(7);
+    expect(agentsPractices.length).toBe(9);
+    expect(promptPractices.length).toBe(9);
 
     // Same practices, same order — compared by NUMBER and by the leading words of the title,
     // so a reworded title does not fail but a DROPPED or REORDERED practice does.
     const key = (s: string): string =>
       s.toLowerCase().replace(/[`_*]/g, '').split(/\s+/).slice(0, 3).join(' ');
     expect(promptPractices.map(key)).toEqual(agentsPractices.map(key));
+  });
+
+  /**
+   * SCOPE + FALSE-NEGATIVE PROFILE (#1063): these assertions check only the presence,
+   * numbering, parity, and clause wording of practices 8 and 9 in agents.md and
+   * cmos/docs/build-session-prompt.md.
+   *
+   * They cannot see COMPLIANCE with practice 8. Its sweep lives in missions.objective in
+   * cmos/db/cmos.sqlite, a shared mutable file every concurrent agent appends to; asserting over
+   * that file here would recreate learning #364's defect class, so that check is refused.
+   * They cannot see COMPLIANCE with practice 9 either: next-step #555 passes the strongest
+   * home-of-record text predicate by citing cmos-context-view.ts while never naming its actual
+   * home, cmos/planning/phase-2-master-plan.md. A predicate that green-lights its motivating
+   * counterexample is a fake gate. These checks also key on wording, so a rewrite that retains
+   * every keyword while inverting the rule can pass; sentence correctness is reviewer-judgment.
+   *
+   * This block runs only in the private tree. Both targets are PRIVATE_PATHS in
+   * scripts/mirror-to-public.sh; the enclosing private-only block skips by scope in the public
+   * mirror and prints what it skipped. The complement — cmos-seed/docs/build-session-prompt.md,
+   * cmos-seed/templates/agents.md, and cmos/templates/agents.md — deliberately has no Process
+   * Hardening section, as the existing seed assertion below requires. Finally, this gates two of
+   * the twenty standing process-rule decision rows absent from both authority documents before
+   * this mission; the other eighteen remain out of scope and are named as a next-step. Historical
+   * planning prose that proposed these rules is evidence, not either designated authority.
+   */
+  it('keeps every required clause of practices 8 and 9 in each authority document', () => {
+    const clauses = [
+      [
+        8,
+        [
+          ['names the defect CLASS', /\bdefect class\b/i],
+          ['names the PREDICATE', /\bpredicate\b/i],
+          ['names the site COUNT', /\bcount\b/i],
+          ['names the before-edit ORDERING', /before .{0,60}edit/i],
+          ['names the WHOLE-TREE scope', /whole tree|across the (?:whole )?tree/i],
+          ['cites learning #364 and decision #1085', /learning #364.*decision #1085/i],
+        ],
+      ],
+      [
+        9,
+        [
+          ['names the HOME OF RECORD', /home of record/i],
+          ['calls the row a CACHE', /\bcache\b/i],
+          ['names the read-on-a-SCHEDULE test', /read (?:on a schedule|at every sprint open)/i],
+          ['names the OPERATOR', /operator/i],
+          [
+            'limits declared authority to a registered foundational document',
+            /projectIdentity\.foundational_docs|registered foundational document/i,
+          ],
+          ['limits cache treatment to a duplicate database row', /duplicate database row/i],
+          ['cites decision #1086', /decision #1086/i],
+        ],
+      ],
+    ] as const;
+    const issues: string[] = [];
+
+    for (const [rel, absolute] of [
+      [PRIVATE.relativePaths.agents, PRIVATE.paths.agents],
+      [PRIVATE.relativePaths.buildSessionPrompt, PRIVATE.paths.buildSessionPrompt],
+    ] as const) {
+      const blocks = processHardeningPracticeBlocks(fs.readFileSync(absolute, 'utf8'));
+      for (const [practiceNumber, requiredClauses] of clauses) {
+        const block = blocks.find((candidate) => candidate.number === practiceNumber);
+        if (!block) {
+          issues.push(`${rel} is missing Process Hardening practice ${practiceNumber}`);
+          continue;
+        }
+        for (const [clauseName, pattern] of requiredClauses) {
+          if (!pattern.test(block.body)) {
+            issues.push(`practice ${practiceNumber} in ${rel} ${clauseName}`);
+          }
+        }
+      }
+    }
+
+    expect(issues).toEqual([]);
+  });
+
+  it('keeps the canonical normative paragraph identical across both authority documents', () => {
+    const agentsBlocks = processHardeningPracticeBlocks(
+      fs.readFileSync(PRIVATE.paths.agents, 'utf8')
+    );
+    const promptBlocks = processHardeningPracticeBlocks(fs.readFileSync(promptPath, 'utf8'));
+    const starts = [
+      [8, /If a mission names a defect class/],
+      [9, /Before asking the operator to adjudicate a record's status/],
+    ] as const;
+    const canonicalLine = (body: string, start: RegExp): string => {
+      const offset = body.search(start);
+      return offset === -1 ? '' : body.slice(offset).split('\n')[0].trim();
+    };
+
+    for (const [practiceNumber, start] of starts) {
+      const agentsBlock = agentsBlocks.find((block) => block.number === practiceNumber);
+      const promptBlock = promptBlocks.find((block) => block.number === practiceNumber);
+      expect(agentsBlock).toBeDefined();
+      expect(promptBlock).toBeDefined();
+      expect(canonicalLine(promptBlock?.body ?? '', start)).toBe(
+        canonicalLine(agentsBlock?.body ?? '', start)
+      );
+      expect(canonicalLine(agentsBlock?.body ?? '', start)).not.toBe('');
+    }
+  });
+
+  it('places practices 8 and 9 at their mission-authoring and review decision points', () => {
+    const prompt = fs.readFileSync(promptPath, 'utf8');
+    const authoring = markdownSection(prompt, '### Mission Authoring Conventions');
+    const review = markdownSection(prompt, '### Sprint Review Session');
+
+    expect(authoring).toMatch(/classSweep/);
+    expect(authoring).toMatch(/practice 8/i);
+    expect(review).toMatch(/home of record/i);
+    expect(review).toMatch(/practice 9/i);
+  });
+
+  it('states that the Process Hardening set now contains nine practices', () => {
+    const prompt = fs.readFileSync(promptPath, 'utf8');
+    expect(prompt).toMatch(/bringing the set to nine/);
+    expect(prompt).not.toMatch(/bringing the set to seven/);
   });
 
   it('carries the 6-path checklist, the positive-fire clause and the no-silent-fail-open rule', () => {
@@ -1009,7 +1577,7 @@ describePrivate('build-session-prompt ↔ agents.md process-hardening parity (s8
 
   it("says '5-path' in neither file", () => {
     expect(fs.readFileSync(promptPath, 'utf8')).not.toMatch(/5-path/);
-    expect(fs.readFileSync(r('agents.md'), 'utf8')).not.toMatch(/5-path/);
+    expect(fs.readFileSync(PRIVATE.paths.agents, 'utf8')).not.toMatch(/5-path/);
   });
 
   it('points See-Also at a document that exists', () => {
@@ -1049,12 +1617,11 @@ describePrivate('build-session-prompt ↔ agents.md process-hardening parity (s8
  * outside this deliberately bold-Markdown contract, and date-only stamps cannot distinguish two
  * body edits made on the same calendar day.
  *
- * ALWAYS-RUNNING, NEVER `inPublicMirror`-GATED, AND THAT IS THE TRAP THIS AVOIDS. The existing
- * **Last Updated** arm below is declared `(inPublicMirror ? it.skip : it)` and loops
- * `PRIVATE_TARGETS`, which is correct for documents the mirror deletes. `cmos-seed/**` is NOT in
- * `mirror-to-public.sh`'s PRIVATE_PATHS — it ships to the public repo — so appending these files
- * to that arm would have left the public stamps unchecked in the one repo an external consumer
- * reads. Separate `it`, no skip, no PRIVATE_TARGETS entry.
+ * THE PACKED-CONTENT ARM ALWAYS RUNS. `cmos-seed/**` is not mirror-excluded, so the public clone
+ * still verifies the stamp count, syntax, future-date bound, schema version, and tool count. The
+ * one private-history comparison is scoped separately: a mirror release commit re-dates private
+ * body changes, so public Git history cannot establish when the private source body changed.
+ * Treating that mirror commit date as source provenance produced this suite's public false RED.
  */
 describe('the seed ships stamps that describe the seed (s87-m04 + s88-m03 + s88-m07)', () => {
   /** The schema version the SHIPPED seed actually seeds. Read from the generated file, not typed. */
@@ -1092,21 +1659,19 @@ describe('the seed ships stamps that describe the seed (s87-m04 + s88-m03 + s88-
 
   const shipsInPackage = (rel: string): boolean => PACKED.files.has(rel);
 
+  const lastUpdatedStamps = (): Array<{ rel: string; value: string }> =>
+    [...PACKED.seedMarkdown].flatMap(([rel, content]) =>
+      stampsInContent(rel, 'Last Updated', content)
+    );
+
   it('records that the old private-only Last Updated arm covered zero tarball stamps', () => {
-    // Anti-vacuity on both sides: the old arm named exactly two paths, and neither appears in the
-    // real npm tarball. In this private source tree both paths carry a stamp; the public mirror
-    // deliberately lacks both files, so opening them there would recreate the scope bug.
+    // These two private paths are excluded from both the tarball and the public mirror.
     expect(PRIVATE_TARGETS).toHaveLength(2);
     expect(PRIVATE_TARGETS.filter(shipsInPackage)).toEqual([]);
-    if (!inPublicMirror) {
-      expect(PRIVATE_TARGETS.flatMap((rel) => stampsIn(rel, 'Last Updated'))).toHaveLength(2);
-    }
   });
 
   it('checks the eight bold Last Updated stamps in actual packed seed Markdown', () => {
-    const stamps = [...PACKED.seedMarkdown].flatMap(([rel, content]) =>
-      stampsInContent(rel, 'Last Updated', content)
-    );
+    const stamps = lastUpdatedStamps();
     const expectedStampPaths = [
       'cmos-seed/README.md',
       'cmos-seed/docs/README.md',
@@ -1134,13 +1699,20 @@ describe('the seed ships stamps that describe the seed (s87-m04 + s88-m03 + s88-
       .map((stamp) => `${stamp.rel} has malformed Last Updated value "${stamp.value}"`);
     expect(malformed).toEqual([]);
 
-    const stale = lastUpdatedBodyChangeFindings(REPO_ROOT, stamps);
-    expect(stale).toEqual([]);
-
     const future = stamps
       .filter((stamp) => new Date(stamp.value).getTime() > Date.now() + 24 * 60 * 60 * 1000)
       .map((stamp) => `${stamp.rel} has future Last Updated value "${stamp.value}"`);
     expect(future).toEqual([]);
+  });
+
+  PRIVATE.describe('private source-history provenance for packed seed stamps', () => {
+    it('confirms the old private-only arm actually observed two private stamps', () => {
+      expect(PRIVATE_TARGETS.flatMap((rel) => stampsIn(rel, 'Last Updated'))).toHaveLength(2);
+    });
+
+    it('dates each Last Updated stamp from the private body history', () => {
+      expect(lastUpdatedBodyChangeFindings(REPO_ROOT, lastUpdatedStamps())).toEqual([]);
+    });
   });
 
   it('every **Schema Version** stamp in the shipped seed names the version the seed seeds', () => {

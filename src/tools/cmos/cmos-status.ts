@@ -20,7 +20,8 @@
 import { z } from 'zod';
 import { withClientAsync } from './client';
 import type { CmosToolResult } from './types';
-import { createSuccess } from './errors';
+import { createError, createSuccess } from './errors';
+import { findWrongTypedStringParam } from './param-type-guard';
 import { getProjectIdentity, deriveProjectSlug } from './project-identity';
 import { DashboardClient, resolveDashboardBaseUrl } from './dashboard-client';
 import { computeAuthState } from '../../auth/auth-state';
@@ -136,6 +137,18 @@ async function resolveLastSyncAt(
 export async function cmosStatus(
   params: CmosStatusParams = {}
 ): Promise<CmosToolResult<CmosStatusResult>> {
+  // s89-m08 — ONE schema-driven boundary guard, placed at the router entry so no handler can be
+  // reached with a wrong-typed published string parameter. It reads this tool's OWN shipped
+  // inputSchema, so it cannot drift from what is published. This tool is ACTION-LESS, so every
+  // published string parameter applies. See param-type-guard.ts for the 714-triple measurement,
+  // the action-scoping evidence, and the null rationale.
+  const wrongTypedParam = findWrongTypedStringParam(
+    cmosStatusToolDefinition.inputSchema,
+    undefined,
+    params
+  );
+  if (wrongTypedParam) return createError<CmosStatusResult>(wrongTypedParam);
+
   return withClientAsync(
     async (client) => {
       const identity = getProjectIdentity(client);

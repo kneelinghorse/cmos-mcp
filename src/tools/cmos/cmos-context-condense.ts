@@ -179,7 +179,12 @@ export async function cmosContextCondense(
         return createError<CmosContextCondenseResult>({
           code: CMOS_ERROR_CODES.CONTEXT_NOT_FOUND,
           message: `Context '${contextType}' not found`,
-          suggestion: 'Use cmos_context(action="view") to check available contexts',
+          // s89-m08: was `cmos_context(action="view")` "to check available contexts" — executed
+          // from this state it returns the SAME CONTEXT_NOT_FOUND, because `view` reads the very
+          // row that is missing. See the identical correction at errors.ts contextNotFound.
+          suggestion:
+            'If the context type is right, then this store has no row for it and the row must be ' +
+            'recreated before it can be condensed.',
         });
       }
 

@@ -14,19 +14,28 @@
  *
  * THE STORE IS A COPY. Every leg runs against a tmpdir copy of the live store — a real, migrated
  * schema — and the live store is never opened for writing.
+ *
+ * NO SILENT FAIL-OPEN. Missing dist/ or private store evidence fails in the private tree. Only a
+ * structurally identified public mirror skips, and the shared helper prints the missing evidence
+ * and reason instead of letting a positive fire return green vacuously.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from '@jest/globals';
+import { afterAll, beforeAll, expect, it } from '@jest/globals';
 import Database from 'better-sqlite3';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
+import { requiresPrivateEvidence } from '../helpers/public-mirror';
 import { connectStdioServer, type StdioHarness } from './stdio-harness';
 
 const REPO_ROOT = path.resolve(__dirname, '../..');
 const DIST_ENTRY = path.join(REPO_ROOT, 'dist', 'index.js');
-const LIVE_DB = path.join(REPO_ROOT, 'cmos', 'db', 'cmos.sqlite');
+const PRIVATE = requiresPrivateEvidence({
+  reason:
+    'This built-server mission-move E2E derives its scratch project from the private live CMOS store.',
+  paths: { liveDb: 'cmos/db/cmos.sqlite' },
+});
 
 const tmpDirs: string[] = [];
 function mkTmp(prefix: string): string {
@@ -42,7 +51,7 @@ function scratchProject(): { projectRoot: string; dbPath: string } {
   fs.mkdirSync(dbDir, { recursive: true });
   const dbPath = path.join(dbDir, 'cmos.sqlite');
   for (const suffix of ['', '-wal', '-shm']) {
-    const src = `${LIVE_DB}${suffix}`;
+    const src = `${PRIVATE.paths.liveDb}${suffix}`;
     if (fs.existsSync(src)) fs.copyFileSync(src, `${dbPath}${suffix}`);
   }
 
@@ -100,7 +109,7 @@ function row(
   }
 }
 
-describe('cmos_mission(move) + parked_missions over stdio (s86-m08)', () => {
+PRIVATE.describe('cmos_mission(move) + parked_missions over stdio (s86-m08)', () => {
   let harness: StdioHarness | undefined;
   let projectRoot: string;
   let dbPath: string;
@@ -112,8 +121,10 @@ describe('cmos_mission(move) + parked_missions over stdio (s86-m08)', () => {
           `\`npm run build\` first. It must not skip — a skipped transport test proves nothing.`
       );
     }
-    if (!fs.existsSync(LIVE_DB)) {
-      throw new Error(`live store not found at ${LIVE_DB}; the scratch copy cannot be built.`);
+    if (!fs.existsSync(PRIVATE.paths.liveDb)) {
+      throw new Error(
+        `private live store not found at ${PRIVATE.paths.liveDb}; absence fails here unless the shared helper identified a structural public mirror.`
+      );
     }
     ({ projectRoot, dbPath } = scratchProject());
     harness = await connectStdioServer({

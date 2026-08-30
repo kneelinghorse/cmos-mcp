@@ -36,10 +36,16 @@ import {
   cmosSessionCapture,
   formatSessionCaptureForLLM,
 } from '../../../src/tools/cmos/cmos-session-capture';
+import { requiresPrivateEvidence } from '../../helpers/public-mirror';
 import { reidentifyCmosTestStore, seedCmosDb } from '../../helpers/seedCmosDb';
 
-const REPO_ROOT = path.resolve(__dirname, '../../..');
-const LIVE_DB = path.join(REPO_ROOT, 'cmos', 'db', 'cmos.sqlite');
+const PRIVATE = requiresPrivateEvidence({
+  reason:
+    'The schema-divergence positive and negative fires derive suite-private copies from the private live CMOS store; the seeded-fixture agreement control remains portable.',
+  paths: { liveDb: 'cmos/db/cmos.sqlite' },
+});
+const PRIVATE_SUITE_TITLE =
+  's86-m02b real-store fire: a failed decision INSERT is named, not called "skipped"';
 
 const tmpDirs: string[] = [];
 function mkTmp(prefix: string): string {
@@ -61,7 +67,7 @@ function copyLiveStore(): string {
   fs.mkdirSync(dbDir, { recursive: true });
   // Copy the main DB plus any WAL/SHM siblings so the copy is not mid-transaction.
   for (const suffix of ['', '-wal', '-shm']) {
-    const src = `${LIVE_DB}${suffix}`;
+    const src = `${PRIVATE.paths.liveDb}${suffix}`;
     if (fs.existsSync(src)) fs.copyFileSync(src, path.join(dbDir, `cmos.sqlite${suffix}`));
   }
   reidentifyCmosTestStore(projectRoot);
@@ -145,11 +151,11 @@ async function captureADecision(projectRoot: string, sessionId: string) {
   return { result, text: formatSessionCaptureForLLM(result) };
 }
 
-describe('s86-m02b real-store fire: a failed decision INSERT is named, not called "skipped"', () => {
+PRIVATE.describe(PRIVATE_SUITE_TITLE, () => {
   let liveStoreAvailable = false;
 
   beforeAll(() => {
-    liveStoreAvailable = fs.existsSync(LIVE_DB);
+    liveStoreAvailable = fs.existsSync(PRIVATE.paths.liveDb);
   });
 
   it('the live store carries the context_id FK this reproduction depends on', () => {
@@ -157,7 +163,7 @@ describe('s86-m02b real-store fire: a failed decision INSERT is named, not calle
     // reproduction below stops being a reproduction and must be re-derived — it must NOT quietly
     // pass for a different reason.
     expect(liveStoreAvailable).toBe(true);
-    const db = new Database(LIVE_DB, { readonly: true });
+    const db = new Database(PRIVATE.paths.liveDb, { readonly: true });
     try {
       const fks = db.prepare('PRAGMA foreign_key_list(strategic_decisions)').all() as Array<{
         table: string;
@@ -231,7 +237,9 @@ describe('s86-m02b real-store fire: a failed decision INSERT is named, not calle
     expect(text).toContain('**Decision Extraction**: Auto-extracted (1)');
     expect(text).not.toContain('Write failures');
   });
+});
 
+describe('s86-m02b portable fixture agreement control', () => {
   it('a seedCmosDb fixture agrees with the real store, despite the 3-FK vs 6-FK divergence', async () => {
     // Success criterion: real-store and fixture must AGREE here. They diverge on which FKs are
     // enforced, but `context_id -> contexts` is present in both, so this reproduction is one of

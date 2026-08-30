@@ -43,9 +43,17 @@ import { CmosDatabaseClient } from '../../../src/tools/cmos/client';
 import { CmosDetector } from '../../../src/intelligence/cmos-detector';
 import { ensureSprintSummaryView } from '../../../src/tools/cmos/schema-migrations';
 import { SPRINT_SUMMARY_VIEW_SQL } from '../../../src/tools/cmos/schema';
+import { requiresPrivateEvidence } from '../../helpers/public-mirror';
 
-const REPO_ROOT = path.resolve(__dirname, '../../..');
-const LIVE_DB = path.join(REPO_ROOT, 'cmos', 'db', 'cmos.sqlite');
+const PRIVATE = requiresPrivateEvidence({
+  reason:
+    'The existing-store upgrade, sprint-binding, and route-integrity fires derive suite-private copies from the private live CMOS store; synthetic migration shapes remain portable.',
+  paths: { liveDb: 'cmos/db/cmos.sqlite' },
+});
+const EXISTING_STORE_SUITE =
+  'real-store fire: an EXISTING store upgrades and stays consistent (s86-m08)';
+const BINDING_SUITE = 'the binding, not just the denominator (s86-m08)';
+const ROUTE_SUITE = 's88-m03 — real-store-derived writes stay on suite-private copies';
 
 const tmpDirs: string[] = [];
 const routedRealStoreCopies: string[] = [];
@@ -324,14 +332,15 @@ describe('ensureSprintSummaryView (s86-m08)', () => {
 
 // ─── the positive fire, on a COPY of the real store ─────────────────────────
 
-describe('real-store fire: an EXISTING store upgrades and stays consistent (s86-m08)', () => {
+PRIVATE.describe(EXISTING_STORE_SUITE, () => {
   let copyPath: string;
 
   beforeAll(() => {
-    if (!fs.existsSync(LIVE_DB)) {
+    if (!fs.existsSync(PRIVATE.paths.liveDb)) {
       throw new Error(
-        `live store not found at ${LIVE_DB}. This fire test must not skip: a mock-client test ` +
-          `cannot catch a wrong-column/wrong-table SQL bug, which is the whole reason the gate exists.`
+        `private live store not found at ${PRIVATE.paths.liveDb}. This fire fails in the private ` +
+          `tree because a mock client cannot catch wrong-column/wrong-table SQL; only a structural ` +
+          `public mirror skips it loudly through the shared helper.`
       );
     }
     // A COPY under os.tmpdir(), never the live path — the real-store guard refuses it under Jest,
@@ -339,7 +348,7 @@ describe('real-store fire: an EXISTING store upgrades and stays consistent (s86-
     const dir = mkTmp('cmos-m08-realstore-');
     copyPath = path.join(dir, 'cmos.sqlite');
     for (const suffix of ['', '-wal', '-shm']) {
-      const src = `${LIVE_DB}${suffix}`;
+      const src = `${PRIVATE.paths.liveDb}${suffix}`;
       if (fs.existsSync(src)) fs.copyFileSync(src, `${copyPath}${suffix}`);
     }
     routedRealStoreCopies.push(copyPath);
@@ -448,14 +457,14 @@ describe('real-store fire: an EXISTING store upgrades and stays consistent (s86-
  * binding decides which sprint the system believes is current — and therefore which sprint_id
  * gets stamped on everything captured in that session.
  */
-describe('the binding, not just the denominator (s86-m08)', () => {
+PRIVATE.describe(BINDING_SUITE, () => {
   let copyPath: string;
 
   beforeAll(() => {
     const dir = mkTmp('cmos-m08-binding-');
     copyPath = path.join(dir, 'cmos.sqlite');
     for (const suffix of ['', '-wal', '-shm']) {
-      const src = `${LIVE_DB}${suffix}`;
+      const src = `${PRIVATE.paths.liveDb}${suffix}`;
       if (fs.existsSync(src)) fs.copyFileSync(src, `${copyPath}${suffix}`);
     }
     routedRealStoreCopies.push(copyPath);
@@ -639,13 +648,13 @@ describe('a store the migration cannot upgrade still gets an answer (s86-m08 cri
   });
 });
 
-describe('s88-m03 — real-store-derived writes stay on suite-private copies', () => {
+PRIVATE.describe(ROUTE_SUITE, () => {
   it('routes both real-store mutation scenarios away from the shared live file', () => {
     expect(routedRealStoreCopies).toHaveLength(2);
     expect(
       routedRealStoreCopies.every(
         (dbPath) =>
-          path.resolve(dbPath) !== path.resolve(LIVE_DB) &&
+          path.resolve(dbPath) !== path.resolve(PRIVATE.paths.liveDb) &&
           tmpDirs.some((dir) => path.resolve(dbPath).startsWith(`${path.resolve(dir)}${path.sep}`))
       )
     ).toBe(true);

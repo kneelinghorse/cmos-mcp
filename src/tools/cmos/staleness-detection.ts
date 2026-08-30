@@ -373,16 +373,19 @@ function resolveThreshold(explicit?: number): number {
 }
 
 /**
- * Get the current (most recent active/planned) sprint number.
- * Returns the highest sprint number from non-completed sprints,
- * or the highest overall if all are completed.
+ * Get the highest canonical sprint number from Active/In Progress/Current sprints,
+ * or the highest canonical sprint number overall when none of those statuses parses.
+ * Legacy-shaped IDs sort after canonical IDs and are skipped by extractSprintNumber.
+ * The remaining source rowid-ordering sites deliberately order carry-forward work within one sprint
+ * (cmos-sprint-carry-forward.ts), blocked missions by insertion age (cmos-agent-onboard.ts), and
+ * retro rows within one sprint (cmos-sprint-retro.ts); none selects the current sprint.
  */
 function getCurrentSprintNumber(client: CmosDatabaseClient): number | null {
-  // Try active sprint first
+  // Try the highest-numbered active sprint first.
   const activeResult = client.getOne<{ id: string }>(
     `SELECT id FROM sprints
      WHERE status IN ('Active', 'In Progress', 'Current')
-     ORDER BY rowid DESC LIMIT 1`,
+     ORDER BY ${sprintIdOrderSql('id', 'DESC')} LIMIT 1`,
     []
   );
   if (activeResult.success && activeResult.data) {
@@ -390,9 +393,9 @@ function getCurrentSprintNumber(client: CmosDatabaseClient): number | null {
     if (num !== null) return num;
   }
 
-  // Fallback to highest numbered sprint
+  // Fallback to the highest-numbered canonical sprint overall.
   const allResult = client.getMany<{ id: string }>(
-    'SELECT id FROM sprints ORDER BY rowid DESC',
+    `SELECT id FROM sprints ORDER BY ${sprintIdOrderSql('id', 'DESC')}`,
     []
   );
   if (allResult.success && allResult.data) {

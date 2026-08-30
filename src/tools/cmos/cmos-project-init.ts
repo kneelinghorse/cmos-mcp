@@ -450,7 +450,41 @@ export async function cmosProjectInit(
       updateMetadata.run('project_id', projectId);
       updateMetadata.run('project_name', projectName);
       updateMetadata.run('tracelab_project_id', tracelabProjectId);
-      updateMetadata.run('schema_version', CMOS_SCHEMA_VERSION);
+      const readMetadata = db.prepare('SELECT value FROM metadata WHERE key = ?');
+      const currentSchemaVersion = (
+        readMetadata.get('schema_version') as { value: string } | undefined
+      )?.value;
+      const currentVersionParts = /^(\d+)\.(\d+)$/.exec(currentSchemaVersion ?? '');
+      const bundledVersionParts = /^(\d+)\.(\d+)$/.exec(CMOS_SCHEMA_VERSION)!;
+      const currentVersionIsLower =
+        !currentVersionParts ||
+        Number(currentVersionParts[1]) < Number(bundledVersionParts[1]) ||
+        (Number(currentVersionParts[1]) === Number(bundledVersionParts[1]) &&
+          Number(currentVersionParts[2]) < Number(bundledVersionParts[2]));
+      if (currentVersionIsLower) {
+        // The read is only a fast path. Re-check the row in the mutation so a concurrent init or
+        // migration cannot raise the label between these statements and then be overwritten here.
+        db.prepare(
+          `INSERT OR REPLACE INTO metadata (key, value)
+           SELECT ?, ?
+           WHERE NOT EXISTS (
+             SELECT 1 FROM metadata
+             WHERE key = ?
+               AND value <> ''
+               AND value NOT GLOB '*[^0-9.]*'
+               AND length(value) - length(replace(value, '.', '')) = 1
+               AND instr(value, '.') > 1
+               AND instr(value, '.') < length(value)
+               AND (
+                 CAST(substr(value, 1, instr(value, '.') - 1) AS INTEGER) > ${Number(bundledVersionParts[1])}
+                 OR (
+                   CAST(substr(value, 1, instr(value, '.') - 1) AS INTEGER) = ${Number(bundledVersionParts[1])}
+                   AND CAST(substr(value, instr(value, '.') + 1) AS INTEGER) >= ${Number(bundledVersionParts[2])}
+                 )
+               )
+           )`
+        ).run('schema_version', CMOS_SCHEMA_VERSION, 'schema_version');
+      }
 
       // s83-m05: persist the tier/type so onboard's tierSelectionPrompt and
       // getProjectType read the operator's choice. An explicit projectType always
@@ -565,6 +599,9 @@ export async function cmosProjectInit(
         createdFiles.push('db/cmos.sqlite');
       }
 
+      const storedSchemaVersion = (
+        readMetadata.get('schema_version') as { value: string } | undefined
+      )?.value;
       db.close();
 
       const result: CmosProjectInitResult = {
@@ -573,7 +610,7 @@ export async function cmosProjectInit(
         isNewProject,
         projectId,
         projectName: projectName || '(not set)',
-        schemaVersion: CMOS_SCHEMA_VERSION,
+        schemaVersion: storedSchemaVersion ?? CMOS_SCHEMA_VERSION,
         created: {
           directories: createdDirs,
           files: createdFiles,

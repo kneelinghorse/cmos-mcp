@@ -25,21 +25,27 @@
  * os.tmpdir(). The real `~/.config/cmos-mcp/credentials.json` holds live `cmk_` secrets at mode
  * 0600 and is never read, copied, or written by this suite.
  *
- * NO SILENT FAIL-OPEN. A missing dist/ or live store FAILS loudly; this suite never skips.
+ * NO SILENT FAIL-OPEN. A missing dist/ or live store FAILS in the private tree. Only a
+ * structurally identified public mirror skips, and the shared helper prints why.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from '@jest/globals';
+import { afterAll, beforeAll, expect, it } from '@jest/globals';
 import Database from 'better-sqlite3';
 import * as http from 'http';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
+import { requiresPrivateEvidence } from '../helpers/public-mirror';
 import { connectStdioServer, type StdioHarness } from './stdio-harness';
 
 const REPO_ROOT = path.resolve(__dirname, '../..');
 const DIST_ENTRY = path.join(REPO_ROOT, 'dist', 'index.js');
-const LIVE_DB = path.join(REPO_ROOT, 'cmos', 'db', 'cmos.sqlite');
+const PRIVATE = requiresPrivateEvidence({
+  reason:
+    'This built-server reissue E2E derives its scratch project from the private live CMOS store.',
+  paths: { liveDb: 'cmos/db/cmos.sqlite' },
+});
 const DASHBOARD_PROJECT_ID = 'e2e-project-uuid';
 
 const tmpDirs: string[] = [];
@@ -60,7 +66,7 @@ function scratchProject(prefix: string): string {
   const dbDir = path.join(projectRoot, 'cmos', 'db');
   fs.mkdirSync(dbDir, { recursive: true });
   for (const suffix of ['', '-wal', '-shm']) {
-    const src = `${LIVE_DB}${suffix}`;
+    const src = `${PRIVATE.paths.liveDb}${suffix}`;
     if (fs.existsSync(src)) fs.copyFileSync(src, path.join(dbDir, `cmos.sqlite${suffix}`));
   }
   const db = new Database(path.join(dbDir, 'cmos.sqlite'));
@@ -119,7 +125,7 @@ function readCredentials(configDir: string): {
   return JSON.parse(fs.readFileSync(path.join(configDir, 'credentials.json'), 'utf8'));
 }
 
-describe('cmos_auth(reissue) over stdio against the built dist (s86-m06)', () => {
+PRIVATE.describe('cmos_auth(reissue) over stdio against the built dist (s86-m06)', () => {
   beforeAll(() => {
     if (!fs.existsSync(DIST_ENTRY)) {
       throw new Error(
@@ -127,8 +133,10 @@ describe('cmos_auth(reissue) over stdio against the built dist (s86-m06)', () =>
           `\`npm run build\` first. It must not skip — a skipped transport test proves nothing.`
       );
     }
-    if (!fs.existsSync(LIVE_DB)) {
-      throw new Error(`live store not found at ${LIVE_DB}; the scratch project cannot be built.`);
+    if (!fs.existsSync(PRIVATE.paths.liveDb)) {
+      throw new Error(
+        `private live store not found at ${PRIVATE.paths.liveDb}; absence fails here unless the shared helper identified a structural public mirror.`
+      );
     }
   });
 

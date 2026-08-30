@@ -1,6 +1,7 @@
 import { describe, expect, test } from '@jest/globals';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { requiresPrivateEvidence } from '../helpers/public-mirror';
 
 type PackageJsonExports = {
   [key: string]:
@@ -22,6 +23,10 @@ type PackageJson = {
 };
 
 const projectRoot = path.resolve(__dirname, '..', '..');
+const PRIVATE = requiresPrivateEvidence({
+  reason: 'publish workflow is intentionally private-source-only',
+  paths: { workflow: '.github/workflows/publish.yml' },
+});
 
 function readTextFile(relativePath: string): string {
   return fs.readFileSync(path.join(projectRoot, relativePath), 'utf8');
@@ -93,23 +98,33 @@ describe('npm publish pipeline configuration', () => {
       .filter(Boolean);
 
     expect(npmIgnoreLines).toEqual(
-      expect.arrayContaining(['cmos/', 'tests/', 'tmp/', 'coverage/', '.eslintcache'])
+      expect.arrayContaining([
+        'cmos/',
+        'tests/',
+        'tmp/',
+        'coverage/',
+        '.eslintcache',
+        '.github/',
+        'scripts/',
+      ])
     );
     expect(npmIgnoreLines).not.toContain('cmos-seed/');
   });
 
-  test('publish workflow triggers on version tags and publishes to npm', () => {
-    const workflow = readTextFile('.github/workflows/publish.yml');
+  PRIVATE.describe('private-source npm publish workflow', () => {
+    test('triggers on version tags and publishes to npm', () => {
+      const workflow = fs.readFileSync(PRIVATE.paths.workflow, 'utf8');
 
-    expect(workflow).toMatch(/name:\s+Publish to npm/);
-    expect(workflow).toMatch(/push:\s*\n\s*tags:\s*\n\s*-\s*'v\*'/m);
-    expect(workflow).toMatch(/npm pack --dry-run/);
-    // Publishes with --access public (scoped package). Deliberately WITHOUT --provenance:
-    // provenance requires a PUBLIC source repo, but this is the private publish source
-    // (F2/F4), so `npm publish --provenance` fails with npm E422 (s73 release). The negative
-    // guard stops a well-meaning re-add from re-breaking the publish.
-    expect(workflow).toMatch(/npm publish --access public/);
-    expect(workflow).not.toMatch(/npm publish --provenance/);
-    expect(workflow).toMatch(/NODE_AUTH_TOKEN:\s+\$\{\{\s*secrets\.NPM_TOKEN\s*\}\}/);
+      expect(workflow).toMatch(/name:\s+Publish to npm/);
+      expect(workflow).toMatch(/push:\s*\n\s*tags:\s*\n\s*-\s*'v\*'/m);
+      expect(workflow).toMatch(/npm pack --dry-run/);
+      // Publishes with --access public (scoped package). Deliberately WITHOUT --provenance:
+      // provenance requires a PUBLIC source repo, but this is the private publish source
+      // (F2/F4), so `npm publish --provenance` fails with npm E422 (s73 release). The negative
+      // guard stops a well-meaning re-add from re-breaking the publish.
+      expect(workflow).toMatch(/npm publish --access public/);
+      expect(workflow).not.toMatch(/npm publish --provenance/);
+      expect(workflow).toMatch(/NODE_AUTH_TOKEN:\s+\$\{\{\s*secrets\.NPM_TOKEN\s*\}\}/);
+    });
   });
 });

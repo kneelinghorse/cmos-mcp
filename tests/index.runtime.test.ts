@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, jest } from '@jest/globa
 import { promises as fs } from 'fs';
 import os from 'os';
 import path from 'path';
+import { createSeededCmosProject } from './helpers/seedCmosDb';
 
 type LoadedModule = Awaited<ReturnType<typeof loadIndexModule>>;
 
@@ -162,7 +163,9 @@ describe('Mission Protocol entry lifecycle', () => {
 
       expect(result).toBe(context);
       expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Initializing MCP server'));
-      expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('CMOS schema version: 2.1'));
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringContaining('CMOS bundled seed schema version: 2.1')
+      );
       expect(consoleSpy).toHaveBeenCalledWith(
         expect.stringContaining('Roots support: probed on first call')
       );
@@ -574,6 +577,7 @@ describe('Mission Protocol entry lifecycle', () => {
   test.each(['cmos_sprint', 'cmos_session'])(
     'CallTool handler returns a structured isError result (no bare -32603) when the %s write handler throws',
     async (toolName) => {
+      const project = await createSeededCmosProject({}, 'cmos-index-write-error-');
       const moduleData = await loadIndexModule();
       const { indexModule, mockServer } = moduleData;
       const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
@@ -602,7 +606,7 @@ describe('Mission Protocol entry lifecycle', () => {
                     action: 'complete',
                     sprintId: 'sprint-1',
                     forceComplete: true,
-                    projectRoot: '/tmp/cmos-m03-wiring-test',
+                    projectRoot: project.projectRoot,
                   },
                 },
               }
@@ -613,7 +617,7 @@ describe('Mission Protocol entry lifecycle', () => {
                     action: 'capture',
                     category: 'decision',
                     content: 'x',
-                    projectRoot: '/tmp/cmos-m03-wiring-test',
+                    projectRoot: project.projectRoot,
                   },
                 },
               };
@@ -628,6 +632,7 @@ describe('Mission Protocol entry lifecycle', () => {
         expect(text).toMatch(/Suggestion:/);
       } finally {
         moduleData.cleanup();
+        await project.cleanup();
         handlerSpy.mockRestore();
         consoleSpy.mockRestore();
       }
@@ -635,6 +640,7 @@ describe('Mission Protocol entry lifecycle', () => {
   );
 
   test('CallTool handler preserves request-local identity disclosure when the selected handler throws', async () => {
+    const project = await createSeededCmosProject({}, 'cmos-index-disclosure-error-');
     const moduleData = await loadIndexModule();
     const { indexModule, mockServer } = moduleData;
     const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
@@ -667,7 +673,7 @@ describe('Mission Protocol entry lifecycle', () => {
           arguments: {
             action: 'view',
             contextType: 'project_context',
-            projectRoot: '/tmp/identity-disclosure-throw',
+            projectRoot: project.projectRoot,
           },
         },
       });
@@ -682,7 +688,7 @@ describe('Mission Protocol entry lifecycle', () => {
           arguments: {
             action: 'view',
             contextType: 'project_context',
-            projectRoot: '/tmp/unrelated-second-call',
+            projectRoot: project.projectRoot,
           },
         },
       });
@@ -697,7 +703,7 @@ describe('Mission Protocol entry lifecycle', () => {
           arguments: {
             action: 'view',
             contextType: 'project_context',
-            projectRoot: '/tmp/primitive-throw-call',
+            projectRoot: project.projectRoot,
           },
         },
       });
@@ -711,12 +717,17 @@ describe('Mission Protocol entry lifecycle', () => {
       expect((primitiveResult.content[0] as { text: string }).text).toContain(primitiveDisclosure);
     } finally {
       moduleData.cleanup();
+      await project.cleanup();
       handlerSpy.mockRestore();
       consoleSpy.mockRestore();
     }
   });
 
   test('parallel CallTool failures keep disclosures isolated when handlers throw the same Error object', async () => {
+    const [projectA, projectB] = await Promise.all([
+      createSeededCmosProject({}, 'cmos-index-parallel-a-'),
+      createSeededCmosProject({}, 'cmos-index-parallel-b-'),
+    ]);
     const moduleData = await loadIndexModule();
     const { indexModule, mockServer } = moduleData;
     const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
@@ -755,8 +766,8 @@ describe('Mission Protocol entry lifecycle', () => {
         });
 
       const [resultA, resultB] = await Promise.all([
-        call('project_context', '/tmp/parallel-identity-a'),
-        call('master_context', '/tmp/parallel-identity-b'),
+        call('project_context', projectA.projectRoot),
+        call('master_context', projectB.projectRoot),
       ]);
 
       expect((resultA.structuredContent as { warnings?: string[] }).warnings).toEqual([
@@ -773,6 +784,7 @@ describe('Mission Protocol entry lifecycle', () => {
       );
     } finally {
       moduleData.cleanup();
+      await Promise.all([projectA.cleanup(), projectB.cleanup()]);
       handlerSpy.mockRestore();
       consoleSpy.mockRestore();
     }

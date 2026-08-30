@@ -119,7 +119,7 @@ describe('tier-config', () => {
       const tiersDir = path.join(storeRoot, 'cmos', 'tiers');
       fs.mkdirSync(tiersDir, { recursive: true });
       fs.copyFileSync(
-        path.resolve(__dirname, '../../../cmos/tiers/build.md'),
+        path.resolve(__dirname, '../../../cmos-seed/tiers/build.md'),
         path.join(tiersDir, 'build.md')
       );
       try {
@@ -178,7 +178,7 @@ describe('tier-config', () => {
     }
 
     function copyTierConfigs() {
-      const srcTiersDir = path.resolve(__dirname, '../../../cmos/tiers');
+      const srcTiersDir = path.resolve(__dirname, '../../../cmos-seed/tiers');
       const destTiersDir = path.join(tempDir, 'cmos', 'tiers');
       fs.mkdirSync(destTiersDir, { recursive: true });
       for (const file of fs.readdirSync(srcTiersDir)) {

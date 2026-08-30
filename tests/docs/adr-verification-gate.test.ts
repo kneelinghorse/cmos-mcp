@@ -3,6 +3,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { requiresPrivateEvidence } from '../helpers/public-mirror';
 
 /**
  * The canonical section heading — defined ONCE here and referenced verbatim by the
@@ -12,8 +13,13 @@ import * as path from 'path';
  */
 const LIVE_SCHEMA_VERIFICATION_HEADING = 'Live-schema verification';
 
-const ADR_DIR = path.resolve(__dirname, '../../cmos/planning/adr');
-const BUILD_SESSION_PROMPT = path.resolve(__dirname, '../../cmos/docs/build-session-prompt.md');
+const PRIVATE = requiresPrivateEvidence({
+  reason: 'private ADR corpus and build-session process convention',
+  paths: {
+    adrDir: 'cmos/planning/adr',
+    buildSessionPrompt: 'cmos/docs/build-session-prompt.md',
+  },
+});
 
 /**
  * A NON-EMPTY section must carry at least one concrete live check — a PRAGMA, a
@@ -75,18 +81,18 @@ function evaluateAdrCompliance(content: string): AdrCompliance {
   return { status, accepted, hasSection, hasConcreteCheck, compliant };
 }
 
-function readAdrs(): Array<{ rel: string; content: string }> {
+function readAdrs(adrDir: string): Array<{ rel: string; content: string }> {
   return fs
-    .readdirSync(ADR_DIR)
+    .readdirSync(adrDir)
     .filter((name) => name.endsWith('.md'))
     .map((name) => ({
       rel: name,
-      content: fs.readFileSync(path.join(ADR_DIR, name), 'utf8'),
+      content: fs.readFileSync(path.join(adrDir, name), 'utf8'),
     }));
 }
 
-describe('ADR verification gate (Sprint 70 m03)', () => {
-  const adrs = readAdrs();
+PRIVATE.describe('ADR verification gate private corpus (Sprint 70 m03)', () => {
+  const adrs = readAdrs(PRIVATE.paths.adrDir);
 
   it('finds the known ADR set (sanity floor — the test is not vacuous)', () => {
     expect(adrs.length).toBeGreaterThanOrEqual(2);
@@ -112,6 +118,13 @@ describe('ADR verification gate (Sprint 70 m03)', () => {
     expect(violations).toEqual([]);
   });
 
+  it('keeps the canonical heading in sync with the build-session-prompt convention (drift guard)', () => {
+    const convention = fs.readFileSync(PRIVATE.paths.buildSessionPrompt, 'utf8');
+    expect(convention).toContain(LIVE_SCHEMA_VERIFICATION_HEADING);
+  });
+});
+
+describe('ADR verification gate mutation proofs (Sprint 70 m03)', () => {
   it('FAILS for an Accepted ADR that is missing the section (mutation proof — the gate can fail)', () => {
     const acceptedButBare = [
       '# ADR — Fixture',
@@ -158,12 +171,5 @@ describe('ADR verification gate (Sprint 70 m03)', () => {
     const c = evaluateAdrCompliance(proposed);
     expect(c.accepted).toBe(false);
     expect(c.compliant).toBe(true);
-  });
-
-  it('keeps the canonical heading in sync with the build-session-prompt convention (drift guard)', () => {
-    // The convention text must name the exact same heading string, so a rename in one
-    // place without the other is caught here rather than drifting silently.
-    const convention = fs.readFileSync(BUILD_SESSION_PROMPT, 'utf8');
-    expect(convention).toContain(LIVE_SCHEMA_VERIFICATION_HEADING);
   });
 });

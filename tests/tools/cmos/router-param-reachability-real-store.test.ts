@@ -31,7 +31,7 @@
  * suite-controlled property: an unrelated CMOS writer may change it during this run.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from '@jest/globals';
+import { afterAll, expect, it } from '@jest/globals';
 import Database from 'better-sqlite3';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -40,10 +40,16 @@ import * as path from 'path';
 import { cmosLearnings } from '../../../src/tools/cmos/cmos-learnings';
 import { cmosContext } from '../../../src/tools/cmos/cmos-context';
 import { cmosSession } from '../../../src/tools/cmos/cmos-session';
+import { requiresPrivateEvidence } from '../../helpers/public-mirror';
 import { reidentifyCmosTestStore } from '../../helpers/seedCmosDb';
 
-const REPO_ROOT = path.resolve(__dirname, '../../..');
-const LIVE_DB = path.join(REPO_ROOT, 'cmos', 'db', 'cmos.sqlite');
+const PRIVATE = requiresPrivateEvidence({
+  reason:
+    'Every router-parameter positive fire derives a suite-private copy from the private live CMOS store.',
+  paths: { liveDb: 'cmos/db/cmos.sqlite' },
+});
+const PRIVATE_SUITE_TITLE =
+  's86-m03 real-store fires: the four params reach the database (tmpdir copy)';
 
 const tmpDirs: string[] = [];
 const routedDbPaths: string[] = [];
@@ -63,7 +69,7 @@ function copyLiveStore(): { projectRoot: string; dbPath: string } {
   const dbDir = path.join(projectRoot, 'cmos', 'db');
   fs.mkdirSync(dbDir, { recursive: true });
   for (const suffix of ['', '-wal', '-shm']) {
-    const src = `${LIVE_DB}${suffix}`;
+    const src = `${PRIVATE.paths.liveDb}${suffix}`;
     if (fs.existsSync(src)) fs.copyFileSync(src, path.join(dbDir, `cmos.sqlite${suffix}`));
   }
   const dbPath = path.join(dbDir, 'cmos.sqlite');
@@ -130,15 +136,8 @@ function seedActiveSession(dbPath: string, sessionId: string): void {
   });
 }
 
-let live = false;
-
-beforeAll(() => {
-  live = fs.existsSync(LIVE_DB);
-});
-
-describe('s86-m03 real-store fires: the four params reach the database (tmpdir copy)', () => {
+PRIVATE.describe(PRIVATE_SUITE_TITLE, () => {
   it('FIRE 1 — reaffirm(evergreen=true) writes the column; false clears it; omitted leaves it byte-identical', async () => {
-    if (!live) return; // the live store is absent in a clean checkout; the fixture suites still gate
     const { projectRoot, dbPath } = copyLiveStore();
 
     const baseline = withDb(dbPath, (db) =>
@@ -209,7 +208,6 @@ describe('s86-m03 real-store fires: the four params reach the database (tmpdir c
   }, 60_000);
 
   it('FIRE 2 — statusFilter=["superseded"] recalls a decision the default ["active"] search cannot', async () => {
-    if (!live) return;
     const { projectRoot, dbPath } = copyLiveStore();
 
     const counts = withDb(dbPath, (db) =>
@@ -281,7 +279,6 @@ describe('s86-m03 real-store fires: the four params reach the database (tmpdir c
   }, 60_000);
 
   it('FIRE 3 — expiresAt reaches constraints.expires_at through BOTH write paths', async () => {
-    if (!live) return;
     const { projectRoot, dbPath } = copyLiveStore();
 
     const baseline = withDb(dbPath, (db) =>
@@ -361,7 +358,6 @@ describe('s86-m03 real-store fires: the four params reach the database (tmpdir c
   }, 60_000);
 
   it("FIRE 4 — agentFeedback files an agent_feedback row whose tool_name is exactly 'cmos_session'", async () => {
-    if (!live) return;
     const { projectRoot, dbPath } = copyLiveStore();
 
     // ESTABLISH the baseline on the COPY; do not inherit it from the live store. The original
@@ -406,7 +402,6 @@ describe('s86-m03 real-store fires: the four params reach the database (tmpdir c
   }, 60_000);
 
   it('FIRE 5 — UN-MIGRATED STORE: reaffirm(evergreen) succeeds where the evergreen column does not exist', async () => {
-    if (!live) return;
     const { projectRoot, dbPath } = copyLiveStore();
 
     // Reproduce a store predating s61-m03 by dropping the column from a SECOND copy. The index
@@ -456,11 +451,10 @@ describe('s86-m03 real-store fires: the four params reach the database (tmpdir c
   }, 60_000);
 
   it('every writable router path was a suite-private store copy', () => {
-    if (!live) return;
     expect(routedDbPaths).toHaveLength(5);
-    expect(routedDbPaths.every((dbPath) => path.resolve(dbPath) !== path.resolve(LIVE_DB))).toBe(
-      true
-    );
+    expect(
+      routedDbPaths.every((dbPath) => path.resolve(dbPath) !== path.resolve(PRIVATE.paths.liveDb))
+    ).toBe(true);
     expect(
       routedDbPaths.every((dbPath) =>
         tmpDirs.some((dir) => path.resolve(dbPath).startsWith(`${path.resolve(dir)}${path.sep}`))

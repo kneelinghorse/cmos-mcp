@@ -22,16 +22,18 @@ import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as ts from 'typescript';
+import { requiresPrivateEvidence } from '../../helpers/public-mirror';
 import * as cmosTools from '../../../src/tools/cmos';
 import { CMOS_ACTION_PARAMS, CMOS_TOOL_DEFINITIONS } from '../../../src/tools/cmos';
 
 const REPO_ROOT = path.resolve(__dirname, '../../..');
-const AGENTS_PATH = path.join(REPO_ROOT, 'agents.md');
-const INVENTORY_PATH = path.join(REPO_ROOT, 'cmos', 'reports', 'tool-definition-inventory.json');
-const PRIVATE_PATHS = [AGENTS_PATH, INVENTORY_PATH];
-const presentPrivatePaths = PRIVATE_PATHS.filter((file) => fs.existsSync(file));
-const inPublicMirror = presentPrivatePaths.length === 0;
-const privateDescribe = inPublicMirror ? describe.skip : describe;
+const PRIVATE = requiresPrivateEvidence({
+  reason: 'private agent playbook and legacy-definition inventory artifact',
+  paths: {
+    agents: 'agents.md',
+    inventory: 'cmos/reports/tool-definition-inventory.json',
+  },
+});
 
 interface ToolDefinitionShape {
   readonly name: string;
@@ -232,7 +234,7 @@ function barrelReExportCount(identifier: string): number {
 }
 
 function readInventory(): InventoryArtifact {
-  return JSON.parse(fs.readFileSync(INVENTORY_PATH, 'utf8')) as InventoryArtifact;
+  return JSON.parse(fs.readFileSync(PRIVATE.paths.inventory, 'utf8')) as InventoryArtifact;
 }
 
 function inventoryCoverageFindings(
@@ -333,18 +335,20 @@ describe('s88-m05 legacy tool-definition inventory', () => {
   });
 
   it('keeps its two private inputs together, with a visible public-mirror scope', () => {
-    expect([0, PRIVATE_PATHS.length]).toContain(presentPrivatePaths.length);
-    if (inPublicMirror) {
-      expect(PRIVATE_PATHS.map((file) => fs.existsSync(file))).toEqual([false, false]);
+    expect([0, Object.keys(PRIVATE.relativePaths).length]).toContain(
+      PRIVATE.availableRelativePaths.length
+    );
+    if (PRIVATE.isPublicMirror) {
+      expect(Object.values(PRIVATE.paths).map((file) => fs.existsSync(file))).toEqual([
+        false,
+        false,
+      ]);
     }
   });
 
-  const privateIt = inPublicMirror ? it.skip : it;
-
-  privateIt(
-    'tracks every unregistered export with its live owner/action and measured references',
-    () => {
-      expect(fs.existsSync(INVENTORY_PATH)).toBe(true);
+  PRIVATE.describe('private inventory evidence', () => {
+    it('tracks every unregistered export with its live owner/action and measured references', () => {
+      expect(fs.existsSync(PRIVATE.paths.inventory)).toBe(true);
       const artifact = readInventory();
       const actual = inventoriedDefinitionExports();
       const actualNames = actual.map(({ exportName }) => exportName);
@@ -397,13 +401,10 @@ describe('s88-m05 legacy tool-definition inventory', () => {
         barrelReExports: 34,
         deletedThisSprint: 0,
       });
-    }
-  );
+    });
 
-  privateIt(
-    'publishes the operator direction and the reproducible all-extension audit command',
-    () => {
-      expect(fs.existsSync(INVENTORY_PATH)).toBe(true);
+    it('publishes the operator direction and the reproducible all-extension audit command', () => {
+      expect(fs.existsSync(PRIVATE.paths.inventory)).toBe(true);
       const artifact = readInventory();
       expect(artifact.operatorDirection).toContain(
         'sprint88, i want to know more about it before cutting'
@@ -414,8 +415,8 @@ describe('s88-m05 legacy tool-definition inventory', () => {
         'npx jest --runTestsByPath tests/tools/cmos/tool-definition-inventory.test.ts --runInBand --coverage=false'
       );
       expect(artifact.method.candidateRule).toMatch(/object identity/i);
-    }
-  );
+    });
+  });
 
   it('the inventory gate is falsifiable: omitting one derived export is detected', () => {
     const actualNames = inventoriedDefinitionExports().map(({ exportName }) => exportName);
@@ -426,9 +427,9 @@ describe('s88-m05 legacy tool-definition inventory', () => {
   });
 });
 
-privateDescribe('s88-m05 agents.md registered-tool-name gate', () => {
+PRIVATE.describe('s88-m05 agents.md registered-tool-name gate', () => {
   it('agents.md names only registered CMOS tools', () => {
-    expect(invalidAgentToolNames(fs.readFileSync(AGENTS_PATH, 'utf8'))).toEqual([]);
+    expect(invalidAgentToolNames(fs.readFileSync(PRIVATE.paths.agents, 'utf8'))).toEqual([]);
   });
 
   it('the gate positively fires on the pre-consolidation cmos_sprint_complete name', () => {

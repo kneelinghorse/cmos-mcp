@@ -16,6 +16,7 @@ import { z } from 'zod';
 import { withClientValidated } from './client';
 import type { ActionParamMap, CmosToolResult } from './types';
 import { createError, createSuccess, CMOS_ERROR_CODES } from './errors';
+import { findWrongTypedStringParam } from './param-type-guard';
 import {
   ensureAgentFeedbackTable,
   AGENT_FEEDBACK_STATUSES,
@@ -208,6 +209,18 @@ export async function cmosFeedback(
   params: CmosFeedbackParams
 ): Promise<CmosToolResult<CmosFeedbackResult>> {
   const action = params.action;
+
+  // s89-m08 — ONE schema-driven boundary guard for the whole tool, placed at the router entry so
+  // no handler can be reached with a wrong-typed published string parameter. Reads this tool's OWN
+  // shipped inputSchema and its OWN per-action applicability contract, so it cannot drift from
+  // what is published. See param-type-guard.ts for the 714-triple measurement and the null
+  // rationale.
+  const wrongTypedParam = findWrongTypedStringParam(
+    cmosFeedbackToolDefinition.inputSchema,
+    CMOS_FEEDBACK_ACTION_PARAMS[action],
+    params
+  );
+  if (wrongTypedParam) return createError<CmosFeedbackResult>(wrongTypedParam);
   const warnings: string[] = [];
   const result = await withClientValidated<CmosFeedbackResult>(
     (client) => {

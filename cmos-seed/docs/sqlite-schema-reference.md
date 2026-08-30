@@ -21,7 +21,7 @@ Quick reference for querying CMOS history using any SQLite client.
 | `session_missions`     | Session-to-mission links                 | `session_id`, `mission_id`                                   |
 | `session_events`       | Project activity/event log               | `ts`, `agent`, `mission`, `action`, `status`, `summary`      |
 | `telemetry_events`     | Runtime metrics and health signals       | `mission`, `source_path`, `ts`, `payload`                    |
-| `strategic_decisions`  | Durable decision records                 | `id`, `sprint_id`, `mission_id`, `decision`, `status`        |
+| `strategic_decisions`  | Durable decision records                 | `id`, `sprint_id`, `mission_id`, `decision_text`, `status`   |
 | `learnings`            | Durable learning records                 | `id`, `sprint_id`, `mission_id`, `content`, `status`         |
 | `next_steps`           | Action items from sessions and missions  | `id`, `sprint_id`, `mission_id`, `content`, `status`         |
 | `constraints`          | Project constraints and review state     | `id`, `content`, `status`, `content_hash`                    |
@@ -211,5 +211,5 @@ ORDER BY name;
 
 ---
 
-**Last Updated**: 2026-08-28
+**Last Updated**: 2026-08-29
 **Replaces**: `sqlite-db-browser-guide.md` (tool-agnostic version)

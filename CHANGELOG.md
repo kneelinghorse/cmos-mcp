@@ -2,16 +2,148 @@
 
 All notable changes to cmos-mcp are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 2.8.1 — 2026-08-30
+
+Sprint 89 "Sweep the Class" — Arc F sprint 3. Corrections and hardening for the 2.8.1 patch.
+
+### Fixed
+
+- **The 2.8.0 notes now disclose the `currentState` response-shape change they were the stated
+  reason for accepting.** Decision #1066 admitted the change because "the 2.8.0 release boundary
+  makes the shape change explicit"; the 2.8.0 section named the field zero times, filed the change
+  under `### Added`, and justified MINOR with a tool-inventory sentence that cannot see a field
+  type. The disclosure is now the first bullet of 2.8.0's `### Changed`, and that section's
+  preamble states the scope of its MINOR claim and what the claim cannot see.
+- A standing repository gate now fingerprints declaration composition (type-alias right-hand
+  sides, type parameters, heritage, and every interface member signature) for every `*Error` /
+  `*Result` root exported by a CMOS tool module and its `src/`-wide transitive closure, then
+  snapshots the 1,486 direct property rows with declared and checker-resolved kinds. It also ledgers mixed-runtime-kind
+  rows and explicit opaque/generic blind spots. The tool INPUT surface has had a checked-in snapshot
+  since `tests/tools/__snapshots__/tool-definitions.test.ts.snap`; this bounded answer-type surface
+  had none, which is why a tool-inventory sentence was the only shape claim the 2.8.0 preamble had
+  available.
+- `agents.md`'s response-pattern block declared `currentState?: any` and `validValues?: any[]`,
+  neither of which is what `src/tools/cmos/types.ts` declares. Both corrected; the block's other
+  six fields were checked against the same source and were already right.
+- README's error-response section now says what `currentState` actually carries.
+- **The seed schema reference no longer names a nonexistent `strategic_decisions.decision`
+  column.** The real column is `decision_text`. The false row shipped in 2.8.0 and is copied into
+  every new project by `cmos_project(action="init")`; following it made SQLite report
+  `no such column: decision`. The shipped-prose gate now executes the seed schema in memory and
+  checks column, executable-SQL, and tool/action claims against the artifact that owns each role
+  instead of merely checking whether a token exists somewhere in source.
+- **Staleness detection now orders canonical sprint IDs numerically instead of by row
+  insertion.** Stores whose sprint rows were inserted out of numeric order may flag additional
+  stale decisions or learnings on the first staleness-maintenance pass after upgrading.
+- **The public clone now has honest tests and a single-source release path.** Tests that require
+  private-only evidence skip loudly only in the public mirror and still fail on partial absence
+  in the private source. README no longer claims disabled public CI, and the private npm-publish
+  workflow is no longer mirrored alongside release tags.
+- **Store-level schema labels no longer downgrade or masquerade as migration-completion proof.**
+  `metadata.schema_version` is now a monotonic high-water label whose guarded writes re-check the
+  current value atomically, while vector storage owns the new
+  `metadata.vector_storage_columns = '2.3'` completion marker. A store without that marker performs
+  one forced double-FTS rebuild on its next retrieval and then stamps the marker, both provisioning
+  missing structures and making the repair self-healing; the current dogfood baseline rebuilt 765
+  indexed rows. `cmos_project(action="init")` now preserves and reports an existing 2.4 label
+  instead of overwriting and reporting it as 2.1.
+- **A wrong-typed published string parameter crashed the tool instead of being refused.** A JSON
+  number, object, array or boolean sent for a property the shipped `inputSchema` declares
+  `type: "string"` reached an unguarded string method or `path.resolve` and threw, and the
+  catch-all boundary dressed the crash as `TOOL_EXECUTION_ERROR` with the message
+  `params.missionId.trim is not a function`. Measured across every (tool, valid action,
+  declared-string-parameter) triple: **42 of 714 triples crashed; 0 do now.** One schema-driven
+  guard at each of the 15 router entry points refuses them as `INVALID_PARAMETER` naming the field.
+- **A malformed value for a parameter the action actually uses was silently ignored, so filters
+  came back unfiltered.** `cmos_learnings(action="list", category=12345)` and
+  `cmos_decisions(action="list", since=12345)` dropped the malformed filter and returned the
+  UNFILTERED result set, which a caller has every reason to read as filtered. 31 triples were in
+  this shape. They are now refused as `INVALID_PARAMETER` naming the field. See `### Changed` for
+  the wire-level detail.
+
+- **Two error suggestions prescribed a remedy that reproduced the refusal, and one hid a
+  precondition.** `CmosErrors.contextNotFound` and `cmos_context(action="condense")` both told the
+  caller to "use `cmos_context(action="view")` to list available contexts"; there is no listing
+  action, `view` needs the very row that is missing, and executing it returned the same
+  `CONTEXT_NOT_FOUND`. Both now state that the row is absent and must be recreated, and the
+  recognized types stay on `validValues`. `cmos_db(action="purge")`'s confirmation refusal now
+  discloses that the prescribed retry only runs when the project has a configured dashboard
+  mirror. Found by executing the remedies, not by reading them.
+
+### Changed
+
+- **Error codes change for malformed input on parameters an action uses.** The guard above is
+  scoped by the published per-action applicability contract (the per-action tables in
+  TOOL_REFERENCE.md), so it only inspects parameters the action actually reads — 219 of the 714
+  triples. Measured over those 714 triples x four wrong JSON types = 2,856 calls, the transitions
+  are:
+  - **`TOOL_EXECUTION_ERROR` → `INVALID_PARAMETER`** — 168 calls that previously crashed.
+  - **success → `INVALID_PARAMETER`** — 76 calls across 31 triples, all of them a filter or
+    identifier the action reads and was silently discarding.
+  - **another refusal code → `INVALID_PARAMETER`** — 588 calls that already failed, but under a
+    downstream code (`MISSING_PARAMETER`, `DB_QUERY_FAILED` and others) rather than one naming the
+    malformed field.
+
+  **1,980 calls are deliberately left untouched**: a malformed value on a parameter the action does
+  not read — `cmos_message(action="whoami", body=12345)` — still succeeds, because the call did
+  what the caller asked and failing it buys nothing. **JSON `null` is also unaffected** and is still
+  treated as an absent optional: all 714 of its outcomes are byte-identical before and after.
+
+- **The catch-all tool boundary no longer claims to know why a call failed.** It used to answer
+  every unhandled exception with "This is an internal error, not an input-validation problem —
+  retry the call", which was false for the whole wrong-typed-parameter class above and prescribed a
+  loop with no exit. It now reports only what that frame knows: an unexpected exception, the raw
+  message, the correlationId, and that a repeat with the same inputs indicates a deterministic
+  fault.
+
 ## 2.8.0 — 2026-08-29
 
 Sprint 88 "Fix the Instrument" — Arc F sprint 2. This release repairs the claims and gates that
 made 2.7.0's behavioural audit look more complete than it was, makes sprint close evidence
 self-describing, separates read-only discovery from identity registration, and carries migration
-warnings all the way to the agent-visible answer. It remains a MINOR release: no consolidated MCP
-tool was added or removed.
+warnings all the way to the agent-visible answer.
+
+It is a MINOR release, and the scope of that claim is the TOOL INVENTORY AND ITS INPUTS: the 15
+consolidated MCP tools, their `action` values, and their published `inputSchema` properties are
+unchanged apart from one added optional input (`evergreen`). **That claim structurally cannot see
+a response-shape change, and this release contains one** — no tool declares an MCP `outputSchema`,
+so the protocol publishes no response schema for automatic validation of a widened field. The
+response change is the first entry under **Changed** below.
+
+> CORRECTION (2.8.1). This preamble originally ended "It remains a MINOR release: no consolidated
+> MCP tool was added or removed." That sentence is true and was checked, but it is a tool-inventory
+> rule and a reader takes it for a compatibility guarantee it does not provide. Decision #1066
+> accepted the `currentState` shape change specifically because "the 2.8.0 release boundary makes
+> the shape change explicit"; this section did not make it explicit. The entry below is that debt
+> paid, and it is dated to 2.8.1 rather than backdated. On `SESSION_ALREADY_ACTIVE` specifically,
+> `currentState` changed from a session-id string to `{ id, type, title, startedAt, captureCount }`.
+> Consumers should branch on `error.code`, read `.id` for that error, and narrow the field before
+> applying generic string operations.
 
 ### Changed
 
+- **`error.currentState` can now be an object instead of a string — on one error code.**
+  `cmos_session(action="start")` returning `SESSION_ALREADY_ACTIVE` used to put the active
+  session's id there as a bare string (`"PS-2026-08-29-006"`). It now puts a five-field object —
+  `{ id, type, title, startedAt, captureCount }` — where `captureCount` is `null` when the stored
+  capture value is missing, malformed, or not an array. `CmosToolError.currentState` widened from `string` to
+  `string | Record<string, unknown>` to allow it, and the value reaches MCP clients on
+  `structuredContent`, not only in the rendered text. **No other error uses an object today**: 13
+  other sites set a status string (`"In Progress"`, `"Completed"`, `"Dropped"`, …), and the
+  sprint-complete site passes its status when present or omits the field when it is null. Branch
+  on `error.code` and read `error.currentState.id` for this one code. Calling a string method such
+  as `startsWith` without narrowing now throws, direct equality with the former id returns false,
+  and interpolation yields `[object Object]`. Code that handles `currentState` generically across
+  error codes should test `typeof currentState === 'string'` first. The rendered
+  `content[0].text` channel did not suffer this coercion break; it now adds a five-line
+  active-session detail block (id plus type, title, start time, and capture count). This stayed a
+  MINOR bump on measured grounds: the field is diagnostic data for one error code, the supported
+  type entrypoint (`dist/index.d.ts`) does not export `CmosToolError`, and `exports` publishes no
+  subpath, so modern exports-aware Node and TypeScript resolution reject the deep import. The
+  underlying `dist/tools/cmos/types.d.ts` does ship, however, and legacy exports-blind TypeScript
+  resolution can reach it; a bespoke consumer may therefore observe the break. No tool declares
+  an `outputSchema`, so MCP metadata exposes no response schema for automatic client validation.
+  Pin `2.7.0` if your integration cannot accommodate the change.
 - **Read-classified calls and `cmos_review` no longer register a project or mint its identity.**
   `getProjectId` is now a pure lookup. Explicit `cmos_project(action="register")` and ordinary
   write boundaries perform registration and identity persistence instead, including an explicit
