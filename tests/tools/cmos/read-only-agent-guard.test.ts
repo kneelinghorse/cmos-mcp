@@ -60,7 +60,9 @@ describe('read-only-agent-guard', () => {
     );
   });
 
-  test('under review role, unknown tools/actions fail closed (throw)', () => {
+  test('the standalone guard keeps unknown tools/actions fail-closed as write-classified', () => {
+    // Dispatcher schema/protocol validation runs before this primitive. These assertions preserve
+    // the guard's own fail-closed fallback if a caller invokes it without that outer validation.
     expect(() => assertReadOnlyAgentAllowed('cmos_nonexistent', 'list', REVIEW)).toThrow(
       ReadOnlyAgentGuardError
     );

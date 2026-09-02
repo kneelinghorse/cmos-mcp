@@ -400,6 +400,7 @@ describe('Mission Protocol entry lifecycle', () => {
   test('registerToolHandlers registers list handler and sanitizes execution errors', async () => {
     const moduleData = await loadIndexModule();
     const { indexModule, mockServer, ErrorHandler } = moduleData;
+    const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'cmos-index-sanitize-error-'));
 
     const definitions = [{ name: 'demo_tool' }];
     const definitionsSpy = jest
@@ -408,27 +409,76 @@ describe('Mission Protocol entry lifecycle', () => {
 
     const context = createMockContext();
     const executionError = new Error('boom');
-
-    const execSpy = jest
-      .spyOn(indexModule, 'executeMissionProtocolTool')
-      .mockRejectedValue(executionError);
+    const cmosBarrel = await import('../src/tools/cmos');
+    const handlerSpy = jest.spyOn(cmosBarrel, 'cmosProject').mockRejectedValue(executionError);
 
     const missionError = new moduleData.MissionProtocolError({
       code: 'INTERNAL_UNEXPECTED',
       category: 'internal',
       message: 'wrapped',
-      context: { module: 'server' },
+      context: { module: 'server', correlationId: 'cid-123' },
     });
     const handleSpy = jest.spyOn(ErrorHandler, 'handle').mockReturnValue(missionError);
-    const publicSpy = jest.spyOn(ErrorHandler, 'toPublicError').mockReturnValue({
-      code: 'INTERNAL_UNEXPECTED',
-      category: 'internal',
-      message: 'Tool execution failed',
-      correlationId: 'cid-123',
-      retryable: false,
-    });
-
     const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      indexModule.__test__.registerToolHandlers(context);
+
+      expect(mockServer.setRequestHandler).toHaveBeenCalledTimes(2);
+      const listHandler = mockServer.setRequestHandler.mock.calls[0][1] as () => any;
+      const listResponse = await listHandler();
+      expect(Array.isArray(listResponse.tools)).toBe(true);
+      expect(listResponse.tools.length).toBeGreaterThan(0);
+
+      const callHandler = mockServer.setRequestHandler.mock.calls[1][1] as (
+        request: any
+      ) => Promise<any>;
+      const result = await callHandler({
+        params: {
+          name: 'cmos_project',
+          arguments: {
+            action: 'init',
+            projectRoot,
+            ...Object.fromEntries(Array.from({ length: 12 }, (_, idx) => [`key${idx}`, idx])),
+          },
+        },
+      });
+
+      expect(result).toMatchObject({
+        isError: true,
+        structuredContent: {
+          success: false,
+          error: { code: 'TOOL_EXECUTION_ERROR' },
+        },
+      });
+      expect((result.content[0] as { text: string }).text).toContain('correlationId=cid-123');
+
+      expect(handleSpy).toHaveBeenCalledTimes(1);
+      const [errorArg, operationArg, contextArg] = handleSpy.mock.calls[0];
+      expect(errorArg).toBe(executionError);
+      expect(operationArg).toBe('server.execute_tool');
+      expect(contextArg).toMatchObject({
+        module: 'server',
+        data: expect.objectContaining({
+          tool: 'cmos_project',
+          args: expect.objectContaining({ key0: 0 }),
+        }),
+      });
+    } finally {
+      moduleData.cleanup();
+      await fs.rm(projectRoot, { recursive: true, force: true });
+      definitionsSpy.mockRestore();
+      consoleSpy.mockRestore();
+      handleSpy.mockRestore();
+      handlerSpy.mockRestore();
+    }
+  });
+
+  test('registerToolHandlers preserves MethodNotFound for an unknown tool', async () => {
+    const moduleData = await loadIndexModule();
+    const { indexModule, mockServer, ErrorHandler } = moduleData;
+    const context = createMockContext();
+    const handleSpy = jest.spyOn(ErrorHandler, 'handle');
 
     try {
       indexModule.__test__.registerToolHandlers(context);
@@ -445,45 +495,33 @@ describe('Mission Protocol entry lifecycle', () => {
       await expect(
         callHandler({
           params: {
-            name: 'dangerous_tool',
-            arguments: Object.fromEntries(
-              Array.from({ length: 12 }, (_, idx) => [`key${idx}`, idx])
-            ),
+            name: 'unknown_tool',
+            arguments: { projectRoot: 12345 },
           },
         })
       ).rejects.toMatchObject({
-        code: 'internal_error',
-        message: expect.stringContaining('correlationId=cid-123'),
+        code: 'method_not_found',
+        message: 'Unknown tool: unknown_tool',
       });
 
-      expect(handleSpy).toHaveBeenCalledTimes(1);
-      const [errorArg, operationArg, contextArg] = handleSpy.mock.calls[0];
-      expect(errorArg).toBeInstanceOf(Error);
-      expect((errorArg as Error).message).toContain('Unknown tool: dangerous_tool');
-      expect(operationArg).toBe('server.execute_tool');
-      expect(contextArg).toMatchObject({
-        module: 'server',
-        data: expect.objectContaining({
-          tool: 'dangerous_tool',
-          args: expect.objectContaining({ key0: 0 }),
-        }),
-      });
+      expect(handleSpy).not.toHaveBeenCalled();
     } finally {
       moduleData.cleanup();
-      definitionsSpy.mockRestore();
-      consoleSpy.mockRestore();
       handleSpy.mockRestore();
-      publicSpy.mockRestore();
-      execSpy.mockRestore();
     }
   });
 
   test('registerToolHandlers omits sanitized args when input is not an object', async () => {
+    const project = await createSeededCmosProject({}, 'cmos-index-non-object-error-');
     const moduleData = await loadIndexModule();
     const { indexModule, mockServer, ErrorHandler } = moduleData;
     const context = createMockContext();
+    const originalCwd = process.cwd;
+    process.cwd = () => project.projectRoot;
 
     const executionError = new Error('explode');
+    const cmosBarrel = await import('../src/tools/cmos');
+    const handlerSpy = jest.spyOn(cmosBarrel, 'cmosStatus').mockRejectedValue(executionError);
     const missionError = new moduleData.MissionProtocolError({
       code: 'INTERNAL_UNEXPECTED',
       category: 'internal',
@@ -491,45 +529,34 @@ describe('Mission Protocol entry lifecycle', () => {
       context: { module: 'server' },
     });
 
-    const execSpy = jest
-      .spyOn(indexModule, 'executeMissionProtocolTool')
-      .mockRejectedValue(executionError);
-
     const handleSpy = jest.spyOn(ErrorHandler, 'handle').mockReturnValue(missionError);
-    const publicSpy = jest.spyOn(ErrorHandler, 'toPublicError').mockReturnValue({
-      code: missionError.code,
-      category: missionError.category,
-      message: 'Tool execution failed',
-      correlationId: undefined,
-      retryable: false,
-    });
 
     try {
       indexModule.__test__.registerToolHandlers(context);
       const callHandler = mockServer.setRequestHandler.mock.calls[1][1] as (
         request: any
-      ) => Promise<unknown>;
+      ) => Promise<any>;
 
-      await expect(
-        callHandler({
-          params: {
-            name: 'string_args_tool',
-            arguments: 'non-object arguments',
-          },
-        })
-      ).rejects.toMatchObject({
-        code: 'internal_error',
-        message: expect.stringContaining('Tool execution failed'),
+      const result = await callHandler({
+        params: {
+          name: 'cmos_status',
+          arguments: 'non-object arguments',
+        },
+      });
+      expect(result).toMatchObject({
+        isError: true,
+        structuredContent: { error: { code: 'TOOL_EXECUTION_ERROR' } },
       });
 
       const [, , contextArg] = handleSpy.mock.calls[0];
       expect(contextArg).toBeDefined();
-      expect(contextArg?.data).toEqual({ tool: 'string_args_tool' });
+      expect(contextArg?.data).toEqual({ tool: 'cmos_status' });
     } finally {
+      process.cwd = originalCwd;
       moduleData.cleanup();
-      execSpy.mockRestore();
+      await project.cleanup();
+      handlerSpy.mockRestore();
       handleSpy.mockRestore();
-      publicSpy.mockRestore();
     }
   });
 
@@ -803,12 +830,12 @@ describe('Mission Protocol entry lifecycle', () => {
 
       await expect(
         callHandler({ params: { name: 'cmos_project_list', arguments: {} } })
-      ).rejects.toBeInstanceOf(Error);
+      ).rejects.toMatchObject({
+        code: 'internal_error',
+        message: 'Server context not initialized',
+      });
 
-      expect(handleSpy).toHaveBeenCalled();
-      const [innerError] = handleSpy.mock.calls[0];
-      expect(innerError).toBeInstanceOf(Error);
-      expect((innerError as Error).message).toBe('Server context not initialized');
+      expect(handleSpy).not.toHaveBeenCalled();
     } finally {
       moduleData.cleanup();
       handleSpy.mockRestore();

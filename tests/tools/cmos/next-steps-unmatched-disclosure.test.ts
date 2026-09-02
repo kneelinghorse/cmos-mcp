@@ -65,6 +65,8 @@ function seed(): void {
     );
     CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     INSERT INTO metadata (key, value) VALUES ('project_name', 'm06 fixture');
+    CREATE TABLE sprints (id TEXT PRIMARY KEY);
+    INSERT INTO sprints (id) VALUES ('sprint-87'), ('sprint-88');
   `);
   db.close();
   CmosDetector.resetInstance();

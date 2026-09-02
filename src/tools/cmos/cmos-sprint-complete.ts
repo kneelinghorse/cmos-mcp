@@ -2,7 +2,7 @@
  * cmos_sprint_complete Tool
  *
  * MCP tool for closing out a sprint in one operation. It validates readiness,
- * snapshots both contexts, clears stale sprint-linked next steps, optionally
+ * snapshots both contexts, bounds next-step prose by count, optionally
  * runs condensation, and returns a closeout receipt with size telemetry.
  *
  * @module tools/cmos/cmos-sprint-complete
@@ -40,7 +40,7 @@ import { resolveProjectRootEnhanced } from '../../intelligence/project-resolutio
 import * as path from 'path';
 import { appendWarnings, appendWriteFailures, attachWarnings } from './format-warnings';
 import { isParkedMissionStatus } from './terminal-status';
-import { countWrite, type WriteFailure } from './write-guard';
+import type { WriteFailure } from './write-guard';
 import { summarizeSessionCaptures } from './session-capture-state';
 
 type CloseoutContextType = 'master_context' | 'project_context';
@@ -169,6 +169,7 @@ export interface SprintCloseoutContextResult {
   snapshotId: number | null;
   beforeSize: ContextSizeMetrics;
   afterSize: ContextSizeMetrics;
+  /** Oldest entries trimmed to enforce the close-time 15/10 count limits. */
   nextStepsCleared: number;
   condensation?: {
     strategy: Exclude<CloseoutCondensationStrategy, 'none'>;
@@ -177,6 +178,28 @@ export interface SprintCloseoutContextResult {
     targetMet: boolean;
     message: string;
   };
+}
+
+/** A pending next-step as observed by the closeout survey. Provenance is not delivery. */
+export interface SprintPendingNextStep {
+  id: number;
+  content: string;
+  sprintId: string | null;
+  missionId: string | null;
+}
+
+export interface SprintPendingNextStepGroups {
+  closingSprintWithMissionProvenance: SprintPendingNextStep[];
+  closingSprintWithoutMissionProvenance: SprintPendingNextStep[];
+  otherSprintProvenance: SprintPendingNextStep[];
+  noSprintProvenance: SprintPendingNextStep[];
+}
+
+/** Whole-ledger pending-work survey. Null totals/groups distinguish a failed read from zero rows. */
+export interface SprintPendingNextStepsSurvey {
+  available: boolean;
+  totalPending: number | null;
+  groups: SprintPendingNextStepGroups | null;
 }
 
 /**
@@ -202,24 +225,12 @@ export interface CmosSprintCompleteResult {
     totalAfterSizeKb: number;
   };
   lifecycle: SprintLifecycleTriggers;
-  /** s81-m06 — reconciliation of the next_steps TABLE at close (distinct from the
-   *  per-context JSON-array `nextStepsCleared` above, which the closeout already did).
-   *  AUTO-completes ONLY the machine-certain subset (pending rows whose `mission_id` is a
-   *  Completed, non-blocked mission of the closing sprint); CARRIES blocked-linked rows;
-   *  and FLAGS the sprint-linked remainder for the operator — it NEVER auto-closes on a
-   *  "did it ship" guess (that recreates the silent-wrong-state debt learning #433 names). */
-  nextStepsReconciled: number;
-  /** Pending sprint-linked rows carried because their `mission_id` is a Blocked mission. */
-  nextStepsCarried: number;
-  /** Sprint-linked pending rows NOT machine-certain (mission_id NULL, or a mission not
-   *  Completed/Blocked in this sprint) — surfaced for the operator to resolve by hand. */
-  pendingFlagged: Array<{ id: number; content: string; missionId: string | null }>;
+  /** Every pending next-step in the ledger, grouped by provenance for explicit disposition. */
+  nextStepsSurvey: SprintPendingNextStepsSurvey;
   /** Build-freshness report, included ONLY when stale=true (omitted on the happy path
    *  to keep the response shape unchanged for fresh-build sprints). */
   buildFreshness?: BuildFreshnessReport;
-  /** s86-m02b — writes the closeout ATTEMPTED and the database REJECTED. Always present, `[]`
-   *  on the happy path. `nextStepsReconciled` above counts rows the UPDATE actually changed,
-   *  so a non-empty array here is the difference between the intent and the outcome. */
+  /** s86-m02b — writes the closeout ATTEMPTED and the database REJECTED. Always present. */
   writeFailures: WriteFailure[];
   message: string;
 }
@@ -288,7 +299,7 @@ export const cmosSprintCompleteToolDefinition = {
     'Close out a sprint in one operation. Validates sprint readiness, marks the sprint Completed with endDate, ' +
     "ARCHIVES the sprint's active decisions and learnings (evergreen learnings are kept active) and names every " +
     'archived id in the result, takes a pre-close database snapshot as an undo handle, snapshots both contexts, ' +
-    'clears stale sprint-linked next steps, and optionally runs context condensation.',
+    'retains bounded next-step prose by count, and optionally runs context condensation.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -353,11 +364,6 @@ export async function cmosSprintComplete(
   const warnings: string[] = [];
   const result = await withClientAsync(
     async (client) => {
-      // s86-m02b — writes the closeout attempted and the database rejected. Kept apart from
-      // `warnings` on purpose (fork f09): a lost next_steps reconciliation and "your build looks
-      // stale" are not the same kind of news, and an operator must be able to tell them apart.
-      const writeSink = { failures: [] as WriteFailure[] };
-
       // Build-freshness is ADVISORY, not blocking (post-s74 review). It used to be
       // an ENFORCED gate here (s70-m02) that blocked closeout with BUILD_STALE
       // unless forceComplete. Two problems retired it: (1) the signals (src-mtime
@@ -611,31 +617,20 @@ export async function cmosSprintComplete(
         });
       }
 
-      const masterCleared = clearSprintLinkedNextSteps(
+      // Keep only the newest bounded prose entries. Text is never inspected: a mission/sprint id
+      // occurring in a next step records provenance, not evidence that the work was delivered.
+      const masterCleared = trimCloseoutNextStepProse(
         masterContext.data.parsedContent,
-        sprintId,
-        readiness.completedMissionIds,
-        readiness.blockedMissionIds
+        'master_context'
       );
-      const projectCleared = clearSprintLinkedNextSteps(
+      const projectCleared = trimCloseoutNextStepProse(
         projectContext.data.parsedContent,
-        sprintId,
-        readiness.completedMissionIds,
-        readiness.blockedMissionIds
+        'project_context'
       );
 
-      // s81-m06: reconcile the next_steps TABLE (distinct from the JSON arrays above),
-      // inside this same txn. Auto-complete only the mission-FK-certain subset; flag the
-      // rest for the operator. Never auto-close on a guess.
-      const nextStepsTable = reconcileSprintNextStepsTable(
-        client,
-        sprintId,
-        readiness.completedMissionIds,
-        readiness.blockedMissionIds,
-        completedAt,
-        writeSink,
-        warnings
-      );
+      // Survey the WHOLE pending ledger. Sprint close cannot prove delivery, so it performs no
+      // next_steps status write and gives the operator grouped rows for explicit disposition.
+      const nextStepsSurvey = surveyPendingNextSteps(client, sprintId, warnings);
 
       // --- Lifecycle Trigger: Archive sprint-scoped decisions/learnings ---
       // s87-m02: the function now carries its own warnings (the per-table `ids.length === changes`
@@ -867,10 +862,8 @@ export async function cmosSprintComplete(
           ),
         },
         lifecycle,
-        nextStepsReconciled: nextStepsTable.reconciled,
-        nextStepsCarried: nextStepsTable.carried,
-        pendingFlagged: nextStepsTable.pendingFlagged,
-        writeFailures: writeSink.failures,
+        nextStepsSurvey,
+        writeFailures: [],
         message: buildCloseoutMessage(sprintId, condensation, readiness),
       };
 
@@ -1124,194 +1117,92 @@ function createSnapshot(
 }
 
 /**
- * s81-m06 — reconcile the next_steps TABLE at sprint close (learning #433 / decision
- * #926 practice #1). `clearSprintLinkedNextSteps` above only prunes the context-JSON
- * string arrays; the next_steps TABLE has always required the operator to pass explicit
- * ids to transition rows, so done-but-unmarked rows accumulated silently — the recurring
- * debt this pays down.
- *
- * Runs inside the closeout's BEGIN IMMEDIATE txn. Reconcile-or-FLAG, never guess:
- *   - AUTO-complete ONLY the machine-CERTAIN subset: pending rows whose `mission_id` is a
- *     Completed, non-blocked mission of the closing sprint (a real FK to a terminal-done
- *     mission — the one case where "done" is knowable without a "did it ship" guess).
- *   - CARRY blocked-linked rows: `mission_id` is a Blocked mission → leave pending (mirrors
- *     `shouldClearStep`'s blocked-mission guard, which fires FIRST).
- *   - FLAG the rest (mission_id NULL free-text, or a mission not Completed/Blocked in this
- *     sprint) on the receipt — NEVER auto-closed. Auto-closing these is exactly the
- *     silent-wrong-state debt #926 forbids.
- * Only sprint-scoped rows (`sprint_id = ?`) are considered — free-text rows with no
- * sprint link are never touched.
+ * Survey every pending next-step without inferring delivery from provenance. The read remains
+ * inside the closeout transaction so the receipt describes the same stable boundary as the close.
  */
-function reconcileSprintNextStepsTable(
+function surveyPendingNextSteps(
   client: CmosDatabaseClient,
   sprintId: string,
-  completedMissionIds: string[],
-  blockedMissionIds: string[],
-  completedAt: string,
-  sink: { failures: WriteFailure[] },
   warnings: string[]
-): {
-  reconciled: number;
-  carried: number;
-  pendingFlagged: Array<{ id: number; content: string; missionId: string | null }>;
-} {
-  const empty = { reconciled: 0, carried: 0, pendingFlagged: [] };
-  const rows = client.getMany<{ id: number; content: string; mission_id: string | null }>(
-    `SELECT id, content, mission_id FROM next_steps WHERE sprint_id = ? AND status = 'pending'`,
-    [sprintId]
+): SprintPendingNextStepsSurvey {
+  const unavailable: SprintPendingNextStepsSurvey = {
+    available: false,
+    totalPending: null,
+    groups: null,
+  };
+  const rows = client.getMany<{
+    id: number;
+    content: string;
+    sprint_id: string | null;
+    mission_id: string | null;
+  }>(
+    `SELECT id, content, sprint_id, mission_id
+       FROM next_steps
+      WHERE status = 'pending'
+      ORDER BY id ASC`,
+    []
   );
-  // s86-m02b: a FAILED read here used to return `empty` — reconciled 0, indistinguishable from
-  // "there was nothing pending to reconcile". The closeout then reported a clean reconciliation
-  // of a table it never managed to read. The read half of the same defect as the write below.
-  if (!rows.success) {
-    warnings.push(
-      `next_steps reconciliation skipped: could not read pending rows for '${sprintId}' — ` +
-        `${rows.error?.code ?? 'DB_ERROR'}: ${rows.error?.message ?? 'unknown'}. ` +
-        `Sprint-linked next steps were NOT reconciled and remain pending.`
-    );
-    return empty;
-  }
-  if (!rows.data) return empty;
 
-  const completed = new Set(completedMissionIds);
-  const blocked = new Set(blockedMissionIds);
-  const toComplete: number[] = [];
-  let carried = 0;
-  const pendingFlagged: Array<{ id: number; content: string; missionId: string | null }> = [];
+  if (!rows.success || !rows.data) {
+    warnings.push(
+      `next_steps survey unavailable for sprint '${sprintId}' — ` +
+        `${rows.error?.code ?? 'DB_ERROR'}: ${rows.error?.message ?? 'no row data returned'}. ` +
+        'Pending total is unknown; no next_steps status was changed.'
+    );
+    return unavailable;
+  }
+
+  const groups: SprintPendingNextStepGroups = {
+    closingSprintWithMissionProvenance: [],
+    closingSprintWithoutMissionProvenance: [],
+    otherSprintProvenance: [],
+    noSprintProvenance: [],
+  };
 
   for (const row of rows.data) {
-    const mid = row.mission_id;
-    // Blocked-mission guard FIRST (mirrors shouldClearStep:817-819): carry, never close.
-    if (mid && blocked.has(mid)) {
-      carried += 1;
-      continue;
+    const item: SprintPendingNextStep = {
+      id: row.id,
+      content: row.content,
+      sprintId: row.sprint_id,
+      missionId: row.mission_id,
+    };
+    if (row.sprint_id === null) {
+      groups.noSprintProvenance.push(item);
+    } else if (row.sprint_id !== sprintId) {
+      groups.otherSprintProvenance.push(item);
+    } else if (row.mission_id !== null) {
+      groups.closingSprintWithMissionProvenance.push(item);
+    } else {
+      groups.closingSprintWithoutMissionProvenance.push(item);
     }
-    // The ONLY machine-certain "done": a real FK to a Completed non-blocked mission.
-    if (mid && completed.has(mid)) {
-      toComplete.push(row.id);
-      continue;
-    }
-    // No mission FK, or a mission not terminal-done in this sprint → FLAG, never guess.
-    pendingFlagged.push({ id: row.id, content: row.content, missionId: mid });
   }
 
-  if (toComplete.length === 0) {
-    return { reconciled: 0, carried, pendingFlagged };
-  }
-
-  const placeholders = toComplete.map(() => '?').join(', ');
-  const updateResult = client.execute(
-    `UPDATE next_steps SET status = 'completed', resolved_at = ? WHERE id IN (${placeholders}) AND status = 'pending'`,
-    [completedAt, ...toComplete]
-  );
-
-  // s86-m02b: report the rows the UPDATE ACTUALLY changed, not the rows we meant to change.
-  //
-  // A SHORT COUNT HERE IS NOT THE BENIGN WHERE-MISS IT IS ELSEWHERE, and the distinction is the
-  // reason `countWrite` leaves this judgement to the call site. `toComplete` was built by the
-  // SELECT above, which carries the IDENTICAL `sprint_id = ? AND status = 'pending'` predicate,
-  // on the SAME connection, INSIDE the same BEGIN IMMEDIATE transaction — so no row in
-  // `toComplete` can have left 'pending' between the SELECT and the UPDATE. At THIS site a
-  // successful statement always changes exactly `toComplete.length` rows, and anything less
-  // means the statement errored. (At cmos-next-steps.ts the ids come from the tool call and were
-  // never re-selected, so a short count there IS ordinary and must not be reported as a failure.)
   return {
-    reconciled: countWrite(updateResult, sink, 'next_steps reconciliation'),
-    carried,
-    pendingFlagged,
+    available: true,
+    totalPending: rows.data.length,
+    groups,
   };
 }
 
-function clearSprintLinkedNextSteps(
+/**
+ * Bound the two canonical production arrays measured at close (master resume and project working
+ * memory). Legacy/noncanonical next-step arrays are preserved without inventing an unmeasured cap.
+ * Text is never inspected for sprint or mission tokens.
+ */
+function trimCloseoutNextStepProse(
   content: Record<string, unknown>,
-  sprintId: string,
-  completedMissionIds: string[],
-  blockedMissionIds: string[]
+  contextType: CloseoutContextType
 ): number {
-  const paths = [
-    ['working_memory', 'next_steps'],
-    ['next_session_context', 'when_we_resume'],
-    ['next_steps'],
-  ] as const;
+  const parentKey = contextType === 'master_context' ? 'next_session_context' : 'working_memory';
+  const arrayKey = contextType === 'master_context' ? 'when_we_resume' : 'next_steps';
+  const limit = contextType === 'master_context' ? 15 : 10;
+  const parent = content[parentKey];
+  if (!isPlainObject(parent) || !Array.isArray(parent[arrayKey])) return 0;
 
-  let removed = 0;
-  for (const path of paths) {
-    removed += pruneStringArrayAtPath(content, [...path], (step) =>
-      shouldClearStep(step, sprintId, completedMissionIds, blockedMissionIds)
-    );
-  }
-
+  const entries = parent[arrayKey] as unknown[];
+  const removed = Math.max(0, entries.length - limit);
+  if (removed > 0) entries.splice(0, removed);
   return removed;
-}
-
-function pruneStringArrayAtPath(
-  content: Record<string, unknown>,
-  path: string[],
-  shouldRemove: (step: string) => boolean
-): number {
-  const parent = getParentObject(content, path.slice(0, -1));
-  const key = path[path.length - 1];
-  if (!parent || !Array.isArray(parent[key])) {
-    return 0;
-  }
-
-  let removed = 0;
-  parent[key] = (parent[key] as unknown[]).filter((entry) => {
-    if (typeof entry === 'string' && shouldRemove(entry)) {
-      removed += 1;
-      return false;
-    }
-    return true;
-  });
-
-  return removed;
-}
-
-function shouldClearStep(
-  step: string,
-  sprintId: string,
-  completedMissionIds: string[],
-  blockedMissionIds: string[]
-): boolean {
-  const normalized = step.toLowerCase();
-  if (blockedMissionIds.some((missionId) => normalized.includes(missionId.toLowerCase()))) {
-    return false;
-  }
-
-  if (completedMissionIds.some((missionId) => normalized.includes(missionId.toLowerCase()))) {
-    return true;
-  }
-
-  return buildSprintTokens(sprintId).some((token) => normalized.includes(token));
-}
-
-function buildSprintTokens(sprintId: string): string[] {
-  const normalizedSprintId = sprintId.toLowerCase();
-  const tokens = [normalizedSprintId, normalizedSprintId.replace(/-/g, ' ')];
-  const numericMatch = normalizedSprintId.match(/^sprint-(\d+)$/);
-  if (numericMatch) {
-    const sprintNumber = String(Number.parseInt(numericMatch[1], 10));
-    tokens.push(`sprint ${sprintNumber}`);
-    tokens.push(`sprint-${numericMatch[1]}`);
-  }
-  return tokens;
-}
-
-function getParentObject(
-  content: Record<string, unknown>,
-  path: string[]
-): Record<string, unknown> | null {
-  let current: Record<string, unknown> = content;
-
-  for (const segment of path) {
-    const next = current[segment];
-    if (!isPlainObject(next)) {
-      return null;
-    }
-    current = next;
-  }
-
-  return current;
 }
 
 function persistCloseoutContext(
@@ -1388,13 +1279,16 @@ async function applyOptionalCondensation(params: {
   ] as const;
 
   for (const [resultKey, contextType] of mappings) {
-    const condenseResult = await cmosContextCondense({
-      contextType,
-      strategy: params.strategy,
-      targetSizePercent: params.targetSizePercent,
-      dryRun: false,
-      projectRoot: params.projectRoot,
-    });
+    const condenseResult = await cmosContextCondense(
+      {
+        contextType,
+        strategy: params.strategy,
+        targetSizePercent: params.targetSizePercent,
+        dryRun: false,
+        projectRoot: params.projectRoot,
+      },
+      { preserveNextStepProse: true }
+    );
 
     if (!condenseResult.success || !condenseResult.data) {
       params.warnings.push(
@@ -1660,7 +1554,7 @@ function computeSprintKPIs(
 /**
  * Clear project_context sprint-specific working_memory fields and update current_sprint.
  * Clears session_history and recent_sessions arrays (sprint-scoped ephemeral data).
- * Does NOT clear next_steps — that's handled by clearSprintLinkedNextSteps which is selective.
+ * Does NOT clear next_steps — closeout retention trims only oldest overflow by count.
  * Mutates the parsed content in-place for subsequent persistence.
  */
 function clearProjectContextWorkingMemory(
@@ -1669,7 +1563,7 @@ function clearProjectContextWorkingMemory(
 ): void {
   if (isPlainObject(content.working_memory)) {
     const wm = content.working_memory as Record<string, unknown>;
-    // Clear sprint-scoped ephemeral arrays but NOT next_steps (handled separately)
+    // Clear sprint-scoped ephemeral arrays but NOT next_steps (bounded separately by count).
     const ephemeralKeys = ['session_history', 'recent_sessions'];
     for (const key of ephemeralKeys) {
       if (Array.isArray(wm[key])) {
@@ -1726,6 +1620,8 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * An empty list renders nothing at all rather than `[]`: "0 decisions" already said it.
  */
 const ARCHIVED_ID_RENDER_CAP = 30;
+const NEXT_STEP_SURVEY_CONTENT_EXCERPT_CAP = 5;
+const NEXT_STEP_SURVEY_CONTENT_RENDER_CAP = 160;
 
 function formatArchivedIds(ids: number[] | undefined): string {
   if (!ids || ids.length === 0) return '';
@@ -1733,6 +1629,37 @@ function formatArchivedIds(ids: number[] | undefined): string {
   const remainder = ids.length - shown.length;
   const body = shown.map((id) => `#${id}`).join(', ');
   return remainder > 0 ? ` (${body}, +${remainder} more)` : ` (${body})`;
+}
+
+function formatPendingNextStepGroup(
+  lines: string[],
+  label: string,
+  rows: SprintPendingNextStep[]
+): void {
+  lines.push(`${label}: ${rows.length}`);
+  if (rows.length === 0) return;
+
+  // Every id stays visible in the text channel agents actually read. Only the prose excerpts are
+  // capped; structured data retains every complete row.
+  lines.push(`  IDs: ${rows.map((row) => `#${row.id}`).join(', ')}`);
+  for (const row of rows.slice(0, NEXT_STEP_SURVEY_CONTENT_EXCERPT_CAP)) {
+    const provenance = [
+      row.sprintId ?? 'no sprint',
+      row.missionId ? `mission provenance ${row.missionId}` : null,
+    ]
+      .filter((value): value is string => value !== null)
+      .join('; ');
+    const content =
+      row.content.length > NEXT_STEP_SURVEY_CONTENT_RENDER_CAP
+        ? `${row.content.slice(0, NEXT_STEP_SURVEY_CONTENT_RENDER_CAP - 1)}…`
+        : row.content;
+    lines.push(`  - #${row.id} [${provenance}]: ${content}`);
+  }
+  if (rows.length > NEXT_STEP_SURVEY_CONTENT_EXCERPT_CAP) {
+    lines.push(
+      `  - ${rows.length - NEXT_STEP_SURVEY_CONTENT_EXCERPT_CAP} additional prose excerpt(s) omitted; all ids are listed above`
+    );
+  }
 }
 
 /**
@@ -1795,8 +1722,8 @@ export function formatSprintCompleteForLLM(
     `Runtime build at close: ${runtimeBuildAtClose}`,
     ...activeSessionsAtClose,
     '',
-    `master_context: ${data.contexts.masterContext.beforeSize.sizeKb.toFixed(2)}KB → ${data.contexts.masterContext.afterSize.sizeKb.toFixed(2)}KB, cleared ${data.contexts.masterContext.nextStepsCleared} next step(s)`,
-    `project_context: ${data.contexts.projectContext.beforeSize.sizeKb.toFixed(2)}KB → ${data.contexts.projectContext.afterSize.sizeKb.toFixed(2)}KB, cleared ${data.contexts.projectContext.nextStepsCleared} next step(s)`,
+    `master_context: ${data.contexts.masterContext.beforeSize.sizeKb.toFixed(2)}KB → ${data.contexts.masterContext.afterSize.sizeKb.toFixed(2)}KB, trimmed ${data.contexts.masterContext.nextStepsCleared} oldest next-step item(s) by count`,
+    `project_context: ${data.contexts.projectContext.beforeSize.sizeKb.toFixed(2)}KB → ${data.contexts.projectContext.afterSize.sizeKb.toFixed(2)}KB, trimmed ${data.contexts.projectContext.nextStepsCleared} oldest next-step item(s) by count`,
     `Total context size: ${data.contexts.totalBeforeSizeKb.toFixed(2)}KB → ${data.contexts.totalAfterSizeKb.toFixed(2)}KB`,
   ];
 
@@ -1814,20 +1741,43 @@ export function formatSprintCompleteForLLM(
     }
   }
 
-  // s86-m02b: the next_steps TABLE reconciliation was structuredContent-ONLY — an agent reading
-  // content[0].text (src/index.ts) had never seen it, true or false. Making the count honest is
-  // the mission's highest-value fix and it was invisible in the channel agents actually read;
-  // `cleared N next step(s)` above is a DIFFERENT number (the per-context JSON arrays).
   lines.push('');
-  lines.push(
-    `Next-steps table: ${data.nextStepsReconciled} auto-completed, ` +
-      `${data.nextStepsCarried} carried (blocked-linked), ` +
-      `${data.pendingFlagged.length} flagged for you`
-  );
-  for (const flagged of data.pendingFlagged) {
+  if (
+    !data.nextStepsSurvey.available ||
+    data.nextStepsSurvey.totalPending === null ||
+    data.nextStepsSurvey.groups === null
+  ) {
+    lines.push('Next-steps survey: unavailable (pending total unknown)');
+  } else {
     lines.push(
-      `  - #${flagged.id}${flagged.missionId ? ` (${flagged.missionId})` : ''}: ${flagged.content}`
+      `Next-steps survey: ${data.nextStepsSurvey.totalPending} pending across the whole ledger`
     );
+    formatPendingNextStepGroup(
+      lines,
+      'Closing sprint with mission provenance (not delivery)',
+      data.nextStepsSurvey.groups.closingSprintWithMissionProvenance
+    );
+    formatPendingNextStepGroup(
+      lines,
+      'Closing sprint without mission provenance',
+      data.nextStepsSurvey.groups.closingSprintWithoutMissionProvenance
+    );
+    formatPendingNextStepGroup(
+      lines,
+      'Other sprint provenance',
+      data.nextStepsSurvey.groups.otherSprintProvenance
+    );
+    formatPendingNextStepGroup(
+      lines,
+      'No sprint provenance',
+      data.nextStepsSurvey.groups.noSprintProvenance
+    );
+    lines.push('Resolve explicitly with one valid action:');
+    lines.push(
+      '  - cmos_context(action="next_steps", nextStepAction="complete", nextStepIds=[...])'
+    );
+    lines.push('  - cmos_context(action="next_steps", nextStepAction="carry", nextStepIds=[...])');
+    lines.push('  - cmos_context(action="next_steps", nextStepAction="drop", nextStepIds=[...])');
   }
 
   appendWriteFailures(lines, data.writeFailures);

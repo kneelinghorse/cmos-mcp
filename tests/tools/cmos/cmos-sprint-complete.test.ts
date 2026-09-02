@@ -174,7 +174,7 @@ describe('cmos_sprint_complete', () => {
   }
 
   describe('happy path', () => {
-    it('completes the sprint, snapshots contexts, and clears sprint-linked next steps', async () => {
+    it('completes the sprint, snapshots contexts, and preserves next-step prose', async () => {
       seedMissions([
         { id: 's22-m01', status: 'Completed' },
         { id: 's22-m02', status: 'Completed' },
@@ -206,8 +206,8 @@ describe('cmos_sprint_complete', () => {
       expect(result.data?.currentStatus).toBe('Completed');
       expect(result.data?.contexts.masterContext.snapshotId).not.toBeNull();
       expect(result.data?.contexts.projectContext.snapshotId).not.toBeNull();
-      expect(result.data?.contexts.masterContext.nextStepsCleared).toBe(1);
-      expect(result.data?.contexts.projectContext.nextStepsCleared).toBe(3);
+      expect(result.data?.contexts.masterContext.nextStepsCleared).toBe(0);
+      expect(result.data?.contexts.projectContext.nextStepsCleared).toBe(0);
 
       const db = new Database(dbPath);
       const sprint = db
@@ -228,18 +228,51 @@ describe('cmos_sprint_complete', () => {
 
       expect(readContext('master_context')).toEqual({
         next_session_context: {
-          when_we_resume: ['Prepare sprint retro notes'],
+          when_we_resume: ['session-1: Wrap s22-m01 follow-up', 'Prepare sprint retro notes'],
         },
       });
       expect(readContext('project_context')).toEqual({
         working_memory: {
-          next_steps: ['Keep lint clean'],
+          next_steps: ['session-1: Finish s22-m02 docs', 'Keep lint clean'],
         },
         next_session_context: {
-          when_we_resume: ['Investigate future telemetry work'],
+          when_we_resume: ['Close sprint-22 checklist', 'Investigate future telemetry work'],
         },
-        next_steps: ['Draft sprint-23 kickoff'],
+        next_steps: ['Archive sprint-22 notes', 'Draft sprint-23 kickoff'],
       });
+    });
+
+    it('trims only oldest overflow, keeping newest 15 master and newest 10 project entries', async () => {
+      seedMissions([{ id: 's22-m01', status: 'Completed' }]);
+      const masterSteps = Array.from(
+        { length: 17 },
+        (_, index) => `master-${index}: sprint-22 s22-m01 follow-up`
+      );
+      const projectSteps = Array.from(
+        { length: 12 },
+        (_, index) => `project-${index}: sprint-22 s22-m01 follow-up`
+      );
+      seedContexts(
+        { next_session_context: { when_we_resume: masterSteps } },
+        { working_memory: { next_steps: projectSteps } }
+      );
+
+      const result = await cmosSprintComplete({
+        sprintId: 'sprint-22',
+        summary: 'Count-only retention',
+        projectRoot: getProjectRoot(),
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.data?.contexts.masterContext.nextStepsCleared).toBe(2);
+      expect(result.data?.contexts.projectContext.nextStepsCleared).toBe(2);
+      expect(
+        (readContext('master_context').next_session_context as Record<string, unknown>)
+          .when_we_resume
+      ).toEqual(masterSteps.slice(-15));
+      expect(
+        (readContext('project_context').working_memory as Record<string, unknown>).next_steps
+      ).toEqual(projectSteps.slice(-10));
     });
   });
 
@@ -420,6 +453,13 @@ describe('cmos_sprint_complete', () => {
       expect(result.data?.contexts.projectContext.afterSize.sizeKb).toBeLessThanOrEqual(
         result.data!.contexts.projectContext.beforeSize.sizeKb
       );
+      expect(
+        (readContext('master_context').next_session_context as Record<string, unknown>)
+          .when_we_resume
+      ).toEqual(['Complete s22-m01 wrap-up']);
+      expect(
+        (readContext('project_context').working_memory as Record<string, unknown>).next_steps
+      ).toEqual(['Complete s22-m01 wrap-up']);
     });
   });
 
@@ -671,7 +711,7 @@ describe('cmos_sprint_complete', () => {
       // Ephemeral arrays cleared
       expect(wm.session_history).toEqual([]);
       expect(wm.recent_sessions).toEqual([]);
-      // next_steps preserved (cleared selectively by clearSprintLinkedNextSteps)
+      // next_steps preserved (closeout retention is length-only)
       expect(wm.next_steps).toEqual(['Keep lint clean']);
       // Sprint/mission references cleared
       expect(context.current_sprint).toBeNull();
@@ -1171,7 +1211,7 @@ describe('cmos_sprint_complete', () => {
     });
   });
 
-  describe('s81-m06 next_steps TABLE reconciliation', () => {
+  describe('s90-m05 whole-ledger next_steps survey', () => {
     /** Create + seed the next_steps table (absent from the base fixture schema). */
     function seedNextStepsTable(
       rows: Array<{
@@ -1213,14 +1253,14 @@ describe('cmos_sprint_complete', () => {
       return row;
     }
 
-    it('auto-completes ONLY mission-FK-certain rows, carries blocked-linked, flags the rest, never touches free-text', async () => {
+    it('leaves every pending row unchanged and groups the whole ledger by provenance', async () => {
       seedMissions([
         { id: 's22-m01', status: 'Completed' },
         { id: 's22-m02', status: 'Blocked', notes: '[Blocked] waiting' },
       ]);
       seedContexts({}, {});
       seedNextStepsTable([
-        // A: pending, FK to a Completed mission → AUTO-complete.
+        // A: pending, FK to a Completed mission → closing sprint with mission provenance.
         {
           id: 1,
           content: 'wrap up s22-m01',
@@ -1228,7 +1268,7 @@ describe('cmos_sprint_complete', () => {
           sprintId: 'sprint-22',
           missionId: 's22-m01',
         },
-        // B: pending, FK to a Blocked mission → CARRY (stay pending).
+        // B: pending, FK to a Blocked mission → same provenance group; still pending.
         {
           id: 2,
           content: 'blocked follow-up',
@@ -1236,7 +1276,7 @@ describe('cmos_sprint_complete', () => {
           sprintId: 'sprint-22',
           missionId: 's22-m02',
         },
-        // C: pending, sprint-linked but NO mission FK (free-text) → FLAG (stay pending).
+        // C: pending, sprint-linked but NO mission FK → closing sprint without mission.
         {
           id: 3,
           content: 'free-text idea, did it ship?',
@@ -1244,7 +1284,7 @@ describe('cmos_sprint_complete', () => {
           sprintId: 'sprint-22',
           missionId: null,
         },
-        // D: pending, a DIFFERENT sprint → UNTOUCHED (not sprint-scoped to the closing sprint).
+        // D: pending, a DIFFERENT sprint → other-sprint provenance.
         {
           id: 4,
           content: 'other sprint work',
@@ -1260,7 +1300,59 @@ describe('cmos_sprint_complete', () => {
           sprintId: 'sprint-22',
           missionId: 's22-m01',
         },
+        // F: pending with no sprint provenance at all.
+        {
+          id: 6,
+          content: 'unscoped pending work',
+          status: 'pending',
+          sprintId: null,
+          missionId: null,
+        },
+        // G: four more rows under the old auto-complete predicate make the positive control
+        // non-vacuous and push one rendered group past the prose-excerpt cap.
+        ...[7, 8, 9, 10].map((id) => ({
+          id,
+          content: `additional delivered-provenance row ${id}`,
+          status: 'pending',
+          sprintId: 'sprint-22',
+          missionId: 's22-m01',
+        })),
       ]);
+
+      const preCloseDb = new Database(dbPath, { readonly: true });
+      try {
+        const oldEligible = preCloseDb
+          .prepare(
+            `SELECT COUNT(*) AS count
+               FROM next_steps ns
+               JOIN missions m ON m.id = ns.mission_id
+              WHERE ns.sprint_id = ?
+                AND ns.status = 'pending'
+                AND m.status = 'Completed'`
+          )
+          .get('sprint-22') as { count: number };
+        expect(oldEligible.count).toBeGreaterThanOrEqual(2);
+
+        const fixtureGroups = preCloseDb
+          .prepare(
+            `SELECT
+               COALESCE(SUM(CASE WHEN sprint_id = ? AND mission_id IS NOT NULL THEN 1 ELSE 0 END), 0) AS closingWithMission,
+               COALESCE(SUM(CASE WHEN sprint_id = ? AND mission_id IS NULL THEN 1 ELSE 0 END), 0) AS closingWithoutMission,
+               COALESCE(SUM(CASE WHEN sprint_id IS NOT NULL AND sprint_id <> ? THEN 1 ELSE 0 END), 0) AS otherSprint,
+               COALESCE(SUM(CASE WHEN sprint_id IS NULL THEN 1 ELSE 0 END), 0) AS noSprint
+             FROM next_steps
+             WHERE status = 'pending'`
+          )
+          .get('sprint-22', 'sprint-22', 'sprint-22') as {
+          closingWithMission: number;
+          closingWithoutMission: number;
+          otherSprint: number;
+          noSprint: number;
+        };
+        expect(Object.values(fixtureGroups).every((count) => count > 0)).toBe(true);
+      } finally {
+        preCloseDb.close();
+      }
 
       const result = await cmosSprintComplete({
         sprintId: 'sprint-22',
@@ -1269,23 +1361,82 @@ describe('cmos_sprint_complete', () => {
       });
 
       expect(result.success).toBe(true);
-      // Receipt counts.
-      expect(result.data?.nextStepsReconciled).toBe(1);
-      expect(result.data?.nextStepsCarried).toBe(1);
-      expect(result.data?.pendingFlagged).toEqual([
-        { id: 3, content: 'free-text idea, did it ship?', missionId: null },
-      ]);
+      expect(result.data?.nextStepsSurvey).toEqual({
+        available: true,
+        totalPending: 9,
+        groups: {
+          closingSprintWithMissionProvenance: [
+            {
+              id: 1,
+              content: 'wrap up s22-m01',
+              sprintId: 'sprint-22',
+              missionId: 's22-m01',
+            },
+            {
+              id: 2,
+              content: 'blocked follow-up',
+              sprintId: 'sprint-22',
+              missionId: 's22-m02',
+            },
+            ...[7, 8, 9, 10].map((id) => ({
+              id,
+              content: `additional delivered-provenance row ${id}`,
+              sprintId: 'sprint-22',
+              missionId: 's22-m01',
+            })),
+          ],
+          closingSprintWithoutMissionProvenance: [
+            {
+              id: 3,
+              content: 'free-text idea, did it ship?',
+              sprintId: 'sprint-22',
+              missionId: null,
+            },
+          ],
+          otherSprintProvenance: [
+            {
+              id: 4,
+              content: 'other sprint work',
+              sprintId: 'sprint-99',
+              missionId: null,
+            },
+          ],
+          noSprintProvenance: [
+            {
+              id: 6,
+              content: 'unscoped pending work',
+              sprintId: null,
+              missionId: null,
+            },
+          ],
+        },
+      });
 
       // Row-level effects.
-      expect(readNextStep(1).status).toBe('completed'); // auto-completed
-      expect(readNextStep(1).resolved_at).not.toBeNull();
-      expect(readNextStep(2).status).toBe('pending'); // carried (blocked-linked)
-      expect(readNextStep(3).status).toBe('pending'); // flagged, never guessed-closed
-      expect(readNextStep(4).status).toBe('pending'); // other sprint, untouched
+      for (const id of [1, 2, 3, 4, 6, 7, 8, 9, 10]) {
+        expect(readNextStep(id)).toEqual({ status: 'pending', resolved_at: null });
+      }
       expect(readNextStep(5).status).toBe('completed'); // already completed, unchanged
+
+      const rendered = formatSprintCompleteForLLM(result);
+      expect(rendered).toContain('Next-steps survey: 9 pending across the whole ledger');
+      expect(rendered).toContain('Closing sprint with mission provenance (not delivery): 6');
+      expect(rendered).toContain('Other sprint provenance: 1');
+      expect(rendered).toContain('No sprint provenance: 1');
+      expect(rendered).toContain('IDs: #1, #2, #7, #8, #9, #10');
+      expect(rendered).not.toContain('additional delivered-provenance row 10');
+      expect(rendered).toContain(
+        'cmos_context(action="next_steps", nextStepAction="complete", nextStepIds=[...])'
+      );
+      expect(rendered).toContain(
+        'cmos_context(action="next_steps", nextStepAction="carry", nextStepIds=[...])'
+      );
+      expect(rendered).toContain(
+        'cmos_context(action="next_steps", nextStepAction="drop", nextStepIds=[...])'
+      );
     });
 
-    it('no-ops safely when there are no pending sprint-linked next_steps rows', async () => {
+    it('surveys pending rows outside the closing sprint instead of reporting an empty receipt', async () => {
       seedMissions([{ id: 's22-m01', status: 'Completed' }]);
       seedContexts({}, {});
       seedNextStepsTable([
@@ -1305,9 +1456,23 @@ describe('cmos_sprint_complete', () => {
       });
 
       expect(result.success).toBe(true);
-      expect(result.data?.nextStepsReconciled).toBe(0);
-      expect(result.data?.nextStepsCarried).toBe(0);
-      expect(result.data?.pendingFlagged).toEqual([]);
+      expect(result.data?.nextStepsSurvey).toEqual({
+        available: true,
+        totalPending: 1,
+        groups: {
+          closingSprintWithMissionProvenance: [],
+          closingSprintWithoutMissionProvenance: [],
+          otherSprintProvenance: [
+            {
+              id: 1,
+              content: 'other sprint',
+              sprintId: 'sprint-99',
+              missionId: null,
+            },
+          ],
+          noSprintProvenance: [],
+        },
+      });
       expect(readNextStep(1).status).toBe('pending'); // untouched
     });
   });

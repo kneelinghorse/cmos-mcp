@@ -117,7 +117,7 @@ export async function cmosProjectRegister(
       return createError({
         code: 'CMOS_NOT_DETECTED',
         message: `No CMOS database found at ${resolvedPath}. Ensure cmos/db/cmos.sqlite exists.`,
-        suggestion: 'Ensure the project has a cmos/db/cmos.sqlite file',
+        suggestion: `Initialize it with cmos_project(action="init", projectRoot=${JSON.stringify(resolvedPath)}), then retry register.`,
       });
     }
 

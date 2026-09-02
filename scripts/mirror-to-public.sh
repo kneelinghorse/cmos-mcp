@@ -10,7 +10,7 @@
 #
 # Usage:
 #   DRY_RUN=1 scripts/mirror-to-public.sh v1.1.0      # stage + leak-check + commit, NO push (verify first)
-#   scripts/mirror-to-public.sh v1.1.0                # real mirror: push main + the vX.Y.Z tag
+#   scripts/mirror-to-public.sh v1.1.0                # real mirror: atomically push main + tag
 #
 # Env overrides:
 #   PUBLIC_REMOTE   default git@github.com:kneelinghorse/cmos-mcp.git (point at a local --bare repo to test)
@@ -91,13 +91,27 @@ echo "✓ leak-guard passed: no PRIVATE_PATHS, nested exclusions, *.sqlite, or .
 
 cd "$PUB"
 git add -A
-if git diff --cached --quiet; then echo "no changes to mirror — public already matches this HEAD"; exit 0; fi
-
-PRIVATE_SHA="$(cd "$REPO_ROOT" && git rev-parse --short HEAD)"
-git commit --quiet -m "release $VERSION
+if git diff --cached --quiet; then
+  echo "no source changes to mirror — public already matches this HEAD; checking release tag"
+else
+  PRIVATE_SHA="$(cd "$REPO_ROOT" && git rev-parse --short HEAD)"
+  git commit --quiet -m "release $VERSION
 
 Mirrored from the private @aquex/cmos-mcp source at $PRIVATE_SHA.
 Excludes private paths (cmos/, analysis/, artifacts/, …) and nested private-source files."
+fi
+
+PUBLIC_COMMIT="$(git rev-parse HEAD)"
+if git show-ref --verify --quiet "refs/tags/$VERSION"; then
+  TAG_COMMIT="$(git rev-parse "$VERSION^{commit}")"
+  [[ "$TAG_COMMIT" == "$PUBLIC_COMMIT" ]] || {
+    echo "ERROR: public tag $VERSION resolves to $TAG_COMMIT, expected $PUBLIC_COMMIT"
+    exit 1
+  }
+else
+  git tag "$VERSION" "$PUBLIC_COMMIT"
+fi
+echo "PUBLIC_COMMIT=$PUBLIC_COMMIT"
 
 if [[ "${DRY_RUN:-0}" == "1" ]]; then
   echo
@@ -112,8 +126,6 @@ if [[ "${DRY_RUN:-0}" == "1" ]]; then
   exit 0
 fi
 
-echo "→ pushing $PUBLIC_BRANCH + tag $VERSION to $PUBLIC_REMOTE"
-git push origin "$PUBLIC_BRANCH"
-git tag "$VERSION"
-git push origin "$VERSION"
-echo "✓ mirrored $VERSION to public"
+echo "→ atomically pushing $PUBLIC_BRANCH + tag $VERSION to $PUBLIC_REMOTE"
+git push --atomic origin "HEAD:refs/heads/$PUBLIC_BRANCH" "refs/tags/$VERSION"
+echo "✓ mirrored $VERSION to public at $PUBLIC_COMMIT"

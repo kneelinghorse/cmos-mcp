@@ -58,6 +58,7 @@ export const CMOS_ERROR_CODES = {
 
   // CMOS detection errors
   CMOS_NOT_DETECTED: 'CMOS_NOT_DETECTED',
+  SENDER_UNRESOLVABLE: 'SENDER_UNRESOLVABLE',
 
   // Dashboard errors (Sprint 28)
   DASHBOARD_UNREACHABLE: 'DASHBOARD_UNREACHABLE',
@@ -210,11 +211,12 @@ export function withSanitizedFields<T>(
  * Error factory functions for common error patterns.
  */
 export const CmosErrors = {
-  dbNotFound(path: string): CmosToolError {
+  dbNotFound(path: string, projectRoot: string): CmosToolError {
     return {
       code: CMOS_ERROR_CODES.DB_NOT_FOUND,
       message: `CMOS database not found at '${path}'`,
-      suggestion: 'Ensure the cmos/ directory exists and contains db/cmos.sqlite',
+      // Keep the repair on the same project root that produced this refusal.
+      suggestion: `Initialize the project with cmos_project(action="init", projectRoot=${JSON.stringify(projectRoot)}), or restore its cmos/db/cmos.sqlite file.`,
     };
   },
 
@@ -361,8 +363,19 @@ export const CmosErrors = {
     return {
       code: CMOS_ERROR_CODES.CMOS_NOT_DETECTED,
       message: `CMOS directory not found starting from '${searchPath}'`,
+      suggestion: `Initialize it with cmos_project(action="init", projectRoot=${JSON.stringify(searchPath)}), or navigate to a CMOS-enabled project.`,
+    };
+  },
+
+  senderUnresolvable(
+    message: string,
+    code: string = CMOS_ERROR_CODES.SENDER_UNRESOLVABLE
+  ): CmosToolError {
+    return {
+      code,
+      message,
       suggestion:
-        'CMOS tools require a cmos/ directory with db/cmos.sqlite. Create one or navigate to a CMOS-enabled project.',
+        'Pass projectRoot explicitly, run from a directory with cmos/db/cmos.sqlite, or ensure the local CMOS DB has a UUID metadata.dashboard_project_id and canonical project_identity.cmos_address.',
     };
   },
 

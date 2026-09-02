@@ -3,7 +3,7 @@
  *
  * Tests:
  * 1. Auto-extraction of next-steps on session completion
- * 2. Next-step lifecycle handlers (list/complete/carry/drop)
+ * 2. Next-step lifecycle handlers (list/complete/carry/drop/reopen)
  * 3. Content hash dedup on extraction
  * 4. Carry-forward integration with pending next-steps
  * 5. Schema migration idempotency
@@ -586,6 +586,214 @@ describe('next-step lifecycle (s40-m02)', () => {
           .get() as { carried_to_sprint: string | null };
         expect(row.carried_to_sprint).toBeNull();
       });
+
+      it.each([
+        ['specific IDs', [1]],
+        ['the bulk branch', undefined],
+      ] as const)(
+        'should refuse a nonexistent target sprint before updating %s',
+        async (_branch, nextStepIds) => {
+          await seedNextSteps(testDb.db);
+          const before = testDb.db
+            .prepare(
+              'SELECT id, status, resolved_at, carried_to_sprint FROM next_steps ORDER BY id'
+            )
+            .all();
+
+          const result = await cmosNextSteps({
+            nextStepAction: 'carry',
+            nextStepIds: nextStepIds ? [...nextStepIds] : undefined,
+            carryToSprint: 'sprint-missing',
+            projectRoot: testDb.tempDir,
+          });
+
+          expect(result).toMatchObject({
+            success: false,
+            error: {
+              code: 'INVALID_PARAMETER',
+              field: 'carryToSprint',
+              providedValue: 'sprint-missing',
+              message:
+                "No sprint row exists for carryToSprint 'sprint-missing'; no next-steps were carried.",
+            },
+          });
+          expect(result.error?.suggestion).toContain(
+            'cmos_sprint(action="add", sprintId="sprint-missing", title="<title>")'
+          );
+          expect(result.error?.suggestion).toContain('omit carryToSprint');
+          expect(result.error?.suggestion).toContain(
+            'cmos_context(action="next_steps", nextStepAction="list", nextStepStatus="carried")'
+          );
+
+          const structured = JSON.stringify(result);
+          const formatted = formatNextStepsForLLM(result);
+          expect(structured).not.toContain('Foreign key constraint violation');
+          expect(formatted).toContain("No sprint row exists for carryToSprint 'sprint-missing'");
+          expect(formatted).toContain('Suggestion: Create it first with cmos_sprint');
+          expect(formatted).toContain('omit carryToSprint');
+          expect(formatted).not.toContain('Foreign key constraint violation');
+
+          const after = testDb.db
+            .prepare(
+              'SELECT id, status, resolved_at, carried_to_sprint FROM next_steps ORDER BY id'
+            )
+            .all();
+          expect(after).toEqual(before);
+        }
+      );
+    });
+
+    describe('reopen', () => {
+      it('should reopen only the named completed and dropped rows and clear resolution metadata', async () => {
+        await seedNextSteps(testDb.db);
+        testDb.db.exec(`
+          UPDATE next_steps
+          SET status = 'completed', resolved_at = '2026-03-14T10:00:00Z', carried_to_sprint = 'sprint-40'
+          WHERE id = 2;
+          UPDATE next_steps
+          SET status = 'dropped', resolved_at = '2026-03-14T11:00:00Z', carried_to_sprint = 'sprint-40'
+          WHERE id = 3;
+          UPDATE next_steps
+          SET resolved_at = '2026-03-14T12:00:00Z', carried_to_sprint = 'sprint-40'
+          WHERE id = 4;
+        `);
+
+        const result = await cmosNextSteps({
+          nextStepAction: 'reopen',
+          nextStepIds: [3, 4],
+          projectRoot: testDb.tempDir,
+        });
+
+        expect(result).toMatchObject({
+          success: true,
+          data: {
+            nextStepAction: 'reopen',
+            affected: 2,
+            writeFailures: [],
+            unmatchedIds: [],
+            message: '2 next-step(s) reopened',
+          },
+        });
+
+        const reopened = testDb.db
+          .prepare(
+            'SELECT id, status, resolved_at, carried_to_sprint FROM next_steps WHERE id IN (3, 4) ORDER BY id'
+          )
+          .all();
+        expect(reopened).toEqual([
+          { id: 3, status: 'pending', resolved_at: null, carried_to_sprint: null },
+          { id: 4, status: 'pending', resolved_at: null, carried_to_sprint: null },
+        ]);
+
+        const unrelated = testDb.db
+          .prepare('SELECT status, resolved_at, carried_to_sprint FROM next_steps WHERE id = 2')
+          .get();
+        expect(unrelated).toEqual({
+          status: 'completed',
+          resolved_at: '2026-03-14T10:00:00Z',
+          carried_to_sprint: 'sprint-40',
+        });
+      });
+
+      it('should require at least one explicit next-step ID', async () => {
+        await seedNextSteps(testDb.db);
+
+        for (const nextStepIds of [undefined, []] as Array<number[] | undefined>) {
+          const result = await cmosNextSteps({
+            nextStepAction: 'reopen',
+            nextStepIds,
+            projectRoot: testDb.tempDir,
+          });
+          expect(result.success).toBe(false);
+          expect(result.error?.code).toBe('MISSING_PARAMETER');
+          expect(result.error?.field).toBe('nextStepIds');
+        }
+      });
+
+      it('should neutrally name pending, carried, and absent IDs as unmatched', async () => {
+        await seedNextSteps(testDb.db);
+        testDb.db.exec(`
+          UPDATE next_steps
+          SET status = 'carried', resolved_at = '2026-03-14T10:00:00Z', carried_to_sprint = 'sprint-40'
+          WHERE id = 2;
+        `);
+
+        const result = await cmosNextSteps({
+          nextStepAction: 'reopen',
+          nextStepIds: [1, 2, 999999],
+          projectRoot: testDb.tempDir,
+        });
+
+        expect(result).toMatchObject({
+          success: true,
+          data: {
+            affected: 0,
+            writeFailures: [],
+            unmatchedIds: [1, 2, 999999],
+          },
+        });
+        const formatted = formatNextStepsForLLM(result);
+        expect(formatted).toContain('Not matched (not completed/dropped, or no such id)');
+        expect(formatted).toContain('#1, #2, #999999');
+        expect(formatted).not.toContain('Write failures');
+
+        const rows = testDb.db
+          .prepare(
+            'SELECT id, status, carried_to_sprint FROM next_steps WHERE id IN (1, 2) ORDER BY id'
+          )
+          .all();
+        expect(rows).toEqual([
+          { id: 1, status: 'pending', carried_to_sprint: null },
+          { id: 2, status: 'carried', carried_to_sprint: 'sprint-40' },
+        ]);
+      });
+
+      it('should disclose a rejected reopen only as a write failure', async () => {
+        await seedNextSteps(testDb.db);
+        testDb.db.exec(`
+          UPDATE next_steps
+          SET resolved_at = '2026-03-14T12:00:00Z', carried_to_sprint = 'sprint-40'
+          WHERE id = 4;
+          CREATE TRIGGER force_reopen_failure BEFORE UPDATE ON next_steps
+          WHEN OLD.id = 4
+          BEGIN SELECT RAISE(ABORT, 'forced reopen rejection'); END;
+        `);
+
+        const result = await cmosNextSteps({
+          nextStepAction: 'reopen',
+          nextStepIds: [4],
+          projectRoot: testDb.tempDir,
+        });
+
+        expect(result).toMatchObject({
+          success: true,
+          data: {
+            affected: 0,
+            unmatchedIds: [],
+            writeFailures: [
+              {
+                op: 'next_steps.reopen #4',
+                code: 'DB_QUERY_FAILED',
+              },
+            ],
+          },
+        });
+        expect(result.data?.writeFailures?.[0]?.message).toContain('forced reopen rejection');
+        const formatted = formatNextStepsForLLM(result);
+        expect(formatted).toContain('Write failures');
+        expect(formatted).toContain('next_steps.reopen #4');
+        expect(formatted).toContain('forced reopen rejection');
+        expect(formatted).not.toContain('Not matched');
+
+        const row = testDb.db
+          .prepare('SELECT status, resolved_at, carried_to_sprint FROM next_steps WHERE id = 4')
+          .get();
+        expect(row).toEqual({
+          status: 'completed',
+          resolved_at: '2026-03-14T12:00:00Z',
+          carried_to_sprint: 'sprint-40',
+        });
+      });
     });
 
     describe('invalid action', () => {
@@ -597,6 +805,7 @@ describe('next-step lifecycle (s40-m02)', () => {
 
         expect(result.success).toBe(false);
         expect(result.error?.code).toBe('INVALID_ACTION');
+        expect(result.error?.validValues).toContain('reopen');
       });
     });
   });

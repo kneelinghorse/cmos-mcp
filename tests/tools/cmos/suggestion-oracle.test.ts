@@ -12,12 +12,19 @@
  * from that state discloses its condition. It asserts NOTHING about whether the prose names the
  * right CAUSE.
  *
+ * T6 SCOPE SENTENCE. For every published non-`action` `type: "string"` field crossed with every
+ * valid action (or its action-less tool), the T6 scope arm calls `findWrongTypedStringParam` with a
+ * numeric wrong value and asserts that the guard's refusal set is a non-empty proper subset of the
+ * whole universe, exactly equals the action-applicability contract, and still covers every pinned
+ * historically-crashing triple. The driven T6 arms separately send number, object, array and
+ * boolean values through all 15 in-process routers and assert every applicable value is refused.
+ *
  * D-5's REFUSAL (#1024) STANDS AND IS REINFORCED, NOT OVERTURNED. D-5 refused a general
  * class-(b) semantic gate at any budget, on a figure ("75 of 176") whose predicate was never
  * recorded and is therefore not re-derivable. Under a STATED predicate re-run in this mission — a
  * suggestion carries no checkable identifier when it contains no `cmos_*(` call token, no bare
  * shipped tool name, no npm/npx/cmos-mcp command, no file path and no snake_case identifier — a
- * MAJORITY of the 181 authored suggestions carry NO checkable identifier at all (112 at the time
+ * MAJORITY of the 182 authored suggestions carry NO checkable identifier at all (112 at the time
  * of writing; the census arm re-derives and PRINTS the figure every run rather than pinning it,
  * because the predicate, not the number, is the thing D-5 was missing). That is a larger prose
  * share than D-5 measured, so its conclusion is if anything stronger. This oracle checks
@@ -37,14 +44,19 @@
  * FALSE-NEGATIVE PROFILE — for every noun in the scope sentence, the complement, with numbers
  * re-derived in this mission rather than carried:
  *
- *  1. THE 2 FORWARDING SITES. 183 `suggestion:` PropertyAssignments exist; 2 are exact
- *     property-access forwarding (`suggestion: x.suggestion`) and make no new claim. 181 authored.
+ *  1. THE 2 FORWARDING SITES. 184 `suggestion:` PropertyAssignments exist; 2 are exact
+ *     property-access forwarding (`suggestion: x.suggestion`) and make no new claim. 182 authored.
  *     Re-derived by this file's own census arm, never hard-coded.
- *  2. THE DECLARED COMPLEMENT — 103 of the 181 are outside this matrix's reach by construction:
- *     FAULT 78 needs a fault-injection instrument (read-only DB file, corrupt context JSON,
- *     dropped table); EXTERNAL 24 needs a dashboard double; UNTYPED 1 is
- *     `sprint-summary-read.ts:45`, which spreads `...error` and has ZERO callers. Those two
- *     instruments are the named successors and neither is built here.
+ *  2. THE DECLARED COMPLEMENT IS SPLIT, NOT HIDDEN. The 75 non-first-run FAULT sites still need a
+ *     fault-injection instrument (read-only DB file, corrupt context JSON, dropped table); the 3
+ *     first-run FAULT sites are the separately driven subset. EXTERNAL 24 now has its OWN portable
+ *     ledger below: a real loopback HTTP server plus synthetic credential/config state reaches 21,
+ *     while 3 are named construction-masked residuals. UNTYPED 1 remains at
+ *     `sprint-summary-read.ts:45`, whose helper has zero production callers and inherits an
+ *     arbitrary error code. `errors.ts:378` is consumer-resolved to SENDER_UNRESOLVABLE and its
+ *     explicit-projectRoot remedy is exercised over stdio. The EXTERNAL arm uses mirrored routers,
+ *     no operator credential and no MCP stdio wire; it therefore takes no credit for the first-run
+ *     wire matrix in `tests/e2e/wire-preflight.e2e.ts`.
  *  3. THE ANSWER-BODY CHANNEL IS DECLARED, NOT CLOSED. 87 `format*ForLLM` declarations in src/,
  *     of which 10 author 13 `cmos_*(` tokens into the BODY of a SUCCESSFUL answer (project-list 2,
  *     project-validate 2, session-start 2, context-history 1, context-search 1, db-backfill purge
@@ -62,13 +74,20 @@
  *     reachability note saying how a supported sequence could produce it.
  *  7. IN-PROCESS ROUTERS, NOT `dist/` OVER STDIO. This gate drives the mirrored routers in
  *     process. The ARTIFACT-level assertion for the same class lives in `scripts/verify-dist.ts`.
+ *  8. T6'S SCOPE ARM TESTS THE ROUTER GUARD, NOT THE WIRE PREFLIGHT. It establishes no pre-guard
+ *     outcome baseline, so "not refused" does not mean success or byte-identical output. Both its
+ *     expected set and the guard's applicable list consume `CMOS_ACTION_PARAMS`; the independent
+ *     table-to-router contract belongs to `action-params.test.ts`. The whole T6 describe is skipped
+ *     in a structural public mirror, and `verify-dist.ts`'s three wrong-type probes are all in-scope,
+ *     so neither surface detects an over-broad guard. A red scope arm can therefore mean either a
+ *     widened guard or an under-declared applicability table. None of this establishes the correct
+ *     `src/index.ts` pre-dispatch scope: the wire consumes `projectRoot` independently of routers.
  *
  * THE MIRROR IS NOT A BUILD. Provenance comes from an AST source transform into a gitignored
  * CommonJS mirror under `node_modules/.cache/` — ZERO `src/` edits — and it proves itself faithful
  * run. See `tests/helpers/suggestion-mirror.ts` for why a structured `remedy` field was rejected.
  */
 
-import { execFileSync } from 'child_process';
 import { createHash } from 'crypto';
 import Database from 'better-sqlite3';
 import * as fs from 'fs';
@@ -76,6 +95,9 @@ import * as os from 'os';
 import * as path from 'path';
 import * as ts from 'typescript';
 
+import { CmosDetector } from '../../../src/intelligence/cmos-detector';
+import { CredentialStore } from '../../../src/intelligence/credential-store';
+import { ProjectGraphRegistry } from '../../../src/intelligence/project-graph-registry';
 import { CMOS_TOOL_DEFINITIONS } from '../../../src/tools/cmos';
 import { CMOS_ACTION_PARAMS } from '../../../src/tools/cmos/action-params';
 import { findWrongTypedStringParam } from '../../../src/tools/cmos/param-type-guard';
@@ -103,7 +125,13 @@ import {
   type SuggestionSink,
 } from '../../helpers/suggestion-mirror';
 import { readMirrorExclusions, requiresPrivateEvidence } from '../../helpers/public-mirror';
-import { reidentifyCmosTestStore } from '../../helpers/seedCmosDb';
+import { seedCmosDb, reidentifyCmosTestStore } from '../../helpers/seedCmosDb';
+import {
+  seedTempCredentials,
+  startDashboardDouble,
+  type DashboardDouble,
+  type DashboardScenario,
+} from '../../helpers/suggestion-axes-external';
 
 jest.setTimeout(900_000);
 
@@ -127,15 +155,18 @@ const PRIVATE = requiresPrivateEvidence({
 // ───────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * `authored === RATIFIED_AUTHORED_BASE + SITES_THIS_MISSION_ADDS`.
+ * `authored === RATIFIED_AUTHORED_BASE + sum(SITES_BY_MISSION)`.
  *
  * The base is Arc F item 1's ratified denominator (decision #1080, re-derived by this mission).
- * s89-m08 adds ZERO authored sites: its one new source module, `src/tools/cmos/param-type-guard.ts`,
- * returns `CmosErrors.invalidParameter`, which owns the only suggestion string involved. If a
- * future mission adds one, it enumerates it here rather than moving the base.
+ * s90-m05 adds exactly the carry-target refusal below. The ratified base remains fixed; each later
+ * mission enumerates its authored sites here rather than moving that base.
  */
 const RATIFIED_AUTHORED_BASE = 181;
-const SITES_THIS_MISSION_ADDS: readonly string[] = [];
+const SITES_BY_MISSION = {
+  's90-m05': ['src/tools/cmos/cmos-next-steps.ts:315'],
+  's90-m07': [],
+} as const satisfies Readonly<Record<string, readonly string[]>>;
+const RATIFIED_SITE_ADDS = Object.values(SITES_BY_MISSION).flat();
 
 const VALIDATION_CODES = new Set([
   'INVALID_PARAMETER',
@@ -173,15 +204,17 @@ const EXTERNAL_PREFIXES = ['DASHBOARD_', 'DEVICE_CODE_', 'CREDENTIAL_'];
  * forwards `updateResult.suggestion` verbatim. The census arm PROVES that single-consumer premise
  * rather than trusting this comment.
  *
- * `sprint-summary-read.ts:45` is deliberately absent: `withViewContext` spreads `...error`, so its
- * code is whatever it is handed, and it has ZERO callers. It stays UNTYPED, which is why UNTYPED
- * is 1 here and not 0.
+ * `errors.ts:378` is produced by `senderUnresolvable`. Its only production error source is
+ * `SenderResolutionError`, whose sole production construction uses the SENDER_UNRESOLVABLE
+ * default; the proof below makes that premise executable. `sprint-summary-read.ts:45` remains
+ * absent: `withViewContext` spreads `...error`, so its code is arbitrary, and it has ZERO callers.
  */
 const CONSUMER_RESOLVED_CODES: Readonly<Record<string, string>> = {
   'src/tools/cmos/cmos-context-update.ts:775': 'INVALID_PARAMETER',
   'src/tools/cmos/cmos-context-update.ts:785': 'INVALID_PARAMETER',
   'src/tools/cmos/cmos-context-update.ts:794': 'INVALID_PARAMETER',
   'src/tools/cmos/cmos-context-update.ts:813': 'INVALID_PARAMETER',
+  'src/tools/cmos/errors.ts:378': 'SENDER_UNRESOLVABLE',
 };
 
 type TriggerClass = 'VALIDATION' | 'STATE' | 'FAULT' | 'EXTERNAL' | 'UNTYPED';
@@ -664,6 +697,16 @@ const MATRIX: MatrixCase[] = [
           sprintId: 'sprint-89089',
           targetAddress: 'cmos://derek/nowhere',
           send: false,
+          projectRoot: ctx.projectRoot,
+        },
+      },
+      {
+        tool: 'cmos_context',
+        params: {
+          action: 'next_steps',
+          nextStepAction: 'carry',
+          nextStepIds: [999999],
+          carryToSprint: 'sprint-89089',
           projectRoot: ctx.projectRoot,
         },
       },
@@ -1263,7 +1306,7 @@ const MATRIX: MatrixCase[] = [
           db.prepare(`DELETE FROM contexts WHERE id = ?`).run(contextId);
           const still = db.prepare(`SELECT 1 FROM contexts WHERE id = ?`).get(contextId);
           if (still) throw new Error(`contexts row '${contextId}' survived deletion`);
-          // The sprint must be CLOSABLE, or `cmos-sprint-complete.ts:548` (SPRINT_NOT_READY) fires
+          // The sprint must be CLOSABLE, or cmos-sprint-complete's SPRINT_NOT_READY guard fires
           // first and masks :568/:579, the two contexts-row refusals this axis exists to reach.
           db.prepare(`UPDATE sprints SET status = 'Active' WHERE id = ?`).run(ctx.sprintId);
           db.prepare(
@@ -1366,7 +1409,7 @@ function runCensus(): CensusSite[] {
   return rows;
 }
 
-/** Every `suggestion:` PropertyAssignment, including the forwarding ones — the 183 denominator. */
+/** Every `suggestion:` PropertyAssignment, including the forwarding ones — the 184 denominator. */
 function countAllSuggestionSites(): { sites: number; forwarding: number; files: number } {
   let sites = 0;
   let forwarding = 0;
@@ -1403,9 +1446,61 @@ const DRIVEABLE = CENSUS.filter(
 );
 const DRIVEABLE_SITES = new Set(DRIVEABLE.map((r) => r.site));
 const CALL_BEARING_DRIVEABLE = DRIVEABLE.filter((r) => r.callBearing);
+const EXTERNAL = CENSUS.filter((row) => row.triggerClass === 'EXTERNAL');
+const EXTERNAL_SITES = new Set(EXTERNAL.map((row) => row.site));
+const FIRST_RUN_CODES = new Set(['CMOS_NOT_DETECTED', 'DB_NOT_FOUND']);
+const FIRST_RUN = CENSUS.filter((row) => row.code !== null && FIRST_RUN_CODES.has(row.code));
+const FIRST_RUN_SITES = new Set(FIRST_RUN.map((row) => row.site));
+
+/**
+ * The 3 members the sanctioned dashboard/credential instrument still cannot construct.
+ * Both ledger directions are checked below: an absent reason is unaccounted work; a reason for a
+ * fired/non-universe site is stale bookkeeping.
+ */
+const EXTERNAL_RESIDUAL_REASONS: Readonly<Record<string, string>> = {
+  'src/tools/cmos/client.ts:748':
+    '`validateProjectId()` has zero production callers; only direct unit tests invoke the method.',
+  'src/tools/cmos/client.ts:756':
+    'The second PROJECT_ID_MISMATCH arm is in the same production-unreachable `validateProjectId()` method.',
+  'src/tools/cmos/sync-mutable-push.ts:166':
+    '`maybePropagateMutableStatus` returns before `pushMutableStatus` unless `isCollabStore` is true; ' +
+    'the NOT_COLLAB_STORE defensive branch is construction-masked by its only production caller.',
+};
+
+const HTTP_EXTERNAL_SITES = new Set([
+  'src/tools/cmos/cmos-auth.ts:610',
+  'src/tools/cmos/cmos-auth.ts:1183',
+  'src/tools/cmos/cmos-auth.ts:1192',
+  'src/tools/cmos/cmos-auth.ts:1200',
+  'src/tools/cmos/cmos-message.ts:1027',
+  'src/tools/cmos/errors.ts:422',
+  'src/tools/cmos/errors.ts:438',
+  'src/tools/cmos/errors.ts:457',
+  'src/tools/cmos/errors.ts:469',
+  'src/tools/cmos/errors.ts:477',
+  'src/tools/cmos/errors.ts:497',
+]);
+const SYNTHETIC_EXTERNAL_SITES = new Set([
+  'src/tools/cmos/cmos-auth.ts:572',
+  'src/tools/cmos/cmos-auth.ts:581',
+  'src/tools/cmos/cmos-auth.ts:667',
+  'src/tools/cmos/cmos-auth.ts:807',
+  'src/tools/cmos/cmos-auth.ts:942',
+  'src/tools/cmos/cmos-auth.ts:949',
+  'src/tools/cmos/cmos-auth.ts:1124',
+  'src/tools/cmos/cmos-auth.ts:1133',
+  'src/tools/cmos/dashboard-client.ts:270',
+  'src/tools/cmos/errors.ts:487',
+]);
+
+/** Shared with the private T7 ledger; the replay fence remains private and unchanged. */
+const externalFiredSites = new Set<string>();
+const externalScratchRoots = new Set<string>();
+const externalCredentialPaths = new Set<string>();
+const externalCredentialResolutions = new Map<string, string>();
 
 describe('s89-m08 CENSUS — the universe re-derives at build time, never from a remembered number', () => {
-  it('re-derives 183 sites / 2 forwarding / authored === the ratified base plus what this mission adds', () => {
+  it('re-derives the sites / forwarding split and the ratified authored-base delta', () => {
     const { sites, forwarding, files } = countAllSuggestionSites();
     const authored = sites - forwarding;
     // eslint-disable-next-line no-console
@@ -1415,7 +1510,8 @@ describe('s89-m08 CENSUS — the universe re-derives at build time, never from a
     );
     expect(CENSUS).toHaveLength(authored);
     // fold 4 — the RULE, not the number. A mission that adds an authored site enumerates it.
-    expect(authored).toBe(RATIFIED_AUTHORED_BASE + SITES_THIS_MISSION_ADDS.length);
+    expect(authored).toBe(RATIFIED_AUTHORED_BASE + RATIFIED_SITE_ADDS.length);
+    expect(SITES_BY_MISSION['s90-m07']).toEqual([]);
   });
 
   it('publishes the trigger-class partition, total and disjoint', () => {
@@ -1438,7 +1534,7 @@ describe('s89-m08 CENSUS — the universe re-derives at build time, never from a
     expect(counts.VALIDATION + counts.STATE).toBe(DRIVEABLE.length);
   });
 
-  it('PROVES the single-consumer premise the consumer-resolved bucket rests on', () => {
+  it('PROVES every consumer-resolved premise instead of trusting its override', () => {
     // The four `cmos-context-update.ts` sites are bucketed by the code their ONE consumer stamps.
     // If a second consumer ever appears, that premise silently becomes false — so assert it.
     const content = fs.readFileSync(
@@ -1460,6 +1556,31 @@ describe('s89-m08 CENSUS — the universe re-derives at build time, never from a
     for (const site of Object.keys(CONSUMER_RESOLVED_CODES)) {
       expect(CENSUS.some((r) => r.site === site)).toBe(true);
     }
+
+    const senderSourcePath = path.join(SRC_ROOT, 'intelligence', 'sender-context.ts');
+    const senderSource = ts.createSourceFile(
+      senderSourcePath,
+      fs.readFileSync(senderSourcePath, 'utf8'),
+      ts.ScriptTarget.ES2020,
+      true
+    );
+    const constructions: ts.NewExpression[] = [];
+    const visit = (node: ts.Node): void => {
+      if (
+        ts.isNewExpression(node) &&
+        ts.isIdentifier(node.expression) &&
+        node.expression.text === 'SenderResolutionError'
+      ) {
+        constructions.push(node);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(senderSource);
+    expect(constructions).toHaveLength(1);
+    expect(constructions[0]?.arguments).toHaveLength(2);
+    expect(fs.readFileSync(path.join(SRC_ROOT, 'tools', 'cmos', 'errors.ts'), 'utf8')).toContain(
+      'code: string = CMOS_ERROR_CODES.SENDER_UNRESOLVABLE'
+    );
   });
 
   it('re-adjudicates D-5 by measuring the prose share under a STATED predicate', () => {
@@ -1533,6 +1654,1279 @@ describe('s89-m08 T5 — every authored suggestion naming a shipped tool yields 
     for (const syntax of ['paren', 'with-action', 'bare-action'] as const) {
       expect(bySyntax.get(syntax)?.length ?? 0).toBeGreaterThan(0);
     }
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+// s90-m07 — THE PORTABLE EXTERNAL + FIRST-RUN INSTRUMENT
+// ──────────────────────────────────────────────────────────────────────────────────────────────
+
+const EXTERNAL_ENV_KEYS = [
+  'CMOS_CONFIG_DIR',
+  'CMOS_DASHBOARD_URL',
+  'CMOS_DASHBOARD_API_KEY',
+  'CMOS_DASHBOARD_USER',
+  'CMOS_DASHBOARD_PASSWORD',
+] as const;
+
+type ExternalEnvKey = (typeof EXTERNAL_ENV_KEYS)[number];
+type CredentialShape = 'none' | 'user' | 'project' | 'two-user';
+
+interface ExternalSeedOptions {
+  seedProject?: boolean;
+  registered?: boolean;
+  credentials?: CredentialShape;
+  legacyApiKey?: boolean;
+  removeSlug?: boolean;
+  projectName?: string;
+  projectId?: string;
+  slug?: string;
+  cmosAddress?: string;
+  dashboardUrl?: 'loopback' | 'unset';
+}
+
+interface ExternalCaseState {
+  caseRoot: string;
+  configDir: string;
+  projectRoot: string;
+  credentialsPath: string;
+  dbPath?: string;
+}
+
+interface PortableEvidence extends DrivenCall {
+  family: 'external-http' | 'external-synthetic' | 'driveable' | 'first-run';
+  expectedCode: string;
+  expectsHttp: boolean;
+  fired: string[];
+  requests: Array<{
+    method: string;
+    url: string;
+    authorization: string;
+    matchedScenario: boolean;
+  }>;
+}
+
+interface PortableReplay {
+  site: string;
+  caseName: string;
+  triggerCode: string | undefined;
+  suggestion: string;
+  tool: string;
+  action: string | undefined;
+  outcome: Outcome;
+  code?: string;
+  thrown?: string;
+  durationMs: number;
+  resolverOutputs: string[];
+  requests: PortableEvidence['requests'];
+}
+
+const portableEvidence: PortableEvidence[] = [];
+const portableReplays: PortableReplay[] = [];
+const blockedOutboundUrls: string[] = [];
+const blockedTriggerOutboundUrls: string[] = [];
+let externalFencePositiveControls = 0;
+let externalTriggerFencePositiveControl = false;
+const externalCredentialModes = new Map<string, number>();
+let externalDouble!: DashboardDouble;
+let savedExternalFetch: typeof fetch | undefined;
+let externalCaseSeq = 0;
+let externalReplaySnapshotSeq = 0;
+let savedExternalEnv!: Record<ExternalEnvKey, string | undefined>;
+let unknownRouteProbe!: { status: number; body: string };
+
+interface IsolatedDashboardBoundary {
+  double: DashboardDouble;
+  configDir: string;
+  blockedUrls: string[];
+  positiveControlBlocked: boolean;
+  sourceCredentialPath: string;
+  mirrorCredentialPath?: string;
+  close(): Promise<void>;
+}
+
+async function installIsolatedDashboardBoundary(label: string): Promise<IsolatedDashboardBoundary> {
+  const savedEnv = Object.fromEntries(
+    EXTERNAL_ENV_KEYS.map((key) => [key, process.env[key]])
+  ) as Record<ExternalEnvKey, string | undefined>;
+  const savedFetch = globalThis.fetch;
+  const blockedUrls: string[] = [];
+  const configDir = mkTmp(`cmos-${label}-config-`);
+  const double = await startDashboardDouble({
+    kind: 'device-code-error',
+    expectedAuthorization: '',
+    status: 503,
+    body: { type: 'text', value: `${label} loopback boundary` },
+  });
+  let closed = false;
+  const close = async (): Promise<void> => {
+    if (closed) return;
+    closed = true;
+    globalThis.fetch = savedFetch;
+    CredentialStore.resetInstance();
+    ProjectGraphRegistry.resetInstance();
+    CmosDetector.resetInstance();
+    if (mirror?.root) resetMirroredExternalState();
+    for (const key of EXTERNAL_ENV_KEYS) {
+      const value = savedEnv[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    await double.close();
+  };
+
+  try {
+    externalScratchRoots.add(fs.realpathSync(configDir));
+    externalScratchRoots.add(double.scratchRoot);
+    for (const key of EXTERNAL_ENV_KEYS) delete process.env[key];
+    process.env.CMOS_CONFIG_DIR = configDir;
+    process.env.CMOS_DASHBOARD_URL = double.origin;
+    CredentialStore.resetInstance();
+    ProjectGraphRegistry.resetInstance();
+    CmosDetector.resetInstance();
+    if (mirror?.root) resetMirroredExternalState();
+    globalThis.fetch = (async (...args: Parameters<typeof fetch>) => {
+      const input = args[0];
+      const raw = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (new URL(raw).origin !== double.origin) {
+        blockedUrls.push(raw);
+        throw new Error(`non-loopback fetch blocked by ${label}: ${raw}`);
+      }
+      return savedFetch(...args);
+    }) as typeof fetch;
+
+    const probeUrl = 'http://127.0.0.1:1/s90-m08-positive-control';
+    let positiveControlBlocked = false;
+    try {
+      await globalThis.fetch(probeUrl);
+    } catch (error) {
+      positiveControlBlocked =
+        error instanceof Error && error.message.includes(`non-loopback fetch blocked by ${label}`);
+    }
+    if (!positiveControlBlocked || blockedUrls.pop() !== probeUrl) {
+      throw new Error(`${label} boundary did not block and record its positive-control URL`);
+    }
+    const sourceCredentialPath = CredentialStore.getInstance().path;
+    const mirrorCredentialPath = mirror?.root ? mirroredCredentialStorePath() : undefined;
+    return {
+      double,
+      configDir,
+      blockedUrls,
+      positiveControlBlocked,
+      sourceCredentialPath,
+      mirrorCredentialPath,
+      close,
+    };
+  } catch (error) {
+    await close();
+    throw error;
+  }
+}
+
+function resetMirroredExternalState(): void {
+  /* eslint-disable @typescript-eslint/no-var-requires */
+  const { CredentialStore } = require(`${mirror.root}/intelligence/credential-store.js`) as {
+    CredentialStore: { resetInstance(): void };
+  };
+  const { ProjectGraphRegistry } = require(
+    `${mirror.root}/intelligence/project-graph-registry.js`
+  ) as { ProjectGraphRegistry: { resetInstance(): void } };
+  const { CmosDetector } = require(`${mirror.root}/intelligence/cmos-detector.js`) as {
+    CmosDetector: { resetInstance(): void };
+  };
+  const { resetDeliveryAckCache } = require(`${mirror.root}/auth/delivery-ack-cache.js`) as {
+    resetDeliveryAckCache(): void;
+  };
+  const { __resetDirectoryCacheForTesting } = require(
+    `${mirror.root}/tools/cmos/cmos-message.js`
+  ) as { __resetDirectoryCacheForTesting(): void };
+  /* eslint-enable @typescript-eslint/no-var-requires */
+  CredentialStore.resetInstance();
+  ProjectGraphRegistry.resetInstance();
+  CmosDetector.resetInstance();
+  resetDeliveryAckCache();
+  __resetDirectoryCacheForTesting();
+}
+
+function mirroredCredentialStorePath(): string {
+  /* eslint-disable @typescript-eslint/no-var-requires */
+  const { CredentialStore } = require(`${mirror.root}/intelligence/credential-store.js`) as {
+    CredentialStore: { getInstance(): { readonly path: string } };
+  };
+  /* eslint-enable @typescript-eslint/no-var-requires */
+  return CredentialStore.getInstance().path;
+}
+
+function restoreExternalEnvironment(): void {
+  if (!savedExternalEnv) return;
+  for (const key of EXTERNAL_ENV_KEYS) {
+    const value = savedExternalEnv[key];
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+}
+
+function markRegistered(dbPath: string): void {
+  withDb(dbPath, (db) => {
+    db.prepare(`INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)`).run(
+      'dashboard_registered',
+      'true'
+    );
+  });
+}
+
+function seedPortableState(label: string, options: ExternalSeedOptions = {}): ExternalCaseState {
+  const safeLabel = label.replace(/[^a-z0-9]+/gi, '-').toLowerCase();
+  const caseRoot = path.join(
+    externalDouble.scratchRoot,
+    `${String(externalCaseSeq++).padStart(2, '0')}-${safeLabel}`
+  );
+  const configDir = path.join(caseRoot, 'config');
+  const projectRoot = path.join(caseRoot, 'project');
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.mkdirSync(projectRoot, { recursive: true });
+  externalScratchRoots.add(caseRoot);
+  externalScratchRoots.add(configDir);
+  externalScratchRoots.add(projectRoot);
+
+  for (const key of EXTERNAL_ENV_KEYS) delete process.env[key];
+  process.env.CMOS_CONFIG_DIR = configDir;
+  if (options.dashboardUrl !== 'unset') process.env.CMOS_DASHBOARD_URL = externalDouble.origin;
+  if (options.legacyApiKey) process.env.CMOS_DASHBOARD_API_KEY = 'cmk_legacy_fixture';
+
+  let dbPath: string | undefined;
+  if (options.seedProject !== false) {
+    dbPath = seedCmosDb(projectRoot, {
+      projectName: options.projectName ?? 'External Fixture',
+      projectId: options.projectId ?? 'external-fixture',
+      slug: options.slug ?? 'external-fixture',
+      dashboardProjectId: options.registered ? '11111111-1111-4111-8111-111111111111' : undefined,
+      cmosAddress: options.cmosAddress ?? 'cmos://local/external-fixture',
+    });
+    if (options.registered) markRegistered(dbPath);
+    if (options.removeSlug) {
+      withDb(dbPath, (db) => {
+        db.prepare(`DELETE FROM metadata WHERE key = 'dashboard_slug'`).run();
+      });
+    }
+  }
+
+  const shape = options.credentials ?? 'none';
+  const userKeys =
+    shape === 'two-user'
+      ? [
+          { keyId: 'user-key-1', key: 'cmk_user_fixture_1' },
+          { keyId: 'user-key-2', key: 'cmk_user_fixture_2' },
+        ]
+      : shape === 'user' || shape === 'project'
+        ? [{ keyId: 'user-key-1', key: 'cmk_user_fixture_1' }]
+        : [];
+  const credentialsPath = seedTempCredentials({
+    configDir,
+    projectRoot,
+    userKeys,
+    ...(shape === 'project'
+      ? {
+          projectKey: {
+            key: 'cmk_project_fixture',
+            keyId: 'project-key-1',
+            parentKeyId: 'user-key-1',
+          },
+        }
+      : {}),
+  });
+  externalCredentialPaths.add(credentialsPath);
+  externalCredentialModes.set(credentialsPath, fs.statSync(credentialsPath).mode & 0o777);
+  resetMirroredExternalState();
+  return {
+    caseRoot,
+    configDir,
+    projectRoot,
+    credentialsPath,
+    ...(dbPath ? { dbPath } : {}),
+  };
+}
+
+function externalReplayParams(
+  prescription: PrescribedCall,
+  state: ExternalCaseState
+): Record<string, unknown> {
+  const params: Record<string, unknown> = { projectRoot: state.projectRoot };
+  if (prescription.action !== undefined) params.action = prescription.action;
+  if (prescription.action === 'login_complete') {
+    params.deviceCode = 'replay-device';
+    params.pollIntervalSeconds = 0;
+    params.maxWaitSeconds = 1;
+  }
+  if (prescription.action === 'revoke') params.keyId = 'project-key-1';
+  return params;
+}
+
+function externalReplayScenario(prescription: PrescribedCall): DashboardScenario {
+  if (['login', 'login_init', 'login_complete'].includes(prescription.action ?? '')) {
+    return { kind: 'device-terminal', expectedAuthorization: '', outcome: 'approved' };
+  }
+  if (prescription.action === 'list') {
+    return {
+      kind: 'http',
+      expected: { method: 'GET', path: '/api/keys', authorization: 'Bearer cmk_project_fixture' },
+      status: 200,
+      body: { type: 'json', value: { keys: [] } },
+    };
+  }
+  if (prescription.action === 'reissue') {
+    return {
+      kind: 'http',
+      expected: {
+        method: 'POST',
+        path: '/api/projects/11111111-1111-4111-8111-111111111111/keys/reissue',
+        authorization: 'Bearer cmk_user_fixture_1',
+      },
+      status: 200,
+      body: {
+        type: 'json',
+        value: {
+          key: 'cmk_reissued_fixture',
+          keyId: 'reissued-project-key',
+          label: 'suggestion replay',
+          revokedKeyIds: [],
+        },
+      },
+    };
+  }
+  if (prescription.action === 'revoke') {
+    return {
+      kind: 'http',
+      expected: {
+        method: 'POST',
+        path: '/api/keys/project-key-1/revoke',
+        authorization: 'Bearer cmk_project_fixture',
+      },
+      status: 200,
+      body: {
+        type: 'json',
+        value: { keyId: 'project-key-1', revokedAt: '2026-09-01T00:00:00.000Z' },
+      },
+    };
+  }
+  return {
+    kind: 'http',
+    expected: { method: 'GET', path: '/__unexpected-remedy__', authorization: '' },
+    status: 599,
+    body: { type: 'text', value: 'unexpected external remedy route' },
+  };
+}
+
+async function replayPortableExternalRemedies(
+  state: ExternalCaseState,
+  trigger: DrivenCall
+): Promise<void> {
+  if (trigger.outcome !== 'REFUSES' || !trigger.suggestion) return;
+  const externalCallBearingSites = trigger.sites.filter((site) =>
+    EXTERNAL.some((row) => row.site === site && row.callBearing)
+  );
+  if (externalCallBearingSites.length === 0) return;
+
+  /* eslint-disable @typescript-eslint/no-var-requires */
+  const dashboardModule = require(`${mirror.root}/tools/cmos/dashboard-client.js`) as {
+    DEFAULT_DASHBOARD_URL: string;
+    resolveDashboardBaseUrl(override?: string): string;
+  };
+  /* eslint-enable @typescript-eslint/no-var-requires */
+  const savedDefault = dashboardModule.DEFAULT_DASHBOARD_URL;
+  const savedResolver = dashboardModule.resolveDashboardBaseUrl;
+  const savedDashboardUrl = process.env.CMOS_DASHBOARD_URL;
+  const savedFetch = globalThis.fetch;
+  const resolverOutputs: string[] = [];
+  const snapshotRoot = path.join(
+    externalDouble.scratchRoot,
+    `replay-baseline-${String(externalReplaySnapshotSeq++).padStart(2, '0')}`
+  );
+
+  try {
+    resetMirroredExternalState();
+    fs.cpSync(state.caseRoot, snapshotRoot, { recursive: true });
+
+    delete process.env.CMOS_DASHBOARD_URL;
+    dashboardModule.DEFAULT_DASHBOARD_URL = externalDouble.origin;
+    if (savedResolver() !== externalDouble.origin) {
+      throw new Error(
+        'mirrored canonical dashboard default did not resolve to the loopback double'
+      );
+    }
+    dashboardModule.resolveDashboardBaseUrl = (override?: string): string => {
+      const resolved = savedResolver(override);
+      resolverOutputs.push(resolved);
+      return resolved;
+    };
+    globalThis.fetch = (async (...args: Parameters<typeof fetch>) => {
+      const input = args[0];
+      const raw = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (new URL(raw).origin !== externalDouble.origin) {
+        blockedOutboundUrls.push(raw);
+        throw new Error(`non-loopback fetch blocked by suggestion replay: ${raw}`);
+      }
+      return savedFetch(...args);
+    }) as typeof fetch;
+
+    const probeUrl = 'http://127.0.0.1:1/s90-m08-replay-positive-control';
+    let positiveControlBlocked = false;
+    try {
+      await globalThis.fetch(probeUrl);
+    } catch (error) {
+      positiveControlBlocked =
+        error instanceof Error &&
+        error.message.includes('non-loopback fetch blocked by suggestion replay');
+    }
+    if (!positiveControlBlocked || blockedOutboundUrls.pop() !== probeUrl) {
+      throw new Error('external replay fence did not block and record its positive-control URL');
+    }
+    externalFencePositiveControls += 1;
+
+    const seen = new Set<string>();
+    for (const site of externalCallBearingSites) {
+      for (const prescription of extractPrescribedCalls(trigger.suggestion)) {
+        const key = `${site}|${prescription.tool}|${prescription.action ?? ''}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        resetMirroredExternalState();
+        fs.rmSync(state.caseRoot, { recursive: true, force: true });
+        fs.cpSync(snapshotRoot, state.caseRoot, { recursive: true });
+        resetMirroredExternalState();
+        if (mirroredCredentialStorePath() !== state.credentialsPath) {
+          throw new Error('external replay escaped its isolated credential store');
+        }
+        externalDouble.setScenario(externalReplayScenario(prescription));
+        externalDouble.clearRequests();
+        sink.reset();
+        const resolverStart = resolverOutputs.length;
+        const started = Date.now();
+        const executed = await driveMirrored(
+          `${trigger.caseName} remedy`,
+          'external-replay',
+          prescription.tool,
+          externalReplayParams(prescription, state)
+        );
+        portableReplays.push({
+          site,
+          caseName: trigger.caseName,
+          triggerCode: trigger.code,
+          suggestion: trigger.suggestion,
+          tool: prescription.tool,
+          action: prescription.action,
+          outcome: executed.outcome,
+          code: executed.code,
+          thrown: executed.thrown,
+          durationMs: Date.now() - started,
+          resolverOutputs: resolverOutputs.slice(resolverStart),
+          requests: [...externalDouble.requests],
+        });
+      }
+    }
+  } finally {
+    globalThis.fetch = savedFetch;
+    dashboardModule.resolveDashboardBaseUrl = savedResolver;
+    dashboardModule.DEFAULT_DASHBOARD_URL = savedDefault;
+    if (savedDashboardUrl === undefined) delete process.env.CMOS_DASHBOARD_URL;
+    else process.env.CMOS_DASHBOARD_URL = savedDashboardUrl;
+    fs.rmSync(snapshotRoot, { recursive: true, force: true });
+  }
+}
+
+async function runPortableCase(options: {
+  name: string;
+  family: PortableEvidence['family'];
+  expectedCode: string;
+  expectsHttp: boolean;
+  scenario: DashboardScenario;
+  seed?: ExternalSeedOptions;
+  tool: string;
+  params: (state: ExternalCaseState) => Record<string, unknown>;
+  setup?: (state: ExternalCaseState) => void;
+}): Promise<void> {
+  const state = seedPortableState(options.name, options.seed);
+  options.setup?.(state);
+  // A setup may create another mirrored-detector-visible project.
+  resetMirroredExternalState();
+  const resolvedCredentialsPath = mirroredCredentialStorePath();
+  externalCredentialResolutions.set(state.credentialsPath, resolvedCredentialsPath);
+  if (resolvedCredentialsPath !== state.credentialsPath) {
+    throw new Error(
+      `mirrored CredentialStore resolved ${resolvedCredentialsPath}; expected isolated ${state.credentialsPath}`
+    );
+  }
+  externalDouble.setScenario(options.scenario);
+  externalDouble.clearRequests();
+  sink.reset();
+  const call = await driveMirrored(
+    options.name,
+    options.family,
+    options.tool,
+    options.params(state)
+  );
+  const fired = [...sink.fired].sort();
+  for (const site of fired) externalFiredSites.add(site);
+  portableEvidence.push({
+    ...call,
+    family: options.family,
+    expectedCode: options.expectedCode,
+    expectsHttp: options.expectsHttp,
+    fired,
+    requests: [...externalDouble.requests],
+  });
+  await replayPortableExternalRemedies(state, call);
+}
+
+interface DirectDashboardUrlRead {
+  site: string;
+  canonical: boolean;
+  syntax: 'dot' | 'element' | 'destructure';
+}
+
+function directDashboardUrlReadsInSource(
+  relative: string,
+  source: ts.SourceFile
+): DirectDashboardUrlRead[] {
+  const reads: DirectDashboardUrlRead[] = [];
+  const isProcessEnv = (node: ts.Node): boolean =>
+    ts.isPropertyAccessExpression(node) &&
+    ts.isIdentifier(node.expression) &&
+    node.expression.text === 'process' &&
+    node.name.text === 'env';
+  const recordsUrlName = (node: ts.Node | undefined): boolean => {
+    if (!node) return false;
+    if (ts.isComputedPropertyName(node)) return recordsUrlName(node.expression);
+    if (ts.isStringLiteralLike(node)) return node.text === 'CMOS_DASHBOARD_URL';
+    return (
+      ts.isIdentifier(node) &&
+      (node.text === 'CMOS_DASHBOARD_URL' || node.text === 'CMOS_DASHBOARD_URL_ENV')
+    );
+  };
+
+  const add = (node: ts.Node, syntax: DirectDashboardUrlRead['syntax']): void => {
+    const line = source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1;
+    let owner: ts.Node | undefined = node.parent;
+    while (owner && !ts.isFunctionDeclaration(owner)) owner = owner.parent;
+    reads.push({
+      site: `${relative}:${line}`,
+      canonical:
+        relative === 'src/tools/cmos/dashboard-client.ts' &&
+        !!owner &&
+        ts.isFunctionDeclaration(owner) &&
+        owner.name?.text === 'resolveDashboardBaseUrl',
+      syntax,
+    });
+  };
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isPropertyAccessExpression(node) &&
+      isProcessEnv(node.expression) &&
+      node.name.text === 'CMOS_DASHBOARD_URL'
+    ) {
+      add(node, 'dot');
+    } else if (
+      ts.isElementAccessExpression(node) &&
+      isProcessEnv(node.expression) &&
+      recordsUrlName(node.argumentExpression)
+    ) {
+      add(node, 'element');
+    } else if (
+      ts.isVariableDeclaration(node) &&
+      ts.isObjectBindingPattern(node.name) &&
+      node.initializer &&
+      isProcessEnv(node.initializer)
+    ) {
+      for (const element of node.name.elements) {
+        if (recordsUrlName(element.propertyName ?? element.name)) add(element, 'destructure');
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return reads;
+}
+
+/** Spelling-independent over dot, element/constant-element and object-destructuring env reads. */
+function directDashboardUrlReads(): DirectDashboardUrlRead[] {
+  const reads: DirectDashboardUrlRead[] = [];
+  for (const absolute of walkTsFiles(SRC_ROOT)) {
+    const content = fs.readFileSync(absolute, 'utf8');
+    if (!content.includes('CMOS_DASHBOARD_URL')) continue;
+    const relative = path.relative(REPO_ROOT, absolute).split(path.sep).join('/');
+    const source = ts.createSourceFile(absolute, content, ts.ScriptTarget.ES2020, true);
+    reads.push(...directDashboardUrlReadsInSource(relative, source));
+  }
+  return reads.sort((a, b) => a.site.localeCompare(b.site));
+}
+
+describe('s90-m07 PORTABLE EXTERNAL + FIRST-RUN LEDGER — loopback, never live credentials', () => {
+  const NO_AUTH = '';
+  const PROJECT_AUTH = 'Bearer cmk_project_fixture';
+  const USER_AUTH = 'Bearer cmk_user_fixture_1';
+  const noHttpScenario: DashboardScenario = {
+    kind: 'http',
+    expected: { method: 'GET', path: '/__unexpected-no-http__', authorization: NO_AUTH },
+    status: 599,
+    body: { type: 'text', value: 'an alleged no-HTTP case reached the dashboard double' },
+  };
+
+  beforeAll(async () => {
+    savedExternalEnv = Object.fromEntries(
+      EXTERNAL_ENV_KEYS.map((key) => [key, process.env[key]])
+    ) as Record<ExternalEnvKey, string | undefined>;
+    mirror = buildSuggestionMirror();
+    sink = installSuggestionSink();
+    sink.reset();
+    mirrorRouters = loadMirrorRouters();
+    externalDouble = await startDashboardDouble();
+    externalScratchRoots.add(externalDouble.scratchRoot);
+    savedExternalFetch = globalThis.fetch;
+    globalThis.fetch = (async (...args: Parameters<typeof fetch>) => {
+      const input = args[0];
+      const raw = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (new URL(raw).origin !== externalDouble.origin) {
+        blockedTriggerOutboundUrls.push(raw);
+        throw new Error(`non-loopback fetch blocked by portable trigger: ${raw}`);
+      }
+      return savedExternalFetch!(...args);
+    }) as typeof fetch;
+    const triggerProbeUrl = 'http://127.0.0.1:1/s90-m08-trigger-positive-control';
+    try {
+      await globalThis.fetch(triggerProbeUrl);
+    } catch (error) {
+      externalTriggerFencePositiveControl =
+        error instanceof Error &&
+        error.message.includes('non-loopback fetch blocked by portable trigger');
+    }
+    if (
+      !externalTriggerFencePositiveControl ||
+      blockedTriggerOutboundUrls.pop() !== triggerProbeUrl
+    ) {
+      throw new Error('portable trigger fence did not block and record its positive-control URL');
+    }
+    externalDouble.setScenario({
+      kind: 'http',
+      expected: { method: 'GET', path: '/configured-only', authorization: NO_AUTH },
+      status: 418,
+      body: { type: 'text', value: 'configured route only' },
+    });
+    const unknownResponse = await fetch(`${externalDouble.origin}/never-stubbed`);
+    unknownRouteProbe = { status: unknownResponse.status, body: await unknownResponse.text() };
+    externalDouble.clearRequests();
+
+    await runPortableCase({
+      name: 'rotate has no local project key',
+      family: 'external-synthetic',
+      expectedCode: 'CREDENTIAL_NOT_FOUND',
+      expectsHttp: false,
+      scenario: noHttpScenario,
+      seed: { registered: true, credentials: 'user' },
+      tool: 'cmos_auth',
+      params: ({ projectRoot }) => ({ action: 'rotate', projectRoot }),
+    });
+    await runPortableCase({
+      name: 'rotate project is not dashboard registered',
+      family: 'external-synthetic',
+      expectedCode: 'PROJECT_NOT_REGISTERED',
+      expectsHttp: false,
+      scenario: noHttpScenario,
+      seed: { credentials: 'project' },
+      tool: 'cmos_auth',
+      params: ({ projectRoot }) => ({ action: 'rotate', projectRoot }),
+    });
+    await runPortableCase({
+      name: 'rotate receives dashboard 401',
+      family: 'external-http',
+      expectedCode: 'DASHBOARD_AUTH_FAILED',
+      expectsHttp: true,
+      scenario: {
+        kind: 'http',
+        expected: {
+          method: 'POST',
+          path: '/api/projects/11111111-1111-4111-8111-111111111111/keys/rotate',
+          authorization: PROJECT_AUTH,
+        },
+        status: 401,
+        body: { type: 'json', value: { error: 'revoked fixture key' } },
+      },
+      seed: { credentials: 'project', registered: true },
+      tool: 'cmos_auth',
+      params: ({ projectRoot }) => ({ action: 'rotate', projectRoot }),
+    });
+    await runPortableCase({
+      name: 'revoke cannot derive an absent project key',
+      family: 'external-synthetic',
+      expectedCode: 'CREDENTIAL_NOT_FOUND',
+      expectsHttp: false,
+      scenario: noHttpScenario,
+      tool: 'cmos_auth',
+      params: ({ projectRoot }) => ({ action: 'revoke', projectRoot }),
+    });
+    await runPortableCase({
+      name: 'reissue project is not dashboard registered',
+      family: 'external-synthetic',
+      expectedCode: 'PROJECT_NOT_REGISTERED',
+      expectsHttp: false,
+      scenario: noHttpScenario,
+      tool: 'cmos_auth',
+      params: ({ projectRoot }) => ({ action: 'reissue', projectRoot }),
+    });
+    await runPortableCase({
+      name: 'reissue has no device-code user credential',
+      family: 'external-synthetic',
+      expectedCode: 'DEVICE_CODE_REQUIRED',
+      expectsHttp: false,
+      scenario: noHttpScenario,
+      seed: { registered: true },
+      tool: 'cmos_auth',
+      params: ({ projectRoot }) => ({ action: 'reissue', projectRoot }),
+    });
+    await runPortableCase({
+      name: 'reissue selected a legacy unattributable credential',
+      family: 'external-synthetic',
+      expectedCode: 'CREDENTIAL_NOT_ATTRIBUTABLE',
+      expectsHttp: false,
+      scenario: noHttpScenario,
+      seed: { registered: true, legacyApiKey: true },
+      tool: 'cmos_auth',
+      params: ({ projectRoot }) => ({ action: 'reissue', projectRoot }),
+    });
+    await runPortableCase({
+      name: 'logout explicit key is not a local user key',
+      family: 'external-synthetic',
+      expectedCode: 'CREDENTIAL_NOT_FOUND',
+      expectsHttp: false,
+      scenario: noHttpScenario,
+      seed: { credentials: 'project' },
+      tool: 'cmos_auth',
+      params: ({ projectRoot }) => ({
+        action: 'logout',
+        keyId: 'missing-user-key',
+        projectRoot,
+      }),
+    });
+    await runPortableCase({
+      name: 'logout has no local user key',
+      family: 'external-synthetic',
+      expectedCode: 'CREDENTIAL_NOT_FOUND',
+      expectsHttp: false,
+      scenario: noHttpScenario,
+      tool: 'cmos_auth',
+      params: ({ projectRoot }) => ({ action: 'logout', projectRoot }),
+    });
+    await runPortableCase({
+      name: 'login device code expires',
+      family: 'external-http',
+      expectedCode: 'DEVICE_CODE_EXPIRED',
+      expectsHttp: true,
+      scenario: {
+        kind: 'device-terminal',
+        expectedAuthorization: NO_AUTH,
+        outcome: 'expired_token',
+        errorDescription: 'fixture terminal',
+        deviceCode: 'dc-expired',
+        expiresIn: 30,
+      },
+      seed: { seedProject: false },
+      tool: 'cmos_auth',
+      params: () => ({ action: 'login' }),
+    });
+    await runPortableCase({
+      name: 'login device code is denied',
+      family: 'external-http',
+      expectedCode: 'DEVICE_CODE_ACCESS_DENIED',
+      expectsHttp: true,
+      scenario: {
+        kind: 'device-terminal',
+        expectedAuthorization: NO_AUTH,
+        outcome: 'access_denied',
+        errorDescription: 'fixture denied',
+        deviceCode: 'dc-denied',
+        expiresIn: 30,
+      },
+      seed: { seedProject: false },
+      tool: 'cmos_auth',
+      params: () => ({ action: 'login' }),
+    });
+    await runPortableCase({
+      name: 'login init device endpoint fails',
+      family: 'external-http',
+      expectedCode: 'DASHBOARD_ERROR',
+      expectsHttp: true,
+      scenario: {
+        kind: 'device-code-error',
+        expectedAuthorization: NO_AUTH,
+        status: 503,
+        body: { type: 'text', value: 'dashboard down' },
+      },
+      seed: { seedProject: false },
+      tool: 'cmos_auth',
+      params: () => ({ action: 'login_init' }),
+    });
+
+    for (const statusCase of [
+      {
+        name: 'directory socket disconnect',
+        expectedCode: 'DASHBOARD_UNREACHABLE',
+        scenario: {
+          kind: 'socket-disconnect',
+          expected: {
+            method: 'GET',
+            path: '/api/projects/directory/public',
+            authorization: PROJECT_AUTH,
+          },
+        } as DashboardScenario,
+      },
+      {
+        name: 'directory dashboard 401',
+        expectedCode: 'DASHBOARD_AUTH_FAILED',
+        scenario: {
+          kind: 'http',
+          expected: {
+            method: 'GET',
+            path: '/api/projects/directory/public',
+            authorization: PROJECT_AUTH,
+          },
+          status: 401,
+          body: { type: 'json', value: { error: 'revoked fixture key' } },
+        } as DashboardScenario,
+      },
+      {
+        name: 'directory dashboard 403',
+        expectedCode: 'DASHBOARD_FORBIDDEN',
+        scenario: {
+          kind: 'http',
+          expected: {
+            method: 'GET',
+            path: '/api/projects/directory/public',
+            authorization: PROJECT_AUTH,
+          },
+          status: 403,
+          body: { type: 'json', value: { error: 'forbidden', hint: 'fixture hint' } },
+        } as DashboardScenario,
+      },
+      {
+        name: 'directory dashboard 404',
+        expectedCode: 'DASHBOARD_NOT_FOUND',
+        scenario: {
+          kind: 'http',
+          expected: {
+            method: 'GET',
+            path: '/api/projects/directory/public',
+            authorization: PROJECT_AUTH,
+          },
+          status: 404,
+          body: { type: 'json', value: { error: 'missing', hint: 'fixture hint' } },
+        } as DashboardScenario,
+      },
+      {
+        name: 'directory dashboard 500',
+        expectedCode: 'DASHBOARD_ERROR',
+        scenario: {
+          kind: 'http',
+          expected: {
+            method: 'GET',
+            path: '/api/projects/directory/public',
+            authorization: PROJECT_AUTH,
+          },
+          status: 500,
+          body: { type: 'text', value: 'upstream exploded' },
+        } as DashboardScenario,
+      },
+      {
+        name: 'directory dashboard 402',
+        expectedCode: 'DASHBOARD_UPGRADE_REQUIRED',
+        scenario: {
+          kind: 'http',
+          expected: {
+            method: 'GET',
+            path: '/api/projects/directory/public',
+            authorization: PROJECT_AUTH,
+          },
+          status: 402,
+          body: { type: 'text', value: 'upgrade required' },
+        } as DashboardScenario,
+      },
+    ]) {
+      await runPortableCase({
+        ...statusCase,
+        family: 'external-http',
+        expectsHttp: true,
+        seed: {
+          credentials: 'project',
+          registered: statusCase.expectedCode === 'DASHBOARD_AUTH_FAILED',
+        },
+        tool: 'cmos_message',
+        params: ({ projectRoot }) => ({ action: 'directory', projectRoot }),
+      });
+    }
+
+    await runPortableCase({
+      name: 'directory has canonical default but no credential',
+      family: 'external-synthetic',
+      expectedCode: 'DASHBOARD_NOT_CONFIGURED',
+      expectsHttp: false,
+      scenario: noHttpScenario,
+      seed: { dashboardUrl: 'unset' },
+      tool: 'cmos_message',
+      params: ({ projectRoot }) => ({ action: 'directory', projectRoot }),
+    });
+
+    let mismatchedAdvertisedRoot = '';
+    await runPortableCase({
+      name: 'send advertised roots mismatch the authoritative sender',
+      family: 'external-http',
+      expectedCode: 'SENDER_ATTRIBUTION_MISMATCH',
+      expectsHttp: true,
+      scenario: {
+        kind: 'message-resolve-success',
+        expectedAuthorization: USER_AUTH,
+        resolved: {
+          projectId: '33333333-3333-4333-8333-333333333333',
+          projectName: 'Receiver',
+          projectSlug: 'receiver',
+        },
+      },
+      seed: {
+        registered: true,
+        credentials: 'user',
+        projectName: 'Primary',
+        projectId: 'primary',
+        slug: 'primary',
+        cmosAddress: 'cmos://local/primary',
+      },
+      setup: (state) => {
+        mismatchedAdvertisedRoot = path.join(state.caseRoot, 'advertised-other');
+        fs.mkdirSync(mismatchedAdvertisedRoot, { recursive: true });
+        externalScratchRoots.add(mismatchedAdvertisedRoot);
+        seedCmosDb(mismatchedAdvertisedRoot, {
+          projectName: 'Other',
+          projectId: 'other',
+          slug: 'other',
+          dashboardProjectId: '22222222-2222-4222-8222-222222222222',
+          cmosAddress: 'cmos://local/other',
+        });
+      },
+      tool: 'cmos_message',
+      params: ({ projectRoot }) => ({
+        action: 'send',
+        targetAddress: 'cmos://target/receiver',
+        type: 'question',
+        summary: 's90-m07 portable sender mismatch',
+        projectRoot,
+        advertisedRoots: [mismatchedAdvertisedRoot],
+      }),
+    });
+
+    await runPortableCase({
+      name: 'purge expected slug differs from local identity',
+      family: 'external-synthetic',
+      expectedCode: 'EXPECTED_SLUG_MISMATCH',
+      expectsHttp: false,
+      scenario: noHttpScenario,
+      seed: { credentials: 'project', projectName: 'Actual Project', slug: 'actual-project' },
+      tool: 'cmos_db',
+      params: ({ projectRoot }) => ({
+        action: 'purge',
+        confirm: true,
+        expectedSlug: 'different-slug',
+        projectRoot,
+      }),
+    });
+
+    await runPortableCase({
+      name: 'logout with two local user keys needs an explicit keyId',
+      family: 'driveable',
+      expectedCode: 'MISSING_PARAMETER',
+      expectsHttp: false,
+      scenario: noHttpScenario,
+      seed: { credentials: 'two-user' },
+      tool: 'cmos_auth',
+      params: ({ projectRoot }) => ({ action: 'logout', projectRoot }),
+    });
+    await runPortableCase({
+      name: 'whoami cannot resolve a project without sender identity',
+      family: 'driveable',
+      expectedCode: 'SENDER_UNRESOLVABLE',
+      expectsHttp: false,
+      scenario: noHttpScenario,
+      tool: 'cmos_message',
+      params: ({ projectRoot }) => ({ action: 'whoami', projectRoot }),
+    });
+    await runPortableCase({
+      name: 'message is absent from exact and bounded fallback reads',
+      family: 'driveable',
+      expectedCode: 'MESSAGE_NOT_FOUND',
+      expectsHttp: true,
+      scenario: { kind: 'message-not-found', expectedAuthorization: PROJECT_AUTH },
+      seed: { credentials: 'project' },
+      tool: 'cmos_message',
+      params: ({ projectRoot }) => ({
+        action: 'get',
+        messageId: '44444444-4444-4444-8444-444444444444',
+        projectRoot,
+      }),
+    });
+    for (const action of ['clone', 'pull'] as const) {
+      await runPortableCase({
+        name: `${action} has configured auth but no dashboard slug`,
+        family: 'driveable',
+        expectedCode: 'MISSING_PARAMETER',
+        expectsHttp: false,
+        scenario: noHttpScenario,
+        seed: { credentials: 'project', removeSlug: true },
+        tool: 'cmos_db',
+        params: ({ projectRoot }) => ({ action, projectRoot }),
+      });
+    }
+
+    await runPortableCase({
+      name: 'register on an empty first-run root',
+      family: 'first-run',
+      expectedCode: 'CMOS_NOT_DETECTED',
+      expectsHttp: false,
+      scenario: noHttpScenario,
+      seed: { seedProject: false },
+      tool: 'cmos_project',
+      params: ({ projectRoot }) => ({ action: 'register', projectRoot }),
+    });
+    await runPortableCase({
+      name: 'health on an empty first-run root',
+      family: 'first-run',
+      expectedCode: 'CMOS_NOT_DETECTED',
+      expectsHttp: false,
+      scenario: noHttpScenario,
+      seed: { seedProject: false },
+      tool: 'cmos_db',
+      params: ({ projectRoot }) => ({ action: 'health', projectRoot }),
+    });
+    await runPortableCase({
+      name: 'health with cmos directory but no SQLite file',
+      family: 'first-run',
+      expectedCode: 'DB_NOT_FOUND',
+      expectsHttp: false,
+      scenario: noHttpScenario,
+      seed: { seedProject: false },
+      setup: ({ projectRoot }) =>
+        fs.mkdirSync(path.join(projectRoot, 'cmos', 'db'), { recursive: true }),
+      tool: 'cmos_db',
+      params: ({ projectRoot }) => ({ action: 'health', projectRoot }),
+    });
+  });
+
+  afterAll(async () => {
+    if (mirror?.root) resetMirroredExternalState();
+    restoreExternalEnvironment();
+    if (savedExternalFetch) globalThis.fetch = savedExternalFetch;
+    if (externalDouble) await externalDouble.close();
+  });
+
+  it('drives every case to its named refusal with no crash or timeout', () => {
+    const wrong = portableEvidence.filter(
+      (entry) => entry.outcome !== 'REFUSES' || entry.code !== entry.expectedCode
+    );
+    for (const entry of wrong) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `  WRONG ${entry.caseName}: expected REFUSES/${entry.expectedCode}, got ${entry.outcome}/${entry.code ?? entry.thrown ?? '—'}`
+      );
+    }
+    expect(wrong.map((entry) => entry.caseName)).toEqual([]);
+  });
+
+  it('uses loopback HTTP exactly for declared HTTP cases and never proxies an unknown route', () => {
+    const transportMismatch = portableEvidence.filter(
+      (entry) => entry.requests.length > 0 !== entry.expectsHttp
+    );
+    expect(transportMismatch.map((entry) => entry.caseName)).toEqual([]);
+    const unmatchedRequests = portableEvidence.flatMap((entry) =>
+      entry.requests
+        .filter((request) => !request.matchedScenario)
+        .map(
+          (request) =>
+            `${entry.caseName}: ${request.method} ${request.url} auth=${request.authorization || '<none>'}`
+        )
+    );
+    expect(unmatchedRequests).toEqual([]);
+    expect(externalTriggerFencePositiveControl).toBe(true);
+    expect(blockedTriggerOutboundUrls).toEqual([]);
+    expect(externalDouble.origin).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+    expect(unknownRouteProbe.status).toBe(404);
+    expect(unknownRouteProbe.body).toContain('Unstubbed dashboard route GET /never-stubbed');
+    const mismatch = portableEvidence.find((entry) =>
+      entry.caseName.startsWith('send advertised roots')
+    );
+    expect(mismatch?.requests.some((request) => request.method === 'POST')).toBe(false);
+  });
+
+  it('EXTERNAL REPLAY — T2/T3/T4 apply to every reached call-bearing EXTERNAL site', () => {
+    const universe = EXTERNAL.filter((row) => row.callBearing);
+    const replayable = universe.filter((row) => externalFiredSites.has(row.site));
+    const residual = universe.filter((row) => !externalFiredSites.has(row.site));
+    const replayedSites = new Set(portableReplays.map((replay) => replay.site));
+    const unstable = portableReplays.filter(
+      (replay) => replay.outcome === 'CRASHES' || replay.outcome === 'TIMEOUT'
+    );
+    const reproduced = portableReplays.filter(
+      (replay) =>
+        replay.outcome === 'REFUSES' &&
+        replay.code !== undefined &&
+        replay.code === replay.triggerCode
+    );
+    const undisclosed = portableReplays.filter(
+      (replay) => replay.outcome === 'REFUSES' && !disclosesCondition(replay.suggestion)
+    );
+    const refused = portableReplays.filter((replay) => replay.outcome === 'REFUSES');
+    // eslint-disable-next-line no-console
+    console.log(
+      `[s90-m08 external replay] universe=${universe.length} replayable=${replayable.length} ` +
+        `residual=${residual.length} replayed-sites=${replayedSites.size} ` +
+        `executions=${portableReplays.length} refused=${refused.length} ` +
+        `T2-unstable=${unstable.length} ` +
+        `T3-reproduced=${reproduced.length} T4-undisclosed=${undisclosed.length}`
+    );
+    for (const replay of reproduced) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `  EXTERNAL REMEDY REPRODUCES ${replay.code} :: ${replay.site} -> ` +
+          `${replay.tool}(${replay.action ?? '—'})`
+      );
+    }
+    expect([...replayedSites].sort()).toEqual(replayable.map((row) => row.site).sort());
+    expect(residual.every((row) => EXTERNAL_RESIDUAL_REASONS[row.site])).toBe(true);
+    expect(unstable).toEqual([]);
+    expect(reproduced).toEqual([]);
+    expect(undisclosed).toEqual([]);
+  });
+
+  it('EXTERNAL REPLAY — canonical default resolution is loopback-only and bounded', () => {
+    const loginFamily = portableReplays.filter((replay) =>
+      ['login', 'login_init', 'login_complete'].includes(replay.action ?? '')
+    );
+    const unmatched = portableReplays.flatMap((replay) =>
+      replay.requests.filter((request) => !request.matchedScenario)
+    );
+    expect(loginFamily.length).toBeGreaterThan(0);
+    expect(externalFencePositiveControls).toBeGreaterThan(0);
+    expect(loginFamily.every((replay) => replay.resolverOutputs.length > 0)).toBe(true);
+    expect(
+      loginFamily.every((replay) =>
+        replay.resolverOutputs.every((output) => output === externalDouble.origin)
+      )
+    ).toBe(true);
+    expect(portableReplays.every((replay) => replay.durationMs < 5_000)).toBe(true);
+    expect(unmatched).toEqual([]);
+    expect(blockedOutboundUrls).toEqual([]);
+  });
+
+  it('EXTERNAL LEDGER — bidirectional E + R equals the re-derived universe', () => {
+    const examined = [...EXTERNAL_SITES].filter((site) => externalFiredSites.has(site)).sort();
+    const residual = [...EXTERNAL_SITES].filter((site) => !externalFiredSites.has(site)).sort();
+    const callBearing = EXTERNAL.filter((row) => row.callBearing);
+    const httpFired = new Set(
+      portableEvidence
+        .filter((entry) => entry.family === 'external-http')
+        .flatMap((entry) => entry.fired)
+        .filter((site) => EXTERNAL_SITES.has(site))
+    );
+    const syntheticFired = new Set(
+      portableEvidence
+        .filter((entry) => entry.family === 'external-synthetic')
+        .flatMap((entry) => entry.fired)
+        .filter((site) => EXTERNAL_SITES.has(site))
+    );
+    // eslint-disable-next-line no-console
+    console.log(
+      `[s90-m07 external] universe=${EXTERNAL.length} examined=${examined.length} ` +
+        `http=${httpFired.size} synthetic=${syntheticFired.size} residual=${residual.length} ` +
+        `real-credentials=0`
+    );
+    // eslint-disable-next-line no-console
+    console.log(
+      `[s90-m08 external replay universe] rule=EXTERNAL&&callBearing count=${callBearing.length} ` +
+        `sites=${callBearing
+          .map(
+            (row) =>
+              `${row.site}->${extractPrescribedCalls(row.text)
+                .map((call) => `${call.tool}(${call.action ?? '—'})`)
+                .join('+')}`
+          )
+          .join(',')}`
+    );
+    for (const site of residual) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `  EXTERNAL RESIDUAL ${site} :: ${EXTERNAL_RESIDUAL_REASONS[site] ?? '*** MISSING ***'}`
+      );
+    }
+    expect(examined.length + residual.length).toBe(EXTERNAL.length);
+    expect(residual.filter((site) => !EXTERNAL_RESIDUAL_REASONS[site])).toEqual([]);
+    expect(
+      Object.keys(EXTERNAL_RESIDUAL_REASONS).filter((site) => !residual.includes(site))
+    ).toEqual([]);
+    expect([...httpFired].sort()).toEqual([...HTTP_EXTERNAL_SITES].sort());
+    expect([...syntheticFired].sort()).toEqual([...SYNTHETIC_EXTERNAL_SITES].sort());
+    expect([...httpFired].filter((site) => syntheticFired.has(site))).toEqual([]);
+    expect(HTTP_EXTERNAL_SITES.size + SYNTHETIC_EXTERNAL_SITES.size + residual.length).toBe(
+      EXTERNAL.length
+    );
+    expect(callBearing.length).toBeGreaterThan(0);
+  });
+
+  it('FIRST-RUN LEDGER — E + R equals its re-derived in-process universe with zero wire credit', () => {
+    const examined = [...FIRST_RUN_SITES].filter((site) => externalFiredSites.has(site)).sort();
+    const residual = [...FIRST_RUN_SITES].filter((site) => !externalFiredSites.has(site)).sort();
+    // eslint-disable-next-line no-console
+    console.log(
+      `[s90-m07 first-run] universe=${FIRST_RUN.length} examined=${examined.length} residual=${residual.length} ` +
+        `scope=in-process-mirror wire-credit=0 (wire owner: s90-m04)`
+    );
+    expect(examined.length + residual.length).toBe(FIRST_RUN.length);
+    expect(residual).toEqual([]);
+  });
+
+  it('allows one explicit-intent read; every effective dashboard URL uses the canonical resolver', () => {
+    const syntheticSource = ts.createSourceFile(
+      'synthetic-dashboard-url-reads.ts',
+      `
+        process.env.CMOS_DASHBOARD_URL;
+        process.env['CMOS_DASHBOARD_URL'];
+        process.env[CMOS_DASHBOARD_URL_ENV];
+        { const { CMOS_DASHBOARD_URL } = process.env; void CMOS_DASHBOARD_URL; }
+        { const { CMOS_DASHBOARD_URL: aliased } = process.env; void aliased; }
+        { const { [CMOS_DASHBOARD_URL_ENV]: computed } = process.env; void computed; }
+        { const { ['CMOS_DASHBOARD_URL']: literalComputed } = process.env; void literalComputed; }
+      `,
+      ts.ScriptTarget.ES2020,
+      true
+    );
+    const syntheticReads = directDashboardUrlReadsInSource(
+      'src/synthetic-dashboard-url-reads.ts',
+      syntheticSource
+    );
+    expect(syntheticReads).toHaveLength(7);
+    expect(syntheticReads.filter((read) => read.syntax === 'dot')).toHaveLength(1);
+    expect(syntheticReads.filter((read) => read.syntax === 'element')).toHaveLength(2);
+    expect(syntheticReads.filter((read) => read.syntax === 'destructure')).toHaveLength(4);
+    expect(syntheticReads.filter((read) => read.canonical)).toEqual([]);
+
+    const reads = directDashboardUrlReads();
+    const canonical = reads.filter((read) => read.canonical);
+    const bypasses = reads.filter((read) => !read.canonical);
+    // This startup check asks whether the operator EXPLICITLY opted into dashboard warnings; it
+    // deliberately does not ask for the effective URL, whose baked default would make every local-
+    // only install warn. All network/display consumers must go through the canonical resolver.
+    const explicitIntentReads = new Set(['src/auth/project-key-capture.ts']);
+    // eslint-disable-next-line no-console
+    console.log(
+      `[s90-m07 dashboard-url reads] total=${reads.length} canonical=${canonical.length} ` +
+        `bypasses=${bypasses.length} :: ${reads.map((read) => `${read.site}[${read.syntax}]`).join(' ')}`
+    );
+    expect(canonical).toHaveLength(1);
+    expect(canonical[0]?.site.startsWith('src/tools/cmos/dashboard-client.ts:')).toBe(true);
+    expect(bypasses.map((read) => read.site.replace(/:\d+$/, '')).sort()).toEqual(
+      [...explicitIntentReads].sort()
+    );
   });
 });
 
@@ -1685,8 +3079,10 @@ PRIVATE.describe(
     /** Calls left deliberately untouched because the action does not use that parameter. */
     let untouched = 0;
     let calls = 0;
+    let boundary!: IsolatedDashboardBoundary;
 
     beforeAll(async () => {
+      boundary = await installIsolatedDashboardBoundary('s89m08-t6');
       const { projectRoot } = freshStore();
       for (const triple of triples) {
         for (const { label, value } of WRONG_VALUES) {
@@ -1732,6 +3128,8 @@ PRIVATE.describe(
       }
     });
 
+    afterAll(async () => boundary?.close());
+
     it('prints its triple count and asserts a non-vacuity floor', () => {
       // eslint-disable-next-line no-console
       console.log(
@@ -1747,34 +3145,61 @@ PRIVATE.describe(
       expect(crashes).toEqual([]);
     });
 
+    it('T1/T6 (HARD) — untouched actions cannot escape isolated credentials or loopback', () => {
+      expect(boundary.blockedUrls).toEqual([]);
+      expect(boundary.positiveControlBlocked).toBe(true);
+      expect(boundary.double.origin).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+      expect(path.dirname(boundary.sourceCredentialPath)).toBe(boundary.configDir);
+      expect(fs.realpathSync(boundary.configDir).startsWith(fs.realpathSync(os.tmpdir()))).toBe(
+        true
+      );
+    });
+
     it('every APPLICABLE wrong-typed value is refused as INVALID_PARAMETER naming the field', () => {
       expect(unguardedApplicable).toEqual([]);
     });
 
     it('the guard is SCOPED to the action, and that scope still covers every crashing triple', () => {
-      // s89-m09. The first cut refused a wrong-typed value on every declared string property of
-      // the tool, whether or not the action read it — measured, that converted 210 of 714 triples
-      // from SUCCESS to INVALID_PARAMETER, and 179 of those were parameters the action ignores
-      // (`cmos_message(action="whoami", body=12345)` is the representative case). Scoping to
-      // CMOS_*_ACTION_PARAMS drops the success-to-error blast radius to 31 triples and misses ZERO
-      // crashes, because a parameter that crashes the handler is by construction one it reads.
-      //
-      // This arm asserts the SCOPE is real in both directions, so neither a silent widening nor a
-      // silent narrowing can pass: the applicable set must be a strict subset of all triples, and
-      // it must contain every triple the pre-guard sweep recorded as crashing.
-      const applicable = triples.filter(appliesToAction);
-      expect(applicable.length).toBeGreaterThan(0);
-      expect(applicable.length).toBeLessThan(triples.length);
+      // s90-m02. The old arm claimed to test the guard in both directions but only filtered the
+      // static applicability table. This arm drives the guard itself. Deleting the guard's
+      // applicable-set `continue` must make `overBroad` non-empty; removing or narrowing the guard
+      // must make `missed` or `uncoveredHistorical` non-empty.
+      const refusedKeys = new Set<string>();
+      const malformedRefusals: string[] = [];
+      for (const triple of triples) {
+        const schema = CMOS_TOOL_DEFINITIONS.find((tool) => tool.name === triple.tool)!.inputSchema;
+        const params: Record<string, unknown> = { [triple.field]: 12_345 };
+        if (triple.action !== undefined) params.action = triple.action;
+        const refusal = findWrongTypedStringParam(schema, applicableParamsFor(triple), params);
+        if (refusal === null) continue;
+        const key = `${triple.tool}|${triple.action ?? ''}|${triple.field}`;
+        refusedKeys.add(key);
+        if (refusal.code !== 'INVALID_PARAMETER' || refusal.field !== triple.field) {
+          malformedRefusals.push(`${key} -> ${refusal.code} field=${String(refusal.field)}`);
+        }
+      }
+
       const applicableKeys = new Set(
-        applicable.map((t) => `${t.tool}|${t.action ?? ''}|${t.field}`)
+        triples
+          .filter(appliesToAction)
+          .map((triple) => `${triple.tool}|${triple.action ?? ''}|${triple.field}`)
       );
-      const uncovered = HISTORICALLY_CRASHING.filter((key) => !applicableKeys.has(key));
+      const overBroad = [...refusedKeys].filter((key) => !applicableKeys.has(key));
+      const missed = [...applicableKeys].filter((key) => !refusedKeys.has(key));
+      const uncoveredHistorical = HISTORICALLY_CRASHING.filter((key) => !refusedKeys.has(key));
       // eslint-disable-next-line no-console
       console.log(
-        `[s89-m08 T6 scope] applicable=${applicable.length}/${triples.length} ` +
-          `historically-crashing=${HISTORICALLY_CRASHING.length} uncovered-by-scope=${uncovered.length}`
+        `[s90-m02 T6 scope] triples=${triples.length} refused-by-guard=${refusedKeys.size} ` +
+          `declared-applicable=${applicableKeys.size} over-broad=${overBroad.length} ` +
+          `missed=${missed.length} historically-crashing=${HISTORICALLY_CRASHING.length} ` +
+          `uncovered-historical=${uncoveredHistorical.length}`
       );
-      expect(uncovered).toEqual([]);
+      expect(refusedKeys.size).toBeGreaterThan(0);
+      expect(refusedKeys.size).toBeLessThan(triples.length);
+      expect(malformedRefusals).toEqual([]);
+      expect(overBroad).toEqual([]);
+      expect(missed).toEqual([]);
+      expect(uncoveredHistorical).toEqual([]);
     });
 
     it('PINS the null decision — the guard treats JSON null as ABSENT, for every published string field', () => {
@@ -2023,43 +3448,36 @@ const RESIDUAL_REASONS: Readonly<Record<string, string>> = {
     'Same fault-shaped precondition as :57, one frame later: `getProjectIdentity` returning null ' +
     'AFTER a write that already succeeded.',
 
-  // ── EXTERNAL-SHAPED PRECONDITIONS inside a VALIDATION/STATE-coded site ───────────────────────
-  // Driveable by CODE, but the trigger needs a dashboard double or a seeded credential store —
-  // the second named successor instrument, and out of this mission by declaration.
-  'src/tools/cmos/cmos-auth.ts:1144':
-    'Needs MORE THAN ONE user-scoped key in the local credential store. Seeding that store is the ' +
-    'credential-double instrument, not an axis over a CMOS database.',
-  'src/tools/cmos/cmos-message.ts:737':
-    'Needs a sender context that resolves to no local store while the call still reaches the handler; ' +
-    'the dispatcher resolves or refuses first on every supported path this matrix drives.',
-  'src/tools/cmos/cmos-message.ts:1007':
+  // ── CONSTRUCTION-MASKED PRECONDITIONS inside a VALIDATION/STATE-coded site ───────────────────
+  // Driveable by CODE, but dispatcher and collab gates mask the triggers from every supported
+  // construction the portable m07 instrument can establish. Four former entries moved to E.
+  'src/tools/cmos/cmos-message.ts:1004':
     'A defensive branch whose own message says the dispatcher should have caught the condition via ' +
     'resolveSenderContext. Reaching it means reaching a state the dispatcher forbids.',
-  'src/tools/cmos/cmos-message.ts:1338':
-    'MESSAGE_NOT_FOUND on a fetched message — needs a dashboard double to serve the fetch window ' +
-    'this refusal describes.',
-  'src/tools/cmos/sync-bootstrap.ts:128':
-    'MEASURED: masked. This is the missing-slug refusal, but clearing metadata.dashboard_slug and ' +
-    'calling cmos_db(action="clone") refuses at DASHBOARD_NOT_CONFIGURED first — the dashboard ' +
-    'client is resolved BEFORE the slug is read. Reaching it needs a configured dashboard AND no ' +
-    'slug, so it belongs to the dashboard-double instrument.',
   'src/tools/cmos/sync-mutable-push.ts:111':
     'The missing-entityId refusal inside pushMutableStatus. Its only caller chain runs through ' +
     'maybePropagateMutableStatus, which early-returns unless isCollabStore(db) — so a solo store ' +
     'never enters the function at all, and a collab store needs a broker.',
   'src/tools/cmos/sync-mutable-push.ts:155':
     'Same collab-store gate as :111, one branch later on slug resolution.',
-  'src/tools/cmos/sync-pull.ts:187':
-    'MEASURED: masked, exactly as sync-bootstrap.ts:128 — cmos_db(action="pull") on a slug-less ' +
-    'store refuses at DASHBOARD_NOT_CONFIGURED before the slug check is reached.',
-
   // ── MASKED BY AN EARLIER REFUSAL ON EVERY PATH THIS MATRIX CAN DRIVE ─────────────────────────
-  'src/tools/cmos/cmos-sprint-complete.ts:568':
+  'src/tools/cmos/cmos-sprint-complete.ts:574':
     'MEASURED: masked. With master_context deleted and the sprint made closable, closeout refuses at ' +
-    'the shared errors.ts contextNotFound BEFORE reaching this sprint-local branch, so :568 is ' +
+    'the shared errors.ts contextNotFound BEFORE reaching this sprint-local branch, so :574 is ' +
     'unreachable while that earlier guard stands.',
-  'src/tools/cmos/cmos-sprint-complete.ts:579': 'Same masking as :568, for project_context.',
+  'src/tools/cmos/cmos-sprint-complete.ts:585': 'Same masking as :574, for project_context.',
 };
+
+const FAULT_SHAPED_DRIVEABLE_RESIDUALS = new Set([
+  'src/tools/cmos/client.ts:671',
+  'src/tools/cmos/client.ts:682',
+  'src/tools/cmos/cmos-context-project-identity.ts:57',
+  'src/tools/cmos/cmos-context-project-identity.ts:116',
+]);
+const INTERNAL_FAULT_RESUME_TRIGGER =
+  'any one of these codes reported from the field by an external adopter, or any in-repo incident that reaches one on a healthy store.';
+const MASKED_RESUME_TRIGGER =
+  'any production caller or control-flow change that makes one of these sites constructible, or any field report or in-repo incident that reaches one on a healthy store.';
 
 PRIVATE.describe(
   's89-m08 THE AXIS MATRIX — reach the trigger state, then execute the remedy',
@@ -2071,11 +3489,14 @@ PRIVATE.describe(
     let driverMissionId = '';
     let driverSprintId = '';
     let closedSprintId = '';
+    let boundary!: IsolatedDashboardBoundary;
 
     beforeAll(async () => {
       mirror = buildSuggestionMirror();
       sink = installSuggestionSink();
+      sink.reset();
       mirrorRouters = loadMirrorRouters();
+      boundary = await installIsolatedDashboardBoundary('s89m08-private');
 
       initializeFrozenSource();
       // Discover the driver rows rather than hard-coding ids that a store edit could invalidate.
@@ -2170,10 +3591,14 @@ PRIVATE.describe(
       }
 
       // EXAMINED, per the operational definition in this file's docblock.
-      const fired = new Set(sink.fired);
+      // m07's portable double is evidence for reachability only. It does NOT widen T2/T3/T4:
+      // remedy replay remains exactly the private matrix pass above.
+      const fired = new Set([...sink.fired, ...externalFiredSites]);
       examinedDriveable = [...DRIVEABLE_SITES].filter((site) => fired.has(site)).sort();
       residualDriveable = [...DRIVEABLE_SITES].filter((site) => !fired.has(site)).sort();
     });
+
+    afterAll(async () => boundary?.close());
 
     it('T1 (HARD) — no driven call CRASHES, from any established trigger state', () => {
       const crashes = driven.filter((c) => c.outcome === 'CRASHES');
@@ -2195,6 +3620,17 @@ PRIVATE.describe(
 
     it('T1 (HARD) — no driven call TIMES OUT', () => {
       expect(driven.filter((c) => c.outcome === 'TIMEOUT').map((c) => c.caseName)).toEqual([]);
+    });
+
+    it('T1 (HARD) — private replay transport and credentials stay inside isolated loopback state', () => {
+      expect(boundary.blockedUrls).toEqual([]);
+      expect(boundary.positiveControlBlocked).toBe(true);
+      expect(boundary.double.origin).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+      expect(path.dirname(boundary.sourceCredentialPath)).toBe(boundary.configDir);
+      expect(path.dirname(boundary.mirrorCredentialPath!)).toBe(boundary.configDir);
+      expect(fs.realpathSync(boundary.configDir).startsWith(fs.realpathSync(os.tmpdir()))).toBe(
+        true
+      );
     });
 
     it('T2 (HARD) — an executable prescription does not CRASH when run from the state that emitted it', () => {
@@ -2270,7 +3706,7 @@ PRIVATE.describe(
       console.log(
         `[s89-m08 ledger] sites=${CENSUS.length + 2} authored=${CENSUS.length} driveable=${DRIVEABLE.length} ` +
           `examined=${examinedDriveable.length} residual=${residualDriveable.length} ` +
-          `remaining=${CENSUS.length - examinedDriveable.length}`
+          `outside-driveable-examined=${CENSUS.length - examinedDriveable.length} (not Arc debt)`
       );
       // eslint-disable-next-line no-console
       console.log(
@@ -2292,6 +3728,98 @@ PRIVATE.describe(
       expect(
         Object.keys(RESIDUAL_REASONS).filter((site) => !residualDriveable.includes(site))
       ).toEqual([]);
+    });
+
+    it('ARC F ITEM 1 ROUTER ADJUDICATION — partitions every authored site with zero wire credit', () => {
+      const sorted = (sites: Iterable<string>): string[] => [...sites].sort();
+      const intersection = (left: Set<string>, right: Set<string>): Set<string> =>
+        new Set([...left].filter((site) => right.has(site)));
+      const difference = (left: Set<string>, right: Set<string>): Set<string> =>
+        new Set([...left].filter((site) => !right.has(site)));
+      const examinedExternal = [...EXTERNAL_SITES].filter((site) => externalFiredSites.has(site));
+      const residualExternal = [...EXTERNAL_SITES].filter((site) => !externalFiredSites.has(site));
+      const examinedFirstRun = [...FIRST_RUN_SITES].filter((site) => externalFiredSites.has(site));
+      const residualFirstRun = [...FIRST_RUN_SITES].filter((site) => !externalFiredSites.has(site));
+      const preAdjudicationCandidates = new Set([
+        ...DRIVEABLE_SITES,
+        ...EXTERNAL_SITES,
+        ...FIRST_RUN_SITES,
+      ]);
+      const routerExamined = new Set([
+        ...examinedDriveable,
+        ...examinedExternal,
+        ...examinedFirstRun,
+      ]);
+      const adjudicatedUnreachable = new Set([
+        ...residualDriveable,
+        ...residualExternal,
+        ...residualFirstRun,
+      ]);
+      const nonFirstRunFaults = CENSUS.filter(
+        (row) => row.triggerClass === 'FAULT' && !FIRST_RUN_SITES.has(row.site)
+      ).map((row) => row.site);
+      const faultShapedDriveable = residualDriveable.filter((site) =>
+        FAULT_SHAPED_DRIVEABLE_RESIDUALS.has(site)
+      );
+      const constructionMasked = [
+        ...residualDriveable.filter((site) => !FAULT_SHAPED_DRIVEABLE_RESIDUALS.has(site)),
+        ...residualExternal,
+        ...CENSUS.filter((row) => row.triggerClass === 'UNTYPED').map((row) => row.site),
+      ];
+      const internalFaultPark = new Set([...nonFirstRunFaults, ...faultShapedDriveable]);
+      const maskedPark = new Set(constructionMasked);
+      const parkedComplement = new Set([...internalFaultPark, ...maskedPark]);
+      const authoredSites = new Set(CENSUS.map((row) => row.site));
+
+      expect(preAdjudicationCandidates.size).toBe(
+        DRIVEABLE_SITES.size + EXTERNAL_SITES.size + FIRST_RUN_SITES.size
+      );
+      expect(sorted(intersection(routerExamined, adjudicatedUnreachable))).toEqual([]);
+      expect(sorted(new Set([...routerExamined, ...adjudicatedUnreachable]))).toEqual(
+        sorted(preAdjudicationCandidates)
+      );
+      expect(routerExamined.size + adjudicatedUnreachable.size).toBe(
+        preAdjudicationCandidates.size
+      );
+      expect(residualFirstRun).toEqual([]);
+      expect(sorted(faultShapedDriveable)).toEqual(sorted(FAULT_SHAPED_DRIVEABLE_RESIDUALS));
+      expect(sorted(intersection(internalFaultPark, maskedPark))).toEqual([]);
+      expect(sorted(intersection(routerExamined, parkedComplement))).toEqual([]);
+      expect(sorted(new Set([...routerExamined, ...parkedComplement]))).toEqual(
+        sorted(authoredSites)
+      );
+      expect(routerExamined.size + parkedComplement.size).toBe(authoredSites.size);
+      expect(sorted(intersection(preAdjudicationCandidates, parkedComplement))).toEqual(
+        sorted(adjudicatedUnreachable)
+      );
+      expect(sorted(difference(parkedComplement, adjudicatedUnreachable))).toEqual(
+        sorted(difference(authoredSites, preAdjudicationCandidates))
+      );
+
+      // eslint-disable-next-line no-console
+      console.log(
+        `[s90-m08 Arc F router adjudication] pre-adjudication-candidates=${preAdjudicationCandidates.size} ` +
+          `router-examined=${routerExamined.size} adjudicated-unreachable=${adjudicatedUnreachable.size} ` +
+          `partition=${routerExamined.size}+${adjudicatedUnreachable.size}; ` +
+          `first-run-router-examined=${examinedFirstRun.length} wire-credit=0`
+      );
+      // eslint-disable-next-line no-console
+      console.log(
+        `[s90-m08 Arc F authored partition] authored=${authoredSites.size} ` +
+          `router-examined=${routerExamined.size} parked-complement=${parkedComplement.size} ` +
+          `partition=${routerExamined.size}+${parkedComplement.size}; ` +
+          `internal-fault=${internalFaultPark.size} construction-masked=${maskedPark.size}`
+      );
+      // eslint-disable-next-line no-console
+      console.log(`[s90-m08 #1127 internal-fault resume trigger] ${INTERNAL_FAULT_RESUME_TRIGGER}`);
+      // eslint-disable-next-line no-console
+      console.log(`[s90-m08 masked resume trigger] ${MASKED_RESUME_TRIGGER}`);
+      // eslint-disable-next-line no-console
+      console.log(
+        '[s90-m08 closure commands] CMOS_DASHBOARD_URL=http://127.0.0.1:9 npx jest ' +
+          'tests/tools/cmos/suggestion-oracle.test.ts --runInBand --coverage=false; ' +
+          'npx jest --config jest.e2e.config.js --runInBand tests/e2e/wire-preflight.e2e.ts'
+      );
     });
   }
 );
@@ -2333,22 +3861,37 @@ describe('s89-m08 MIRROR INTEGRITY — the instrument proves it is byte-faithful
       if (now !== digest) changed.push(path.relative(REPO_ROOT, file));
     }
     expect(changed).toEqual([]);
-    // The mirror root is gitignored, so it must produce no porcelain entry of any kind — and it
-    // must not create `<repo>/tmp/` either: `tmp` is a PRIVATE_PATHS marker, and materialising one
-    // at runtime makes requiresPrivateEvidence read a staged public mirror as a private checkout,
-    // which turns every later suite's loud SKIP into a declaration-time THROW (measured: 13 suites).
-    const status = execFileSync('git', ['status', '--porcelain'], {
-      cwd: REPO_ROOT,
-      encoding: 'utf8',
-    });
-    const untrackedMarkers = status
-      .split('\n')
-      .map((line) => line.slice(3).trim())
-      .filter((file) => file.startsWith('tmp/') || file.startsWith('node_modules/'));
-    expect(untrackedMarkers).toEqual([]);
+    // Scratch placement is deliberately stricter than identity detection: avoid every mirror
+    // exclusion, including untracked leak guards, so a future tracking change stays harmless.
     expect(MIRROR_ROOT.startsWith(path.join(REPO_ROOT, 'tmp'))).toBe(false);
-    for (const marker of readMirrorExclusions().all) {
+    const exclusions = readMirrorExclusions().all;
+    for (const marker of exclusions) {
       expect(path.relative(REPO_ROOT, MIRROR_ROOT).split(path.sep)[0]).not.toBe(marker);
+    }
+    const realTemp = fs.realpathSync(os.tmpdir());
+    const isDescendant = (parent: string, candidate: string): boolean => {
+      const relative = path.relative(parent, candidate);
+      return (
+        relative.length > 0 &&
+        relative !== '..' &&
+        !relative.startsWith(`..${path.sep}`) &&
+        !path.isAbsolute(relative)
+      );
+    };
+    expect(externalScratchRoots.size).toBeGreaterThan(0);
+    for (const scratchRoot of externalScratchRoots) {
+      expect(isDescendant(realTemp, scratchRoot)).toBe(true);
+      expect(isDescendant(REPO_ROOT, scratchRoot)).toBe(false);
+      for (const marker of exclusions) {
+        expect(path.relative(REPO_ROOT, scratchRoot).split(path.sep)[0]).not.toBe(marker);
+      }
+    }
+    expect(externalCredentialPaths.size).toBeGreaterThan(0);
+    for (const credentialPath of externalCredentialPaths) {
+      expect(isDescendant(realTemp, credentialPath)).toBe(true);
+      expect(isDescendant(path.join(os.homedir(), '.config'), credentialPath)).toBe(false);
+      expect(externalCredentialModes.get(credentialPath)).toBe(0o600);
+      expect(externalCredentialResolutions.get(credentialPath)).toBe(credentialPath);
     }
   });
 });

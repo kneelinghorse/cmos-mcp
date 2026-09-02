@@ -233,7 +233,9 @@ describe('cmosDbHealth', () => {
         expect(result.success).toBe(false);
         expect(result.error?.code).toBe(CMOS_ERROR_CODES.CMOS_NOT_DETECTED);
         expect(result.error?.suggestion).toBeDefined();
-        expect(result.error?.suggestion).toContain('cmos/');
+        expect(result.error?.suggestion).toContain(
+          `cmos_project(action="init", projectRoot=${JSON.stringify(emptyDir)})`
+        );
       } finally {
         fs.rmSync(emptyDir, { recursive: true, force: true });
       }

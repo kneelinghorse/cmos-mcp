@@ -50,6 +50,19 @@ export interface SourceRef {
   readonly line: number;
 }
 
+/** Why one raw `params.<key>` read before the tool's entry call does or does not need preflight. */
+export type PreDispatchReadClassification =
+  | 'requires-preflight'
+  | 'safe-enum-discriminant'
+  | 'non-string-schema';
+
+/** One dispatcher-level params read, retained even when a rule proves it cannot throw. */
+export interface PreDispatchRead extends SourceRef {
+  readonly key: string;
+  readonly classification: PreDispatchReadClassification;
+  readonly reason: string;
+}
+
 /** A key excluded from the forwarding rules, with the RULE that excluded it. Never an allowlist. */
 export interface ExcludedKey extends SourceRef {
   readonly key: string;
@@ -132,6 +145,8 @@ export interface ToolModel {
    * publish `projectRoot` as inapplicable to every cmos_message action.
    */
   readonly routerScopeReadKeys: readonly string[];
+  /** Raw `params.<key>` reads in src/index.ts before this case reaches its entry call. */
+  readonly preDispatchReads: readonly PreDispatchRead[];
   readonly branches: readonly Branch[];
 }
 
@@ -143,6 +158,8 @@ export interface Unclassifiable extends SourceRef {
 
 export interface WalkResult {
   readonly tools: readonly ToolModel[];
+  /** Exported literal guard scope read from src/index.ts; malformed declarations are C failures. */
+  readonly preflightParams: readonly string[];
   readonly unclassifiable: readonly Unclassifiable[];
   /** Every @internal/underscore/outside-parameter-0 exclusion made anywhere in the walk. */
   readonly exclusions: readonly ExcludedKey[];
@@ -950,6 +967,537 @@ function walkBranch(
   return out;
 }
 
+interface DispatchEntry {
+  readonly call: ts.CallExpression;
+  readonly callee: ts.FunctionLikeDeclaration;
+  readonly clause: ts.CaseClause;
+  readonly paramsName: string;
+  readonly paramsDeclaration: ts.Identifier;
+}
+
+/**
+ * Read the exported literal that owns the dispatcher preflight's scope. A missing, hidden,
+ * computed, empty, duplicate, or non-string declaration is not an empty scope — it is a fact the
+ * walk cannot establish, so assertion C must fail it loudly.
+ */
+function readPreflightParams(sf: ts.SourceFile, ctx: Ctx): string[] {
+  const declarations: Array<{
+    statement: ts.VariableStatement;
+    declaration: ts.VariableDeclaration;
+  }> = [];
+  for (const statement of sf.statements) {
+    if (!ts.isVariableStatement(statement)) continue;
+    for (const declaration of statement.declarationList.declarations) {
+      if (ts.isIdentifier(declaration.name) && declaration.name.text === 'PREFLIGHT_PARAMS') {
+        declarations.push({ statement, declaration });
+      }
+    }
+  }
+
+  const fail = (node: ts.Node, detail: string): string[] => {
+    ctx.unclassifiable.push({
+      ...refOf(node, ctx.paths),
+      what: 'pre-dispatch PREFLIGHT_PARAMS is not an exported non-empty string-literal tuple',
+      detail,
+    });
+    return [];
+  };
+
+  if (declarations.length === 0) {
+    return fail(
+      sf,
+      'src/index.ts must export exactly one literal `PREFLIGHT_PARAMS = [...] as const`; no declaration was found.'
+    );
+  }
+  if (declarations.length !== 1) {
+    return fail(
+      declarations[0].declaration,
+      `found ${declarations.length} declarations; the guard scope must have one source of truth.`
+    );
+  }
+
+  const { statement, declaration } = declarations[0];
+  if ((statement.declarationList.flags & ts.NodeFlags.Const) === 0) {
+    return fail(declaration, 'PREFLIGHT_PARAMS must be declared with const.');
+  }
+  const exported = statement.modifiers?.some(
+    (modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword
+  );
+  if (!exported) {
+    return fail(
+      declaration,
+      'PREFLIGHT_PARAMS exists but is not exported, so the standing gate cannot share the shipped scope.'
+    );
+  }
+  if (!declaration.initializer) {
+    return fail(declaration, 'PREFLIGHT_PARAMS has no initializer.');
+  }
+
+  const initializer = unwrap(declaration.initializer);
+  if (!ts.isArrayLiteralExpression(initializer)) {
+    return fail(
+      declaration.initializer,
+      'PREFLIGHT_PARAMS must be an inline array literal; computed values make the scope unauditable.'
+    );
+  }
+  if (initializer.elements.length === 0) {
+    return fail(initializer, 'PREFLIGHT_PARAMS must not be empty.');
+  }
+
+  const values: string[] = [];
+  for (const element of initializer.elements) {
+    if (!ts.isStringLiteralLike(element)) {
+      return fail(element, 'every PREFLIGHT_PARAMS member must be a string literal.');
+    }
+    if (element.text.length === 0) {
+      return fail(element, 'PREFLIGHT_PARAMS members must not be empty strings.');
+    }
+    values.push(element.text);
+  }
+  if (new Set(values).size !== values.length) {
+    return fail(initializer, 'PREFLIGHT_PARAMS contains duplicate members.');
+  }
+  return values;
+}
+
+function enumStringsOf(schemaProperty: unknown): string[] {
+  if (!schemaProperty || typeof schemaProperty !== 'object') return [];
+  const enumValue = (schemaProperty as { enum?: unknown }).enum;
+  return Array.isArray(enumValue)
+    ? enumValue.filter((value): value is string => typeof value === 'string')
+    : [];
+}
+
+/** Strip wrappers that have no runtime effect on a value. Unlike `unwrap`, do not erase `await`. */
+function unwrapStatic(node: ts.Expression): ts.Expression {
+  let current = node;
+  for (;;) {
+    if (
+      ts.isSatisfiesExpression(current) ||
+      ts.isAsExpression(current) ||
+      ts.isParenthesizedExpression(current) ||
+      ts.isNonNullExpression(current)
+    ) {
+      current = current.expression;
+    } else {
+      return current;
+    }
+  }
+}
+
+/** Walk outward through wrappers that have no runtime effect on a value. */
+function outerStatic(node: ts.Expression): ts.Expression {
+  let current = node;
+  for (;;) {
+    const parent = current.parent;
+    if (
+      (ts.isSatisfiesExpression(parent) ||
+        ts.isAsExpression(parent) ||
+        ts.isParenthesizedExpression(parent) ||
+        ts.isNonNullExpression(parent)) &&
+      parent.expression === current
+    ) {
+      current = parent;
+    } else {
+      return current;
+    }
+  }
+}
+
+function isWithin(node: ts.Node, ancestor: ts.Node): boolean {
+  for (let current: ts.Node | undefined = node; current; current = current.parent) {
+    if (current === ancestor) return true;
+  }
+  return false;
+}
+
+/**
+ * The matched entry call is the end of the pre-dispatch boundary, but only for forwarding itself.
+ * A nested computation such as `entry(normalize(params))` still executes before entry and must not
+ * inherit a blanket exemption merely because it is lexically inside the call.
+ */
+function isDirectEntryParamsForward(node: ts.Node, entry: DispatchEntry): boolean {
+  if (!ts.isIdentifier(node)) return false;
+  const value = outerStatic(node);
+  if (entry.call.arguments.some((argument) => argument === value)) return true;
+
+  if (!ts.isSpreadAssignment(value.parent) || value.parent.expression !== value) return false;
+  const object = value.parent.parent;
+  if (!ts.isObjectLiteralExpression(object)) return false;
+  const objectArgument = outerStatic(object);
+  return entry.call.arguments.some((argument) => argument === objectArgument);
+}
+
+function preDispatchMutationKind(
+  read: ts.Expression
+): 'assignment' | 'update' | 'delete' | undefined {
+  let value: ts.Node = outerStatic(read);
+  let parent = value.parent;
+  if (
+    ts.isBinaryExpression(parent) &&
+    parent.left === value &&
+    parent.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+    parent.operatorToken.kind <= ts.SyntaxKind.LastAssignment
+  ) {
+    return 'assignment';
+  }
+  if (
+    (ts.isPrefixUnaryExpression(parent) || ts.isPostfixUnaryExpression(parent)) &&
+    parent.operand === value &&
+    (parent.operator === ts.SyntaxKind.PlusPlusToken ||
+      parent.operator === ts.SyntaxKind.MinusMinusToken)
+  ) {
+    return 'update';
+  }
+  if (ts.isDeleteExpression(parent) && parent.expression === value) return 'delete';
+
+  // Follow an assignment-pattern target outward: `({ action: params.action } = source)`,
+  // `[params.action] = source`, and their rest forms all write the same field as a simple `=`.
+  for (;;) {
+    if (ts.isPropertyAssignment(parent) && parent.initializer === value) {
+      value = parent;
+    } else if (
+      (ts.isSpreadAssignment(parent) || ts.isSpreadElement(parent)) &&
+      parent.expression === value
+    ) {
+      value = parent;
+    } else if (
+      ts.isObjectLiteralExpression(parent) &&
+      parent.properties.some((property) => property === value)
+    ) {
+      value = outerStatic(parent);
+    } else if (
+      ts.isArrayLiteralExpression(parent) &&
+      parent.elements.some((element) => element === value)
+    ) {
+      value = outerStatic(parent);
+    } else {
+      break;
+    }
+    parent = value.parent;
+  }
+
+  if (
+    ts.isBinaryExpression(parent) &&
+    parent.left === value &&
+    parent.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+    parent.operatorToken.kind <= ts.SyntaxKind.LastAssignment
+  ) {
+    return 'assignment';
+  }
+  if (
+    (ts.isForInStatement(parent) || ts.isForOfStatement(parent)) &&
+    parent.initializer === value
+  ) {
+    return 'assignment';
+  }
+  return undefined;
+}
+
+function isEntryParamsIdentifier(
+  node: ts.Node,
+  entry: DispatchEntry,
+  checker: ts.TypeChecker
+): boolean {
+  const declarationSymbol = checker.getSymbolAtLocation(entry.paramsDeclaration);
+  return (
+    declarationSymbol !== undefined &&
+    ts.isIdentifier(node) &&
+    node.text === entry.paramsName &&
+    checker.getSymbolAtLocation(node) === declarationSymbol
+  );
+}
+
+function entryParamKeyOf(
+  expression: ts.Expression,
+  entry: DispatchEntry,
+  checker: ts.TypeChecker
+): string | undefined {
+  const value = unwrapStatic(expression);
+  if (
+    ts.isPropertyAccessExpression(value) &&
+    isEntryParamsIdentifier(value.expression, entry, checker)
+  ) {
+    return value.name.text;
+  }
+  if (
+    ts.isElementAccessExpression(value) &&
+    isEntryParamsIdentifier(value.expression, entry, checker) &&
+    value.argumentExpression &&
+    ts.isStringLiteralLike(value.argumentExpression)
+  ) {
+    return value.argumentExpression.text;
+  }
+  return undefined;
+}
+
+function strictComparisonProof(
+  condition: ts.Expression,
+  key: string,
+  entry: DispatchEntry,
+  checker: ts.TypeChecker,
+  enumValues: readonly string[]
+): { readonly operator: ts.SyntaxKind } | undefined {
+  const value = unwrapStatic(condition);
+  if (
+    !ts.isBinaryExpression(value) ||
+    (value.operatorToken.kind !== ts.SyntaxKind.EqualsEqualsEqualsToken &&
+      value.operatorToken.kind !== ts.SyntaxKind.ExclamationEqualsEqualsToken)
+  ) {
+    return undefined;
+  }
+
+  const left = unwrapStatic(value.left);
+  const right = unwrapStatic(value.right);
+  const matches = (read: ts.Expression, literal: ts.Expression): boolean =>
+    entryParamKeyOf(read, entry, checker) === key &&
+    ts.isStringLiteralLike(literal) &&
+    enumValues.includes(literal.text);
+  if (!matches(left, right) && !matches(right, left)) return undefined;
+  return { operator: value.operatorToken.kind };
+}
+
+function typeofStringProof(
+  condition: ts.Expression,
+  key: string,
+  entry: DispatchEntry,
+  checker: ts.TypeChecker
+): { readonly operator: ts.SyntaxKind } | undefined {
+  const value = unwrapStatic(condition);
+  if (
+    !ts.isBinaryExpression(value) ||
+    (value.operatorToken.kind !== ts.SyntaxKind.EqualsEqualsEqualsToken &&
+      value.operatorToken.kind !== ts.SyntaxKind.ExclamationEqualsEqualsToken)
+  ) {
+    return undefined;
+  }
+
+  const left = unwrapStatic(value.left);
+  const right = unwrapStatic(value.right);
+  const matches = (typeQuery: ts.Expression, literal: ts.Expression): boolean =>
+    ts.isTypeOfExpression(typeQuery) &&
+    entryParamKeyOf(typeQuery.expression, entry, checker) === key &&
+    ts.isStringLiteralLike(literal) &&
+    literal.text === 'string';
+  if (!matches(left, right) && !matches(right, left)) return undefined;
+  return { operator: value.operatorToken.kind };
+}
+
+/** Whether this truth arm proves the raw wire value is a string without trusting static types. */
+function conditionProvesString(
+  condition: ts.Expression,
+  whenTrue: boolean,
+  key: string,
+  entry: DispatchEntry,
+  checker: ts.TypeChecker,
+  enumValues: readonly string[]
+): boolean {
+  const value = unwrapStatic(condition);
+  if (ts.isPrefixUnaryExpression(value) && value.operator === ts.SyntaxKind.ExclamationToken) {
+    return conditionProvesString(value.operand, !whenTrue, key, entry, checker, enumValues);
+  }
+
+  const proof =
+    strictComparisonProof(value, key, entry, checker, enumValues) ??
+    typeofStringProof(value, key, entry, checker);
+  if (!proof) return false;
+  return proof.operator === ts.SyntaxKind.EqualsEqualsEqualsToken ? whenTrue : !whenTrue;
+}
+
+/** A case arm is safe only when every clause that can fall through to it proves an enum string. */
+function isSafeEnumSwitchArm(
+  read: ts.Expression,
+  key: string,
+  entry: DispatchEntry,
+  checker: ts.TypeChecker,
+  enumValues: readonly string[]
+): boolean {
+  let clause: ts.CaseOrDefaultClause | undefined;
+  for (let current: ts.Node | undefined = read.parent; current; current = current.parent) {
+    if (ts.isFunctionLike(current)) return false;
+    if (ts.isCaseClause(current) || ts.isDefaultClause(current)) {
+      clause = current;
+      break;
+    }
+    if (current === entry.clause) return false;
+  }
+  if (!clause || !ts.isCaseClause(clause)) return false;
+  const caseBlock = clause.parent;
+  if (!ts.isCaseBlock(caseBlock)) return false;
+  const statement = caseBlock.parent;
+  if (
+    !ts.isSwitchStatement(statement) ||
+    entryParamKeyOf(statement.expression, entry, checker) !== key
+  ) {
+    return false;
+  }
+
+  const target = caseBlock.clauses.indexOf(clause);
+  return caseBlock.clauses.slice(0, target + 1).every((candidate) => {
+    if (!ts.isCaseClause(candidate)) return false;
+    const expression = unwrapStatic(candidate.expression);
+    return ts.isStringLiteralLike(expression) && enumValues.includes(expression.text);
+  });
+}
+
+/** A string enum read is safe only when runtime syntax proves the discriminator is a string. */
+function isSafeEnumDiscriminantRead(
+  read: ts.Expression,
+  key: string,
+  schemaProperty: unknown,
+  entry: DispatchEntry,
+  checker: ts.TypeChecker
+): boolean {
+  const enumValues = enumStringsOf(schemaProperty);
+  if (enumValues.length === 0) return false;
+
+  const outer = outerStatic(read);
+  const parent = outer.parent;
+  if (
+    ts.isBinaryExpression(parent) &&
+    (parent.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken ||
+      parent.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsEqualsToken)
+  ) {
+    const other =
+      parent.left === outer ? parent.right : parent.right === outer ? parent.left : undefined;
+    if (other) {
+      const unwrapped = unwrapStatic(other);
+      if (ts.isStringLiteralLike(unwrapped) && enumValues.includes(unwrapped.text)) return true;
+    }
+  }
+
+  if (ts.isTypeOfExpression(parent) && parent.expression === outer) return true;
+  if (ts.isSwitchStatement(parent) && parent.expression === outer) return true;
+
+  for (let current: ts.Node | undefined = read.parent; current; current = current.parent) {
+    if (ts.isFunctionLike(current)) return false;
+    if (ts.isIfStatement(current)) {
+      if (
+        isWithin(read, current.thenStatement) &&
+        conditionProvesString(current.expression, true, key, entry, checker, enumValues)
+      ) {
+        return true;
+      }
+      if (
+        current.elseStatement &&
+        isWithin(read, current.elseStatement) &&
+        conditionProvesString(current.expression, false, key, entry, checker, enumValues)
+      ) {
+        return true;
+      }
+    } else if (ts.isConditionalExpression(current)) {
+      if (
+        isWithin(read, current.whenTrue) &&
+        conditionProvesString(current.condition, true, key, entry, checker, enumValues)
+      ) {
+        return true;
+      }
+      if (
+        isWithin(read, current.whenFalse) &&
+        conditionProvesString(current.condition, false, key, entry, checker, enumValues)
+      ) {
+        return true;
+      }
+    }
+    if (current === entry.clause) break;
+  }
+
+  return isSafeEnumSwitchArm(read, key, entry, checker, enumValues);
+}
+
+function schemaTypeOf(schemaProperty: unknown): unknown {
+  return schemaProperty && typeof schemaProperty === 'object'
+    ? (schemaProperty as { type?: unknown }).type
+    : undefined;
+}
+
+/**
+ * Read raw dispatcher params accesses up to and including the matched entry call. Reads after the
+ * entry call belong to response formatting, not the pre-dispatch boundary. Dynamic element access
+ * is reported to C instead of disappearing from a name-based set.
+ */
+function readPreDispatchReads(
+  entry: DispatchEntry,
+  schemaProperties: Record<string, unknown>,
+  ctx: Ctx
+): PreDispatchRead[] {
+  const reads: PreDispatchRead[] = [];
+  const cutoff = entry.call.getEnd();
+  const sf = entry.clause.getSourceFile();
+
+  const record = (node: ts.Expression, key: string): void => {
+    const schemaProperty = schemaProperties[key];
+    const mutationKind = preDispatchMutationKind(node);
+    if (mutationKind) {
+      ctx.unclassifiable.push({
+        ...refOf(node, ctx.paths),
+        what: `pre-dispatch params field mutation for ${entry.clause.expression.getText()}`,
+        detail:
+          `${mutationKind} of params.${key} invalidates any earlier runtime string proof; ` +
+          'the gate does not model mutable field flow, so the write must be removed or explicitly modeled.',
+      });
+    }
+    let classification: PreDispatchReadClassification;
+    let reason: string;
+    if (schemaTypeOf(schemaProperty) !== 'string') {
+      classification = 'non-string-schema';
+      reason = 'the published top-level schema does not declare this key as type:string';
+    } else if (isSafeEnumDiscriminantRead(node, key, schemaProperty, entry, ctx.checker)) {
+      classification = 'safe-enum-discriminant';
+      reason =
+        'a published string enum is protected by a runtime strict comparison, typeof guard, or switch case';
+    } else {
+      classification = 'requires-preflight';
+      reason =
+        'published type:string read before entry without a demonstrated runtime narrowing rule';
+    }
+    reads.push({ ...refOf(node, ctx.paths), key, classification, reason });
+  };
+
+  const visit = (node: ts.Node): void => {
+    if (node.getStart(sf) > cutoff) return;
+    if (
+      ts.isPropertyAccessExpression(node) &&
+      isEntryParamsIdentifier(node.expression, entry, ctx.checker)
+    ) {
+      record(node, node.name.text);
+    } else if (
+      ts.isElementAccessExpression(node) &&
+      isEntryParamsIdentifier(node.expression, entry, ctx.checker)
+    ) {
+      const argument = node.argumentExpression;
+      if (argument && ts.isStringLiteralLike(argument)) {
+        record(node, argument.text);
+      } else {
+        ctx.unclassifiable.push({
+          ...refOf(node, ctx.paths),
+          what: `dynamic pre-dispatch params access for ${entry.clause.expression.getText()}`,
+          detail:
+            'the dispatcher reads params through a non-literal element key before entry; the walk cannot map it to a published schema property.',
+        });
+      }
+    } else if (
+      isEntryParamsIdentifier(node, entry, ctx.checker) &&
+      !(ts.isVariableDeclaration(node.parent) && node.parent.name === node) &&
+      !(
+        (ts.isPropertyAccessExpression(node.parent) || ts.isElementAccessExpression(node.parent)) &&
+        node.parent.expression === node
+      ) &&
+      !isDirectEntryParamsForward(node, entry)
+    ) {
+      ctx.unclassifiable.push({
+        ...refOf(node, ctx.paths),
+        what: `unsupported pre-dispatch params value flow for ${entry.clause.expression.getText()}`,
+        detail:
+          'the dispatcher aliases, destructures, spreads, or otherwise passes the whole params value before entry; the walk follows only direct literal-key reads, so this value flow must be made explicit or taught to the gate.',
+      });
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(entry.clause);
+  return reads;
+}
+
 /**
  * Read the REAL tool→entry-function map out of the `executeMissionProtocolTool` switch in
  * src/index.ts. Deriving it (rather than configuring it here) is what makes a newly-registered
@@ -958,8 +1506,8 @@ function walkBranch(
 function readDispatchMap(
   program: ts.Program,
   ctx: Ctx
-): Map<string, { call: ts.CallExpression; callee: ts.FunctionLikeDeclaration }> {
-  const map = new Map<string, { call: ts.CallExpression; callee: ts.FunctionLikeDeclaration }>();
+): { entries: Map<string, DispatchEntry>; preflightParams: string[] } {
+  const map = new Map<string, DispatchEntry>();
   const sf = program.getSourceFile(ctx.paths.indexTs);
   if (!sf) {
     ctx.unclassifiable.push({
@@ -968,8 +1516,10 @@ function readDispatchMap(
       what: 'dispatch source file missing from the program',
       detail: `${ctx.paths.indexTs} is not in the ts.Program; the tool→entry map cannot be derived.`,
     });
-    return map;
+    return { entries: map, preflightParams: [] };
   }
+
+  const preflightParams = readPreflightParams(sf, ctx);
 
   let dispatchFn: ts.FunctionLikeDeclaration | undefined;
   const findFn = (node: ts.Node): void => {
@@ -984,11 +1534,11 @@ function readDispatchMap(
       what: `${DISPATCH_FN} not found`,
       detail: 'the MCP dispatch function was renamed or moved; the derived map is unavailable.',
     });
-    return map;
+    return { entries: map, preflightParams };
   }
 
   const sw = findToolNameSwitch(dispatchFn);
-  if (!sw) return map;
+  if (!sw) return { entries: map, preflightParams };
 
   for (const clause of sw.caseBlock.clauses) {
     if (!ts.isCaseClause(clause) || !ts.isStringLiteralLike(clause.expression)) continue;
@@ -1005,11 +1555,19 @@ function readDispatchMap(
     // rather than name equality, because cmos_agent_onboard's handler widens the cast type
     // (`InternalCmosAgentOnboardParams extends CmosAgentOnboardParams`).
     let castType: ts.Type | undefined;
+    let paramsName: string | undefined;
+    let paramsDeclaration: ts.Identifier | undefined;
     const findCast = (n: ts.Node): void => {
       if (castType) return;
       if (ts.isVariableDeclaration(n) && n.name.getText() === 'params' && n.initializer) {
         const init = n.initializer;
-        if (ts.isAsExpression(init)) castType = ctx.checker.getTypeFromTypeNode(init.type);
+        if (ts.isAsExpression(init)) {
+          castType = ctx.checker.getTypeFromTypeNode(init.type);
+          if (ts.isIdentifier(n.name)) {
+            paramsName = n.name.text;
+            paramsDeclaration = n.name;
+          }
+        }
       }
       ts.forEachChild(n, findCast);
     };
@@ -1046,9 +1604,18 @@ function readDispatchMap(
     const entryCall = matches[0];
     const callee = declarationOf(entryCall, ctx.checker, ctx.paths);
     if (!callee) continue;
-    map.set(toolName, { call: entryCall, callee });
+    if (!paramsName || !paramsDeclaration) {
+      ctx.unclassifiable.push({
+        ...refOf(clause, ctx.paths),
+        what: `pre-dispatch params binding unavailable for ${toolName}`,
+        detail:
+          'the case entry cast did not bind an identifier the pre-dispatch read arm can follow.',
+      });
+      continue;
+    }
+    map.set(toolName, { call: entryCall, callee, clause, paramsName, paramsDeclaration });
   }
-  return map;
+  return { entries: map, preflightParams };
 }
 
 /** Top-level property names on a tool definition's published JSON inputSchema. */
@@ -1106,7 +1673,7 @@ export function walkRouterParams(opts: WalkOptions): WalkResult {
   const tools: ToolModel[] = [];
 
   for (const def of opts.toolDefinitions) {
-    const entry = dispatch.get(def.name);
+    const entry = dispatch.entries.get(def.name);
     if (!entry) {
       ctx.unclassifiable.push({
         file: path.relative(paths.repoRoot, paths.indexTs),
@@ -1118,6 +1685,7 @@ export function walkRouterParams(opts: WalkOptions): WalkResult {
     }
 
     const { callee } = entry;
+    const preDispatchReads = readPreDispatchReads(entry, def.inputSchema?.properties ?? {}, ctx);
     const routerParamName = callee.parameters[0]?.name.getText() ?? 'params';
     const entryRef = { ...refOf(callee, paths), fn: def.name };
     // The SAME three exclusion rules apply here as at a delegated call. Without this a MONOLITHIC
@@ -1193,12 +1761,14 @@ export function walkRouterParams(opts: WalkOptions): WalkResult {
       inputSchemaKeys: inputSchemaTopLevelKeys(def),
       entryParamKeys,
       routerScopeReadKeys,
+      preDispatchReads,
       branches,
     });
   }
 
   return {
     tools,
+    preflightParams: dispatch.preflightParams,
     unclassifiable: ctx.unclassifiable,
     exclusions: ctx.exclusions,
     nonDelegatingCalls: ctx.nonDelegatingCalls,

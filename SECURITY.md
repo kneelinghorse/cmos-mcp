@@ -6,7 +6,10 @@ If something here does not match the code, that is a bug in this document — pl
 
 CMOS-MCP is a **local-first** MCP server. The default, fully-supported mode is: a stdio server running
 on your machine, reading and writing a single SQLite file in your project. Nothing listens on a
-network port. The optional dashboard integration is off unless you configure it.
+network port. Ordinary local-only operations do not contact the dashboard. Dashboard-backed tool
+calls can, and startup may conditionally recover a missing project key when a registered project and
+usable stored user credential make that recovery possible. Authentication bootstrap can use the
+baked default host without an environment setting.
 
 ## Reporting a vulnerability
 
@@ -30,15 +33,23 @@ network surface.
 
 CMOS makes outbound requests in exactly two situations, both optional:
 
-1. **The dashboard**, only when you set `CMOS_DASHBOARD_URL` (or use the baked default
-   `https://cmos.aquex.ai`, [dashboard-client.ts:36](src/tools/cmos/dashboard-client.ts)). Used by
-   `cmos_message`, `cmos_auth`, and `cmos_db` sync actions. With no dashboard configured and no
-   credentials, these degrade gracefully and nothing is sent.
+1. **Dashboard-backed workflows and conditional startup key recovery.** For normal MCP calls, the
+   effective URL resolves from `CMOS_DASHBOARD_URL`, then the baked `https://cmos.aquex.ai` default;
+   internal callers and tests may supply an explicit override
+   ([dashboard-client.ts:36](src/tools/cmos/dashboard-client.ts)). Once a project is initialized and
+   resolved, invoking `cmos_auth(action="login")` or `login_init` deliberately contacts that
+   effective host even when no URL environment variable or credential exists. `login_complete`
+   polls only when supplied a `deviceCode`; without one it returns local `MISSING_PARAMETER` and
+   sends nothing. Other conditional dashboard-backed paths include messaging and its onboard/review
+   summaries, status/sync health, database sync/backfill, sprint carry-forward, and startup recovery
+   of a missing project key when a registered project and usable user-scoped credential already
+   exist. The baked address alone does not make ordinary local-only operations send project data.
 2. **HuggingFace (`huggingface.co`)**, on first use of semantic retrieval, to download the embedding
    model `Xenova/all-MiniLM-L6-v2` (~25 MB, [embedding-pipeline.ts:38](src/intelligence/embedding-pipeline.ts))
    and, for token counting, `Xenova/claude-tokenizer` ([tokenizer-bootstrap.ts:70](src/intelligence/tokenizer-bootstrap.ts)).
-   After the first download the models are cached locally. You can force **fully offline** operation
-   with `CMOS_OFFLINE_EMBEDDINGS=1` (and optionally a pre-seeded `CMOS_MODEL_CACHE_DIR`): the loader
+   After the first download the models are cached locally. You can force **embedding-model loading
+   to remain offline** with `CMOS_OFFLINE_EMBEDDINGS=1` (and optionally a pre-seeded
+   `CMOS_MODEL_CACHE_DIR`): the loader
    sets `env.allowRemoteModels=false` before loading
    ([transformers-offline-env.ts](src/intelligence/transformers-offline-env.ts)), and if the model is
    not present locally the vector arm degrades to BM25-only retrieval instead of blocking on a fetch
@@ -47,10 +58,11 @@ CMOS makes outbound requests in exactly two situations, both optional:
 
 ## Authentication model
 
-Dashboard authentication is **optional** and, when used, is resolved by
-`DashboardClient.fromEnvForProject()` in this priority order
-([dashboard-client.ts](src/tools/cmos/dashboard-client.ts)), surfaced as an `authTier`
-([auth-state.ts:39](src/auth/auth-state.ts), `deriveAuthTier` at
+Dashboard authentication is **optional**. Device-code bootstrap uses the effective dashboard URL
+described above and does not require an existing credential. After bootstrap, credential-bearing
+project clients are constructed by `DashboardClient.fromEnvForProject()`
+([dashboard-client.ts](src/tools/cmos/dashboard-client.ts)); the selected credential source is
+surfaced as an `authTier` ([auth-state.ts:39](src/auth/auth-state.ts), `deriveAuthTier` at
 [auth-state.ts:209](src/auth/auth-state.ts)):
 
 - **`device-code` (preferred).** RFC 8628 device-code flow via `cmos_auth(action="login_init")` +
@@ -60,8 +72,9 @@ Dashboard authentication is **optional** and, when used, is resolved by
   server emits a one-time `[WARN]` nudging migration to device-code
   ([dashboard-client.ts](src/tools/cmos/dashboard-client.ts) `warnLegacyAuth`).
 - **`password-fallback`.** Email + password login. Also emits the migration `[WARN]`.
-- **`none`.** No credentials — local-only operation; dashboard features return a graceful
-  "not configured" error.
+- **`none`.** No stored credential — ordinary local work remains local and credential-requiring
+  dashboard operations refuse gracefully. Credential bootstrap remains available: `login` /
+  `login_init` require no existing key and may contact the baked dashboard host.
 
 ## Data & credentials at rest
 

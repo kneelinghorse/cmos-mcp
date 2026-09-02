@@ -70,6 +70,7 @@ import {
   resolveSenderContext,
   SenderResolutionError,
   SERVER_INSTALL_ROOT,
+  type ResolutionCandidate,
   type SenderContext,
 } from './intelligence/sender-context';
 import {
@@ -124,8 +125,10 @@ import {
   resolveProjectRoot,
   CMOS_PROJECT_ROOT_ENV,
   CMOS_ERROR_CODES,
+  CmosErrors,
 } from './tools/cmos';
 import type {
+  CmosToolError,
   CmosMissionParams,
   CmosMissionTransitionParams,
   CmosSprintParams,
@@ -142,6 +145,7 @@ import type {
   CmosMessageParams,
   CmosReviewParams,
 } from './tools/cmos';
+import { findWrongTypedStringParam } from './tools/cmos/param-type-guard';
 import { TokenCounter } from './intelligence/token-counters';
 import { SupportedModel } from './intelligence/types';
 import { CMOS_SCHEMA_VERSION } from './tools/cmos/schema';
@@ -231,6 +235,42 @@ export interface ToolDefinition {
  */
 export function getToolDefinitions(): readonly ToolDefinition[] {
   return [...(CMOS_TOOL_DEFINITIONS as unknown as ToolDefinition[])];
+}
+
+/**
+ * Parameters whose malformed JSON type can throw before a CMOS handler gets a chance to return
+ * its normal structured validation error. This boundary list is intentionally unconditional:
+ * every published tool accepts `projectRoot` as a string, and resolution reads it before the
+ * action router for most tools.
+ */
+export const PREFLIGHT_PARAMS = ['projectRoot'] as const;
+
+interface PublishedSchemaProperty {
+  readonly enum?: readonly unknown[];
+}
+
+interface PublishedToolSchema {
+  readonly properties?: Readonly<Record<string, PublishedSchemaProperty | undefined>>;
+}
+
+/** Return a known, schema-derived refusal before sender resolution; unknown tools pass through. */
+function preflightMissionProtocolTool(name: string, args: unknown): CmosToolError | null {
+  const definition = (CMOS_TOOL_DEFINITIONS as readonly ToolDefinition[]).find(
+    (candidate) => candidate.name === name
+  );
+  if (!definition) return null;
+
+  const actionProperty = (definition.inputSchema as PublishedToolSchema).properties?.['action'];
+  const availableActions = actionProperty?.enum;
+  if (Array.isArray(availableActions)) {
+    const providedAction =
+      args && typeof args === 'object' ? (args as Record<string, unknown>)['action'] : undefined;
+    if (!availableActions.includes(providedAction)) {
+      return CmosErrors.invalidAction(name, providedAction, availableActions.map(String));
+    }
+  }
+
+  return findWrongTypedStringParam(definition.inputSchema, PREFLIGHT_PARAMS, args);
 }
 
 export function summarizeValue(value: unknown): JsonValue {
@@ -412,6 +452,12 @@ export function registerToolHandlers(
       return attachProjectIdentityDisclosures(captured.value, captured.projectIdentityDisclosures);
     } catch (error) {
       const originalError = unwrapCapturedToolCallError(error);
+      if (originalError instanceof SenderResolutionError) {
+        return attachProjectIdentityDisclosures(
+          buildKnownToolErrorResult(await classifySenderResolutionError(originalError)),
+          projectIdentityDisclosuresForError(error)
+        );
+      }
       // Sprint 74 m03: a tool HANDLER that throws an unhandled exception (a
       // write-path crash — e.g. cmos_sprint(complete)/cmos_session(capture)
       // hitting a store-specific failure) is a tool-EXECUTION failure, not a
@@ -420,42 +466,12 @@ export function registerToolHandlers(
       // never a bare JSON-RPC -32603 that swallows the cause (aquex.ai aa124685).
       // Genuine protocol errors (McpError: unknown tool, uninitialized context)
       // keep their JSON-RPC error shape — they already carry a clear message.
-      if (!(originalError instanceof McpError)) {
-        return attachProjectIdentityDisclosures(
-          buildToolExecutionErrorResult(name, args, originalError),
-          projectIdentityDisclosuresForError(error)
-        );
+      if (originalError instanceof McpError) {
+        throw originalError;
       }
-
-      const sanitizedArgs = sanitizeArgs(args);
-      const data: Record<string, JsonValue> = {
-        tool: name,
-      };
-      if (sanitizedArgs) {
-        data.args = sanitizedArgs;
-      }
-
-      const missionError = ErrorHandler.handle(
-        originalError,
-        'server.execute_tool',
-        {
-          module: 'server',
-          data,
-        },
-        {
-          rethrow: false,
-          userMessage: 'Tool execution failed. Please check inputs and try again.',
-        }
-      );
-
-      const publicError = ErrorHandler.toPublicError(missionError);
-      const correlationFragment = publicError.correlationId
-        ? ` (correlationId=${publicError.correlationId})`
-        : '';
-
-      throw new McpError(
-        ErrorCode.InternalError,
-        `Tool execution failed${correlationFragment}: ${publicError.message}`
+      return attachProjectIdentityDisclosures(
+        buildToolExecutionErrorResult(name, args, originalError),
+        projectIdentityDisclosuresForError(error)
       );
     }
   });
@@ -499,24 +515,30 @@ export function buildToolExecutionErrorResult(
       ? missionError.message.trim()
       : 'unexpected internal error';
 
-  const structured = {
-    success: false as const,
-    error: {
-      code: CMOS_ERROR_CODES.TOOL_EXECUTION_ERROR,
-      message: `The '${toolName}' tool failed with an unhandled internal error: ${detail}`,
-      // s89-m08 CLASS 3. This used to open "This is an internal error, not an input-validation
-      // problem". That is a UNIVERSAL claim about the CAUSE, made by a catch-all boundary that
-      // has only an unhandled exception and a correlationId and cannot know it — and it was
-      // measurably FALSE for the whole wrong-typed-parameter class (42 triples), where the cause
-      // was exactly an input-validation problem. It also prescribed "retry the call", a loop with
-      // no exit for any deterministic fault. Say only what this frame knows.
-      suggestion: `The tool raised an exception this boundary did not expect, so the cause is not classified here; the message above is the raw failure. If it repeats with the same inputs, it is deterministic — capture the tool inputs and report this${correlationSuffix}.`,
-    },
+  const structuredError: CmosToolError = {
+    code: CMOS_ERROR_CODES.TOOL_EXECUTION_ERROR,
+    message: `The '${toolName}' tool failed with an unhandled internal error: ${detail}`,
+    // s89-m08 CLASS 3. This used to open "This is an internal error, not an input-validation
+    // problem". That is a UNIVERSAL claim about the CAUSE, made by a catch-all boundary that
+    // has only an unhandled exception and a correlationId and cannot know it — and it was
+    // measurably FALSE for the whole wrong-typed-parameter class (42 triples), where the cause
+    // was exactly an input-validation problem. It also prescribed "retry the call", a loop with
+    // no exit for any deterministic fault. Say only what this frame knows.
+    suggestion: `The tool raised an exception this boundary did not expect, so the cause is not classified here; the message above is the raw failure. If it repeats with the same inputs, it is deterministic — capture the tool inputs and report this${correlationSuffix}.`,
   };
+  return buildKnownToolErrorResult(structuredError);
+}
 
+/**
+ * Render a refusal whose cause is already known. Unlike the catch-all execution-error boundary,
+ * this helper performs no logging and creates no correlation id: expected client/setup faults are
+ * not internal incidents.
+ */
+export function buildKnownToolErrorResult(error: CmosToolError): CallToolResult {
+  const structured = { success: false as const, error };
+  const suggestion = error.suggestion ? `\nSuggestion: ${error.suggestion}` : '';
   const text =
-    `Tool execution error [${structured.error.code}]: ${structured.error.message}\n` +
-    `Suggestion: ${structured.error.suggestion}\n\n` +
+    `Tool execution error [${error.code}]: ${error.message}${suggestion}\n\n` +
     JSON.stringify(structured, null, 2);
 
   return {
@@ -534,6 +556,135 @@ function extractActionArg(args: unknown): string | undefined {
     return typeof value === 'string' ? value : undefined;
   }
   return undefined;
+}
+
+function senderEvidenceMessage(error: SenderResolutionError, evidence: string): string {
+  return `${error.message} Resolution evidence: ${evidence}`;
+}
+
+function isDatabaseFailure(reason: string): boolean {
+  return reason === 'failed to open CMOS database' || reason.startsWith('DB read error:');
+}
+
+function isIdentityFailure(reason: string): boolean {
+  return (
+    reason.includes('dashboard_project_id') ||
+    reason.includes('project_identity.cmos_address') ||
+    reason.includes('cmos://unknown/')
+  );
+}
+
+async function classifyConcreteSenderCandidate(
+  error: SenderResolutionError,
+  candidate: ResolutionCandidate
+): Promise<CmosToolError> {
+  const reason = candidate.rejectReason ?? `${candidate.source} candidate was not acceptable`;
+  const projectRoot = candidate.projectRoot;
+
+  if (isDatabaseFailure(reason) && projectRoot) {
+    return CmosErrors.dbConnectionFailed(
+      path.join(projectRoot, 'cmos', 'db', 'cmos.sqlite'),
+      reason
+    );
+  }
+
+  if (reason === 'no CMOS database at projectRoot' && projectRoot) {
+    // validateProject intentionally records one reason for both absence classes. Re-observe the
+    // filesystem without the detector cache so the public error does not guess which one occurred.
+    try {
+      const detection = await CmosDetector.getInstance().detect(projectRoot, {
+        forceRefresh: true,
+      });
+      return detection.hasCmosDirectory
+        ? CmosErrors.dbNotFound(
+            path.join(detection.cmosDirectory, 'db', 'cmos.sqlite'),
+            projectRoot
+          )
+        : CmosErrors.cmosNotDetected(projectRoot);
+    } catch (detectionError) {
+      const detail =
+        detectionError instanceof Error ? detectionError.message : String(detectionError);
+      return CmosErrors.senderUnresolvable(
+        senderEvidenceMessage(
+          error,
+          `${reason}; filesystem re-observation failed for '${projectRoot}': ${detail}`
+        ),
+        error.code
+      );
+    }
+  }
+
+  return CmosErrors.senderUnresolvable(senderEvidenceMessage(error, reason), error.code);
+}
+
+/**
+ * Classify the resolver's recorded evidence without pre-resolving or repeating identity reads.
+ * Only the ambiguous "no CMOS database" reason needs a forced detector observation to distinguish
+ * a missing cmos/ directory from a present cmos/ directory whose SQLite file is absent.
+ */
+export async function classifySenderResolutionError(
+  error: SenderResolutionError
+): Promise<CmosToolError> {
+  const explicit = error.candidates.find((candidate) => candidate.source === 'explicit');
+  if (explicit) {
+    // A caller-supplied root is the highest-trust evidence. Do not let a later registry ambiguity
+    // rewrite a concrete wrong-root diagnosis into a generic sender ambiguity.
+    return classifyConcreteSenderCandidate(error, explicit);
+  }
+
+  const mcpRoots = error.candidates.filter((candidate) => candidate.source === 'mcp-roots');
+  if (mcpRoots.length > 1) {
+    const evidence = mcpRoots
+      .map(
+        (candidate) =>
+          `${candidate.projectRoot ?? '<unknown>'}: ${candidate.rejectReason ?? 'not acceptable'}`
+      )
+      .join('; ');
+    return CmosErrors.senderUnresolvable(
+      senderEvidenceMessage(error, `multiple MCP roots were rejected (${evidence})`),
+      error.code
+    );
+  }
+  if (mcpRoots.length === 1) {
+    return classifyConcreteSenderCandidate(error, mcpRoots[0]);
+  }
+
+  const cwd = error.candidates.find((candidate) => candidate.source === 'cwd');
+  if (
+    cwd?.rejectReason &&
+    (isDatabaseFailure(cwd.rejectReason) ||
+      isIdentityFailure(cwd.rejectReason) ||
+      cwd.rejectReason.includes('cwd-vs-SERVER_INSTALL_ROOT guard'))
+  ) {
+    return classifyConcreteSenderCandidate(error, cwd);
+  }
+
+  const registry = error.candidates.find((candidate) => candidate.source === 'registry-singleton');
+  if (
+    registry?.rejectReason &&
+    ((registry.projectRoot &&
+      (registry.rejectReason === 'no CMOS database at projectRoot' ||
+        isDatabaseFailure(registry.rejectReason) ||
+        isIdentityFailure(registry.rejectReason))) ||
+      registry.rejectReason.includes('auto-pick only allowed when size === 1') ||
+      registry.rejectReason.startsWith('registry error:'))
+  ) {
+    return classifyConcreteSenderCandidate(error, registry);
+  }
+
+  if (cwd) return classifyConcreteSenderCandidate(error, cwd);
+  if (registry?.projectRoot) return classifyConcreteSenderCandidate(error, registry);
+
+  const trace = error.candidates
+    .map(
+      (candidate) =>
+        `${candidate.source}${candidate.projectRoot ? ` (${candidate.projectRoot})` : ''}: ${candidate.rejectReason ?? 'not acceptable'}`
+    )
+    .join('; ');
+  return CmosErrors.senderUnresolvable(
+    senderEvidenceMessage(error, trace || 'the resolver supplied no candidate trace'),
+    error.code
+  );
 }
 
 /** Attach request-local fallback-identity disclosures to both MCP answer channels. */
@@ -588,17 +739,37 @@ export async function executeMissionProtocolTool(
       );
       return attachProjectIdentityDisclosures(captured.value, captured.projectIdentityDisclosures);
     } catch (error) {
-      // This exported function historically throws the original protocol/handler value. The
-      // registered CallTool boundary owns the unique disclosure carrier; direct callers retain
-      // the established McpError instanceof/code contract.
-      throw unwrapCapturedToolCallError(error);
+      const originalError = unwrapCapturedToolCallError(error);
+      if (originalError instanceof SenderResolutionError) {
+        return attachProjectIdentityDisclosures(
+          buildKnownToolErrorResult(await classifySenderResolutionError(originalError)),
+          projectIdentityDisclosuresForError(error)
+        );
+      }
+      // Direct callers retain the established McpError instanceof/code contract. Known sender
+      // setup refusals above are the deliberate exception: they now use the same structured
+      // result and disclosure carrier as the registered CallTool boundary.
+      throw originalError;
     }
   }
 
-  // Sprint 78 m04 (FORK-5): read-only review-agent guard. Runs BEFORE the switch —
-  // and therefore before any resolveToolSenderContext / DB open — so a blocked write
-  // opens no DB and mutates no row. Strict no-op unless CMOS_AGENT_ROLE=review; then
-  // any write-classified action is hard-rejected as a structured isError result.
+  // Client/schema failures and protocol method lookup precede the authorization guard: neither can
+  // mutate state, and they retain INVALID_ACTION / MethodNotFound even in a review-role process.
+  const definitionExists = (CMOS_TOOL_DEFINITIONS as readonly ToolDefinition[]).some(
+    (definition) => definition.name === name
+  );
+  if (!definitionExists) {
+    throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
+  }
+
+  const preflightError = preflightMissionProtocolTool(name, args);
+  if (preflightError) {
+    return buildKnownToolErrorResult(preflightError);
+  }
+
+  // Sprint 78 m04 (FORK-5): read-only review-agent guard. It still runs before the switch and any
+  // resolveToolSenderContext / DB open, so a blocked valid write opens no DB and mutates no row.
+  // Strict no-op unless CMOS_AGENT_ROLE=review; then write-classified calls are hard-rejected.
   try {
     assertReadOnlyAgentAllowed(name, extractActionArg(args));
   } catch (error) {

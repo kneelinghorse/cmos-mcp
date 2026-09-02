@@ -4,8 +4,9 @@
  * Manages structured next-steps with status tracking:
  * - list: View pending/all next-steps
  * - complete: Mark a next-step as completed
- * - carry: Carry pending next-steps to a new sprint
+ * - carry: Carry open next-steps to a new sprint
  * - drop: Drop a next-step (no longer relevant)
+ * - reopen: Return a completed or dropped next-step to pending
  *
  * Wired into cmos_context(action="next_steps").
  *
@@ -47,13 +48,20 @@ export interface NextStepRecord {
  * failure and no warning; admitting it breaks all five of that test's assertions. If that test
  * needs editing to accommodate a change here, the change is wrong — not the test.
  *
- * DO NOT COPY THIS TO `cmos-sprint-complete.ts`. Its predicate looks identical and has the
- * OPPOSITE short-count semantics: it re-SELECTs its id set under the same predicate inside the
- * same transaction, so a short count THERE really does imply an error and is warned about. Same
- * SQL fragment, different call-site judgement — `write-disclosure-next-steps.test.ts` says so in
- * a docblock.
+ * Sprint close deliberately does not reuse this predicate. Its whole-ledger survey performs no
+ * next_steps write because mission/sprint links are provenance, not delivery evidence. Keep this
+ * status gate local to explicit operator actions where caller-supplied ids can legitimately miss
+ * without implying a database failure. Sprint-close disclosure tests cover its separate context
+ * writes and survey-read failure.
  */
 const TRANSITIONABLE_STATUS = "status IN ('pending','carried')";
+
+/** Published next-step sub-actions, shared by the handler and cmos_context's two schemas. */
+export const NEXT_STEP_ACTIONS = ['list', 'complete', 'carry', 'drop', 'reopen'] as const;
+export type NextStepAction = (typeof NEXT_STEP_ACTIONS)[number];
+
+/** Reopening is intentionally narrower than the ordinary pending/carried transition predicate. */
+const REOPENABLE_STATUS = "status IN ('completed','dropped')";
 
 export interface NextStepsResult {
   /** The sub-action that was performed */
@@ -63,10 +71,10 @@ export interface NextStepsResult {
   /** Count of items affected */
   affected: number;
   /** s86-m02b — writes an action ATTEMPTED and the database REJECTED. Emitted by every write
-   *  action (complete/carry/drop), `[]` on the happy path; absent on `list`, which writes
+   *  action (complete/carry/drop/reopen), `[]` on the happy path; absent on `list`, which writes
    *  nothing. `affected` above counts rows the UPDATE actually changed, so a non-empty array
    *  here is the difference between the intent and the outcome. A caller-supplied id that
-   *  matched no pending row is NOT a failure — the statement ran, its WHERE matched nothing —
+   *  matched no row eligible for that action is NOT a failure — its WHERE matched nothing —
    *  and produces no entry. */
   writeFailures?: WriteFailure[];
   /**
@@ -75,7 +83,7 @@ export interface NextStepsResult {
    * `affected` says HOW MANY rows moved. Asking for 12 and getting 10 told an operator that two
    * ids did nothing and gave them no way to find out which two. These ids are not failures and
    * are deliberately NOT reported as such: the statement ran and its WHERE matched nothing, which
-   * is an ordinary outcome for an id that is already completed, already dropped, or does not
+   * is an ordinary outcome for an id whose status that action does not accept, or that does not
    * exist. `writeFailures` means the database REJECTED something, and conflating the two would
    * tell an operator a write failed when none did — the "say only what you know" violation this
    * fix exists to close, committed inside the fix.
@@ -88,13 +96,13 @@ export interface NextStepsResult {
 }
 
 export interface CmosNextStepsParams {
-  /** Sub-action: list | complete | carry | drop */
-  nextStepAction: 'list' | 'complete' | 'carry' | 'drop';
+  /** Sub-action: list | complete | carry | drop | reopen */
+  nextStepAction: NextStepAction;
   /** Filter by status (for list, default: pending) */
   nextStepStatus?: NextStepStatus;
   /** s85-m04: filter list to next-steps stamped with this mission (#487 read surface) */
   missionId?: string;
-  /** Next-step ID(s) to act on (for complete/carry/drop) */
+  /** Next-step ID(s) to act on (for complete/carry/drop/reopen) */
   nextStepIds?: number[];
   /** Target sprint for carry action */
   carryToSprint?: string;
@@ -107,12 +115,12 @@ export async function cmosNextSteps(
 ): Promise<CmosToolResult<NextStepsResult>> {
   const action = params.nextStepAction;
 
-  if (!action || !['list', 'complete', 'carry', 'drop'].includes(action)) {
+  if (!action || !NEXT_STEP_ACTIONS.includes(action)) {
     return createError<NextStepsResult>({
       code: 'INVALID_ACTION',
       message: `Invalid next_step action: '${action}'`,
-      suggestion: 'Use nextStepAction: list | complete | carry | drop',
-      validValues: ['list', 'complete', 'carry', 'drop'],
+      suggestion: `Use nextStepAction: ${NEXT_STEP_ACTIONS.join(' | ')}`,
+      validValues: [...NEXT_STEP_ACTIONS],
     });
   }
 
@@ -130,6 +138,8 @@ export async function cmosNextSteps(
           return carryNextSteps(client, params.nextStepIds, params.carryToSprint ?? null);
         case 'drop':
           return transitionNextSteps(client, params.nextStepIds ?? [], 'dropped');
+        case 'reopen':
+          return reopenNextSteps(client, params.nextStepIds ?? []);
         default:
           return createError<NextStepsResult>({
             code: 'INVALID_ACTION',
@@ -247,11 +257,69 @@ function transitionNextSteps(
   });
 }
 
+function reopenNextSteps(
+  client: CmosDatabaseClient,
+  ids: number[]
+): CmosToolResult<NextStepsResult> {
+  if (ids.length === 0) {
+    return createError<NextStepsResult>(CmosErrors.missingParameter('nextStepIds'));
+  }
+
+  const writeSink = { failures: [] as WriteFailure[] };
+  let affected = 0;
+  const unmatchedIds: number[] = [];
+
+  for (const id of ids) {
+    const result = client.execute(
+      `UPDATE next_steps SET status = 'pending', resolved_at = NULL, carried_to_sprint = NULL WHERE id = ? AND ${REOPENABLE_STATUS}`,
+      [id]
+    );
+    const changed = countWrite(result, writeSink, `next_steps.reopen #${id}`);
+    if (result.success && (result.data?.changes ?? 0) === 0) unmatchedIds.push(id);
+    affected += changed;
+  }
+
+  return createSuccess<NextStepsResult>({
+    nextStepAction: 'reopen',
+    affected,
+    writeFailures: writeSink.failures,
+    unmatchedIds,
+    message: `${affected} next-step(s) reopened`,
+  });
+}
+
 function carryNextSteps(
   client: CmosDatabaseClient,
   ids: number[] | undefined,
   targetSprint: string | null
 ): CmosToolResult<NextStepsResult> {
+  if (targetSprint !== null) {
+    const sprint = client.getOne<{ id: string }>('SELECT id FROM sprints WHERE id = ?', [
+      targetSprint,
+    ]);
+    if (!sprint.success) {
+      return createError<NextStepsResult>(
+        sprint.error ?? {
+          code: 'DB_QUERY_FAILED',
+          message: `Failed to validate carryToSprint '${targetSprint}'`,
+        }
+      );
+    }
+    if (!sprint.data) {
+      return createError<NextStepsResult>({
+        code: 'INVALID_PARAMETER',
+        field: 'carryToSprint',
+        providedValue: targetSprint,
+        message: `No sprint row exists for carryToSprint '${targetSprint}'; no next-steps were carried.`,
+        suggestion:
+          `Create it first with cmos_sprint(action="add", sprintId="${targetSprint}", title="<title>"), then retry; ` +
+          'or omit carryToSprint to park the row as carried with no target. Parked rows leave ' +
+          'cmos_agent_onboard\'s pending view; list them with cmos_context(action="next_steps", ' +
+          'nextStepAction="list", nextStepStatus="carried").',
+      });
+    }
+  }
+
   // If no IDs provided, carry ALL pending next-steps
   const now = new Date().toISOString();
   const writeSink = { failures: [] as WriteFailure[] };
@@ -319,10 +387,12 @@ export function formatNextStepsForLLM(result: CmosToolResult<NextStepsResult>): 
   // what went wrong — and so a reader can tell at a glance that it is neither of those things.
   const unmatched = result.data?.unmatchedIds ?? [];
   if (unmatched.length > 0) {
+    const reason =
+      result.data?.nextStepAction === 'reopen'
+        ? 'not completed/dropped, or no such id'
+        : 'already resolved, or no such id';
     lines.push('');
-    lines.push(
-      `Not matched (already resolved, or no such id): ${unmatched.map((id) => `#${id}`).join(', ')}`
-    );
+    lines.push(`Not matched (${reason}): ${unmatched.map((id) => `#${id}`).join(', ')}`);
   }
 
   appendWriteFailures(lines, result.data?.writeFailures);
@@ -338,7 +408,9 @@ export function formatNextStepsForLLM(result: CmosToolResult<NextStepsResult>): 
 function renderNextStepsBody(result: CmosToolResult<NextStepsResult>): string {
   if (!result.success || !result.data) {
     const error = result.error;
-    return `Failed to manage next-steps: ${error?.message ?? 'Unknown error'}`;
+    const lines = [`Failed to manage next-steps: ${error?.message ?? 'Unknown error'}`];
+    if (error?.suggestion) lines.push(`Suggestion: ${error.suggestion}`);
+    return lines.join('\n');
   }
 
   const d = result.data;

@@ -23,7 +23,6 @@ jest.mock('../../src/tools/cmos/dashboard-client', () => {
 import { executeMissionProtocolTool } from '../../src/index';
 import { CmosDetector } from '../../src/intelligence/cmos-detector';
 import { ProjectGraphRegistry } from '../../src/intelligence/project-graph-registry';
-import { SenderResolutionError } from '../../src/intelligence/sender-context';
 import { DashboardClient } from '../../src/tools/cmos/dashboard-client';
 
 async function makeTempDir(prefix: string): Promise<string> {
@@ -56,19 +55,24 @@ describe('dispatcher fail-closed behavior', () => {
     ]);
   });
 
-  it('throws SenderResolutionError before any dashboard HTTP client is created', async () => {
-    await expect(
-      executeMissionProtocolTool(
-        'cmos_message',
-        {
-          action: 'send',
-          targetAddress: 'cmos://derek/cmos-dashboard',
-          type: 'question',
-          summary: 'Should never send',
-        },
-        {} as never
-      )
-    ).rejects.toBeInstanceOf(SenderResolutionError);
+  it('returns a classified refusal before any dashboard HTTP client is created', async () => {
+    const result = await executeMissionProtocolTool(
+      'cmos_message',
+      {
+        action: 'send',
+        targetAddress: 'cmos://derek/cmos-dashboard',
+        type: 'question',
+        summary: 'Should never send',
+      },
+      {} as never
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      success: false,
+      error: { code: 'CMOS_NOT_DETECTED' },
+    });
+    expect(JSON.stringify(result)).not.toContain('correlationId');
 
     expect(DashboardClient.fromEnv).not.toHaveBeenCalled();
   });

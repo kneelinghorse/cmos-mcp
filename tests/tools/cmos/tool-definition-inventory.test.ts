@@ -396,7 +396,7 @@ describe('s88-m05 legacy tool-definition inventory', () => {
         exportedDefinitions: 49,
         registeredDefinitions: 15,
         inventoriedDefinitions: 34,
-        testReferences: 229,
+        testReferences: 230,
         uniqueTestFiles: 30,
         barrelReExports: 34,
         deletedThisSprint: 0,

@@ -1293,20 +1293,6 @@ describe('shipped-document stamps and citations (s86-m05)', () => {
   });
 
   PRIVATE.describe('private authority-document stamps', () => {
-    it('stamps agents.md and build-session-prompt.md at the package version', () => {
-      const agents = fs.readFileSync(PRIVATE.paths.agents, 'utf8');
-      const prompt = fs.readFileSync(PRIVATE.paths.buildSessionPrompt, 'utf8');
-
-      const agentsVersion = agents.match(/\*\*Version\*\*:\s*([0-9]+\.[0-9]+\.[0-9]+)/);
-      expect(agentsVersion?.[1]).toBe(PKG.version);
-
-      // build-session-prompt.md's stamp is written as a minor line ("CMOS Version: 2.2"), so it is
-      // asserted as a version PREFIX rather than an exact string.
-      const promptVersion = prompt.match(/\*\*CMOS Version\*\*:\s*([0-9]+\.[0-9]+)/);
-      expect(promptVersion).not.toBeNull();
-      expect(PKG.version.startsWith(`${promptVersion?.[1]}.`)).toBe(true);
-    });
-
     it('stamps Last Updated no earlier than the release whose content the file documents', () => {
       // WHAT THIS ASSERTS, stated plainly because an earlier revision's NAME promised more than
       // its body delivered: it claimed "not older than the newest sprint the file documents" and

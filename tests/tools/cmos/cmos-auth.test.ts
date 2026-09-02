@@ -24,6 +24,10 @@ import type {
   RotateProjectKeyResult,
   ReissueProjectKeyResult,
 } from '../../../src/tools/cmos/dashboard-client';
+import {
+  CMOS_DASHBOARD_URL_ENV,
+  DEFAULT_DASHBOARD_URL,
+} from '../../../src/tools/cmos/dashboard-client';
 import type { CmosToolResult } from '../../../src/tools/cmos/types';
 import { DeviceCodeError, runDeviceCodeFlow } from '../../../src/auth/device-code';
 import type {
@@ -881,6 +885,23 @@ describe('cmos_auth', () => {
     );
 
     expect(captured.baseUrl).toBe(BASE_URL);
+  });
+
+  it('login_init uses the baked dashboard default when the env and dependency override are absent', async () => {
+    delete process.env[CMOS_DASHBOARD_URL_ENV];
+    const captured: { baseUrl?: string } = {};
+    const requester: DeviceCodeRequesterImpl = async ({ baseUrl }) => {
+      captured.baseUrl = baseUrl;
+      return DEVICE_CODE_RESPONSE;
+    };
+
+    const result = await cmosAuth(
+      { action: 'login_init' },
+      deps({ deviceCodeRequester: requester })
+    );
+
+    expect(result.success).toBe(true);
+    expect(captured.baseUrl).toBe(DEFAULT_DASHBOARD_URL);
   });
 
   it('login_init fails with DASHBOARD_NOT_CONFIGURED when no base URL is available', async () => {

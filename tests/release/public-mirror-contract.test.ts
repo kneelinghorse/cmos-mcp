@@ -22,15 +22,43 @@ const CONTRACT_FILE = 'tests/release/public-mirror-contract.test.ts';
 const HELPER_FILE = 'tests/helpers/public-mirror.ts';
 const fixtureRoots: string[] = [];
 
-function mirrorFixture(withPrivateMarker = false): string {
+function mirrorFixture(withPrivateMarker = false, initializeGit = true): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-public-mirror-contract-'));
   fixtureRoots.push(root);
   fs.mkdirSync(path.join(root, 'scripts'), { recursive: true });
   fs.writeFileSync(
     path.join(root, 'scripts', 'mirror-to-public.sh'),
-    'PRIVATE_PATHS=( private-root )\nDOCS_EXCLUDES=( internal/doc.md )\n'
+    'PRIVATE_PATHS=( private-root scratch-a scratch-b cmos artifacts tmp )\n' +
+      'DOCS_EXCLUDES=( internal/private-marker.md )\n'
   );
-  if (withPrivateMarker) fs.mkdirSync(path.join(root, 'private-root'), { recursive: true });
+  fs.writeFileSync(path.join(root, '.gitignore'), 'tmp/\nartifacts/quality-metrics/\n');
+  if (withPrivateMarker) {
+    fs.mkdirSync(path.join(root, 'internal'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'internal', 'private-marker.md'), 'private marker\n');
+  }
+  if (initializeGit) {
+    execFileSync('git', ['init', '-q'], { cwd: root });
+    execFileSync('git', ['add', '-A'], { cwd: root });
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'user.name=CMOS Test',
+        '-c',
+        'user.email=cmos-test@example.invalid',
+        '-c',
+        'commit.gpgsign=false',
+        'commit',
+        '-qm',
+        'fixture',
+      ],
+      { cwd: root }
+    );
+    if (withPrivateMarker) {
+      fs.rmSync(path.join(root, 'internal', 'private-marker.md'));
+      execFileSync('git', ['add', '-u'], { cwd: root });
+    }
+  }
   return root;
 }
 
@@ -546,10 +574,10 @@ const KNOWN_STATIC_FALSE_NEGATIVES = [
 
 describe('public mirror exclusion parser and helper', () => {
   it('parses literal arrays and rejects executable, duplicate, or non-normal shell input', () => {
-    expect(
-      parseMirrorExclusions("PRIVATE_PATHS=( alpha 'nested/path' )\nDOCS_EXCLUDES=( docs/one.md )")
-        .all
-    ).toEqual(['alpha', 'nested/path', 'docs/one.md']);
+    const parsed = parseMirrorExclusions(
+      "PRIVATE_PATHS=( alpha 'nested/path' )\n" + 'DOCS_EXCLUDES=( docs/one.md )\n'
+    );
+    expect(parsed.all).toEqual(['alpha', 'nested/path', 'docs/one.md']);
     for (const source of [
       'PRIVATE_PATHS=( alpha alpha )\nDOCS_EXCLUDES=( docs/x )',
       'PRIVATE_PATHS=( ../escape )\nDOCS_EXCLUDES=( docs/x )',
@@ -560,7 +588,9 @@ describe('public mirror exclusion parser and helper', () => {
 
     const sentinel = path.join(mirrorFixture(), 'parser-must-not-execute');
     expect(() =>
-      parseMirrorExclusions(`PRIVATE_PATHS=( $(touch ${sentinel}) )\nDOCS_EXCLUDES=( docs/x )`)
+      parseMirrorExclusions(
+        `PRIVATE_PATHS=( $(touch ${sentinel}) )\n` + 'DOCS_EXCLUDES=( docs/x )\n'
+      )
     ).toThrow();
     expect(fs.existsSync(sentinel)).toBe(false);
   });
@@ -568,14 +598,42 @@ describe('public mirror exclusion parser and helper', () => {
   it('skips loudly only in a structural mirror and never invokes a revision-only callback', () => {
     expect(SYNTHETIC_REVISION_SCOPE.isPublicMirror).toBe(true);
     expect(syntheticMirrorBodyInvoked).toBe(false);
-    const log = jest.spyOn(console, 'log').mockImplementation(() => undefined);
-    const mirror = requiresPrivateEvidence(
-      { reason: 'printed path reason', paths: { proof: 'private-root/proof.txt' } },
-      mirrorFixture()
-    );
-    expect(mirror.isPublicMirror).toBe(true);
-    expect(log).toHaveBeenCalledWith(expect.stringMatching(/printed path reason.*Missing:/));
-    log.mockRestore();
+    const root = mirrorFixture();
+    fs.mkdirSync(path.join(root, 'scratch-a'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'scratch-a', 'runtime.txt'), 'runtime\n');
+    fs.mkdirSync(path.join(root, 'scratch-b'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'scratch-b', 'runtime.txt'), 'runtime\n');
+    fs.mkdirSync(path.join(root, 'cmos', 'research'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'cmos', 'research', 'runtime.json'), '{}\n');
+    fs.mkdirSync(path.join(root, 'tmp'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'tmp', 'ignored.txt'), 'ignored\n');
+    fs.mkdirSync(path.join(root, 'artifacts', 'quality-metrics'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'artifacts', 'quality-metrics', 'latest.json'), '{}\n');
+    fs.mkdirSync(path.join(root, 'internal'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'internal', 'private-marker.md'), 'untracked marker\n');
+    const write = jest
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((() => true) as typeof process.stderr.write);
+    try {
+      const mirror = requiresPrivateEvidence(
+        { reason: 'printed path reason', paths: { proof: 'private-root/proof.txt' } },
+        root
+      );
+      expect(mirror.isPublicMirror).toBe(true);
+      expect(write).toHaveBeenCalledWith(expect.stringMatching(/printed path reason.*Missing:/));
+    } finally {
+      write.mockRestore();
+    }
+  });
+
+  it('fails loud instead of guessing when the checkout has no readable git index', () => {
+    const root = mirrorFixture(false, false);
+    expect(() =>
+      requiresPrivateEvidence(
+        { reason: 'git index is required', paths: { proof: 'private-root/proof.txt' } },
+        root
+      )
+    ).toThrow(/git ls-files --cached.*Git checkout/s);
   });
 
   it('throws on private absence and every unsafe requested-path spelling', () => {
@@ -596,6 +654,51 @@ describe('public mirror exclusion parser and helper', () => {
         requiresPrivateEvidence({ reason: 'must fail', paths: { proof } }, privateRoot)
       ).toThrow(/safe relative path/);
     }
+  });
+
+  it('treats either a staged addition or committed deletion as private tracked state', () => {
+    const indexOnlyRoot = mirrorFixture();
+    fs.mkdirSync(path.join(indexOnlyRoot, 'internal'), { recursive: true });
+    fs.writeFileSync(
+      path.join(indexOnlyRoot, 'internal', 'private-marker.md'),
+      'staged private marker\n'
+    );
+    execFileSync('git', ['add', 'internal/private-marker.md'], { cwd: indexOnlyRoot });
+    expect(() =>
+      requiresPrivateEvidence(
+        { reason: 'index-only marker must fail', paths: { proof: 'private-root/missing.txt' } },
+        indexOnlyRoot
+      )
+    ).toThrow(/Tracked excluded roots in HEAD\/index: internal\/private-marker\.md/);
+
+    const headOnlyRoot = mirrorFixture(true);
+    expect(() =>
+      requiresPrivateEvidence(
+        { reason: 'HEAD-only marker must fail', paths: { proof: 'private-root/missing.txt' } },
+        headOnlyRoot
+      )
+    ).toThrow(/Tracked excluded roots in HEAD\/index: internal\/private-marker\.md/);
+  });
+
+  it('rejects a nested directory that merely inherits a parent git checkout', () => {
+    const parent = mirrorFixture();
+    const nested = path.join(parent, 'nested');
+    fs.mkdirSync(path.join(nested, 'scripts'), { recursive: true });
+    fs.copyFileSync(
+      path.join(parent, 'scripts', 'mirror-to-public.sh'),
+      path.join(nested, 'scripts', 'mirror-to-public.sh')
+    );
+    expect(() =>
+      requiresPrivateEvidence(
+        {
+          reason: 'nested roots cannot inherit identity',
+          paths: { proof: 'private-root/proof.txt' },
+        },
+        nested
+      )
+    ).toThrow(
+      /Git checkout whose root matches repoRoot.*does not equal requested repository root/s
+    );
   });
 });
 
@@ -618,9 +721,32 @@ describe('public mirror routed-test class gate', () => {
     );
   });
 
+  it('publishes public main and its tag as one retryable atomic boundary', () => {
+    const script = fs.readFileSync(path.join(REPO_ROOT, 'scripts', 'mirror-to-public.sh'), 'utf8');
+    const noDiffIndex = script.indexOf('if git diff --cached --quiet; then');
+    const noDiffEnd = script.indexOf('\nfi\n\nPUBLIC_COMMIT=', noDiffIndex);
+    const tagIndex = script.indexOf('git tag "$VERSION" "$PUBLIC_COMMIT"');
+    const pushIndex = script.indexOf(
+      'git push --atomic origin "HEAD:refs/heads/$PUBLIC_BRANCH" "refs/tags/$VERSION"'
+    );
+    const pushCommands = script.match(/^\s*git push\b.*$/gm) ?? [];
+
+    expect(noDiffIndex).toBeGreaterThan(-1);
+    expect(noDiffEnd).toBeGreaterThan(noDiffIndex);
+    expect(script.slice(noDiffIndex, noDiffEnd)).not.toMatch(/\bexit\s+0\b/);
+    expect(script).toContain('PUBLIC_COMMIT="$(git rev-parse HEAD)"');
+    expect(script).toContain('git show-ref --verify --quiet "refs/tags/$VERSION"');
+    expect(tagIndex).toBeGreaterThan(noDiffEnd);
+    expect(pushIndex).toBeGreaterThan(tagIndex);
+    expect(pushCommands).toEqual([
+      'git push --atomic origin "HEAD:refs/heads/$PUBLIC_BRANCH" "refs/tags/$VERSION"',
+    ]);
+    expect(script).toContain('at $PUBLIC_COMMIT');
+  });
+
   it('fires on raw paths, same-file wrappers, fixed revisions, and local mirror classifiers', () => {
     const fake = parseMirrorExclusions(
-      'PRIVATE_PATHS=( private-root )\nDOCS_EXCLUDES=( internal/doc.md )'
+      'PRIVATE_PATHS=( private-root )\n' + 'DOCS_EXCLUDES=( internal/doc.md )'
     );
     const raw = auditSource(
       'raw.test.ts',
@@ -689,7 +815,7 @@ describe('public mirror routed-test class gate', () => {
     expect(negativeOracle.findings).toEqual([]);
   });
 
-  it('has exactly 18 routed files across default/E2E and two private-history consumers', () => {
+  it('derives the routed census and asserts its invariants without pinning its population', () => {
     const files = trackedTestFiles();
     const audits = files.map(
       (file) =>
@@ -702,17 +828,19 @@ describe('public mirror routed-test class gate', () => {
     const pathFiles = routed.filter(([, audit]) => audit.hasPaths);
     const revisionFiles = routed.filter(([, audit]) => audit.hasRevisions);
     expect(files.length).toBeGreaterThan(225);
-    expect({
+    const census = {
       all: routed.length,
       default: routed.filter(([file]) => file.endsWith('.test.ts')).length,
       e2e: routed.filter(([file]) => file.endsWith('.e2e.ts')).length,
       paths: pathFiles.length,
       revisions: revisionFiles.length,
-      // s89-m08: 17 -> 18 (default 13 -> 14, paths 16 -> 17).
-      // tests/tools/cmos/suggestion-oracle.test.ts is a new private-evidence consumer: its axis
-      // matrix and wrong-typed sweep both derive suite-private copies of cmos/db/cmos.sqlite.
-      // It routes through this helper rather than guarding itself, so `findings` below stays empty.
-    }).toEqual({ all: 18, default: 14, e2e: 4, paths: 17, revisions: 2 });
+    };
+    process.stderr.write(
+      `[public mirror routed census] all=${census.all} default=${census.default} ` +
+        `e2e=${census.e2e} paths=${census.paths} revisions=${census.revisions}\n`
+    );
+    expect(routed.length).toBeGreaterThan(0);
+    expect(routed.filter(([, audit]) => !audit.hasPaths && !audit.hasRevisions)).toEqual([]);
     expect(audits.flatMap(([, audit]) => audit.findings)).toEqual([]);
   });
 

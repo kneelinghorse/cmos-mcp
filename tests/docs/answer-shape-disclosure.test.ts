@@ -87,16 +87,15 @@ const SHAPE_SOURCE_ROOT = process.env.CMOS_ANSWER_SHAPE_SOURCE_ROOT
   : CMOS_SOURCE_ROOT;
 
 const EXPECTED_TOTALS = {
-  // s89-m08: 120 -> 121. `src/tools/cmos/param-type-guard.ts` joins the symbol-resolved closure
-  // because it returns `CmosToolError`. It adds NO root, NO declaration, NO composition and NO
-  // property row — the answer SHAPE is byte-identical, only the closure's file count moves. That
-  // is why this is a one-number edit and owes no CHANGELOG answer-shape bullet: the guard changes
-  // which error CODE a wrong-typed parameter produces, not the shape of the object carrying it.
+  // s90-m05: the published sprint-close receipt replaces three scalar/list fields with the named
+  // `SprintPendingNextStep`, `SprintPendingNextStepGroups`, and `SprintPendingNextStepsSurvey`
+  // closure. That adds three declarations/compositions and nine property rows; the CHANGELOG's
+  // Changed section discloses the corresponding answer-shape break.
   files: 121,
   roots: 137,
-  declarations: 267,
-  compositions: 267,
-  rows: 1486,
+  declarations: 270,
+  compositions: 270,
+  rows: 1495,
 } as const;
 const EXPLICIT_OPAQUE_LEDGER = [
   'CmosToolError.providedValue = ANY',

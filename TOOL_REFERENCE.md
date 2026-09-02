@@ -333,10 +333,10 @@ Consolidated context tool with action parameter support. Actions: view, update, 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
 | `action` | string | yes | Context action: view \| update \| condense \| snapshot \| history \| next_steps \| constraints \| search |
-| `nextStepAction` | string | no | Sub-action for next_steps: list \| complete \| carry \| drop |
+| `nextStepAction` | string | no | Sub-action for next_steps: list \| complete \| carry \| drop \| reopen |
 | `nextStepStatus` | string | no | Filter status for next_steps list (default: pending) |
-| `nextStepIds` | array | no | Next-step IDs to act on for complete/carry/drop |
-| `carryToSprint` | string | no | Target sprint ID for carry action |
+| `nextStepIds` | array | no | Next-step IDs to act on for complete/carry/drop/reopen |
+| `carryToSprint` | string | no | Existing target sprint ID for carry; missing targets are refused by name. Create one with cmos_sprint(action="add"), or omit to park with no target |
 | `missionId` | string | no | Filter next_steps to rows stamped with this mission (#487 mission -> row trail) |
 | `projectRoot` | string | no | Project root directory to search for CMOS database (defaults to cwd) |
 

@@ -9,9 +9,10 @@ import type { CmosToolResult } from './types';
  *
  * `client.execute` and `client.raw` return envelopes; their `success` flags are the only evidence
  * the statement ran. Code that discards one, or folds it into a counter/object list with no
- * negative arm, makes the answer assert something not so: `nextStepsReconciled: 4` for an UPDATE
- * that errored, or `alreadyCurrent: true` for a raw CREATE that failed. These two helpers are the
- * supported way to carry the failure into the answer instead.
+ * negative arm, makes the answer assert something not so: before s90-m05, that included
+ * `nextStepsReconciled: 4` for an UPDATE that errored; a current example is
+ * `alreadyCurrent: true` for a raw CREATE that failed. These two helpers carry the failure into
+ * the answer instead.
  *
  * WARN, DO NOT THROW. Both helpers RECORD and return; neither aborts. A `session_events` insert
  * failing must not abort a session start — the defect class here is "assert something not so",
@@ -84,10 +85,10 @@ export function checkWrite(
  *     say so.
  *
  * Whether a legitimate zero is itself worth reporting is a CALL-SITE judgement this helper
- * deliberately does not make: at cmos-sprint-complete.ts the id set is re-SELECTed under the
- * identical predicate inside the same exclusive transaction, so a short count there implies an
- * error; at cmos-next-steps.ts the ids come from the tool call and were never re-selected, so a
- * short count there is ordinary.
+ * deliberately does not make. A caller that first selects an expected id set may need a separate
+ * short-count check; at cmos-next-steps.ts the ids come directly from the tool call and were never
+ * re-selected, so a short count is ordinary. Sprint close no longer writes next_steps status at
+ * all (s90-m05).
  */
 export function countWrite(
   result: CmosToolResult<{ changes: number; lastInsertRowid: number | bigint }>,

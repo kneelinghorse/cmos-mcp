@@ -25,7 +25,18 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 export interface ToolResult {
   isError?: boolean;
   content?: Array<{ text?: string }>;
-  structuredContent?: { data?: unknown };
+  structuredContent?: {
+    success?: boolean;
+    data?: unknown;
+    error?: {
+      code?: string;
+      message?: string;
+      field?: string;
+      suggestion?: string;
+      [key: string]: unknown;
+    };
+    [key: string]: unknown;
+  };
 }
 
 /** A connected stdio server + the extractors/drivers bound to its client. */

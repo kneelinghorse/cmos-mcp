@@ -62,7 +62,7 @@ import {
   type ProjectKeyRecord,
   type UserScopedKeyRecord,
 } from '../../intelligence/credential-store';
-import { DashboardClient, type ListedKey, CMOS_DASHBOARD_URL_ENV } from './dashboard-client';
+import { DashboardClient, type ListedKey, resolveDashboardBaseUrl } from './dashboard-client';
 import { withClientAsync } from './client';
 import {
   classifyAttribution,
@@ -486,8 +486,8 @@ export interface CmosAuthDependencies {
   /** Sprint 59 m04 — override for tests; default = `pollForTokenBounded`. */
   tokenPoller?: TokenPollerImpl;
   /**
-   * Sprint 58 m01 — override for tests; default reads
-   * `process.env[CMOS_DASHBOARD_URL_ENV]`. Null disables the login action.
+   * Sprint 58 m01 — explicit override for tests. When omitted, the canonical resolver applies
+   * explicit/env/baked-default precedence. An explicit empty string disables login actions.
    */
   dashboardBaseUrl?: string;
 }
@@ -531,9 +531,7 @@ export async function cmosAuth(
     deps.deviceCodeRequester ?? (({ baseUrl, userAgent }) => requestDeviceCode(baseUrl, userAgent));
   const tokenPoller = deps.tokenPoller ?? pollForTokenBounded;
   const dashboardBaseUrl =
-    deps.dashboardBaseUrl !== undefined
-      ? deps.dashboardBaseUrl
-      : process.env[CMOS_DASHBOARD_URL_ENV];
+    deps.dashboardBaseUrl !== undefined ? deps.dashboardBaseUrl : resolveDashboardBaseUrl();
 
   switch (actionValue) {
     case 'rotate':
@@ -571,7 +569,7 @@ async function handleRotate(
       code: 'CREDENTIAL_NOT_FOUND',
       message: `No project-scoped key found locally for ${params.projectRoot}`,
       suggestion:
-        'Run registration or cmos_auth(action=reissue) to populate the local project key first.',
+        'Run registration or cmos_auth(action="reissue") to populate the local project key first.',
     });
   }
 

@@ -8,7 +8,8 @@
  * THE RULE. `.execute(...)`, `.raw(...)`, and `.transaction(...)` return a `CmosToolResult`
  * envelope. Its `success` flag is the only evidence that the statement or atomic unit ran. Code
  * that discards it, or folds it into a counter/object list with no negative arm, produces an
- * ANSWER THAT ASSERTS SOMETHING NOT SO — `nextStepsReconciled: 4` when the UPDATE errored,
+ * ANSWER THAT ASSERTS SOMETHING NOT SO — before s90-m05 that included
+ * `nextStepsReconciled: 4` when the UPDATE errored; current examples include
  * `alreadyCurrent: true` when a raw CREATE VIRTUAL TABLE failed, or “all writes landed” after a
  * transaction rolled back. This gate makes that shape unrepresentable.
  *
@@ -105,8 +106,8 @@
  *     UPDATE that matched the wrong rows is, to this gate, a clean write.
  *  7. IT CANNOT JUDGE WHETHER `changes === 0` IS MEANINGFUL. A zero from a WHERE that matched
  *     nothing is legitimate; a zero from a statement that errored is not. `countWrite` moves that
- *     judgement to the call site, where the caller knows whether the id set was re-selected under
- *     the same predicate (cmos-sprint-complete.ts) or supplied by the caller (cmos-next-steps.ts).
+ *     judgement to the call site, where the caller knows whether it first selected an expected id
+ *     set or received ids from the caller (as cmos-next-steps.ts does).
  * ───────────────────────────────────────────────────────────────────────────────────────────
  */
 

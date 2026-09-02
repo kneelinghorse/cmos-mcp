@@ -2,6 +2,80 @@
 
 All notable changes to cmos-mcp are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 3.0.0 — 2026-09-01
+
+Sprint 90 "The Front Door". This is a **MAJOR** release because
+`cmos_sprint(action="complete")` removes the published `nextStepsReconciled`,
+`nextStepsCarried`, and `pendingFlagged` receipt fields and replaces them with
+`nextStepsSurvey`. The published `reopen` next-step sub-action is additive, while the remaining
+wire and first-run behavior changes correct defects; neither makes the removed fields
+backward-compatible. A 2.9.0 or 2.8.2 cut was therefore rejected.
+
+### Added
+
+### Changed
+
+- **Once a CMOS project is initialized and resolved, fresh installs can start dashboard device-code
+  authentication without setting `CMOS_DASHBOARD_URL`.** Explicitly invoking
+  `cmos_auth(action="login")` or `login_init` now uses the canonical URL resolver — environment value,
+  then baked `https://cmos.aquex.ai` for normal MCP calls — instead of returning
+  `DASHBOARD_NOT_CONFIGURED` when the environment variable is absent or empty. Either action can
+  therefore make an outbound request to the baked host. `login_complete` uses the same host when
+  supplied a `deviceCode`; without one it returns local `MISSING_PARAMETER` and sends nothing. The
+  large-delta database-backfill upload remedy now uses the same canonical resolver.
+- **Release-version coherence is now one executable class gate instead of a hand-copied
+  checklist.** The gate couples `package.json` to both package-lock root stamps, the newest dated
+  CHANGELOG heading, and the private authority-document version stamps while explicitly
+  classifying schema, template, scaffold, and release-boundary tag axes. It runs on the
+  mirror-visible members in the public suite, and the release runbook invokes that same test
+  instead of carrying a second inline comparison. The two stale package-lock root stamps were
+  corrected from 2.8.0 to match 2.8.1 before this cut and now move with the package version; the
+  published `v2.8.1` tag and history are unchanged.
+- **Sprint close now treats next-step mission links as provenance, not proof of delivery.** It no
+  longer auto-completes `next_steps` rows or deletes context prose merely because it contains a
+  completed mission or closing-sprint token, including when optional close-time condensation is
+  requested. Close-time retention for the canonical master-resume and project-working-memory
+  arrays is count-only (newest 15 / newest 10 respectively); legacy array shapes are left intact.
+  The old `nextStepsReconciled`, `nextStepsCarried`, and `pendingFlagged` receipt fields are
+  replaced by a whole-ledger `nextStepsSurvey` grouped by closing-sprint, other-sprint, and
+  missing-sprint provenance. `cmos_context(action="next_steps")` also adds explicit-ID `reopen`,
+  while `carry` to a nonexistent sprint now returns a named `carryToSprint` refusal with
+  create-or-park remedies instead of a raw foreign-key failure.
+- **The MCP stdio boundary now refuses a wrong-typed `projectRoot` before sender resolution.**
+  Re-measured over every (tool, action) pair published by the server's own `tools/list` (83) × six
+  non-null wrong JSON values (498 calls), 455 calls in the original 2.8.1 live-store measurement
+  change code or outcome. Twenty calls that had succeeded with `projectRoot: 0` now return
+  `INVALID_PARAMETER` because that falsy value was treated as absent and silently substituted the
+  discovered project, including on registry writes. JSON `null` remains absent-equivalent, and
+  `INVALID_ACTION` takes precedence. `projectRoot` is the only published string parameter read
+  unsafely before dispatch; the standing AST gate separately re-derives every raw pre-dispatch
+  read and the rule-classified unsafe-string subset instead of trusting that sentence.
+
+### Fixed
+
+- **Literal first-run failures over MCP stdio now name the reachable local cause instead of
+  reporting an unhandled internal error.** With an empty working directory, a fresh
+  `CMOS_CONFIG_DIR`, and no arguments beyond each published action, 74 of 82 driven pairs returned
+  `TOOL_EXECUTION_ERROR` with a correlation ID and “report this” advice; the server published 83
+  pairs, but the legacy blocking `cmos_auth(login)` action was explicitly excluded. Those 74 paths
+  now return `CMOS_NOT_DETECTED`. Separate missing-database, unreadable-database, invalid-identity,
+  and ambiguous-sender fixtures pin `DB_NOT_FOUND`, `DB_CONNECTION_FAILED`, and
+  `SENDER_UNRESOLVABLE`; none of these known first-run/setup refusals reaches the catch-all.
+  The final gate derives and drives all 83 published tool/action pairs with zero exclusions,
+  re-drives the network-bearing no-argument auth actions against loopback, and proves missing-code
+  `login_complete` refuses locally. `CMOS_NOT_DETECTED` and `DB_NOT_FOUND` repair advice now carries
+  a JSON-string `projectRoot`; the gate extracts that emitted value, initializes that exact physical
+  root, and proves the original call succeeds on retry.
+- **Unknown tool calls now retain the MCP protocol's `-32601` `MethodNotFound` response.** The
+  registered boundary previously remapped that already-classified protocol error to `-32603`
+  `InternalError`; schema preflight and protocol lookup now run before the review-role write guard,
+  while known valid writes remain blocked for review agents.
+- **Public mirroring now pushes the filtered branch and release tag as one atomic boundary.** The
+  prior sequential pushes could leave public `main` advanced without its tag, and a retry then
+  exited early because the tree already matched. The no-diff path now creates or validates the
+  missing tag, the branch and tag move in one `git push --atomic` transaction, and the script
+  reports the exact public commit id used for independent verification.
+
 ## 2.8.1 — 2026-08-30
 
 Sprint 89 "Sweep the Class" — Arc F sprint 3. Corrections and hardening for the 2.8.1 patch.
@@ -54,6 +128,16 @@ Sprint 89 "Sweep the Class" — Arc F sprint 3. Corrections and hardening for th
   `params.missionId.trim is not a function`. Measured across every (tool, valid action,
   declared-string-parameter) triple: **42 of 714 triples crashed; 0 do now.** One schema-driven
   guard at each of the 15 router entry points refuses them as `INVALID_PARAMETER` naming the field.
+  > CORRECTION (3.0.0). The sentence “Measured across every (tool, valid action,
+  > declared-string-parameter) triple: 42 of 714 triples crashed; 0 do now” is true of the universe
+  > it measured and false of the surface a caller touches. Those 714 triples invoked the 15 router
+  > functions directly, and the guard sits inside those routers, so it answers for them. It does
+  > not answer for MCP stdio: `src/index.ts` resolves `params.projectRoot` through
+  > `resolveToolSenderContext` before router dispatch, so a wrong-typed value can throw from
+  > `path.resolve` before the guard runs. A historical real-stdio remeasurement over all 83 pairs
+  > published by `tools/list` × six non-null wrong JSON values (498 calls) found 380
+  > `TOOL_EXECUTION_ERROR` results. The predicate was right; the universe was wrong. The corrected
+  > wire claim and its standing gate are recorded in 3.0.0's entries above.
 - **A malformed value for a parameter the action actually uses was silently ignored, so filters
   came back unfiltered.** `cmos_learnings(action="list", category=12345)` and
   `cmos_decisions(action="list", since=12345)` dropped the malformed filter and returned the

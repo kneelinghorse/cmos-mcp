@@ -213,9 +213,9 @@ async function main(): Promise<void> {
       `drift=${JSON.stringify(driftStale)}`
     );
 
-    // --- s81-m06: cmos_sprint(complete) carries the next_steps TABLE reconcile receipt
-    //     (nextStepsReconciled / nextStepsCarried / pendingFlagged). Drive a minimal
-    //     empty-sprint close on a fresh project and assert the receipt SHAPE shipped in dist.
+    // --- s90-m05: cmos_sprint(complete) carries the whole-ledger next_steps survey receipt.
+    //     Drive a minimal empty-sprint close on a fresh project and assert both the new shape and
+    //     removal of the old provenance-as-delivery reconciliation fields in the shipped dist.
     const projectDir3 = mkTmp('cmos-verify-m06-');
     await h.callOk('cmos_project', {
       action: 'init',
@@ -236,16 +236,35 @@ async function main(): Promise<void> {
         sprintId: 'sv-1',
         summary: 'verify:dist reconcile-receipt shape',
       })
-    ) as { nextStepsReconciled?: unknown; nextStepsCarried?: unknown; pendingFlagged?: unknown };
+    ) as Record<string, unknown>;
+    const nextStepsSurvey = closeData?.nextStepsSurvey as
+      | {
+          available?: unknown;
+          totalPending?: unknown;
+          groups?: Record<string, unknown> | null;
+        }
+      | undefined;
+    const surveyGroups = nextStepsSurvey?.groups;
     check(
-      's81-m06: cmos_sprint(complete) returns the next_steps reconcile receipt shape',
-      typeof closeData?.nextStepsReconciled === 'number' &&
-        typeof closeData?.nextStepsCarried === 'number' &&
-        Array.isArray(closeData?.pendingFlagged),
+      's90-m05: cmos_sprint(complete) returns the whole-ledger next_steps survey shape',
+      nextStepsSurvey?.available === true &&
+        nextStepsSurvey.totalPending === 0 &&
+        surveyGroups !== null &&
+        typeof surveyGroups === 'object' &&
+        Array.isArray(surveyGroups.closingSprintWithMissionProvenance) &&
+        Array.isArray(surveyGroups.closingSprintWithoutMissionProvenance) &&
+        Array.isArray(surveyGroups.otherSprintProvenance) &&
+        Array.isArray(surveyGroups.noSprintProvenance) &&
+        !Object.prototype.hasOwnProperty.call(closeData, 'nextStepsReconciled') &&
+        !Object.prototype.hasOwnProperty.call(closeData, 'nextStepsCarried') &&
+        !Object.prototype.hasOwnProperty.call(closeData, 'pendingFlagged'),
       `receipt=${JSON.stringify({
-        reconciled: closeData?.nextStepsReconciled,
-        carried: closeData?.nextStepsCarried,
-        flagged: closeData?.pendingFlagged,
+        survey: nextStepsSurvey,
+        oldFields: {
+          nextStepsReconciled: closeData?.nextStepsReconciled,
+          nextStepsCarried: closeData?.nextStepsCarried,
+          pendingFlagged: closeData?.pendingFlagged,
+        },
       })}`
     );
 

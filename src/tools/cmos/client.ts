@@ -236,7 +236,7 @@ export class CmosDatabaseClient {
         }
 
         if (!detection.hasDatabase || !detection.databasePath) {
-          return createError(CmosErrors.dbNotFound(detection.cmosDirectory));
+          return createError(CmosErrors.dbNotFound(detection.cmosDirectory, projectRoot));
         }
 
         // SPLIT-THE-PATHS (s88-m08): explicit and ambient WRITE opens share one registration
@@ -300,7 +300,7 @@ export class CmosDatabaseClient {
     options: Omit<CmosDatabaseClientOptions, 'dbPath' | 'projectRoot'> = {}
   ): CmosToolResult<CmosDatabaseClient> {
     if (!detection.hasDatabase || !detection.databasePath) {
-      return createError(CmosErrors.dbNotFound(detection.cmosDirectory));
+      return createError(CmosErrors.dbNotFound(detection.cmosDirectory, detection.projectRoot));
     }
 
     const client = new CmosDatabaseClient(detection.databasePath, options);

@@ -181,9 +181,10 @@ export async function resolveProjectRootEnhanced(
   throw new ProjectResolutionError(
     'No CMOS project found. Could not resolve project root.',
     `Options:
-  1. Run from a directory containing cmos/db/cmos.sqlite
-  2. Provide projectRoot parameter explicitly
-  3. Register a default project: cmos_project(action="register", projectRoot="<path>", setAsDefault=true)`
+  1. Create a project here: cmos_project(action="init", projectRoot=${JSON.stringify(cwd)})
+  2. Run from a directory containing cmos/db/cmos.sqlite
+  3. Provide projectRoot parameter explicitly
+  4. Register an existing project: cmos_project(action="register", projectRoot="<path>", setAsDefault=true)`
   );
 }
 

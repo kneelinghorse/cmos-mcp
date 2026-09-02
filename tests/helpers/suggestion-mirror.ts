@@ -32,8 +32,8 @@
  * the mirror is testing something other than the shipped source and the suite is meaningless.
  *
  * THE MIRROR IS AN INSTRUMENT, NOT A BUILD. It is written under `node_modules/.cache/`, which is
- * gitignored, outside jest `roots: ['<rootDir>/tests']` and outside `collectCoverageFrom` — and,
- * unlike `<repo>/tmp/`, is not a PRIVATE_PATHS marker. See MIRROR_ROOT for why that matters.
+ * gitignored, outside jest `roots: ['<rootDir>/tests']` and outside `collectCoverageFrom` — and is
+ * not part of any mirror exclusion. See MIRROR_ROOT for why that placement remains load-bearing.
  */
 
 import { createHash } from 'crypto';
@@ -46,13 +46,12 @@ const SRC_ROOT = path.join(REPO_ROOT, 'src');
 /**
  * The mirror lives under `node_modules/.cache/`, NOT under `<repo>/tmp/`.
  *
- * MEASURED REASON, and it is not a style preference. `tmp` is a member of PRIVATE_PATHS in
- * `scripts/mirror-to-public.sh`, and `requiresPrivateEvidence` decides "am I in the public mirror?"
- * by asking whether ANY exclusion marker is present at the repo root. Writing the mirror into
- * `<repo>/tmp/` therefore CREATES a private-repo marker at runtime — so in a staged public mirror,
- * every suite that ran after this one stopped skipping and started THROWING for missing private
- * evidence. Observed: 13 suites failed to run in the staged mirror for that reason alone, and all
- * 13 pass once `tmp/` is removed.
+ * MEASURED REASON, and it is not a style preference. `tmp` is a PRIVATE_PATHS leak guard. The old
+ * classifier treated every exclusion as an identity marker, so writing the mirror into
+ * `<repo>/tmp/` made 13 later suites throw instead of skip in a staged public mirror. Identity now
+ * uses excluded paths tracked in the checkout's HEAD/index, but scratch placement still avoids
+ * every exclusion: that keeps generated data out of the mirror surface and survives a future
+ * tracking change.
  *
  * `node_modules/.cache/` has every property `tmp/` was chosen for — gitignored, outside jest
  * `roots: ['<rootDir>/tests']`, outside `collectCoverageFrom: ['src/**\/*.ts']` — and additionally

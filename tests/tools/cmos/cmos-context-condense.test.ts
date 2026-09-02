@@ -143,13 +143,17 @@ describe('cmos_context_condense', () => {
   async function runCondense(
     params: Partial<CmosContextCondenseParams> & {
       contextType: 'master_context' | 'project_context';
-    }
+    },
+    internalOptions?: { preserveNextStepProse?: boolean }
   ): Promise<CmosToolResult<CmosContextCondenseResult>> {
     CmosDetector.resetInstance();
-    return cmosContextCondense({
-      ...params,
-      projectRoot: getProjectRoot(),
-    } as CmosContextCondenseParams);
+    return cmosContextCondense(
+      {
+        ...params,
+        projectRoot: getProjectRoot(),
+      } as CmosContextCondenseParams,
+      internalOptions
+    );
   }
 
   describe('context not found', () => {
@@ -282,6 +286,51 @@ describe('cmos_context_condense', () => {
       expect(parsed.next_steps).not.toContain('Start s01-m01 implementation');
       expect(parsed.next_steps).toContain('Review s02-m01 progress');
       expect(parsed.next_steps).toContain('General planning task');
+    });
+
+    it('preserves next-step prose for internal callers without disabling other condensation', async () => {
+      seedMissions([{ id: 's01-m01', sprintId: 'sprint-01', status: 'Completed' }]);
+
+      const outstandingStep = 'Start s01-m01 follow-up that remains outstanding';
+      const history = Array.from({ length: 10 }, (_, i) => ({ session: `s${i}` }));
+      seedContext('master_context', {
+        next_steps: [outstandingStep],
+        working_memory: {
+          next_steps: [outstandingStep],
+          session_history: history,
+        },
+        next_session_context: {
+          when_we_resume: [outstandingStep],
+        },
+      });
+
+      const result = await runCondense(
+        {
+          contextType: 'master_context',
+          strategy: 'auto',
+        },
+        { preserveNextStepProse: true }
+      );
+
+      expect(result.success).toBe(true);
+      expect(Object.keys(cmosContextCondenseToolDefinition.inputSchema.properties)).not.toContain(
+        'preserveNextStepProse'
+      );
+
+      const db = new Database(dbPath);
+      const context = db
+        .prepare('SELECT content FROM contexts WHERE id = ?')
+        .get('master_context') as { content: string };
+      db.close();
+
+      const parsed = JSON.parse(context.content);
+      expect(parsed.next_steps).toEqual([outstandingStep]);
+      expect(parsed.working_memory.next_steps).toEqual([outstandingStep]);
+      expect(parsed.next_session_context.when_we_resume).toEqual([outstandingStep]);
+      expect(parsed.working_memory.session_history).toHaveLength(5);
+      expect(result.data?.sectionsCondensed.map((section) => section.section)).toEqual([
+        'working_memory.session_history',
+      ]);
     });
   });
 

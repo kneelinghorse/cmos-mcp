@@ -1,13 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // ABOUTME: Single fail-loud private-evidence scope for tests that are also copied to the public mirror.
-// ABOUTME: Derives mirror identity from the shell script that performs the mirror; never duplicates its lists.
+// ABOUTME: Derives exclusions from the mirror script and identity from Git tracked state; never duplicates lists.
 
 /**
  * `scripts/mirror-to-public.sh` mirrors `tests/` but removes its `PRIVATE_PATHS` and
- * `DOCS_EXCLUDES`. A test that needs one of those inputs therefore has two honest outcomes:
- * run in a complete private checkout, or print its reason and register a skipped scope in the
- * structural public mirror. Any missing evidence in a non-mirror checkout is a real defect and
- * throws while the test module is being declared.
+ * `DOCS_EXCLUDES`. A test that needs one of those inputs therefore has two honest outcomes: run in
+ * a complete private checkout, or print its reason and register a skipped scope in the structural
+ * public mirror. Any missing evidence in a non-mirror checkout is a real defect and throws while
+ * the test module is being declared.
+ *
+ * Exclusion and identity are deliberately separate. `all` remains the leak/removal authority;
+ * identity comes from excluded paths tracked in the checkout's HEAD or index. Runtime-created,
+ * untracked directory containers therefore cannot impersonate private source evidence.
  *
  * The shell file is parsed as a deliberately small literal-array language. It is never sourced or
  * evaluated: expanding that language silently would turn executable shell into test input.
@@ -139,7 +143,7 @@ function parseLiteralShellArray(source: string, arrayName: string): string[] {
   throw new Error(`${arrayName} has no closing parenthesis`);
 }
 
-/** Derive the two authoritative exclusion sets from the mirror implementation. */
+/** Derive the two authoritative removal sets from the mirror implementation. */
 export function parseMirrorExclusions(source: string): MirrorExclusions {
   const privatePaths = parseLiteralShellArray(source, 'PRIVATE_PATHS');
   const docsExcludes = parseLiteralShellArray(source, 'DOCS_EXCLUDES');
@@ -190,6 +194,49 @@ function resolveRevision(repoRoot: string, revision: string): string | null {
   }
 }
 
+function splitNullTerminated(output: string): string[] {
+  return output.split('\0').filter(Boolean);
+}
+
+/** Return concise exclusion roots represented in the checkout's committed or staged tree. */
+function trackedMirrorMarkers(repoRoot: string, exclusions: MirrorExclusions): string[] {
+  try {
+    const gitRoot = execFileSync('git', ['rev-parse', '--show-toplevel'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim();
+    if (fs.realpathSync(gitRoot) !== fs.realpathSync(repoRoot)) {
+      throw new Error(`git root ${gitRoot} does not equal requested repository root ${repoRoot}`);
+    }
+    const pathspec = ['--', ...exclusions.all];
+    const indexed = splitNullTerminated(
+      execFileSync('git', ['ls-files', '-z', '--cached', ...pathspec], {
+        cwd: repoRoot,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+    );
+    const committed = splitNullTerminated(
+      execFileSync('git', ['ls-tree', '-rz', '--name-only', 'HEAD', ...pathspec], {
+        cwd: repoRoot,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+    );
+    const tracked = new Set([...indexed, ...committed]);
+    return exclusions.all.filter((excluded) =>
+      [...tracked].some((file) => file === excluded || file.startsWith(`${excluded}/`))
+    );
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Private-evidence routing could not run git ls-files --cached and git ls-tree HEAD in ` +
+        `${repoRoot}. Run tests from a Git checkout whose root matches repoRoot. ${detail}`
+    );
+  }
+}
+
 /**
  * Declare a test scope whose evidence exists only in the private source checkout.
  *
@@ -235,9 +282,7 @@ export function requiresPrivateEvidence<
   const availableRelativePaths = Object.entries(paths)
     .filter(([, absolutePath]) => fs.existsSync(absolutePath))
     .map(([key]) => relativePaths[key]);
-  const presentMirrorMarkers = exclusions.all.filter((relativePath) =>
-    fs.existsSync(path.resolve(root, relativePath))
-  );
+  const presentMirrorMarkers = trackedMirrorMarkers(root, exclusions);
   const isPublicMirror = presentMirrorMarkers.length === 0;
 
   const missingPaths = Object.entries(paths)
@@ -254,7 +299,8 @@ export function requiresPrivateEvidence<
   if (missing.length > 0 && !isPublicMirror) {
     throw new Error(
       `Private evidence is missing outside the structural public mirror: ${missing.join(', ')}. ` +
-        `Present mirror-only markers: ${presentMirrorMarkers.join(', ') || '(none)'}. ${reason}`
+        `Tracked excluded roots in HEAD/index: ${presentMirrorMarkers.join(', ') || '(none)'}. ` +
+        reason
     );
   }
 
@@ -265,10 +311,9 @@ export function requiresPrivateEvidence<
   ) as ResolvedMap<Revisions>;
   const skip = missing.length > 0 && isPublicMirror;
   if (skip) {
-    // eslint-disable-next-line no-console
-    console.log(
+    process.stderr.write(
       `[public mirror] SKIP private evidence: ${reason} Missing: ${missing.join(', ')}. ` +
-        'The exclusion set was parsed from scripts/mirror-to-public.sh; tests/ itself is mirrored.'
+        'Exclusions came from scripts/mirror-to-public.sh and none are tracked in HEAD/index.\n'
     );
   }
 

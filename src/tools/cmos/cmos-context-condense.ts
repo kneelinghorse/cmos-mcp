@@ -110,6 +110,17 @@ export const cmosContextCondenseSchema = z.object({
 export type CmosContextCondenseParams = z.infer<typeof cmosContextCondenseSchema>;
 
 /**
+ * Internal call-path controls. These are deliberately absent from the MCP input schema above.
+ */
+interface CmosContextCondenseInternalOptions {
+  /**
+   * Keep next-step prose byte-for-byte even when it mentions a Completed mission. A mission id
+   * records provenance, not evidence that the prose itself was delivered.
+   */
+  readonly preserveNextStepProse?: boolean;
+}
+
+/**
  * MCP Tool Definition for cmos_context_condense.
  */
 export const cmosContextCondenseToolDefinition = {
@@ -160,7 +171,8 @@ const AGGRESSIVE_MAX_ARCHIVED_SUMMARIES = 5;
  * Execute the cmos_context_condense tool.
  */
 export async function cmosContextCondense(
-  params: CmosContextCondenseParams
+  params: CmosContextCondenseParams,
+  internalOptions: CmosContextCondenseInternalOptions = {}
 ): Promise<CmosToolResult<CmosContextCondenseResult>> {
   return withClientValidated(
     (client) => {
@@ -220,20 +232,24 @@ export async function cmosContextCondense(
       // Get completed mission IDs for stale next_steps cleanup
       const completedMissionIds = getCompletedMissionIds(client);
 
-      // Common to all strategies: remove stale next_steps referencing completed missions
-      const commonCleanupError = runCondensationPhase(
-        {
-          contextType,
-          strategy,
-          phase: 'common_cleanup',
-          operation: 'applyCommonCleanup',
-          content,
-          section: 'recent_sessions',
-        },
-        () => applyCommonCleanup(content, completedMissionIds, sectionsCondensed)
-      );
-      if (commonCleanupError) {
-        return commonCleanupError;
+      // Common to all public-tool strategies: remove stale next_steps referencing completed
+      // missions. Internal sprint-close callers can preserve this prose because a mission id is
+      // provenance, not evidence that the referenced work was delivered.
+      if (!internalOptions.preserveNextStepProse) {
+        const commonCleanupError = runCondensationPhase(
+          {
+            contextType,
+            strategy,
+            phase: 'common_cleanup',
+            operation: 'applyCommonCleanup',
+            content,
+            section: 'recent_sessions',
+          },
+          () => applyCommonCleanup(content, completedMissionIds, sectionsCondensed)
+        );
+        if (commonCleanupError) {
+          return commonCleanupError;
+        }
       }
 
       if (

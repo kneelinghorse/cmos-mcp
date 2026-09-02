@@ -26,6 +26,7 @@ import {
 import { CmosDetector } from '../../../src/intelligence/cmos-detector';
 import { ProjectGraphRegistry } from '../../../src/intelligence/project-graph-registry';
 import { CredentialStore } from '../../../src/intelligence/credential-store';
+import { DEFAULT_DASHBOARD_URL } from '../../../src/tools/cmos/dashboard-client';
 import type { CmosToolResult } from '../../../src/tools/cmos/types';
 
 // ─── Fetch Mock ───────────────────────────────────────────────────────────────
@@ -1308,6 +1309,9 @@ describe('cmosDbBackfill', () => {
     expect(result.data?.warnings).toBeDefined();
     expect(result.data?.warnings?.[0]).toContain('Delta too large');
     expect(result.data?.message).toContain('Re-upload');
+    expect(result.data?.message).toContain(
+      'https://test-dashboard.example.com/projects/your-project'
+    );
 
     // No sync events should have been pushed
     const pushCalls = fetchMock.mock.calls.filter((call: unknown[]) => {
@@ -1315,6 +1319,23 @@ describe('cmosDbBackfill', () => {
       return url.includes('/api/sync/events');
     });
     expect(pushCalls).toHaveLength(0);
+  });
+
+  it('uses the baked dashboard URL in the large-delta remedy when the env URL is absent', async () => {
+    delete process.env.CMOS_DASHBOARD_URL;
+    const rows = Array.from({ length: 51 }, (_, i) => {
+      const day = Math.floor(i / 24) + 1;
+      const hour = i % 24;
+      return `INSERT INTO strategic_decisions (decision_text, created_at) VALUES ('Decision ${i}', '2026-03-0${day}T${String(hour).padStart(2, '0')}:00:00Z')`;
+    }).join(';\n');
+    createDb(rows);
+
+    const result = await cmosDbBackfill({ projectRoot: tempDir });
+
+    expect(result.success).toBe(true);
+    expect(result.data?.pushed).toBe(0);
+    expect(result.data?.message).toContain(`${DEFAULT_DASHBOARD_URL}/projects/your-project`);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('should bypass large-delta guard when force=true (51 decisions)', async () => {

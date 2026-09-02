@@ -28,10 +28,10 @@
  *      evidence of an error. Reporting it as a silent write failure would be this sprint's own
  *      defect class committed inside its fix.
  *
- * THE CONTRAST WORTH REMEMBERING (and the reason `countWrite` refuses to make this call itself):
- * at cmos-sprint-complete.ts the id set IS re-SELECTed under the identical predicate inside the
- * same exclusive transaction, so `changes < ids.length` THERE does imply an error and is warned
- * about. Same helper, opposite call-site judgement. Do not "unify" them.
+ * THE BOUNDARY WORTH REMEMBERING: `countWrite` refuses to decide whether a successful zero is
+ * meaningful because only its caller knows the id provenance. Sprint close stopped writing
+ * next_steps status in s90-m05; these explicit operator transitions retain caller-supplied ids,
+ * where an ordinary miss must stay distinct from a rejected write.
  *
  * NO MOCK CLIENTS. Every failure below is forced at the DATABASE, on a real seeded store in a
  * tmpdir, with a `BEFORE UPDATE ... RAISE(ABORT, …)` trigger scoped to exactly the table (and,
@@ -76,6 +76,11 @@ function mkStore(): { projectRoot: string; dbPath: string } {
   tmpDirs.push(projectRoot);
   const dbPath = seedCmosDb(projectRoot, { projectName: 'm02b next-steps fixture' });
   reidentifyCmosTestStore(projectRoot);
+  withDb(dbPath, (db) =>
+    db
+      .prepare(`INSERT INTO sprints (id, title, status) VALUES ('sprint-99', 'Target', 'Active')`)
+      .run()
+  );
   return { projectRoot, dbPath };
 }
 
@@ -501,10 +506,10 @@ describe('s86-m02b — cmos_context(next_steps) / cmos_context(constraints) writ
        * `success: false`, and this test is what stops that from being quietly widened to
        * `success && changes === 0`.
        *
-       * THE CONTRAST, one line, because it is the reason the judgement lives at the call site and
-       * not in the helper: at cmos-sprint-complete.ts the id set IS re-SELECTed under the
-       * identical predicate inside the same transaction, so a short count THERE does imply an
-       * error and IS warned about. Same helper, opposite call-site judgement.
+       * THE BOUNDARY: sprint close no longer reuses this predicate or calls `countWrite` for
+       * next_steps at all. Its whole-ledger survey performs no status write because provenance is
+       * not delivery. This benign-zero contract therefore belongs only to explicit operator
+       * transitions, and the five assertions below remain the guard against widening it.
        */
       const { projectRoot, dbPath } = mkStore();
       const id = seedNextStep(dbPath, 'already done before the call', 'completed');

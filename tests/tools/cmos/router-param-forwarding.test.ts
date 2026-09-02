@@ -167,6 +167,21 @@ function scoredCalls(model: ToolModel) {
   );
 }
 
+function preDispatchKeys(
+  result: WalkResult,
+  classification?: 'requires-preflight' | 'safe-enum-discriminant' | 'non-string-schema'
+): string[] {
+  return [
+    ...new Set(
+      result.tools.flatMap((tool) =>
+        tool.preDispatchReads
+          .filter((read) => classification === undefined || read.classification === classification)
+          .map((read) => read.key)
+      )
+    ),
+  ].sort();
+}
+
 describe('router param forwarding gate (s86-m03)', () => {
   // ── Assertion A ────────────────────────────────────────────────────────────
   it(
@@ -297,6 +312,7 @@ describe('router param forwarding gate (s86-m03)', () => {
         'client',
         'overallTimeoutMs',
         'perRequestTimeoutMs',
+        'preserveNextStepProse',
         'registry',
       ]);
       // All FOUR rules are exercised. If any stops firing, the rule set is no longer what the
@@ -385,6 +401,40 @@ describe('router param forwarding gate (s86-m03)', () => {
   );
 });
 
+describe('pre-dispatch published-string guard scope (s90-m04)', () => {
+  it(
+    'derives every raw pre-entry read and requires PREFLIGHT_PARAMS for exactly the unsafe strings',
+    () => {
+      const rows = real.tools.flatMap((tool) =>
+        tool.preDispatchReads.map((read) => ({ tool: tool.tool, ...read }))
+      );
+
+      // Printed as the review artifact: raw reads, their rule classification, and the constant
+      // checked against them. A safe discriminator remains visible instead of silently vanishing.
+      // eslint-disable-next-line no-console
+      console.log(
+        '\n[s90-m04] PRE-DISPATCH READS (raw, before rule classification):\n' +
+          rows
+            .map(
+              (read) =>
+                `  ${read.tool}.${read.key} [${read.classification}] ${read.file}:${read.line} — ${read.reason}`
+            )
+            .join('\n') +
+          `\n  PREFLIGHT_PARAMS = ${JSON.stringify(real.preflightParams)}`
+      );
+
+      expect(preDispatchKeys(real)).toEqual(['acrossProjects', 'action', 'projectRoot']);
+      expect(preDispatchKeys(real, 'safe-enum-discriminant')).toEqual(['action']);
+      expect(preDispatchKeys(real, 'non-string-schema')).toEqual(['acrossProjects']);
+      expect(preDispatchKeys(real, 'requires-preflight')).toEqual(['projectRoot']);
+      expect(real.preflightParams).toEqual(['projectRoot']);
+      expect(preDispatchKeys(real, 'requires-preflight')).toEqual([...real.preflightParams].sort());
+      expect(real.unclassifiable.filter((item) => item.what.includes('pre-dispatch'))).toEqual([]);
+    },
+    TIMEOUT_MS
+  );
+});
+
 // ─── Synthetic fixtures: assertion C must FAIL, not skip ──────────────────────
 
 /**
@@ -419,9 +469,13 @@ export interface CmosToolResult<T> { success: boolean; data?: T }
 `;
 
 /** A dispatch file whose switch binds \`result\` to \`entryFn(params)\` for one tool. */
-function indexTs(body: string): string {
+function indexTs(
+  body: string,
+  preflightDeclaration = "export const PREFLIGHT_PARAMS = ['projectRoot'] as const;"
+): string {
   return `
 import { entry } from './router';
+${preflightDeclaration}
 export async function executeMissionProtocolTool(name: string, args: unknown): Promise<unknown> {
   switch (name) {
 ${body}
@@ -431,6 +485,207 @@ ${body}
 void entry;
 `;
 }
+
+describe('pre-dispatch read arm fails in both directions (s90-m04)', () => {
+  const roots: string[] = [];
+  afterAll(() => {
+    for (const r of roots) fs.rmSync(r, { recursive: true, force: true });
+  });
+
+  const defs: ToolDefs = [
+    {
+      name: 'cmos_fix',
+      inputSchema: {
+        properties: {
+          action: { type: 'string', enum: ['go', 'stop'] },
+          projectRoot: { type: 'string' },
+          slug: { type: 'string' },
+        },
+      },
+    },
+  ];
+
+  function walkIndex(
+    beforeEntry: string,
+    afterEntry = '',
+    preflightDeclaration?: string,
+    entryArgument = 'params'
+  ): WalkResult {
+    const root = fixture({
+      'src/types.ts': TYPES_TS,
+      'src/router.ts': `
+import type { CmosToolResult } from './types';
+export interface FixParams { action: 'go' | 'stop'; projectRoot?: string; slug?: string }
+export async function entry(params: FixParams): Promise<CmosToolResult<string>> {
+  return { success: !!params };
+}
+`,
+      'src/index.ts': indexTs(
+        `    case 'cmos_fix': {
+      const params = args as import('./router').FixParams;
+      ${beforeEntry}
+      const result = await entry(${entryArgument});
+      ${afterEntry}
+      return result;
+    }`,
+        preflightDeclaration
+      ),
+    });
+    roots.push(root);
+    return walkRouterParams({ toolDefinitions: defs, projectRoot: root });
+  }
+
+  it(
+    'an added published string read before entry becomes unsafe, while the same read after entry does not',
+    () => {
+      const before = walkIndex('const observed = params.slug; void observed;');
+      expect(preDispatchKeys(before, 'requires-preflight')).toContain('slug');
+      expect(preDispatchKeys(before, 'requires-preflight')).not.toEqual(before.preflightParams);
+
+      const after = walkIndex('', 'const observed = params.slug; void observed;');
+      expect(preDispatchKeys(after, 'requires-preflight')).not.toContain('slug');
+      expect(preDispatchKeys(after, 'requires-preflight')).toEqual([]);
+    },
+    TIMEOUT_MS
+  );
+
+  it(
+    'an enum action is safe under positive equality, switch cases, and typeof-string guards',
+    () => {
+      for (const body of [
+        "if (params.action === 'go') { params.action.trim(); }",
+        "switch (params.action) { case 'go': params.action.trim(); break; case 'stop': break; }",
+        "if (typeof params.action === 'string') { params.action.trim(); }",
+      ]) {
+        const safe = walkIndex(body);
+        expect(preDispatchKeys(safe, 'safe-enum-discriminant')).toEqual(['action']);
+        expect(preDispatchKeys(safe, 'requires-preflight')).not.toContain('action');
+      }
+    },
+    TIMEOUT_MS
+  );
+
+  it(
+    'does not trust checker-only enum narrowing reached through a negative comparison',
+    () => {
+      const unsafe = walkIndex("if (params.action !== 'go') { params.action.trim(); }");
+      expect(preDispatchKeys(unsafe, 'safe-enum-discriminant')).toContain('action');
+      expect(preDispatchKeys(unsafe, 'requires-preflight')).toContain('action');
+      expect(preDispatchKeys(unsafe, 'requires-preflight')).not.toEqual(unsafe.preflightParams);
+    },
+    TIMEOUT_MS
+  );
+
+  it(
+    'still treats an unguarded enum string operation as requiring preflight',
+    () => {
+      const unsafe = walkIndex('params.action.trim();');
+
+      expect(preDispatchKeys(unsafe, 'requires-preflight')).toContain('action');
+      expect(preDispatchKeys(unsafe, 'requires-preflight')).not.toEqual(unsafe.preflightParams);
+    },
+    TIMEOUT_MS
+  );
+
+  it.each([
+    ['missing', ''],
+    ['not exported', "const PREFLIGHT_PARAMS = ['projectRoot'] as const;"],
+    [
+      'non-literal',
+      "export const PREFLIGHT_PARAMS = makeParams(); function makeParams() { return ['projectRoot'] as const; }",
+    ],
+    ['empty', 'export const PREFLIGHT_PARAMS = [] as const;'],
+  ])(
+    'reports a %s PREFLIGHT_PARAMS declaration as unclassifiable',
+    (_label, declaration) => {
+      const result = walkIndex('', '', declaration);
+      expect(
+        result.unclassifiable.some((item) => item.what.includes('pre-dispatch PREFLIGHT_PARAMS'))
+      ).toBe(true);
+    },
+    TIMEOUT_MS
+  );
+
+  it(
+    'reports a dynamic params element access before entry rather than silently omitting it',
+    () => {
+      const result = walkIndex(
+        "const key: keyof import('./router').FixParams = 'slug'; void params[key];"
+      );
+      expect(
+        result.unclassifiable.some((item) =>
+          item.what.includes('dynamic pre-dispatch params access')
+        )
+      ).toBe(true);
+    },
+    TIMEOUT_MS
+  );
+
+  it.each([
+    ['alias', 'const alias = params; void alias.slug;'],
+    ['destructure', 'const { slug } = params; void slug;'],
+    ['spread', 'const copy = { ...params }; void copy.slug;'],
+  ])(
+    'reports a pre-dispatch params %s escape instead of silently losing value flow',
+    (_label, beforeEntry) => {
+      const result = walkIndex(beforeEntry);
+      expect(
+        result.unclassifiable.some((item) =>
+          item.what.includes('unsupported pre-dispatch params value flow')
+        )
+      ).toBe(true);
+    },
+    TIMEOUT_MS
+  );
+
+  it(
+    'permits only direct entry forwarding and reports a nested whole-params computation',
+    () => {
+      const direct = walkIndex('');
+      const spread = walkIndex('', '', undefined, '{ ...params }');
+      for (const result of [direct, spread]) {
+        expect(
+          result.unclassifiable.filter((item) =>
+            item.what.includes('unsupported pre-dispatch params value flow')
+          )
+        ).toEqual([]);
+      }
+
+      const nested = walkIndex(
+        "const normalize = (value: import('./router').FixParams) => value;",
+        '',
+        undefined,
+        'normalize(params)'
+      );
+      expect(
+        nested.unclassifiable.filter((item) =>
+          item.what.includes('unsupported pre-dispatch params value flow')
+        )
+      ).toHaveLength(1);
+    },
+    TIMEOUT_MS
+  );
+
+  it.each([
+    [
+      'assignment',
+      "if (params.action === 'go') { params.action = 42 as never; params.action.trim(); }",
+    ],
+    ['update', "if (params.action === 'go') { params.action++; params.action.trim(); }"],
+    ['delete', "if (params.action === 'go') { delete params.action; params.action.trim(); }"],
+  ])(
+    'reports a guarded params field %s rather than trusting the stale proof',
+    (_label, beforeEntry) => {
+      const result = walkIndex(beforeEntry);
+      expect(
+        result.unclassifiable.some((item) =>
+          item.what.includes('pre-dispatch params field mutation')
+        )
+      ).toBe(true);
+    },
+    TIMEOUT_MS
+  );
+});
 
 describe('assertion C fails loudly rather than skipping (s86-m03)', () => {
   const roots: string[] = [];

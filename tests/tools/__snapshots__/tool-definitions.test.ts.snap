@@ -122,7 +122,7 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "type": "object",
         },
         "carryToSprint": {
-          "description": "Target sprint ID for carry action",
+          "description": "Existing target sprint ID for carry; missing targets are refused by name. Create one with cmos_sprint(action="add"), or omit to park with no target",
           "type": "string",
         },
         "compact": {
@@ -219,17 +219,18 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "type": "string",
         },
         "nextStepAction": {
-          "description": "Sub-action for next_steps: list | complete | carry | drop",
+          "description": "Sub-action for next_steps: list | complete | carry | drop | reopen",
           "enum": [
             "list",
             "complete",
             "carry",
             "drop",
+            "reopen",
           ],
           "type": "string",
         },
         "nextStepIds": {
-          "description": "Next-step IDs to act on for complete/carry/drop",
+          "description": "Next-step IDs to act on for complete/carry/drop/reopen",
           "items": {
             "minimum": 1,
             "type": "integer",

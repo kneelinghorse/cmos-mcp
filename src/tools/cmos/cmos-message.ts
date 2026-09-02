@@ -728,14 +728,11 @@ export async function getWhoamiDiagnostics(
   return {
     success: false,
     data,
-    error: {
-      code: strictError?.code ?? 'SENDER_UNRESOLVABLE',
-      message:
-        strictError?.message ??
+    error: CmosErrors.senderUnresolvable(
+      strictError?.message ??
         'Could not authoritatively resolve sender context for the next outbound send.',
-      suggestion:
-        'Pass projectRoot explicitly, run from a directory with cmos/db/cmos.sqlite, or ensure the local CMOS DB has a UUID metadata.dashboard_project_id and canonical project_identity.cmos_address.',
-    },
+      strictError?.code
+    ),
     warnings,
   };
 }

@@ -60,6 +60,7 @@ import {
 import {
   cmosNextSteps,
   formatNextStepsForLLM,
+  NEXT_STEP_ACTIONS,
   type CmosNextStepsParams,
   type NextStepsResult,
 } from './cmos-next-steps';
@@ -222,9 +223,9 @@ export const cmosContextSchema = z
       .describe('Page size for history action'),
     // next_steps params
     nextStepAction: z
-      .enum(['list', 'complete', 'carry', 'drop'])
+      .enum(NEXT_STEP_ACTIONS)
       .optional()
-      .describe('Sub-action for next_steps: list | complete | carry | drop'),
+      .describe(`Sub-action for next_steps: ${NEXT_STEP_ACTIONS.join(' | ')}`),
     nextStepStatus: z
       .enum(NEXT_STEP_STATUSES)
       .optional()
@@ -232,8 +233,13 @@ export const cmosContextSchema = z
     nextStepIds: z
       .array(z.number().int().positive())
       .optional()
-      .describe('Next-step IDs to act on for complete/carry/drop'),
-    carryToSprint: z.string().optional().describe('Target sprint ID for carry action'),
+      .describe('Next-step IDs to act on for complete/carry/drop/reopen'),
+    carryToSprint: z
+      .string()
+      .optional()
+      .describe(
+        'Existing target sprint ID for carry; missing targets are refused by name. Create one with cmos_sprint(action="add"), or omit to park with no target'
+      ),
     // constraints params
     constraintAction: z
       .enum(['list', 'review', 'archive', 'reaffirm'])
@@ -411,8 +417,8 @@ export const cmosContextToolDefinition = {
       },
       nextStepAction: {
         type: 'string',
-        enum: ['list', 'complete', 'carry', 'drop'],
-        description: 'Sub-action for next_steps: list | complete | carry | drop',
+        enum: [...NEXT_STEP_ACTIONS],
+        description: `Sub-action for next_steps: ${NEXT_STEP_ACTIONS.join(' | ')}`,
       },
       nextStepStatus: {
         type: 'string',
@@ -422,11 +428,12 @@ export const cmosContextToolDefinition = {
       nextStepIds: {
         type: 'array',
         items: { type: 'integer', minimum: 1 },
-        description: 'Next-step IDs to act on for complete/carry/drop',
+        description: 'Next-step IDs to act on for complete/carry/drop/reopen',
       },
       carryToSprint: {
         type: 'string',
-        description: 'Target sprint ID for carry action',
+        description:
+          'Existing target sprint ID for carry; missing targets are refused by name. Create one with cmos_sprint(action="add"), or omit to park with no target',
       },
       constraintAction: {
         type: 'string',

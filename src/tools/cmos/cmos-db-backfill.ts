@@ -23,7 +23,7 @@
 
 import * as path from 'path';
 import { withClientAsync, type CmosDatabaseClient } from './client';
-import { DashboardClient } from './dashboard-client';
+import { DashboardClient, resolveDashboardBaseUrl } from './dashboard-client';
 import { createError, createSuccess, CmosErrors } from './errors';
 import type { CmosToolResult } from './types';
 import { migrateContentHash, computeContentHash } from './schema-migrations';
@@ -869,7 +869,7 @@ export async function cmosDbBackfill(
         const tableNames = Object.keys(breakdown) as (keyof typeof breakdown)[];
         for (const table of tableNames) {
           if (breakdown[table] > LARGE_DELTA_THRESHOLD) {
-            const dashUrl = process.env['CMOS_DASHBOARD_URL'] ?? '';
+            const dashUrl = resolveDashboardBaseUrl();
             const slugResult = db.getOne<MetadataRow>(
               `SELECT value FROM metadata WHERE key = 'dashboard_slug'`
             );
