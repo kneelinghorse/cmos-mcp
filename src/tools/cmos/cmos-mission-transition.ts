@@ -159,7 +159,10 @@ export const cmosMissionTransitionToolDefinition = {
       decisions: {
         type: 'array',
         items: { type: 'string' },
-        description: 'Decisions made during mission for complete action',
+        description:
+          'Decisions made during mission for complete action. Prefer notes-only completion and ' +
+          'cmos_decisions(action="record", missionId) per decision: a host that absorbs this array ' +
+          'into notes makes the server refuse the completion.',
       },
       resolution: {
         type: 'string',

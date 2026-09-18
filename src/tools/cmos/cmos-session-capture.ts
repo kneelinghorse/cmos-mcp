@@ -22,13 +22,10 @@ import {
   ensureAuthorNamespaceColumns,
   computeContentHash,
 } from './schema-migrations';
-import { detectSupersessionCandidates, type SupersessionCandidate } from './supersession-detection';
+import { type SupersessionCandidate } from './supersession-detection';
+import { findExistingDecisionId, insertDecisionRow, followDecisionInsert } from './decision-write';
 import { applyLearningReaffirm, sanitizeLearningIds } from './learning-reaffirm';
-import {
-  recordEmbedding,
-  decisionEmbeddingInput,
-  learningEmbeddingInput,
-} from '../../intelligence/embedding-pipeline';
+import { recordEmbedding, learningEmbeddingInput } from '../../intelligence/embedding-pipeline';
 import { appendWarnings, appendWriteFailures, attachWarnings } from './format-warnings';
 import { checkWrite, type WriteFailure } from './write-guard';
 
@@ -585,13 +582,6 @@ export async function cmosSessionCapture(
           sprintId = session.sprint_id ?? inferSprintIdForDecisionCapture(client);
         }
 
-        // Get project_domain from metadata
-        const domainResult = client.getOne<{ value: string }>(
-          "SELECT value FROM metadata WHERE key = 'project_domain'",
-          []
-        );
-        const projectDomain = domainResult.success ? (domainResult.data?.value ?? null) : null;
-
         // s69-m04 — settle the author_* rename (session_id → author_session_id)
         // BEFORE the dedup SELECT/INSERT below so both reference the live column
         // name. Marker-gated fast no-op once applied; the later genesisColumns call
@@ -599,105 +589,60 @@ export async function cmosSessionCapture(
         // s86-m02b (fork f23): a half-applied rename must not be silent.
         warnings.push(...(ensureAuthorNamespaceColumns(client).warnings ?? []));
 
-        // Check for duplicate
-        const existingResult = client.getOne<{ id: number }>(
-          'SELECT id FROM strategic_decisions WHERE decision_text = ? AND author_session_id = ?',
-          [content, sessionId]
-        );
+        // s91-m04: the lookup, INSERT, detection and embedding live in decision-write.ts, shared
+        // with cmos_decisions(action="record").
+        const existingDecisionId = findExistingDecisionId(client, content, sessionId);
 
-        if (existingResult.success && existingResult.data) {
+        if (existingDecisionId !== undefined) {
           resultData.decisionAlreadyExtracted = true;
           resultData.decisionExtractionCount = 0;
-          resultData.decisionId = existingResult.data.id;
+          resultData.decisionId = existingDecisionId;
           resultData.structuredMaterialization.outcome = 'existing';
         } else {
-          // Build dynamic column list
-          const columns = [
-            'decision_text',
-            'created_at',
-            'sprint_id',
-            'project_domain',
-            'author_session_id',
-          ];
-          const insertParams: unknown[] = [content, now, sprintId, projectDomain, sessionId];
-
-          if (missionId) {
-            columns.push('mission_id');
-            insertParams.push(missionId);
-          }
-
-          // Serialize and store evidence if provided
           const evidenceArray = params.evidence;
-          const evidenceJson =
-            evidenceArray && evidenceArray.length > 0 ? JSON.stringify(evidenceArray) : null;
-          if (evidenceJson) {
-            columns.push('evidence');
-            insertParams.push(evidenceJson);
-          }
-
-          // s69-m03 — stamp the per-row genesis columns into the dynamic list.
-          const genesis = genesisColumns(client, 'strategic_decisions', getProjectId(client));
-          columns.push(...genesis.columns);
-          insertParams.push(...genesis.values);
-
-          const insertColumns = columns.join(', ');
-          const insertPlaceholders = columns.map(() => '?').join(', ');
-
-          const insertResult = client.execute(
-            `INSERT INTO strategic_decisions (${insertColumns}) VALUES (${insertPlaceholders})`,
-            insertParams
+          const written = insertDecisionRow(
+            client,
+            {
+              content,
+              now,
+              sprintId,
+              authorSessionId: sessionId,
+              missionId,
+              evidence: evidenceArray,
+            },
+            writeSink
           );
 
-          // s86-m02b: routed through checkWrite rather than tested positively, so the DISCHARGE
-          // is attributable to THIS binding. `insertResult` is reused by the learning and
-          // constraint arms below; under a name-keyed rule their checkWrite calls silently
-          // satisfied this site too, and reverting this arm to the old lie left the gate green.
-          if (checkWrite(insertResult, writeSink, 'strategic_decisions.insert')) {
+          if (written.kind === 'materialized') {
             resultData.decisionExtractionCount = 1;
             resultData.decisionAlreadyExtracted = false;
             if (evidenceArray && evidenceArray.length > 0) {
               resultData.evidenceStored = evidenceArray;
             }
-
-            // Detect potential supersession candidates
-            const newDecisionId =
-              typeof insertResult.data?.lastInsertRowid === 'number'
-                ? insertResult.data.lastInsertRowid
-                : typeof insertResult.data?.lastInsertRowid === 'bigint'
-                  ? Number(insertResult.data.lastInsertRowid)
-                  : undefined;
-
-            if (newDecisionId !== undefined) {
-              resultData.decisionId = newDecisionId;
+            if (written.decisionId !== undefined) {
+              resultData.decisionId = written.decisionId;
             }
             resultData.structuredMaterialization.outcome = 'materialized';
 
-            const suggestion = await detectSupersessionCandidates(client, content, newDecisionId);
-
-            if (suggestion.candidates.length > 0) {
-              resultData.supersessionCandidates = suggestion.candidates;
-              resultData.supersessionMessage = suggestion.message ?? undefined;
+            const followUp = await followDecisionInsert(
+              client,
+              content,
+              written.decisionId,
+              sprintId,
+              warnings
+            );
+            if (followUp.supersessionCandidates) {
+              resultData.supersessionCandidates = followUp.supersessionCandidates;
+              resultData.supersessionMessage = followUp.supersessionMessage;
             }
-
-            // Sprint 66 m03 — write-path embedding hook
-            if (newDecisionId !== undefined) {
-              const embedResult = await recordEmbedding(client, {
-                type: 'decision',
-                id: newDecisionId,
-                inputText: decisionEmbeddingInput(content),
-              });
-              warnings.push(...(embedResult.warnings ?? []));
-            }
-          } else {
+          } else if (written.kind === 'failed') {
             // s86-m02b — THE FLAGSHIP FIX. This arm has existed since Sprint 20 and set
             // count=0 + alreadyExtracted=false, which the formatter rendered as
             // "Extraction skipped". Nothing was skipped: the INSERT errored and a strategic
             // decision was LOST while the answer reported a clean, uneventful capture.
             resultData.decisionExtractionCount = 0;
             resultData.decisionAlreadyExtracted = false;
-            resultData.decisionExtractionFailed = `${insertResult.error?.code ?? 'DB_ERROR'}: ${
-              insertResult.error?.message ?? 'unknown'
-            }`;
+            resultData.decisionExtractionFailed = written.message;
           }
         }
       }
@@ -990,6 +935,9 @@ function initialStructuredMaterialization(
 /**
  * Format session capture result for LLM readability.
  */
+/** s91-m05: the rendered receipt echoes at most this much of the captured content. */
+const CONTENT_ECHO_CHARS = 100;
+
 export function formatSessionCaptureForLLM(
   result: CmosToolResult<CmosSessionCaptureResult>
 ): string {
@@ -1023,7 +971,10 @@ export function formatSessionCaptureForLLM(
     `${categoryIcon[data.category]} **${data.category.charAt(0).toUpperCase() + data.category.slice(1)} Captured**`,
     '',
     `**Session**: ${data.sessionId}`,
-    `**Content**: ${data.content}`,
+    // s91-m05: the caller already holds what it sent; a 9 KB decision was echoed in full.
+    data.content.length > CONTENT_ECHO_CHARS
+      ? `**Content**: ${data.content.slice(0, CONTENT_ECHO_CHARS)}… (${data.content.length} characters stored)`
+      : `**Content**: ${data.content}`,
     `**Capture #${data.captureCount}** in this session`,
   ];
 

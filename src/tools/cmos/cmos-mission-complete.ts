@@ -25,7 +25,11 @@ import {
   ensureMissionTimestamps,
   snapshotDedupPrunedFilter,
 } from './schema-migrations';
-import { sanitizeContentField, sanitizeStringArray } from '../../intelligence/content-sanitizer';
+import {
+  absorbedParameterNames,
+  sanitizeContentField,
+  sanitizeStringArray,
+} from '../../intelligence/content-sanitizer';
 import { recordEmbedding, decisionEmbeddingInput } from '../../intelligence/embedding-pipeline';
 import { patchProjectIdentity, type ProjectIdentityData } from './project-identity';
 import { appendWarnings, attachWarnings } from './format-warnings';
@@ -202,6 +206,34 @@ export async function cmosMissionComplete(
     inputSanitized.push(...r.sanitizedFields);
   }
 
+  // s91-m03 — the absorbed-sibling guard. When the harness drops a closing tag, a sibling like
+  // `decisions=[...]` lands inside `notes` as a literal `<parameter name="decisions">` token, the
+  // sanitizer strips it, and `decisions` arrives undefined. Completing is unrepeatable, so refuse
+  // BEFORE the transition when the absorbed name is a sibling that did not arrive. A stripped
+  // `<content>`/`<invoke>` tag, or an absorbed sibling that DID arrive, completes as before.
+  const lostSibling =
+    inputSanitized.length > 0
+      ? absorbedParameterNames(params.notes ?? '').find(
+          (name) =>
+            (name === 'decisions' || name === 'agentFeedback') &&
+            (params as unknown as Record<string, unknown>)[name] === undefined
+        )
+      : undefined;
+  if (lostSibling !== undefined) {
+    return {
+      ...createError<MissionCompleteResult>({
+        code: CMOS_ERROR_CODES.INVALID_PARAMETER,
+        message: `\`notes\` carried <parameter name="${lostSibling}"> and \`${lostSibling}\` did not arrive; the mission was not completed`,
+        field: lostSibling,
+        suggestion:
+          lostSibling === 'decisions'
+            ? `Retry cmos_mission_transition(action="complete", missionId="${missionId}") with notes only, then write each decision with cmos_decisions(action="record", missionId="${missionId}", content="...").`
+            : `Retry cmos_mission_transition(action="complete", missionId="${missionId}") with a short notes and agentFeedback as its own parameter.`,
+      }),
+      sanitizedFields: inputSanitized,
+    };
+  }
+
   const warnings: string[] = [];
   const result = await withClientAsync(
     async (client) => {
@@ -234,7 +266,12 @@ export async function cmosMissionComplete(
           code: CMOS_ERROR_CODES.MISSION_ALREADY_COMPLETED,
           message: `Mission '${missionId}' is already Completed`,
           currentState: currentStatus,
-          suggestion: 'This mission has already been completed. No action needed.',
+          // s91-m03: a retry that carries decisions/agentFeedback is recovering lost data, and
+          // "No action needed" told Stage1 the decisions were safe when they had never landed.
+          suggestion:
+            (cleanDecisions?.length ?? 0) > 0 || params.agentFeedback
+              ? `The mission is already Completed and this call wrote nothing. Record each decision with cmos_decisions(action="record", missionId="${missionId}", content="..."); agentFeedback can be sent on cmos_session(action="complete").`
+              : 'This mission has already been completed. No action needed.',
         });
       }
 

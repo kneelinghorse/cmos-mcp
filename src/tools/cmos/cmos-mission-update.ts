@@ -211,6 +211,20 @@ export const cmosMissionUpdateToolDefinition = {
   },
 } as const;
 
+/** Map of `fields` keys to database column names; a key outside it is refused by name. */
+const MISSION_UPDATE_COLUMNS: Readonly<Record<string, string>> = {
+  name: 'name',
+  status: 'status',
+  objective: 'objective',
+  context: 'context',
+  successCriteria: 'success_criteria',
+  deliverables: 'deliverables',
+  referenceDocs: 'reference_docs',
+  domainFields: 'domain_fields',
+  notes: 'notes',
+  metadata: 'metadata',
+};
+
 /**
  * Execute the cmos_mission_update tool.
  *
@@ -263,8 +277,23 @@ export async function cmosMissionUpdate(
     return createError({
       code: CMOS_ERROR_CODES.INVALID_PARAMETER,
       message: 'No fields provided to update',
-      suggestion: 'Provide at least one field to update (e.g., name, status, objective, notes)',
+      suggestion:
+        'Provide `fields: { ... }` with at least one of name, status, objective, notes; a bare ' +
+        'top-level `notes` is not read.',
     });
+  }
+
+  // s91-m02 Fix 3: an unknown key used to be skipped while the receipt reported it as written,
+  // and an all-unknown object built `UPDATE missions SET  WHERE id = ?`. Refuse it by name.
+  const unknownKey = fieldKeys.find((key) => !(key in MISSION_UPDATE_COLUMNS));
+  if (unknownKey !== undefined) {
+    return createError(
+      CmosErrors.invalidParameter(
+        `fields.${unknownKey}`,
+        fields[unknownKey as keyof MissionUpdateFields],
+        Object.keys(MISSION_UPDATE_COLUMNS)
+      )
+    );
   }
 
   // Validate status if provided
@@ -335,20 +364,6 @@ export async function cmosMissionUpdate(
       const setClauses: string[] = [];
       const queryParams: (string | null)[] = [];
 
-      // Map of TypeScript field names to database column names
-      const fieldMapping: Record<string, string> = {
-        name: 'name',
-        status: 'status',
-        objective: 'objective',
-        context: 'context',
-        successCriteria: 'success_criteria',
-        deliverables: 'deliverables',
-        referenceDocs: 'reference_docs',
-        domainFields: 'domain_fields',
-        notes: 'notes',
-        metadata: 'metadata',
-      };
-
       // JSON fields that need serialization
       const jsonFields = new Set([
         'successCriteria',
@@ -359,7 +374,7 @@ export async function cmosMissionUpdate(
       ]);
 
       for (const key of fieldKeys) {
-        const dbColumn = fieldMapping[key];
+        const dbColumn = MISSION_UPDATE_COLUMNS[key];
         if (!dbColumn) continue;
 
         const value = fields[key as keyof MissionUpdateFields];

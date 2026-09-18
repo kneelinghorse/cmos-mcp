@@ -165,6 +165,15 @@ const RATIFIED_AUTHORED_BASE = 181;
 const SITES_BY_MISSION = {
   's90-m05': ['src/tools/cmos/cmos-next-steps.ts:315'],
   's90-m07': [],
+  's91-m02': ['src/tools/cmos/unknown-param-guard.ts:80'],
+  's91-m03': [
+    'src/tools/cmos/cmos-mission-complete.ts:229',
+    'src/tools/cmos/cmos-session-complete.ts:330',
+  ],
+  's91-m04': [
+    'src/tools/cmos/cmos-decisions-record.ts:142',
+    'src/tools/cmos/cmos-decisions-record.ts:168',
+  ],
 } as const satisfies Readonly<Record<string, readonly string[]>>;
 const RATIFIED_SITE_ADDS = Object.values(SITES_BY_MISSION).flat();
 
@@ -595,6 +604,10 @@ function publishedProbePoints(): Array<{ tool: string; action: string | undefine
   return out;
 }
 
+/** s91-m04 self-supersede probe: the seeded row's text and its id, re-read by every setup. */
+const S91_M04_SELF_TEXT = 's91-m04 axis-2 probe: a decision that names itself in supersedes';
+let s91M04SelfId = 0;
+
 const MATRIX: MatrixCase[] = [
   // ── AXIS 1 — mission status × the seven driven actions ────────────────────────────────────────
   ...MISSION_STATUSES.map(
@@ -802,6 +815,69 @@ const MATRIX: MatrixCase[] = [
         tool: 'cmos_message',
         params: { action: 'get', messageId: 'msg-absent-000', projectRoot: ctx.projectRoot },
       },
+      // s91-m04: a supersedes target that does not exist.
+      {
+        tool: 'cmos_decisions',
+        params: {
+          action: 'record',
+          content: 's91-m04 axis-2 probe: supersedes an absent decision',
+          supersedes: [999_999_999],
+          projectRoot: ctx.projectRoot,
+        },
+      },
+    ],
+  },
+  {
+    axis: '2 row-presence',
+    name: 'record names its own already-recorded text in supersedes',
+    reachable:
+      'ordinary: cmos_decisions(record) retried with supersedes naming the id the first call ' +
+      "returned; SQL-forced here because a matrix call cannot read a previous call's id",
+    setup: (ctx) => {
+      withDb(ctx.dbPath, (db) => {
+        const session = db
+          .prepare(
+            `SELECT id FROM sessions WHERE status = 'active' ORDER BY started_at DESC LIMIT 1`
+          )
+          .get() as { id: string } | undefined;
+        const author = session?.id ?? null;
+        const existing = db
+          .prepare(
+            'SELECT id FROM strategic_decisions WHERE decision_text = ? AND author_session_id IS ?'
+          )
+          .get(S91_M04_SELF_TEXT, author) as { id: number } | undefined;
+        if (existing) {
+          s91M04SelfId = existing.id;
+          return;
+        }
+        const seq = (
+          db
+            .prepare('SELECT COALESCE(MAX(origin_seq), 0) + 1 AS n FROM strategic_decisions')
+            .get() as {
+            n: number;
+          }
+        ).n;
+        const info = db
+          .prepare(
+            `INSERT INTO strategic_decisions (decision_text, created_at, status, author_session_id,
+               project_id, stable_event_id, occurred_at, origin_seq, event_type, schema_version)
+             VALUES (?, ?, 'active', ?, 'cmos-mcp-pro', '01S91M04SELFSUPERSEDE00000', ?, ?,
+               'decision_captured', 1)`
+          )
+          .run(S91_M04_SELF_TEXT, new Date().toISOString(), author, Date.now(), seq);
+        s91M04SelfId = Number(info.lastInsertRowid);
+      });
+    },
+    calls: (ctx) => [
+      {
+        tool: 'cmos_decisions',
+        params: {
+          action: 'record',
+          content: S91_M04_SELF_TEXT,
+          supersedes: [s91M04SelfId],
+          projectRoot: ctx.projectRoot,
+        },
+      },
     ],
   },
   {
@@ -882,6 +958,42 @@ const MATRIX: MatrixCase[] = [
           action: 'start',
           title: 's89-m08 axis-3 probe',
           type: 'custom',
+          projectRoot: ctx.projectRoot,
+        },
+      },
+    ],
+  },
+  {
+    axis: '3 session-lifecycle',
+    name: 'a completion whose free text absorbed a sibling that did not arrive',
+    reachable:
+      'WITNESSED LIVE (Stage1, five completions): a host drops a closing tag and a sibling array is ' +
+      'absorbed into notes/summary as a literal <parameter name="..."> token',
+    setup: (ctx) => {
+      setMissionStatus(ctx.dbPath, ctx.missionId, 'In Progress');
+      withDb(ctx.dbPath, (db) => {
+        const row = db.prepare(`SELECT id FROM sessions ORDER BY started_at DESC LIMIT 1`).get() as
+          | { id: string }
+          | undefined;
+        if (!row) throw new Error('frozen source has no sessions row to activate');
+        db.prepare(`UPDATE sessions SET status = 'active' WHERE id = ?`).run(row.id);
+      });
+    },
+    calls: (ctx) => [
+      {
+        tool: 'cmos_mission_transition',
+        params: {
+          action: 'complete',
+          missionId: ctx.missionId,
+          notes: 's91-m03 probe <parameter name="decisions">["lost"]',
+          projectRoot: ctx.projectRoot,
+        },
+      },
+      {
+        tool: 'cmos_session',
+        params: {
+          action: 'complete',
+          summary: 's91-m03 probe <parameter name="nextSteps">["lost"]',
           projectRoot: ctx.projectRoot,
         },
       },
@@ -3448,6 +3560,13 @@ const RESIDUAL_REASONS: Readonly<Record<string, string>> = {
     'Same fault-shaped precondition as :57, one frame later: `getProjectIdentity` returning null ' +
     'AFTER a write that already succeeded.',
 
+  // ── DISPATCHER-PREFLIGHT SITES (false-negative item 7: this matrix drives routers, not stdio) ──
+  'src/tools/cmos/unknown-param-guard.ts:80':
+    's91-m02 unknown top-level parameter refusal. It runs in src/index.ts preflight BEFORE any ' +
+    'router, so the in-process router matrix cannot reach it. Driven instead over real stdio on ' +
+    'every tools/list pair by tests/e2e/wire-preflight.e2e.ts, and in process by ' +
+    'tests/index.preflight.test.ts. The suggestion carries no cmos_* prescription.',
+
   // ── CONSTRUCTION-MASKED PRECONDITIONS inside a VALIDATION/STATE-coded site ───────────────────
   // Driveable by CODE, but dispatcher and collab gates mask the triggers from every supported
   // construction the portable m07 instrument can establish. Four former entries moved to E.
@@ -3461,11 +3580,11 @@ const RESIDUAL_REASONS: Readonly<Record<string, string>> = {
   'src/tools/cmos/sync-mutable-push.ts:155':
     'Same collab-store gate as :111, one branch later on slug resolution.',
   // ── MASKED BY AN EARLIER REFUSAL ON EVERY PATH THIS MATRIX CAN DRIVE ─────────────────────────
-  'src/tools/cmos/cmos-sprint-complete.ts:574':
+  'src/tools/cmos/cmos-sprint-complete.ts:608':
     'MEASURED: masked. With master_context deleted and the sprint made closable, closeout refuses at ' +
-    'the shared errors.ts contextNotFound BEFORE reaching this sprint-local branch, so :574 is ' +
+    'the shared errors.ts contextNotFound BEFORE reaching this sprint-local branch, so :608 is ' +
     'unreachable while that earlier guard stands.',
-  'src/tools/cmos/cmos-sprint-complete.ts:585': 'Same masking as :574, for project_context.',
+  'src/tools/cmos/cmos-sprint-complete.ts:619': 'Same masking as :608, for project_context.',
 };
 
 const FAULT_SHAPED_DRIVEABLE_RESIDUALS = new Set([

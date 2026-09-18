@@ -146,6 +146,7 @@ import type {
   CmosReviewParams,
 } from './tools/cmos';
 import { findWrongTypedStringParam } from './tools/cmos/param-type-guard';
+import { findUnknownTopLevelParam } from './tools/cmos/unknown-param-guard';
 import { TokenCounter } from './intelligence/token-counters';
 import { SupportedModel } from './intelligence/types';
 import { CMOS_SCHEMA_VERSION } from './tools/cmos/schema';
@@ -270,7 +271,11 @@ function preflightMissionProtocolTool(name: string, args: unknown): CmosToolErro
     }
   }
 
-  return findWrongTypedStringParam(definition.inputSchema, PREFLIGHT_PARAMS, args);
+  const wrongTyped = findWrongTypedStringParam(definition.inputSchema, PREFLIGHT_PARAMS, args);
+  if (wrongTyped) return wrongTyped;
+
+  // s91-m02: precedence is action, then projectRoot type, then unknown top-level keys.
+  return findUnknownTopLevelParam(name, definition.inputSchema, args);
 }
 
 export function summarizeValue(value: unknown): JsonValue {

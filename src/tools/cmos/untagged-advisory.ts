@@ -57,10 +57,9 @@ export function buildUntaggedSessionAdvisory(client: CmosDatabaseClient): string
 /**
  * Build the decision-triage advisory, or `null` when there is nothing to report.
  *
- * `cmos_decisions(action="review")` filters `sprint_id IS NOT NULL` when selecting candidates
- * for staleness scoring, so an untagged active decision is permanently invisible to triage —
- * it can never be flagged stale, no matter how old it gets. This is a known, accepted
- * consequence of s85-m03; the advisory is the mitigation, not a fix.
+ * s91-m08: `cmos_decisions(action="review")` now scores untagged decisions by wall-clock age
+ * (they used to be permanently invisible to triage). The advisory still names how many there
+ * are, because their age is approximate: it counts 14-day periods, not real sprint closes.
  */
 export function buildUntaggedDecisionAdvisory(client: CmosDatabaseClient): string | null {
   const result = client.getOne<{ count: number }>(
@@ -69,9 +68,9 @@ export function buildUntaggedDecisionAdvisory(client: CmosDatabaseClient): strin
   );
   if (!result.success || !result.data || result.data.count === 0) return null;
   return (
-    `${result.data.count} active decision(s) have no sprint tag and are EXCLUDED from staleness ` +
-    `scoring — this review filters on sprint_id IS NOT NULL, so they can never be flagged stale ` +
-    `however old they get. Decisions captured while no sprint was open are untagged by design ` +
-    `(s85-m03). Review them directly with cmos_decisions(action="list").`
+    `${result.data.count} active decision(s) have no sprint tag and are aged on wall-clock time ` +
+    `because they carry no sprint tag (one sprint per 14 days since creation). Decisions ` +
+    `captured while no sprint was open are untagged by design (s85-m03). Review them directly ` +
+    `with cmos_decisions(action="list").`
   );
 }

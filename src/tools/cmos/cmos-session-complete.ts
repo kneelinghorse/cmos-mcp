@@ -14,6 +14,7 @@ import { genesisColumns, getProjectId } from './genesis-columns';
 import type { CmosToolResult, Session, Context } from './types';
 import { createError, createSuccess, CmosErrors, CMOS_ERROR_CODES } from './errors';
 import {
+  absorbedParameterNames,
   sanitizeContentField,
   sanitizeStringArray,
   type SanitizedField,
@@ -309,6 +310,28 @@ export async function cmosSessionComplete(
   );
   sanitizedFields.push(...citesLearningIdsSan.sanitizedFields);
   const citesLearningIds = citesLearningIdsSan.cleaned;
+
+  // s91-m03 — the absorbed-sibling guard, twin of cmos-mission-complete.ts. Completing a session
+  // is unrepeatable: when `summary` carried `<parameter name="X">` for a sibling X that did not
+  // arrive, refuse BEFORE the transition instead of completing and reporting sanitizedFields.
+  const lostSibling = summarySan.wasModified
+    ? absorbedParameterNames(params.summary).find(
+        (name) =>
+          (name === 'decisions' || name === 'nextSteps' || name === 'agentFeedback') &&
+          (params as unknown as Record<string, unknown>)[name] === undefined
+      )
+    : undefined;
+  if (lostSibling !== undefined) {
+    return {
+      ...createError<CmosSessionCompleteResult>({
+        code: CMOS_ERROR_CODES.INVALID_PARAMETER,
+        message: `\`summary\` carried <parameter name="${lostSibling}"> and \`${lostSibling}\` did not arrive; the session was not completed`,
+        field: lostSibling,
+        suggestion: `Retry cmos_session(action="complete") with a short summary and ${lostSibling} as its own parameter; the session is still active.`,
+      }),
+      sanitizedFields,
+    };
+  }
 
   const agent = params.agent ?? 'assistant';
 

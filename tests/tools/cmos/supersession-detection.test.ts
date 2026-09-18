@@ -198,7 +198,7 @@ describe('supersession-detection', () => {
         detectSupersessionCandidates(
           client,
           'Switch from SQLite to PostgreSQL for database storage',
-          999 // exclude non-existent ID
+          { sprintId: null, excludeDecisionId: 999 } // exclude non-existent ID
         )
       );
 
@@ -211,7 +211,9 @@ describe('supersession-detection', () => {
       seedDecisions([{ text: 'Use Docker for containerization' }]);
 
       const result = await runWithClient((client) =>
-        detectSupersessionCandidates(client, 'Implement authentication with JWT tokens')
+        detectSupersessionCandidates(client, 'Implement authentication with JWT tokens', {
+          sprintId: null,
+        })
       );
 
       expect(result.candidates).toHaveLength(0);
@@ -227,7 +229,10 @@ describe('supersession-detection', () => {
       db.close();
 
       const result = await runWithClient((client) =>
-        detectSupersessionCandidates(client, 'Use SQLite for database storage', 42)
+        detectSupersessionCandidates(client, 'Use SQLite for database storage', {
+          sprintId: null,
+          excludeDecisionId: 42,
+        })
       );
 
       // Should not include decision #42 itself
@@ -242,7 +247,9 @@ describe('supersession-detection', () => {
       ]);
 
       const result = await runWithClient((client) =>
-        detectSupersessionCandidates(client, 'Switch database storage engine to something new')
+        detectSupersessionCandidates(client, 'Switch database storage engine to something new', {
+          sprintId: null,
+        })
       );
 
       // Only active decisions should appear
@@ -266,7 +273,11 @@ describe('supersession-detection', () => {
       ]);
 
       const result = await runWithClient((client) =>
-        detectSupersessionCandidates(client, 'New database storage engine criteria for production')
+        detectSupersessionCandidates(
+          client,
+          'New database storage engine criteria for production',
+          { sprintId: null }
+        )
       );
 
       expect(result.candidates.length).toBeLessThanOrEqual(3);
@@ -276,7 +287,7 @@ describe('supersession-detection', () => {
       seedDecisions([{ text: 'Use TypeScript for backend services' }]);
 
       const result = await runWithClient((client) =>
-        detectSupersessionCandidates(client, 'OK done')
+        detectSupersessionCandidates(client, 'OK done', { sprintId: null })
       );
 
       expect(result.candidates).toHaveLength(0);
@@ -288,13 +299,93 @@ describe('supersession-detection', () => {
       const result = await runWithClient((client) =>
         detectSupersessionCandidates(
           client,
-          'Switch backend API services to Python instead of TypeScript'
+          'Switch backend API services to Python instead of TypeScript',
+          { sprintId: null }
         )
       );
 
       if (result.candidates.length > 0) {
         expect(result.candidates[0].overlapCount).toBeGreaterThanOrEqual(2);
       }
+    });
+  });
+
+  // s91-m05 — the four changes, each pinned so a regression names itself.
+  describe('s91-m05 detector changes', () => {
+    it("offers only candidates from the capturing row's own sprint (NULL matches NULL)", async () => {
+      seedDecisions([
+        {
+          text: 'Adopt PostgreSQL replication for database storage failover',
+          sprintId: 'sprint-a',
+        },
+        { text: 'Adopt PostgreSQL replication for database storage backups', sprintId: 'sprint-b' },
+        { text: 'Adopt PostgreSQL replication for database storage clusters' },
+      ]);
+      const text = 'Revise PostgreSQL replication for database storage failover';
+
+      const inA = await runWithClient((client) =>
+        detectSupersessionCandidates(client, text, { sprintId: 'sprint-a' })
+      );
+      const untagged = await runWithClient((client) =>
+        detectSupersessionCandidates(client, text, { sprintId: null })
+      );
+
+      expect(inA.candidates.map((c) => c.sprintId)).toEqual(['sprint-a']);
+      expect(untagged.candidates.map((c) => c.sprintId)).toEqual([null]);
+    });
+
+    it('matches whole tokens, never substrings (`sprint` does not hit `sprints`)', async () => {
+      seedDecisions([{ text: 'Capital sprints planning retained' }]);
+      const result = await runWithClient((client) =>
+        detectSupersessionCandidates(client, 'Api sprint plan capital retention', {
+          sprintId: null,
+        })
+      );
+      // Only `capital` is a whole-token match; `api`⊂`capital` and `sprint`⊂`sprints` do not count.
+      expect(result.candidates).toHaveLength(0);
+    });
+
+    it('never offers a decision the new text cites by #id', async () => {
+      const db = new Database(dbPath);
+      db.prepare(
+        `INSERT INTO strategic_decisions (id, decision_text, created_at, status)
+         VALUES (77, 'Use SQLite for persistent database storage', '2026-01-01T00:00:00Z', 'active')`
+      ).run();
+      db.close();
+
+      const citing = await runWithClient((client) =>
+        detectSupersessionCandidates(
+          client,
+          'Per #77, keep SQLite for persistent database storage and add backups',
+          { sprintId: null }
+        )
+      );
+      const notCiting = await runWithClient((client) =>
+        detectSupersessionCandidates(
+          client,
+          'Keep SQLite for persistent database storage and add backups',
+          { sprintId: null }
+        )
+      );
+
+      expect(citing.candidates.map((c) => c.id)).not.toContain(77);
+      expect(notCiting.candidates.map((c) => c.id)).toContain(77);
+    });
+
+    it('bounds the structured candidate to a 100-character preview, keeping decisionText', async () => {
+      const long = `Use SQLite for persistent database storage ${'because of durability '.repeat(400)}`;
+      seedDecisions([{ text: long }]);
+      const result = await runWithClient((client) =>
+        detectSupersessionCandidates(client, 'Switch SQLite persistent database storage', {
+          sprintId: null,
+        })
+      );
+
+      expect(result.candidates).toHaveLength(1);
+      const [candidate] = result.candidates;
+      expect(candidate.preview).toBe(long.slice(0, 100));
+      expect(candidate.decisionText).toBe(candidate.preview);
+      expect(Buffer.byteLength(JSON.stringify(candidate))).toBeLessThan(600);
     });
   });
 
@@ -305,7 +396,8 @@ describe('supersession-detection', () => {
       const result = await runWithClient((client) =>
         detectSupersessionCandidates(
           client,
-          'Switch from SQLite to PostgreSQL for database storage'
+          'Switch from SQLite to PostgreSQL for database storage',
+          { sprintId: null }
         )
       );
 

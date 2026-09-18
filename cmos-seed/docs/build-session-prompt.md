@@ -39,7 +39,8 @@ Then run missions in a loop:
 4. COMPLETE: Call cmos_mission_transition(action="complete", missionId="<id>", notes="<what was done>")
    - Marks completed in database
    - Logs completion event
-   - Optionally pass decisions=["..."] and agentFeedback="..." when the host preserves structured arguments
+   - Pass notes only. Record each decision separately with cmos_decisions(action="record", missionId="<id>", content="...")
+   - If the host absorbs a sibling array into notes (a literal <parameter name="decisions"> token), the server refuses the completion; retry with notes only, then record the decisions
 
 5. VERIFY: Call cmos_mission(action="status") to confirm state
 
@@ -130,5 +131,5 @@ The review response includes project identity:
 
 ---
 
-**Last Updated**: 2026-08-28
+**Last Updated**: 2026-09-18
 **For**: Build session mission loops

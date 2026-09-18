@@ -91,11 +91,23 @@ const EXPECTED_TOTALS = {
   // `SprintPendingNextStep`, `SprintPendingNextStepGroups`, and `SprintPendingNextStepsSurvey`
   // closure. That adds three declarations/compositions and nine property rows; the CHANGELOG's
   // Changed section discloses the corresponding answer-shape break.
-  files: 121,
-  roots: 137,
-  declarations: 270,
-  compositions: 270,
-  rows: 1495,
+  // s91-m02: src/tools/cmos/unknown-param-guard.ts joins the analyzed tool root. It declares no
+  // answer type, so only the file count moves; roots, declarations and rows are unchanged.
+  // s91-m04: cmos-decisions-record.ts adds the root `CmosDecisionsRecordResult` and
+  // `SupersededEcho` (additive; the CmosDecisionsResult union widens), and decision-write.ts joins
+  // the analyzed root. CmosSessionCaptureResult is unchanged by the extraction.
+  // s91-m05: SupersessionCandidate (inside CmosSessionCaptureResult and the record receipt) gains
+  // `preview` and `score`; `decisionText` is kept and now holds the preview. Two rows, additive.
+  // s91-m06: next-step-lease.ts joins the root; NextStepRecord gains optional closesSurvived and
+  // lease; SprintPendingNextStep gains status and closesSurvived; the survey gains totalOpen and
+  // the new SprintNextStepLease; the close receipt gains lapsedDroppedIds. All additive.
+  // s91-m07: sprint-tracking.ts joins the root; CmosReviewResult.sprint gains `resolvedBy`
+  // (additive, same row count — the sprint row's declared shape widens).
+  files: 126,
+  roots: 138,
+  declarations: 274,
+  compositions: 274,
+  rows: 1524,
 } as const;
 const EXPLICIT_OPAQUE_LEDGER = [
   'CmosToolError.providedValue = ANY',

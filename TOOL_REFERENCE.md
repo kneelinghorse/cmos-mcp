@@ -131,7 +131,7 @@ Consolidated mission state-machine tool with action parameter support. Actions: 
 | `action` | string | yes | Transition action: start \| complete \| block \| unblock \| drop \| defer |
 | `missionId` | string | yes | The mission ID to transition |
 | `notes` | string | no | Notes for start/complete actions |
-| `decisions` | array | no | Decisions made during mission for complete action |
+| `decisions` | array | no | Decisions made during mission for complete action. Prefer notes-only completion and cmos_decisions(action="record", missionId) per decision: a host that absorbs this array into notes makes the server refuse the completion. |
 | `agentFeedback` | string | no | Optional free-text UX feedback (Sprint 56 m03). Use on complete actions to flag rough edges or improvement ideas you hit while working the mission. Reviewed via cmos_feedback(action="list"). |
 | `projectRoot` | string | no | Project root directory to search for CMOS database (defaults to cwd) |
 
@@ -334,7 +334,7 @@ Consolidated context tool with action parameter support. Actions: view, update, 
 | --- | --- | --- | --- |
 | `action` | string | yes | Context action: view \| update \| condense \| snapshot \| history \| next_steps \| constraints \| search |
 | `nextStepAction` | string | no | Sub-action for next_steps: list \| complete \| carry \| drop \| reopen |
-| `nextStepStatus` | string | no | Filter status for next_steps list (default: pending) |
+| `nextStepStatus` | string | no | Filter status for next_steps list (default: every open row, pending and carried, with its lease age) |
 | `nextStepIds` | array | no | Next-step IDs to act on for complete/carry/drop/reopen |
 | `carryToSprint` | string | no | Existing target sprint ID for carry; missing targets are refused by name. Create one with cmos_sprint(action="add"), or omit to park with no target |
 | `missionId` | string | no | Filter next_steps to rows stamped with this mission (#487 mission -> row trail) |
@@ -444,18 +444,18 @@ Consolidated session tool with action parameter support. Actions: list, start, c
 
 ## cmos_decisions
 
-Consolidated decisions tool with action parameter support. Actions: list, search, update, review, batch_update. Use review to triage stale decisions with scores and suggested actions. Use batch_update to archive/supersede multiple decisions at once.
+Consolidated decisions tool with action parameter support. Actions: list, search, update, review, batch_update, record. Use review to triage stale decisions with scores and suggested actions. Use batch_update to archive/supersede multiple decisions at once. Use record to write a decision without a session. Decision text is never amended in place: correct a decision by recording a new one with supersedes=[<old id>].
 
-**Actions:** `list`, `search`, `update`, `review`, `batch_update`
+**Actions:** `list`, `search`, `update`, `review`, `batch_update`, `record`
 
 ### cmos_decisions(action="list")
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
-| `action` | string | yes | Decisions action: list \| search \| update \| review \| batch_update |
-| `domain` | string | no | Filter by domain |
-| `sprintId` | string | no | Filter by sprint ID |
-| `missionId` | string | no | Filter to rows stamped with this mission (#487 mission -> row trail) |
+| `action` | string | yes | Decisions action: list \| search \| update \| review \| batch_update \| record |
+| `domain` | string | no | Filter by domain; for record, the row's project_domain |
+| `sprintId` | string | no | Filter by sprint ID; for record, an existing sprint to tag when missionId is absent |
+| `missionId` | string | no | Filter to rows stamped with this mission (#487 mission -> row trail); for record, the mission to stamp (its sprint is used) |
 | `since` | string | no | ISO date lower bound for list action |
 | `until` | string | no | ISO date upper bound for list action |
 | `page` | integer | no | Page number for list action |
@@ -467,9 +467,9 @@ Consolidated decisions tool with action parameter support. Actions: list, search
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
-| `action` | string | yes | Decisions action: list \| search \| update \| review \| batch_update |
-| `domain` | string | no | Filter by domain |
-| `sprintId` | string | no | Filter by sprint ID |
+| `action` | string | yes | Decisions action: list \| search \| update \| review \| batch_update \| record |
+| `domain` | string | no | Filter by domain; for record, the row's project_domain |
+| `sprintId` | string | no | Filter by sprint ID; for record, an existing sprint to tag when missionId is absent |
 | `query` | string | no | Search query for search action |
 | `limit` | integer | no | Maximum results for search action |
 | `projectRoot` | string | no | Project root directory to search for CMOS database (defaults to cwd) |
@@ -478,7 +478,7 @@ Consolidated decisions tool with action parameter support. Actions: list, search
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
-| `action` | string | yes | Decisions action: list \| search \| update \| review \| batch_update |
+| `action` | string | yes | Decisions action: list \| search \| update \| review \| batch_update \| record |
 | `decisionId` | integer | no | Decision ID for update action |
 | `supersededBy` | integer | no | ID of the decision that supersedes this one (for update action) |
 | `status` | string | no | New status for update/batch_update action |
@@ -488,7 +488,7 @@ Consolidated decisions tool with action parameter support. Actions: list, search
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
-| `action` | string | yes | Decisions action: list \| search \| update \| review \| batch_update |
+| `action` | string | yes | Decisions action: list \| search \| update \| review \| batch_update \| record |
 | `includeApproaching` | boolean | no | Include decisions approaching staleness in review (default true) |
 | `projectRoot` | string | no | Project root directory to search for CMOS database (defaults to cwd) |
 
@@ -496,9 +496,25 @@ Consolidated decisions tool with action parameter support. Actions: list, search
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
-| `action` | string | yes | Decisions action: list \| search \| update \| review \| batch_update |
+| `action` | string | yes | Decisions action: list \| search \| update \| review \| batch_update \| record |
 | `status` | string | no | New status for update/batch_update action |
 | `decisionIds` | array | no | Array of decision IDs for batch_update action (max 100) |
+| `projectRoot` | string | no | Project root directory to search for CMOS database (defaults to cwd) |
+
+### cmos_decisions(action="record")
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `action` | string | yes | Decisions action: list \| search \| update \| review \| batch_update \| record |
+| `content` | string | no | Decision text for record action (required) |
+| `missionId` | string | no | Filter to rows stamped with this mission (#487 mission -> row trail); for record, the mission to stamp (its sprint is used) |
+| `sprintId` | string | no | Filter by sprint ID; for record, an existing sprint to tag when missionId is absent |
+| `supersedes` | array | no | record action: existing decision IDs this decision supersedes; each is set superseded with a pointer to the new row in the same transaction |
+| `evidence` | array | no | record action: TraceLab evidence references [{type, id}] |
+| `evidence[].type` | string | yes | Evidence type |
+| `evidence[].id` | string | yes | Evidence identifier |
+| `citesLearningIds` | array | no | record action: learning IDs this decision cites (bumps last_reviewed_at) |
+| `domain` | string | no | Filter by domain; for record, the row's project_domain |
 | `projectRoot` | string | no | Project root directory to search for CMOS database (defaults to cwd) |
 
 ## cmos_db

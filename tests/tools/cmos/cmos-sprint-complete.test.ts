@@ -21,6 +21,11 @@ import { CmosDatabaseClient } from '../../../src/tools/cmos/client';
 import * as buildFreshnessModule from '../../../src/tools/cmos/build-freshness';
 import * as serverHealth from '../../../src/server-health';
 import type { BuildManifest } from '../../../src/server-health';
+import {
+  LEASE_COUNTING_RULE,
+  LEASE_LAPSE_AT,
+  LEASE_WARN_AT,
+} from '../../../src/tools/cmos/next-step-lease';
 
 describe('cmos_sprint_complete', () => {
   let tempDir: string;
@@ -230,6 +235,8 @@ describe('cmos_sprint_complete', () => {
         next_session_context: {
           when_we_resume: ['session-1: Wrap s22-m01 follow-up', 'Prepare sprint retro notes'],
         },
+        // s91-m07: the close keeps sprint_tracking in step; nothing is open after sprint-22.
+        sprint_tracking: { current_sprint: null, last_completed_sprint: 'sprint-22' },
       });
       expect(readContext('project_context')).toEqual({
         working_memory: {
@@ -447,8 +454,14 @@ describe('cmos_sprint_complete', () => {
       expect(result.success).toBe(true);
       expect(result.data?.contexts.masterContext.condensation?.strategy).toBe('conservative');
       expect(result.data?.contexts.projectContext.condensation?.strategy).toBe('conservative');
+      // s91-m07: the close adds the sprint_tracking pointer to master_context, so "condensation
+      // never grows the context" allows exactly the pointer's own bytes and nothing more.
+      const pointerKb =
+        JSON.stringify({
+          sprint_tracking: { current_sprint: null, last_completed_sprint: 'sprint-22' },
+        }).length / 1024;
       expect(result.data?.contexts.masterContext.afterSize.sizeKb).toBeLessThanOrEqual(
-        result.data!.contexts.masterContext.beforeSize.sizeKb
+        result.data!.contexts.masterContext.beforeSize.sizeKb + pointerKb + 0.01
       );
       expect(result.data?.contexts.projectContext.afterSize.sizeKb).toBeLessThanOrEqual(
         result.data!.contexts.projectContext.beforeSize.sizeKb
@@ -1364,6 +1377,8 @@ describe('cmos_sprint_complete', () => {
       expect(result.data?.nextStepsSurvey).toEqual({
         available: true,
         totalPending: 9,
+        // s91-m06: additive — open total, per-row status and age, and the lease block.
+        totalOpen: 9,
         groups: {
           closingSprintWithMissionProvenance: [
             {
@@ -1371,18 +1386,24 @@ describe('cmos_sprint_complete', () => {
               content: 'wrap up s22-m01',
               sprintId: 'sprint-22',
               missionId: 's22-m01',
+              status: 'pending',
+              closesSurvived: 0,
             },
             {
               id: 2,
               content: 'blocked follow-up',
               sprintId: 'sprint-22',
               missionId: 's22-m02',
+              status: 'pending',
+              closesSurvived: 0,
             },
             ...[7, 8, 9, 10].map((id) => ({
               id,
               content: `additional delivered-provenance row ${id}`,
               sprintId: 'sprint-22',
               missionId: 's22-m01',
+              status: 'pending',
+              closesSurvived: 0,
             })),
           ],
           closingSprintWithoutMissionProvenance: [
@@ -1391,6 +1412,8 @@ describe('cmos_sprint_complete', () => {
               content: 'free-text idea, did it ship?',
               sprintId: 'sprint-22',
               missionId: null,
+              status: 'pending',
+              closesSurvived: 0,
             },
           ],
           otherSprintProvenance: [
@@ -1399,6 +1422,8 @@ describe('cmos_sprint_complete', () => {
               content: 'other sprint work',
               sprintId: 'sprint-99',
               missionId: null,
+              status: 'pending',
+              closesSurvived: 0,
             },
           ],
           noSprintProvenance: [
@@ -1407,8 +1432,17 @@ describe('cmos_sprint_complete', () => {
               content: 'unscoped pending work',
               sprintId: null,
               missionId: null,
+              status: 'pending',
+              closesSurvived: 0,
             },
           ],
+        },
+        lease: {
+          warnAt: LEASE_WARN_AT,
+          lapseAt: LEASE_LAPSE_AT,
+          countingRule: LEASE_COUNTING_RULE,
+          warned: [],
+          lapsed: [],
         },
       });
 
@@ -1459,6 +1493,8 @@ describe('cmos_sprint_complete', () => {
       expect(result.data?.nextStepsSurvey).toEqual({
         available: true,
         totalPending: 1,
+        // s91-m06: additive — open total, per-row status and age, and the lease block.
+        totalOpen: 1,
         groups: {
           closingSprintWithMissionProvenance: [],
           closingSprintWithoutMissionProvenance: [],
@@ -1468,9 +1504,18 @@ describe('cmos_sprint_complete', () => {
               content: 'other sprint',
               sprintId: 'sprint-99',
               missionId: null,
+              status: 'pending',
+              closesSurvived: 0,
             },
           ],
           noSprintProvenance: [],
+        },
+        lease: {
+          warnAt: LEASE_WARN_AT,
+          lapseAt: LEASE_LAPSE_AT,
+          countingRule: LEASE_COUNTING_RULE,
+          warned: [],
+          lapsed: [],
         },
       });
       expect(readNextStep(1).status).toBe('pending'); // untouched

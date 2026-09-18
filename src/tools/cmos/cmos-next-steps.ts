@@ -19,6 +19,15 @@ import { createError, createSuccess, CmosErrors } from './errors';
 import { ensureNextStepsTable, type NextStepStatus } from './schema-migrations';
 import { appendWarnings, appendWriteFailures, attachWarnings } from './format-warnings';
 import { countWrite, type WriteFailure } from './write-guard';
+import {
+  CLOSES_SURVIVED_SQL,
+  LEASED_STATUS_SQL,
+  LEASE_COUNTING_RULE,
+  LEASE_LAPSE_AT,
+  LEASE_WARN_AT,
+  leaseState,
+  type LeaseState,
+} from './next-step-lease';
 
 /**
  * A next-step record from the database.
@@ -33,6 +42,10 @@ export interface NextStepRecord {
   createdAt: string;
   resolvedAt: string | null;
   carriedToSprint: string | null;
+  /** s91-m06: sprint closes this open row has survived (see next-step-lease.ts); open rows only. */
+  closesSurvived?: number;
+  /** s91-m06: `lapsing` = the next close drops it unless carried; `warning` = the one after. */
+  lease?: LeaseState;
 }
 
 /**
@@ -98,7 +111,7 @@ export interface NextStepsResult {
 export interface CmosNextStepsParams {
   /** Sub-action: list | complete | carry | drop | reopen */
   nextStepAction: NextStepAction;
-  /** Filter by status (for list, default: pending) */
+  /** Filter by status (for list; default: the open rows, pending and carried — s91-m06) */
   nextStepStatus?: NextStepStatus;
   /** s85-m04: filter list to next-steps stamped with this mission (#487 read surface) */
   missionId?: string;
@@ -131,7 +144,7 @@ export async function cmosNextSteps(
 
       switch (action) {
         case 'list':
-          return listNextSteps(client, params.nextStepStatus ?? 'pending', params.missionId);
+          return listNextSteps(client, params.nextStepStatus, params.missionId);
         case 'complete':
           return transitionNextSteps(client, params.nextStepIds ?? [], 'completed');
         case 'carry':
@@ -173,21 +186,24 @@ interface NextStepRow {
  */
 function listNextSteps(
   client: CmosDatabaseClient,
-  status: NextStepStatus,
+  status: NextStepStatus | undefined,
   missionId?: string
 ): CmosToolResult<NextStepsResult> {
-  const conditions = ['status = ?'];
-  const queryParams: unknown[] = [status];
+  // s91-m06: with no status filter the list is the lease view — every OPEN row, carried included.
+  // Carried rows used to be invisible to every surface but an explicit `carried` filter.
+  const conditions = status === undefined ? [LEASED_STATUS_SQL] : ['n.status = ?'];
+  const queryParams: unknown[] = status === undefined ? [] : [status];
 
   if (missionId) {
-    conditions.push('mission_id = ?');
+    conditions.push('n.mission_id = ?');
     queryParams.push(missionId);
   }
 
-  const query = `SELECT id, content, status, session_id, sprint_id, mission_id, created_at, resolved_at, carried_to_sprint
-     FROM next_steps WHERE ${conditions.join(' AND ')} ORDER BY created_at ASC`;
+  const query = `SELECT n.id, n.content, n.status, n.session_id, n.sprint_id, n.mission_id,
+            n.created_at, n.resolved_at, n.carried_to_sprint, ${CLOSES_SURVIVED_SQL} AS closes_survived
+     FROM next_steps n WHERE ${conditions.join(' AND ')} ORDER BY n.created_at ASC`;
 
-  const result = client.getMany<NextStepRow>(query, queryParams);
+  const result = client.getMany<NextStepRow & { closes_survived: number }>(query, queryParams);
 
   if (!result.success || !result.data) {
     return createError<NextStepsResult>({
@@ -206,15 +222,18 @@ function listNextSteps(
     createdAt: row.created_at,
     resolvedAt: row.resolved_at,
     carriedToSprint: row.carried_to_sprint,
+    ...(row.status === 'pending' || row.status === 'carried'
+      ? { closesSurvived: row.closes_survived, lease: leaseState(row.closes_survived) }
+      : {}),
   }));
 
   return createSuccess<NextStepsResult>({
     nextStepAction: 'list',
     items,
     affected: items.length,
-    message: `Found ${items.length} next-step(s) with status '${status}'${
-      missionId ? ` for mission '${missionId}'` : ''
-    }`,
+    message: `Found ${items.length} next-step(s) ${
+      status === undefined ? 'open (pending or carried)' : `with status '${status}'`
+    }${missionId ? ` for mission '${missionId}'` : ''}`,
   });
 }
 
@@ -417,13 +436,24 @@ function renderNextStepsBody(result: CmosToolResult<NextStepsResult>): string {
 
   if (d.nextStepAction === 'list' && d.items) {
     if (d.items.length === 0) {
-      return 'No pending next-steps found.';
+      // Echo the filter that matched nothing, e.g. "No next-step(s) open (pending or carried)".
+      return `${d.message.replace(/^Found 0 /, 'No ')}.`;
     }
     const lines = [`**Next Steps (${d.items.length})**`, ''];
     for (const item of d.items) {
       const sprint = item.sprintId ? ` [${item.sprintId}]` : '';
       const mission = item.missionId ? ` (${item.missionId})` : '';
-      lines.push(`  #${item.id} [${item.status}]${sprint}${mission}: ${item.content}`);
+      const lease =
+        item.closesSurvived === undefined
+          ? ''
+          : ` {closes survived ${item.closesSurvived}${item.lease === 'ok' ? '' : `, ${item.lease}`}}`;
+      lines.push(`  #${item.id} [${item.status}]${lease}${sprint}${mission}: ${item.content}`);
+    }
+    if (d.items.some((item) => item.closesSurvived !== undefined)) {
+      lines.push('');
+      lines.push(
+        `Lease: warn at ${LEASE_WARN_AT}, drop at ${LEASE_LAPSE_AT} unless carried. ${LEASE_COUNTING_RULE}.`
+      );
     }
     return lines.join('\n');
   }

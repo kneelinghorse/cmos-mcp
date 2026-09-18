@@ -181,13 +181,21 @@ The transition tool surfaces relevant past decisions via FTS5 keyword overlap wh
 
 ## 7. Complete the work
 
-When you're done coding, capture what you decided and finish the mission:
+When you're done coding, finish the mission with notes only, then record what you decided in its own call:
 
 ```
 cmos_mission_transition(action="complete", missionId="s01-m01",
-                        notes="Built feature X, added tests, snapshotted DB before migration",
-                        decisions=["Chose event sourcing for the audit trail"])
+                        notes="Built feature X, added tests, snapshotted DB before migration")
 ```
+
+```
+cmos_decisions(action="record", missionId="s01-m01",
+               content="Chose event sourcing for the audit trail")
+```
+
+Keep the two apart. Some hosts drop a closing tag when a long free-text parameter and an array share
+one call, and the array is absorbed into the text; the server refuses such a completion rather than
+completing without your decisions.
 
 ```
 cmos_session(action="complete", summary="Sprint 01 first mission shipped")

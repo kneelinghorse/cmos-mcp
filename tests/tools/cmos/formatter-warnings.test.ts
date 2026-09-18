@@ -139,9 +139,11 @@ const SRC_ROOT = path.resolve(__dirname, '../../../src');
 // formatter this mission adds. It is a LEAF (it delegates to no other format*ForLLM), so both
 // the declaration count and the leaf count move by exactly one and the dispatcher count is
 // unchanged at 10.
-const EXPECTED_DECLARATIONS = 87;
+// s91-m04: 87 -> 88 and 77 -> 78 — formatDecisionsRecordForLLM (cmos-decisions-record.ts), a
+// LEAF that calls appendWarnings; the dispatcher count stays 10.
+const EXPECTED_DECLARATIONS = 88;
 const EXPECTED_DISPATCHERS = 10;
-const EXPECTED_LEAVES = 77;
+const EXPECTED_LEAVES = 78;
 /** The one leaf with no CmosToolResult parameter — reported by name, never skipped silently. */
 const STRUCTURAL_EXCLUSION = 'formatSyncHealthForLLM';
 
@@ -663,10 +665,12 @@ describe('s86-m02 Step 1 — the envelope warnings channel is universal', () => 
       delegatedReturns: delegatedReturns.length,
       genuineRenderReturns: genuineRenderReturns.length,
     }).toEqual({
-      terminalReturns: 265,
-      errorPreambles: 91,
-      delegatedReturns: 71,
-      genuineRenderReturns: 103,
+      // s91-m04: formatDecisionsRecordForLLM adds one error preamble, one render return, and the
+      // cmos_decisions dispatcher gains one delegated return.
+      terminalReturns: 268,
+      errorPreambles: 92,
+      delegatedReturns: 72,
+      genuineRenderReturns: 104,
     });
     expect(
       uncoveredGenuineReturns.map(
@@ -687,7 +691,8 @@ describe('s86-m02 Step 1 — the envelope warnings channel is universal', () => 
       modulesWithFormatters: new Set(warningEnvelopeFormatters.map((formatter) => formatter.file))
         .size,
       formatters: warningEnvelopeFormatters.length,
-    }).toEqual({ warningEnvelopeModules: 27, modulesWithFormatters: 25, formatters: 28 });
+      // s91-m04: cmos-decisions-record.ts adds one module whose formatter renders the envelope.
+    }).toEqual({ warningEnvelopeModules: 28, modulesWithFormatters: 26, formatters: 29 });
     expect(
       [...new Set(looseErrorPreambles.map((row) => row.errorPreambleCondition))].sort()
     ).toEqual(['!result.success || !result.data']);

@@ -120,6 +120,64 @@ describe('mission-protocol dispatcher preflight', () => {
     expect(handleSpy).not.toHaveBeenCalled();
   });
 
+  // s91-m02 Fix 2 — every published schema declares additionalProperties: false and nothing
+  // enforced it, so a misplaced key was dropped silently and the call "succeeded" without it.
+  it('refuses an unknown top-level key by name before sender resolution', async () => {
+    const handleSpy = jest.spyOn(ErrorHandler, 'handle');
+    const result = await executeMissionProtocolTool('cmos_review', { __s91_probe: 1 }, {} as never);
+    const structured = result.structuredContent as StructuredError;
+
+    expect(result.isError).toBe(true);
+    expect(structured.error).toMatchObject({
+      code: 'INVALID_PARAMETER',
+      field: '__s91_probe',
+      providedValue: 1,
+    });
+    expect(structured.error.suggestion).toContain('not a parameter of cmos_review');
+    expect(structured.error.validValues).toContain('projectRoot');
+    expect(handleSpy).not.toHaveBeenCalled();
+  });
+
+  it('names the wrapper when an unknown top-level key belongs to a nested object', async () => {
+    const result = await executeMissionProtocolTool(
+      'cmos_mission',
+      { action: 'update', missionId: 'x', metadata: { a: 1 } },
+      {} as never
+    );
+    const structured = result.structuredContent as StructuredError;
+
+    expect(structured.error).toMatchObject({ code: 'INVALID_PARAMETER', field: 'metadata' });
+    expect(structured.error.suggestion).toContain('for action=update it belongs under `fields`');
+  });
+
+  it('names the array wrapper when an unknown top-level key belongs to its entries', async () => {
+    const result = await executeMissionProtocolTool(
+      'cmos_context',
+      { action: 'update', path: 'project_name', value: 'x' },
+      {} as never
+    );
+    const structured = result.structuredContent as StructuredError;
+
+    expect(structured.error).toMatchObject({ code: 'INVALID_PARAMETER', field: 'path' });
+    expect(structured.error.suggestion).toContain('inside each `fieldUpdates` entry');
+  });
+
+  it('checks unknown keys only after the action and projectRoot checks', async () => {
+    const badAction = await executeMissionProtocolTool(
+      'cmos_feedback',
+      { action: 'nope', projectRoot: 12345, __s91_probe: 1 },
+      {} as never
+    );
+    expect((badAction.structuredContent as StructuredError).error.code).toBe('INVALID_ACTION');
+
+    const badRoot = await executeMissionProtocolTool(
+      'cmos_feedback',
+      { action: 'list', projectRoot: 12345, __s91_probe: 1 },
+      {} as never
+    );
+    expect((badRoot.structuredContent as StructuredError).error.field).toBe('projectRoot');
+  });
+
   it('does not preflight unknown tools, preserving the direct MethodNotFound contract', async () => {
     await expect(
       executeMissionProtocolTool(

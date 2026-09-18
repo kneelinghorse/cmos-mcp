@@ -229,7 +229,9 @@ export const cmosContextSchema = z
     nextStepStatus: z
       .enum(NEXT_STEP_STATUSES)
       .optional()
-      .describe('Filter status for next_steps list (default: pending)'),
+      .describe(
+        'Filter status for next_steps list (default: every open row, pending and carried, with its lease age)'
+      ),
     nextStepIds: z
       .array(z.number().int().positive())
       .optional()
@@ -423,7 +425,8 @@ export const cmosContextToolDefinition = {
       nextStepStatus: {
         type: 'string',
         enum: [...NEXT_STEP_STATUSES],
-        description: 'Filter status for next_steps list (default: pending)',
+        description:
+          'Filter status for next_steps list (default: every open row, pending and carried, with its lease age)',
       },
       nextStepIds: {
         type: 'array',

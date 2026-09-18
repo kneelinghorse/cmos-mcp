@@ -95,14 +95,16 @@ describe('cmos_decisions', () => {
   });
 
   describe('CMOS_DECISIONS_ACTIONS', () => {
-    it('contains 5 actions', () => {
-      expect(CMOS_DECISIONS_ACTIONS).toHaveLength(5);
+    // s91-m04: `record` is the sixth — a decision written outside a session, with supersedes.
+    it('contains 6 actions', () => {
+      expect(CMOS_DECISIONS_ACTIONS).toHaveLength(6);
       expect([...CMOS_DECISIONS_ACTIONS]).toEqual([
         'list',
         'search',
         'update',
         'review',
         'batch_update',
+        'record',
       ]);
     });
   });

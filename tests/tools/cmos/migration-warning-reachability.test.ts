@@ -123,7 +123,8 @@ const FORWARDING_CARRIERS: readonly ForwardingCarrier[] = [
   },
   {
     key: 'tools/cmos/cmos-mission-complete.ts:ensureMissionIdColumn:ensureStrategicDecisionsSchema',
-    reason: 'the string[] carrier is spliced directly or through captureDecisions',
+    reason:
+      'the string[] carrier is spliced directly (capture, session complete, decisions record) or through captureDecisions',
   },
   {
     key: 'tools/cmos/cmos-sprint-complete.ts:archiveSprintDecisionsAndLearnings:ensureArchivalColumns',
@@ -714,8 +715,9 @@ function verifyMissionIdCarrier(
     return false;
   }
   const calls = callsToFunction(program, owner, checker);
+  // s91-m04: the fourth caller is cmos-decisions-record.ts, whose sink reaches attachWarnings.
   return (
-    calls.length === 3 &&
+    calls.length === 4 &&
     calls.every((call) => {
       const callerSink = warningSinkForCall(call, checker);
       return Boolean(callerSink && mutableSinkReachesAnswers(call, callerSink, program, checker));
@@ -788,7 +790,9 @@ describe('s88-m09 MigrationResult warning reachability census', () => {
         `forwarded=${forwarded.length} residual=${unconsumed.length}`
     );
     expect([...census.producerNames].sort()).toEqual([...EXPECTED_PRODUCERS].sort());
-    expect(census.sites.length).toBe(48);
+    // s91-m04: 48 -> 50 — cmos-decisions-record.ts runs ensureFirehoseEventColumns and
+    // ensureAuthorNamespaceColumns before its transaction; both reach attachWarnings.
+    expect(census.sites.length).toBe(50);
   });
 
   it('carries every reachable producer through its exact answer boundary', () => {
@@ -809,7 +813,7 @@ describe('s88-m09 MigrationResult warning reachability census', () => {
           `${siteKey(site)}:${site.line} broke its verified forwarding chain — ${expectedForwarders.get(siteKey(site))}`
       )
     ).toEqual([]);
-    expect(directlyBounded).toHaveLength(36);
+    expect(directlyBounded).toHaveLength(38); // s91-m04: +2 in cmos-decisions-record.ts
     expect(forwarded.map(siteKey).sort()).toEqual([...expectedForwarders.keys()].sort());
   });
 
@@ -844,7 +848,7 @@ describe('s88-m09 MigrationResult warning reachability census', () => {
     );
 
     expect(actual.map((row) => row.key).sort()).toEqual([...expected.keys()].sort());
-    expect(consumed).toHaveLength(41);
+    expect(consumed).toHaveLength(43);
     expect(unconsumed).toHaveLength(STRUCTURAL_RESIDUALS.length);
   });
 });

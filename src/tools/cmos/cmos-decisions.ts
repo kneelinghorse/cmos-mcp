@@ -2,7 +2,7 @@
  * cmos_decisions Tool
  *
  * Consolidated decisions tool with action parameter support.
- * Actions: list, search.
+ * Actions: list, search, update, review, batch_update, record.
  * Routes to existing decisions handlers without rewriting business logic.
  *
  * @module tools/cmos/cmos-decisions
@@ -38,6 +38,12 @@ import {
   type CmosDecisionsReviewResult,
 } from './cmos-decisions-review';
 import {
+  cmosDecisionsRecord,
+  formatDecisionsRecordForLLM,
+  type CmosDecisionsRecordParams,
+  type CmosDecisionsRecordResult,
+} from './cmos-decisions-record';
+import {
   cmosDecisionsBatchUpdate,
   formatDecisionsBatchUpdateForLLM,
   type CmosDecisionsBatchUpdateParams,
@@ -50,6 +56,7 @@ export const CMOS_DECISIONS_ACTIONS = [
   'update',
   'review',
   'batch_update',
+  'record',
 ] as const;
 
 export type CmosDecisionsAction = (typeof CMOS_DECISIONS_ACTIONS)[number];
@@ -75,6 +82,17 @@ export const CMOS_DECISIONS_ACTION_PARAMS: ActionParamMap<
   update: ['action', 'decisionId', 'supersededBy', 'status', 'projectRoot'],
   review: ['action', 'includeApproaching', 'projectRoot'],
   batch_update: ['action', 'status', 'decisionIds', 'projectRoot'],
+  record: [
+    'action',
+    'content',
+    'missionId',
+    'sprintId',
+    'supersedes',
+    'evidence',
+    'citesLearningIds',
+    'domain',
+    'projectRoot',
+  ],
 };
 
 export type CmosDecisionsResult =
@@ -82,7 +100,8 @@ export type CmosDecisionsResult =
   | CmosDecisionsSearchResult
   | CmosDecisionsUpdateResult
   | CmosDecisionsReviewResult
-  | CmosDecisionsBatchUpdateResult;
+  | CmosDecisionsBatchUpdateResult
+  | CmosDecisionsRecordResult;
 
 export const cmosDecisionsSchema = z
   .object({
@@ -141,6 +160,20 @@ export const cmosDecisionsSchema = z
       .array(z.number().int().positive())
       .optional()
       .describe('Array of decision IDs for batch_update action (max 100)'),
+    // record params (s91-m04)
+    content: z.string().optional().describe('Decision text for record action (required)'),
+    supersedes: z
+      .array(z.number().int().positive())
+      .optional()
+      .describe('record action: existing decision IDs this decision supersedes'),
+    evidence: z
+      .array(z.object({ type: z.string().min(1), id: z.string().min(1) }).strict())
+      .optional()
+      .describe('record action: TraceLab evidence references [{type, id}]'),
+    citesLearningIds: z
+      .array(z.number().int().positive())
+      .optional()
+      .describe('record action: learning IDs this decision cites (bumps last_reviewed_at)'),
     projectRoot: z
       .string()
       .optional()
@@ -154,9 +187,11 @@ export const cmosDecisionsToolDefinition = {
   name: 'cmos_decisions',
   description:
     'Consolidated decisions tool with action parameter support. ' +
-    'Actions: list, search, update, review, batch_update. ' +
+    'Actions: list, search, update, review, batch_update, record. ' +
     'Use review to triage stale decisions with scores and suggested actions. ' +
-    'Use batch_update to archive/supersede multiple decisions at once.',
+    'Use batch_update to archive/supersede multiple decisions at once. ' +
+    'Use record to write a decision without a session. Decision text is never amended in ' +
+    'place: correct a decision by recording a new one with supersedes=[<old id>].',
   inputSchema: {
     type: 'object',
     properties: {
@@ -165,11 +200,44 @@ export const cmosDecisionsToolDefinition = {
         enum: [...CMOS_DECISIONS_ACTIONS],
         description: `Decisions action: ${CMOS_DECISIONS_ACTIONS.join(' | ')}`,
       },
-      domain: { type: 'string', description: 'Filter by domain' },
-      sprintId: { type: 'string', description: 'Filter by sprint ID' },
+      domain: {
+        type: 'string',
+        description: "Filter by domain; for record, the row's project_domain",
+      },
+      sprintId: {
+        type: 'string',
+        description:
+          'Filter by sprint ID; for record, an existing sprint to tag when missionId is absent',
+      },
       missionId: {
         type: 'string',
-        description: 'Filter to rows stamped with this mission (#487 mission -> row trail)',
+        description:
+          'Filter to rows stamped with this mission (#487 mission -> row trail); for record, the mission to stamp (its sprint is used)',
+      },
+      content: { type: 'string', description: 'Decision text for record action (required)' },
+      supersedes: {
+        type: 'array',
+        items: { type: 'integer', minimum: 1 },
+        description:
+          'record action: existing decision IDs this decision supersedes; each is set superseded with a pointer to the new row in the same transaction',
+      },
+      evidence: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            type: { type: 'string', description: 'Evidence type' },
+            id: { type: 'string', description: 'Evidence identifier' },
+          },
+          required: ['type', 'id'],
+          additionalProperties: false,
+        },
+        description: 'record action: TraceLab evidence references [{type, id}]',
+      },
+      citesLearningIds: {
+        type: 'array',
+        items: { type: 'integer', minimum: 1 },
+        description: 'record action: learning IDs this decision cites (bumps last_reviewed_at)',
       },
       since: { type: 'string', description: 'ISO date lower bound for list action' },
       until: { type: 'string', description: 'ISO date upper bound for list action' },
@@ -293,6 +361,17 @@ export async function cmosDecisions(
         status: params.status ?? '',
         projectRoot: params.projectRoot,
       } satisfies CmosDecisionsBatchUpdateParams);
+    case 'record':
+      return cmosDecisionsRecord({
+        content: params.content ?? '',
+        missionId: params.missionId,
+        sprintId: params.sprintId,
+        supersedes: params.supersedes,
+        evidence: params.evidence,
+        citesLearningIds: params.citesLearningIds,
+        domain: params.domain,
+        projectRoot: params.projectRoot,
+      } satisfies CmosDecisionsRecordParams);
   }
 }
 
@@ -335,6 +414,8 @@ export function formatDecisionsForLLM(
       return formatDecisionsBatchUpdateForLLM(
         result as CmosToolResult<CmosDecisionsBatchUpdateResult>
       );
+    case 'record':
+      return formatDecisionsRecordForLLM(result as CmosToolResult<CmosDecisionsRecordResult>);
     default: {
       if (!result.success) return '❌ Failed to execute cmos_decisions';
       const lines = ['✓ Decisions action completed'];

@@ -238,7 +238,7 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "type": "array",
         },
         "nextStepStatus": {
-          "description": "Filter status for next_steps list (default: pending)",
+          "description": "Filter status for next_steps list (default: every open row, pending and carried, with its lease age)",
           "enum": [
             "pending",
             "completed",
@@ -422,7 +422,7 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
     "name": "cmos_db",
   },
   {
-    "description": "Consolidated decisions tool with action parameter support. Actions: list, search, update, review, batch_update. Use review to triage stale decisions with scores and suggested actions. Use batch_update to archive/supersede multiple decisions at once.",
+    "description": "Consolidated decisions tool with action parameter support. Actions: list, search, update, review, batch_update, record. Use review to triage stale decisions with scores and suggested actions. Use batch_update to archive/supersede multiple decisions at once. Use record to write a decision without a session. Decision text is never amended in place: correct a decision by recording a new one with supersedes=[<old id>].",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -431,14 +431,27 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "type": "boolean",
         },
         "action": {
-          "description": "Decisions action: list | search | update | review | batch_update",
+          "description": "Decisions action: list | search | update | review | batch_update | record",
           "enum": [
             "list",
             "search",
             "update",
             "review",
             "batch_update",
+            "record",
           ],
+          "type": "string",
+        },
+        "citesLearningIds": {
+          "description": "record action: learning IDs this decision cites (bumps last_reviewed_at)",
+          "items": {
+            "minimum": 1,
+            "type": "integer",
+          },
+          "type": "array",
+        },
+        "content": {
+          "description": "Decision text for record action (required)",
           "type": "string",
         },
         "decisionId": {
@@ -455,8 +468,30 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "type": "array",
         },
         "domain": {
-          "description": "Filter by domain",
+          "description": "Filter by domain; for record, the row's project_domain",
           "type": "string",
+        },
+        "evidence": {
+          "description": "record action: TraceLab evidence references [{type, id}]",
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "description": "Evidence identifier",
+                "type": "string",
+              },
+              "type": {
+                "description": "Evidence type",
+                "type": "string",
+              },
+            },
+            "required": [
+              "type",
+              "id",
+            ],
+            "type": "object",
+          },
+          "type": "array",
         },
         "includeApproaching": {
           "description": "Include decisions approaching staleness in review (default true)",
@@ -469,7 +504,7 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "type": "integer",
         },
         "missionId": {
-          "description": "Filter to rows stamped with this mission (#487 mission -> row trail)",
+          "description": "Filter to rows stamped with this mission (#487 mission -> row trail); for record, the mission to stamp (its sprint is used)",
           "type": "string",
         },
         "page": {
@@ -496,7 +531,7 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "type": "string",
         },
         "sprintId": {
-          "description": "Filter by sprint ID",
+          "description": "Filter by sprint ID; for record, an existing sprint to tag when missionId is absent",
           "type": "string",
         },
         "status": {
@@ -513,6 +548,14 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "description": "ID of the decision that supersedes this one (for update action)",
           "minimum": 1,
           "type": "integer",
+        },
+        "supersedes": {
+          "description": "record action: existing decision IDs this decision supersedes; each is set superseded with a pointer to the new row in the same transaction",
+          "items": {
+            "minimum": 1,
+            "type": "integer",
+          },
+          "type": "array",
         },
         "until": {
           "description": "ISO date upper bound for list action",
@@ -1021,7 +1064,7 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           "type": "array",
         },
         "decisions": {
-          "description": "Decisions made during mission for complete action",
+          "description": "Decisions made during mission for complete action. Prefer notes-only completion and cmos_decisions(action="record", missionId) per decision: a host that absorbs this array into notes makes the server refuse the completion.",
           "items": {
             "type": "string",
           },

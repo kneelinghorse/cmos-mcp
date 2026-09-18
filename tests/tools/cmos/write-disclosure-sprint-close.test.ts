@@ -237,6 +237,31 @@ describe('s90-m05 sprint-close survey and mandatory-write disclosure', () => {
 
     const db = new Database(dbPath);
     try {
+      // s91-m06: a row past the lease line, so the close's in-transaction `dropped` write is one
+      // of the writes the rejected persist must roll back. The store is already migrated, so the
+      // genesis columns are copied from an existing row with fresh event ids.
+      const day = 24 * 60 * 60 * 1000;
+      [40, 30, 20, 10].forEach((ago, n) => {
+        db.prepare(
+          `INSERT INTO sprints (id, title, status, end_date, project_id, stable_event_id,
+             occurred_at, origin_seq, event_type, schema_version)
+           SELECT ?, ?, 'Completed', ?, project_id, ?, occurred_at, origin_seq + 100 + ?,
+             event_type, schema_version FROM sprints WHERE id = ?`
+        ).run(
+          `sprint-lease-${ago}`,
+          `Lease ${ago}`,
+          new Date(Date.now() - ago * day).toISOString(),
+          `01S91M06LEASESPRINT0000000${n}`,
+          n,
+          CLOSING_SPRINT
+        );
+      });
+      db.prepare(
+        `INSERT INTO next_steps (id, content, status, created_at, project_id, stable_event_id,
+           occurred_at, origin_seq, event_type, schema_version)
+         SELECT 6, 'lapsed row', 'pending', ?, project_id, '01S91M06LEASESTEP000000006',
+           occurred_at, origin_seq + 100, event_type, schema_version FROM next_steps WHERE id = 1`
+      ).run(new Date(Date.now() - 50 * day).toISOString());
       db.exec(
         `CREATE TRIGGER ${PROJECT_CONTEXT_TRIGGER}
          BEFORE UPDATE OF content ON contexts
@@ -286,7 +311,8 @@ describe('s90-m05 sprint-close survey and mandatory-write disclosure', () => {
       )
     ).toBe(0);
     expect(readScalar<number>(dbPath, `SELECT COUNT(*) AS value FROM context_snapshots`)).toBe(0);
-    for (const id of [1, 2, 3, 4, 5]) {
+    // Including #6, which the lease would have dropped had the close committed.
+    for (const id of [1, 2, 3, 4, 5, 6]) {
       expect(readStep(dbPath, id)).toEqual({ status: 'pending', resolved_at: null });
     }
   });
@@ -317,7 +343,10 @@ describe('s90-m05 sprint-close survey and mandatory-write disclosure', () => {
     expect(data.nextStepsSurvey).toEqual({
       available: false,
       totalPending: null,
+      // s91-m06: the additive keys are null too — a failed read never looks like an empty ledger.
+      totalOpen: null,
       groups: null,
+      lease: null,
     });
     for (const id of [1, 2, 3, 4, 5]) {
       expect(readStep(dbPath, id)).toEqual({ status: 'pending', resolved_at: null });

@@ -34,7 +34,8 @@ interface TestDb {
 
 function createTestDb(): TestDb {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-update-test-'));
-  const dbPath = path.join(tempDir, 'cmos.sqlite');
+  fs.mkdirSync(path.join(tempDir, 'cmos', 'db'), { recursive: true });
+  const dbPath = path.join(tempDir, 'cmos', 'db', 'cmos.sqlite');
   const db = new Database(dbPath);
 
   // Create comprehensive schema
@@ -103,185 +104,19 @@ function cleanupTestDb(testDb: TestDb): void {
 }
 
 /**
- * Helper to call cmosMissionUpdate with explicit dbPath
+ * s91-m02: drive the REAL handler. This helper used to re-implement cmosMissionUpdate line for
+ * line, so no assertion in this file could fail when src/ changed — the s91-m02 RED stayed red
+ * against a fixed handler because the copy, not the handler, was under test. The fixture's store
+ * sits in the standard `cmos/db/cmos.sqlite` layout so the handler resolves it from `projectRoot`.
  */
 async function callMissionUpdate(
   dbPath: string,
   params: { missionId: string; fields: MissionUpdateFields }
 ): Promise<CmosToolResult<MissionUpdateResult>> {
-  const { withClient } = await import('../../../src/tools/cmos/client');
-  const {
-    createError,
-    createSuccess,
-    CmosErrors,
-    CMOS_ERROR_CODES,
-    VALID_MISSION_STATUSES,
-    VALID_STATE_TRANSITIONS,
-  } = await import('../../../src/tools/cmos/errors');
-
-  if (!params.missionId || params.missionId.trim() === '') {
-    return createError(CmosErrors.missingParameter('missionId'));
-  }
-
-  const missionId = params.missionId.trim();
-  const fields = params.fields;
-
-  // Check if any fields are provided
-  const fieldKeys = Object.keys(fields).filter(
-    (k) => fields[k as keyof MissionUpdateFields] !== undefined
-  );
-
-  if (fieldKeys.length === 0) {
-    return createError({
-      code: CMOS_ERROR_CODES.INVALID_PARAMETER,
-      message: 'No fields provided to update',
-      suggestion: 'Provide at least one field to update (e.g., name, status, objective, notes)',
-    });
-  }
-
-  // Validate status if provided
-  if (fields.status !== undefined && !VALID_MISSION_STATUSES.includes(fields.status)) {
-    return createError(
-      CmosErrors.invalidParameter('status', fields.status, VALID_MISSION_STATUSES)
-    );
-  }
-
-  return withClient(
-    (client) => {
-      // Query mission by ID
-      const missionResult = client.getOne<{ id: string; status: MissionStatus; name: string }>(
-        'SELECT id, status, name FROM missions WHERE id = ?',
-        [missionId]
-      );
-
-      if (!missionResult.success) {
-        return createError<MissionUpdateResult>(
-          missionResult.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to query mission' }
-        );
-      }
-
-      if (!missionResult.data) {
-        return createError<MissionUpdateResult>(CmosErrors.missionNotFound(missionId));
-      }
-
-      const mission = missionResult.data;
-      const currentStatus = mission.status;
-      let previousStatus: MissionStatus | undefined;
-      let newStatus: MissionStatus | undefined;
-
-      // Validate status transition if status is being changed
-      if (fields.status !== undefined && fields.status !== currentStatus) {
-        const validTransitions = VALID_STATE_TRANSITIONS[currentStatus];
-        if (!validTransitions.includes(fields.status)) {
-          return createError<MissionUpdateResult>(
-            CmosErrors.missionInvalidTransition(missionId, currentStatus, fields.status)
-          );
-        }
-        previousStatus = currentStatus;
-        newStatus = fields.status;
-      }
-
-      // Build dynamic UPDATE query
-      const setClauses: string[] = [];
-      const queryParams: (string | null)[] = [];
-
-      const fieldMapping: Record<string, string> = {
-        name: 'name',
-        status: 'status',
-        objective: 'objective',
-        context: 'context',
-        successCriteria: 'success_criteria',
-        deliverables: 'deliverables',
-        referenceDocs: 'reference_docs',
-        domainFields: 'domain_fields',
-        notes: 'notes',
-        metadata: 'metadata',
-      };
-
-      const jsonFields = new Set([
-        'successCriteria',
-        'deliverables',
-        'referenceDocs',
-        'domainFields',
-        'metadata',
-      ]);
-
-      for (const key of fieldKeys) {
-        const dbColumn = fieldMapping[key];
-        if (!dbColumn) continue;
-
-        const value = fields[key as keyof MissionUpdateFields];
-        if (value === undefined) continue;
-
-        setClauses.push(`${dbColumn} = ?`);
-
-        if (jsonFields.has(key)) {
-          queryParams.push(JSON.stringify(value));
-        } else {
-          queryParams.push(value as string);
-        }
-      }
-
-      // Handle completed_at for status changes
-      if (newStatus === 'Completed') {
-        setClauses.push('completed_at = ?');
-        queryParams.push(new Date().toISOString());
-      }
-
-      queryParams.push(missionId);
-
-      const updateQuery = `
-        UPDATE missions
-        SET ${setClauses.join(', ')}
-        WHERE id = ?
-      `;
-
-      const updateResult = client.execute(updateQuery, queryParams);
-
-      if (!updateResult.success || updateResult.data?.changes === 0) {
-        return createError<MissionUpdateResult>({
-          code: CMOS_ERROR_CODES.DB_QUERY_FAILED,
-          message: `Failed to update mission '${missionId}'`,
-          suggestion: 'The mission may have been modified by another process',
-        });
-      }
-
-      // Log the state change to session_events if status changed
-      if (previousStatus !== undefined && newStatus !== undefined) {
-        const now = new Date().toISOString();
-        client.execute(
-          `INSERT INTO session_events (ts, agent, mission, action, status, summary, raw_event) VALUES (?, 'mcp-tool', ?, 'update', ?, ?, ?)`,
-          [
-            now,
-            missionId,
-            newStatus,
-            `Updated mission ${missionId}: status changed from ${previousStatus} to ${newStatus}`,
-            JSON.stringify({
-              tool: 'cmos_mission_update',
-              missionId,
-              previousStatus,
-              newStatus,
-              updatedFields: fieldKeys,
-            }),
-          ]
-        );
-      }
-
-      const result: MissionUpdateResult = {
-        missionId,
-        updatedFields: fieldKeys,
-        message: `Mission '${missionId}' updated successfully (${fieldKeys.length} field${fieldKeys.length === 1 ? '' : 's'})`,
-      };
-
-      if (previousStatus !== undefined && newStatus !== undefined) {
-        result.previousStatus = previousStatus;
-        result.currentStatus = newStatus;
-      }
-
-      return createSuccess(result);
-    },
-    { dbPath }
-  );
+  return cmosMissionUpdate({
+    ...params,
+    projectRoot: path.dirname(path.dirname(path.dirname(dbPath))),
+  });
 }
 
 describe('cmos_mission_update', () => {
@@ -646,6 +481,40 @@ describe('cmos_mission_update', () => {
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe(CMOS_ERROR_CODES.INVALID_PARAMETER);
       expect(result.error?.message).toContain('No fields provided');
+      // s91-m02: Stage1 put `notes` at the top level and was told to "provide at least one
+      // field" — a remedy that never names the wrapper it was missing. The suggestion must.
+      expect(result.error?.suggestion).toContain('fields');
+    });
+
+    // s91-m02 Fix 3 — an unknown key inside `fields` used to be skipped silently while the
+    // receipt reported it as written (mixed case), or to build `UPDATE missions SET  WHERE`
+    // and prescribe "check the SQL syntax" (all-unknown case). Both must refuse by name.
+    it('refuses an unknown key inside fields by name instead of reporting it as written', async () => {
+      const result = await callMissionUpdate(testDb.dbPath, {
+        missionId: 'm-queued',
+        fields: { bogus: 1, notes: 'x' } as unknown as MissionUpdateFields,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(CMOS_ERROR_CODES.INVALID_PARAMETER);
+      expect(result.error?.field).toBe('fields.bogus');
+      expect(result.error?.validValues).toContain('notes');
+      const row = testDb.db.prepare('SELECT notes FROM missions WHERE id = ?').get('m-queued') as {
+        notes: string | null;
+      };
+      expect(row.notes).not.toBe('x');
+    });
+
+    it('refuses an all-unknown fields object instead of executing an empty UPDATE', async () => {
+      const result = await callMissionUpdate(testDb.dbPath, {
+        missionId: 'm-queued',
+        fields: { bogus: 1 } as unknown as MissionUpdateFields,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(CMOS_ERROR_CODES.INVALID_PARAMETER);
+      expect(result.error?.field).toBe('fields.bogus');
+      expect(result.error?.suggestion ?? '').not.toContain('SQL');
     });
 
     it('should return error for invalid status value', async () => {

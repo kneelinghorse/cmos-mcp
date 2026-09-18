@@ -14,25 +14,52 @@ import type { CmosDatabaseClient } from './client';
 import { HybridRetriever } from './fts5-retriever';
 
 const MAX_CANDIDATES = 3;
-const CANDIDATE_POOL_MULTIPLIER = 3;
+/**
+ * s91-m05: the retriever ranks ALL active decisions, and only same-sprint rows survive the sprint
+ * filter below, so the pool is widened from 9 to 30 to keep a same-sprint candidate from being
+ * crowded out by other sprints' rows. Retriever scoring itself is untouched.
+ */
+const CANDIDATE_POOL = 30;
 const MIN_KEYWORD_LENGTH = 3;
 const MIN_KEYWORDS_FOR_SEARCH = 2;
+/** Shared tokens with a non-zero weight a candidate needs before it is offered. */
+const MIN_WEIGHTED_OVERLAP = 2;
+/**
+ * Length-normalized floor. Raw overlap grows with text length: two unrelated sprint-88 review
+ * rows of 3-8 KB shared 55 weighted tokens. MEASURED on the live corpus (s91-m05): release rows
+ * offered across sprints for #1140 sat at 0.02; the genuine #1135 -> #1134 supersession is 0.129.
+ */
+const MIN_SIMILARITY = 0.05;
+/** A token present in more than this share of active decisions is house style, not a claim. */
+const COMMON_TOKEN_SHARE = 0.3;
+/** Below this many active decisions, document frequency says nothing, so no token is zeroed. */
+const MIN_CORPUS_FOR_COMMON_CUTOFF = 10;
+export const CANDIDATE_PREVIEW_CHARS = 100;
 
 export interface SupersessionCandidate {
   /** ID of the existing decision */
   id: number;
 
-  /** Text of the existing decision */
+  /**
+   * s91-m05: the first CANDIDATE_PREVIEW_CHARS characters of the existing decision — the same
+   * value as `preview`. The key is kept (not removed) so the receipt shape stays additive.
+   */
   decisionText: string;
 
-  /** Sprint the existing decision belongs to */
+  /** The first CANDIDATE_PREVIEW_CHARS characters of the existing decision. */
+  preview: string;
+
+  /** Sprint the existing decision belongs to (always the capturing row's sprint, s91-m05) */
   sprintId: string | null;
 
   /** When the existing decision was created */
   createdAt: string;
 
-  /** Number of overlapping keywords */
+  /** Number of shared whole tokens that carry weight (rare enough to be a claim) */
   overlapCount: number;
+
+  /** Cosine similarity of the two IDF-weighted token sets, 0..1 (rounded to 3 places) */
+  score: number;
 }
 
 export interface SupersessionSuggestion {
@@ -43,22 +70,42 @@ export interface SupersessionSuggestion {
   message: string | null;
 }
 
+export interface SupersessionDetectionOptions {
+  /**
+   * The capturing row's sprint. Only active decisions in the SAME sprint are candidates; NULL
+   * matches NULL. A prior sprint's decisions are archived by its close, so any still active are
+   * the untagged rows — which is why the rule is "same sprint", not "open sprint".
+   */
+  sprintId: string | null;
+  /** The new decision's own id, never offered as its own candidate. */
+  excludeDecisionId?: number;
+}
+
 /**
  * Detect potential supersession candidates for a newly captured decision.
  *
- * Routes the new decision text through HybridRetriever and returns up to
- * MAX_CANDIDATES matches. `overlapCount` is preserved as the secondary filter
- * + display metric so the suggestion message reads the same as before.
+ * s91-m05 — eight independent reports showed the detector offering the historical review verdicts
+ * a good close cites, because (1) it ranked every sprint's active decisions, (2) it counted
+ * SUBSTRING hits (`sprint` hit `sprints`, `api` hit `capital`), (3) house-style vocabulary
+ * ("MEASURED", "THE RULING", review, close, mission) scored like a claim, and (4) a row the new
+ * text cites by `#id` was offered as the row it replaces. Now: same-sprint candidacy; whole-token
+ * overlap weighted by inverse document frequency over the active-decision corpus, with tokens in
+ * more than COMMON_TOKEN_SHARE of it contributing nothing (once the corpus has
+ * MIN_CORPUS_FOR_COMMON_CUTOFF rows), ranked by length-normalized cosine similarity; cited ids
+ * excluded; and a bounded preview on the receipt.
  *
- * @param client - Database client
- * @param newDecisionText - The newly captured decision text
- * @param excludeDecisionId - ID of the new decision to exclude from results
- * @returns Supersession suggestion with candidates
+ * KNOWN RESIDUAL, measured rather than tuned away: #1086 -> #1085 (both sprint-88) scores 0.116
+ * against the genuine #1135 -> #1134 at 0.129. #1086 resolves an item #1085 raised without citing
+ * it by `#id`; no text-similarity threshold separates "resolves an item from" and "supersedes"
+ * with one positive to calibrate against, so this pair stays offerable.
+ *
+ * NOT LOOKED AT: fts5-retriever.ts scoring and its unused `sprintRange` option;
+ * relevance-surfacing.ts (mission-start surfacing is deliberately cross-sprint).
  */
 export async function detectSupersessionCandidates(
   client: CmosDatabaseClient,
   newDecisionText: string,
-  excludeDecisionId?: number
+  options: SupersessionDetectionOptions
 ): Promise<SupersessionSuggestion> {
   const keywords = extractKeywords(newDecisionText);
 
@@ -69,41 +116,57 @@ export async function detectSupersessionCandidates(
   const retriever = new HybridRetriever(client);
   const results = await retriever.search(newDecisionText, {
     types: ['decision'],
-    limit: MAX_CANDIDATES * CANDIDATE_POOL_MULTIPLIER,
+    limit: CANDIDATE_POOL,
     statusFilter: ['active'],
     // s82-m04: deliberately NO expandGraph — this is a precision, corpus-mutating path
     // (drives supersession marking); graph-adjacent candidates would over-mark.
   });
 
+  const cited = citedDecisionIds(newDecisionText);
+  const weights = tokenWeights(client);
+  const newTokens = new Set(keywords);
+
+  const newNorm = vectorNorm(keywords, weights);
+
   const candidates: SupersessionCandidate[] = results
-    .filter((r) => {
-      if (excludeDecisionId === undefined) return true;
-      const idNum = typeof r.id === 'number' ? r.id : Number(r.id);
-      return idNum !== excludeDecisionId;
+    .map((r) => ({ ...r, idNum: typeof r.id === 'number' ? r.id : Number(r.id) }))
+    .filter((r) => r.idNum !== options.excludeDecisionId)
+    .filter((r) => !cited.has(r.idNum))
+    .filter((r) => (r.sprintId ?? null) === options.sprintId)
+    .map((r) => {
+      const candidateTokens = extractKeywords(r.text);
+      const weighted = candidateTokens
+        .filter((t) => newTokens.has(t))
+        .map((t) => weights(t))
+        .filter((w) => w > 0);
+      const norms = newNorm * vectorNorm(candidateTokens, weights);
+      const similarity = norms > 0 ? weighted.reduce((sum, w) => sum + w * w, 0) / norms : 0;
+      const preview = r.text.slice(0, CANDIDATE_PREVIEW_CHARS);
+      return {
+        id: r.idNum,
+        decisionText: preview,
+        preview,
+        sprintId: r.sprintId ?? null,
+        createdAt: r.createdAt ?? '',
+        overlapCount: weighted.length,
+        score: Math.round(similarity * 1000) / 1000,
+      };
     })
-    .map((r) => ({
-      id: typeof r.id === 'number' ? r.id : Number(r.id),
-      decisionText: r.text,
-      sprintId: r.sprintId,
-      createdAt: r.createdAt ?? '',
-      overlapCount: countKeywordOverlap(r.text, keywords),
-    }))
-    .filter((c) => c.overlapCount >= MIN_KEYWORDS_FOR_SEARCH)
-    .sort((a, b) => b.overlapCount - a.overlapCount);
+    .filter((c) => c.overlapCount >= MIN_WEIGHTED_OVERLAP && c.score >= MIN_SIMILARITY)
+    .sort((a, b) => b.score - a.score);
 
   if (candidates.length === 0) {
     return { candidates: [], message: null };
   }
 
   const limited = candidates.slice(0, MAX_CANDIDATES);
-  const message = formatSuggestionMessage(limited, excludeDecisionId);
+  const message = formatSuggestionMessage(limited, options.excludeDecisionId);
 
   return { candidates: limited, message };
 }
 
 /**
- * Extract meaningful keywords from decision text.
- * Filters out stop words and short tokens.
+ * Extract meaningful keywords from decision text: whole lower-cased tokens, stop words removed.
  */
 export function extractKeywords(text: string): string[] {
   const tokens = text
@@ -116,9 +179,40 @@ export function extractKeywords(text: string): string[] {
   return unique;
 }
 
-function countKeywordOverlap(text: string, keywords: string[]): number {
-  const lower = text.toLowerCase();
-  return keywords.reduce((count, kw) => count + (lower.includes(kw) ? 1 : 0), 0);
+/** Euclidean norm of a binary token vector under the IDF weights. */
+function vectorNorm(tokens: readonly string[], weights: (token: string) => number): number {
+  return Math.sqrt(tokens.reduce((sum, t) => sum + weights(t) ** 2, 0));
+}
+
+/** Every `#<id>` the text names. A row cited by reference is carried, not replaced. */
+function citedDecisionIds(text: string): Set<number> {
+  return new Set([...text.matchAll(/#(\d+)\b/g)].map((m) => Number(m[1])));
+}
+
+/**
+ * Inverse-document-frequency weight per token over the ACTIVE decision corpus, computed at query
+ * time (a maintained term table would be a migration to save milliseconds). A token in more than
+ * COMMON_TOKEN_SHARE of the corpus weighs zero once the corpus is large enough for that share to
+ * mean anything.
+ */
+function tokenWeights(client: CmosDatabaseClient): (token: string) => number {
+  const corpus = client.getMany<{ decision_text: string }>(
+    `SELECT decision_text FROM strategic_decisions WHERE status = 'active'`,
+    []
+  );
+  const docs = corpus.success ? (corpus.data ?? []) : [];
+  const n = docs.length;
+  const df = new Map<string, number>();
+  for (const doc of docs) {
+    for (const token of extractKeywords(doc.decision_text ?? '')) {
+      df.set(token, (df.get(token) ?? 0) + 1);
+    }
+  }
+  return (token) => {
+    const count = df.get(token) ?? 0;
+    if (n >= MIN_CORPUS_FOR_COMMON_CUTOFF && count / n > COMMON_TOKEN_SHARE) return 0;
+    return Math.log((n + 1) / (count + 1)) + 1;
+  };
 }
 
 function formatSuggestionMessage(
@@ -132,7 +226,9 @@ function formatSuggestionMessage(
     const sprint = c.sprintId ? ` (${c.sprintId})` : '';
     const preview =
       c.decisionText.length > 80 ? c.decisionText.slice(0, 80) + '...' : c.decisionText;
-    lines.push(`  - Decision #${c.id}${sprint}: "${preview}" (${c.overlapCount} keyword overlap)`);
+    lines.push(
+      `  - Decision #${c.id}${sprint}: "${preview}" (${c.overlapCount} shared rare terms, score ${c.score})`
+    );
   }
   lines.push('');
   lines.push('To mark a candidate as superseded:');

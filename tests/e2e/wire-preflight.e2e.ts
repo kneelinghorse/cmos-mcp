@@ -637,6 +637,34 @@ describe('s90-m04 wire preflight and first-run classification over built stdio',
     );
   }, 180_000);
 
+  // s91-m02: every published schema declares additionalProperties: false. The universe is the
+  // server's own tools/list pairs, never a hand list. Driven on the uninitialized first-run root,
+  // so a refusal proves the key was rejected before any store was resolved or opened.
+  it('refuses one unknown top-level key on every published pair before dispatch', async () => {
+    const failures: ObservedFailure[] = [];
+    const storePath = path.join(firstRunRoot, 'cmos', 'db', 'cmos.sqlite');
+    const storeExistedBefore = fs.existsSync(storePath);
+
+    for (const pair of pairs) {
+      const result = await callBounded(firstRunHarness, pair, argsFor(pair, { __s91_probe: 1 }));
+      const error = result.structuredContent?.error;
+      if (
+        result.isError !== true ||
+        error?.code !== 'INVALID_PARAMETER' ||
+        error.field !== '__s91_probe' ||
+        hasCatchAllDisclosure(result)
+      ) {
+        failures.push(observedFailure(pair, result, '__s91_probe'));
+      }
+    }
+
+    expect(failures).toEqual([]);
+    expect(fs.existsSync(storePath)).toBe(storeExistedBefore);
+    console.log(
+      `[s91-m02 unknown-key wire] pairs=${pairs.length} INVALID_PARAMETER=${pairs.length}`
+    );
+  }, 180_000);
+
   it('preserves omitted/null projectRoot semantics across two isolated all-pair sweeps', async () => {
     dashboardDouble.clearRequests();
     const omitted = await sweepProjectRootSemantics(

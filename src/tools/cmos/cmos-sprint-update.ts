@@ -14,6 +14,7 @@ import { createError, createSuccess, CmosErrors, CMOS_ERROR_CODES } from './erro
 import { isOpenStatus } from './terminal-status';
 import { buildDemotionWarning, writeSingleCurrentSprint } from './sprint-current-invariant';
 import { appendWarnings, attachWarnings } from './format-warnings';
+import { syncSprintTracking } from './sprint-tracking';
 
 /**
  * Fields that can be updated on a sprint.
@@ -129,6 +130,15 @@ export const cmosSprintUpdateToolDefinition = {
   },
 } as const;
 
+/** Map of `fields` keys to database column names; a key outside it is refused by name. */
+const SPRINT_UPDATE_COLUMNS: Readonly<Record<string, string>> = {
+  title: 'title',
+  focus: 'focus',
+  status: 'status',
+  startDate: 'start_date',
+  endDate: 'end_date',
+};
+
 /**
  * Execute the cmos_sprint_update tool.
  *
@@ -156,8 +166,22 @@ export async function cmosSprintUpdate(
       code: CMOS_ERROR_CODES.INVALID_PARAMETER,
       message: 'No fields provided to update',
       suggestion:
-        'Provide at least one field to update (e.g., title, focus, status, startDate, endDate)',
+        'Provide `fields: { ... }` with at least one of title, focus, status, startDate, endDate; ' +
+        'a bare top-level `status` is not read.',
     });
+  }
+
+  // s91-m02 Fix 3: an unknown key used to be skipped while the receipt reported it as written,
+  // and an all-unknown object built `UPDATE sprints SET  WHERE id = ?`. Refuse it by name.
+  const unknownKey = fieldKeys.find((key) => !(key in SPRINT_UPDATE_COLUMNS));
+  if (unknownKey !== undefined) {
+    return createError(
+      CmosErrors.invalidParameter(
+        `fields.${unknownKey}`,
+        fields[unknownKey as keyof SprintUpdateFields],
+        Object.keys(SPRINT_UPDATE_COLUMNS)
+      )
+    );
   }
 
   return withClientValidated(
@@ -175,22 +199,13 @@ export async function cmosSprintUpdate(
         return createError<SprintUpdateResult>(CmosErrors.sprintNotFound(sprintId));
       }
 
-      // Map of TypeScript field names to database column names
-      const fieldMapping: Record<string, string> = {
-        title: 'title',
-        focus: 'focus',
-        status: 'status',
-        startDate: 'start_date',
-        endDate: 'end_date',
-      };
-
       // The primary write: build + run the dynamic UPDATE from the provided fields.
       const applyUpdate = (): CmosToolResult<void> => {
         const setClauses: string[] = [];
         const queryParams: (string | null)[] = [];
 
         for (const key of fieldKeys) {
-          const dbColumn = fieldMapping[key];
+          const dbColumn = SPRINT_UPDATE_COLUMNS[key];
           if (!dbColumn) continue;
 
           const value = fields[key as keyof SprintUpdateFields];
@@ -240,12 +255,21 @@ export async function cmosSprintUpdate(
       const willBecomeOpen =
         nextStatus !== undefined && nextStatus !== '' && isOpenStatus(nextStatus);
 
+      // s91-m07: a status change moves master_context.sprint_tracking; a field-only edit does not.
+      const trackingWarnings = (): string[] => {
+        if (nextStatus === undefined) return [];
+        const tracked: string[] = [];
+        syncSprintTracking(client, tracked, nextStatus === 'Completed' ? sprintId : undefined);
+        return tracked;
+      };
+
       if (!willBecomeOpen) {
         const updated = applyUpdate();
         if (!updated.success) {
           return createError<SprintUpdateResult>(updated.error!);
         }
-        return success();
+        const tracked = trackingWarnings();
+        return success(tracked.length > 0 ? tracked : undefined);
       }
 
       const invariant = writeSingleCurrentSprint(client, sprintId, applyUpdate);
@@ -258,6 +282,7 @@ export async function cmosSprintUpdate(
       const warning = buildDemotionWarning(invariant.data!.demoted);
       const warnings = [...(invariant.warnings ?? [])];
       if (warning) warnings.push(warning);
+      warnings.push(...trackingWarnings());
       return success(warnings.length > 0 ? warnings : undefined);
     },
     { projectRoot: params.projectRoot }

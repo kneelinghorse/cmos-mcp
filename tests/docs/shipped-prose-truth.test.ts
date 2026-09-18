@@ -1378,10 +1378,12 @@ describePrivate('build-session-prompt ↔ agents.md process-hardening parity (s8
     // practices PLUS the six checklist items nested inside practice 4. Which shape a file uses
     // is decided by its FIRST numbered item in the section — practice 1 — so the shape is read
     // off the document rather than assumed per-file.
-    const OUTSIDE = /^(\d)\.\s+\*\*([^*]+?)\*\*/gm;
-    const INSIDE = /^\*\*(\d)\.\s+([^*—]+?)(?:\s+—|\*\*)/gm;
-    const firstOutside = section.search(/^\d\.\s+\*\*/m);
-    const firstInside = section.search(/^\*\*\d\.\s+/m);
+    // s91-m08: `\d+`, not `\d` — practice 10 is the first two-digit practice, and a single-digit
+    // pattern silently stops counting at nine.
+    const OUTSIDE = /^(\d+)\.\s+\*\*([^*]+?)\*\*/gm;
+    const INSIDE = /^\*\*(\d+)\.\s+([^*—]+?)(?:\s+—|\*\*)/gm;
+    const firstOutside = section.search(/^\d+\.\s+\*\*/m);
+    const firstInside = section.search(/^\*\*\d+\.\s+/m);
     const usesInside = firstInside !== -1 && (firstOutside === -1 || firstInside < firstOutside);
     const pattern = usesInside ? INSIDE : OUTSIDE;
     const matches = [...section.matchAll(pattern)];
@@ -1408,7 +1410,7 @@ describePrivate('build-session-prompt ↔ agents.md process-hardening parity (s8
     return end === -1 ? rest : rest.slice(0, end);
   };
 
-  it('carries nine numbered practices, at parity with agents.md', () => {
+  it('carries ten numbered practices, at parity with agents.md', () => {
     // agents.md says "Full text + evidence lives in build-session-prompt.md" — so the cited
     // authority must not be the weaker of the two documents.
     const agentsPractices = processHardeningPractices(
@@ -1418,8 +1420,9 @@ describePrivate('build-session-prompt ↔ agents.md process-hardening parity (s8
 
     // Premise check: the extractor found a Process Hardening section in BOTH files. Without
     // this, two empty lists would compare equal and the parity assertion would be vacuous.
-    expect(agentsPractices.length).toBe(9);
-    expect(promptPractices.length).toBe(9);
+    // s91-m08: practice 10 (rules live in documents; rows expire; a next-step holds a lease).
+    expect(agentsPractices.length).toBe(10);
+    expect(promptPractices.length).toBe(10);
 
     // Same practices, same order — compared by NUMBER and by the leading words of the title,
     // so a reworded title does not fail but a DROPPED or REORDERED practice does.
@@ -1541,10 +1544,10 @@ describePrivate('build-session-prompt ↔ agents.md process-hardening parity (s8
     expect(review).toMatch(/practice 9/i);
   });
 
-  it('states that the Process Hardening set now contains nine practices', () => {
+  it('states that the Process Hardening set now contains ten practices', () => {
     const prompt = fs.readFileSync(promptPath, 'utf8');
-    expect(prompt).toMatch(/bringing the set to nine/);
-    expect(prompt).not.toMatch(/bringing the set to seven/);
+    expect(prompt).toMatch(/bringing the set to ten/);
+    expect(prompt).not.toMatch(/bringing the set to (?:seven|nine)/);
   });
 
   it('carries the 6-path checklist, the positive-fire clause and the no-silent-fail-open rule', () => {

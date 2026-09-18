@@ -111,7 +111,7 @@ cmos_mission_transition(action="complete", missionId="s01-m01", notes="What was 
 | `cmos_sprint`             | list, show, add, update, complete, retro, carry_forward, analytics                   |
 | `cmos_session`            | list, start, capture, complete, search                                               |
 | `cmos_context`            | view, update, condense, snapshot, history, next_steps, constraints, search           |
-| `cmos_decisions`          | list, search, update, review, batch_update                                           |
+| `cmos_decisions`          | list, search, update, review, batch_update, record                                   |
 | `cmos_learnings`          | list, search, update, reaffirm                                                       |
 | `cmos_feedback`           | list, triage, resolve, archive                                                       |
 | `cmos_auth`               | login_init, login_complete, login, logout, rotate, revoke, list, reissue             |
@@ -165,4 +165,4 @@ See `docs/` for complete documentation:
 ---
 
 **Schema Version**: 2.1
-**Last Updated**: 2026-08-28
+**Last Updated**: 2026-09-18

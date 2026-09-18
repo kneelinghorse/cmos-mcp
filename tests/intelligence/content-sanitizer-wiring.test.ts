@@ -373,6 +373,81 @@ describe('Content sanitizer wiring: cmos_mission_complete (Sprint 60 m02)', () =
     ]);
   });
 
+  // s91-m03 — Stage1 lost the decisions on five completions: the harness absorbed
+  // `decisions=[...]` into `notes`, the sanitizer stripped it, `decisions` arrived undefined, and the
+  // mission transitioned anyway. The transition is unrepeatable, so the server must refuse FIRST.
+  it('refuses to complete when notes absorbed a missing decisions parameter', async () => {
+    const result = await cmosMissionComplete({
+      missionId: 's60-mc02',
+      notes: 'Shipped the thing. <parameter name="decisions">["the lost decision"]',
+      projectRoot: testDb.tempDir,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatchObject({ code: 'INVALID_PARAMETER', field: 'decisions' });
+    expect(result.error?.message).toContain('was not completed');
+    expect(result.error?.suggestion).toContain('cmos_decisions(action="record"');
+    expect(result.sanitizedFields?.map((f) => f.field)).toContain('notes');
+
+    const row = testDb.db.prepare('SELECT status FROM missions WHERE id = ?').get('s60-mc02') as {
+      status: string;
+    };
+    expect(row.status).toBe('In Progress');
+    const events = testDb.db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM session_events WHERE mission = ? AND status = 'Completed'`
+      )
+      .get('s60-mc02') as { n: number };
+    expect(events.n).toBe(0);
+    const decisions = testDb.db
+      .prepare('SELECT COUNT(*) AS n FROM strategic_decisions WHERE mission_id = ?')
+      .get('s60-mc02') as { n: number };
+    expect(decisions.n).toBe(0);
+  });
+
+  it('refuses when notes absorbed a missing agentFeedback parameter', async () => {
+    const result = await cmosMissionComplete({
+      missionId: 's60-mc02',
+      notes: 'Done.\n<parameter name="agentFeedback">rough edge',
+      decisions: ['kept decision'],
+      projectRoot: testDb.tempDir,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatchObject({ code: 'INVALID_PARAMETER', field: 'agentFeedback' });
+  });
+
+  it('keeps completing when the absorbed tag names no missing sibling (content/invoke)', async () => {
+    const result = await cmosMissionComplete({
+      missionId: 's60-mc02',
+      notes: 'Done. <invoke name="something">',
+      projectRoot: testDb.tempDir,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.sanitizedFields?.map((f) => f.field)).toContain('notes');
+  });
+
+  it('names the record remedy on an already-Completed retry that carried decisions', async () => {
+    await cmosMissionComplete({ missionId: 's60-mc03', projectRoot: testDb.tempDir });
+    const withDecisions = await cmosMissionComplete({
+      missionId: 's60-mc03',
+      decisions: ['arrived late'],
+      projectRoot: testDb.tempDir,
+    });
+    const without = await cmosMissionComplete({
+      missionId: 's60-mc03',
+      projectRoot: testDb.tempDir,
+    });
+
+    expect(withDecisions.error?.code).toBe('MISSION_ALREADY_COMPLETED');
+    expect(withDecisions.error?.suggestion).toContain(
+      'cmos_decisions(action="record", missionId="s60-mc03"'
+    );
+    expect(withDecisions.error?.suggestion).not.toContain('No action needed');
+    expect(without.error?.suggestion).toContain('No action needed');
+  });
+
   it('leaves clean inputs untouched and omits sanitizedFields', async () => {
     const result = await cmosMissionComplete({
       missionId: 's60-mc03',

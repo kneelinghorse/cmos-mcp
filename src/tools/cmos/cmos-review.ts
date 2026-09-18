@@ -44,6 +44,7 @@
  * @module tools/cmos/cmos-review
  */
 
+import { isOpenStatus } from './terminal-status';
 import type Database from 'better-sqlite3';
 import { statSync } from 'fs';
 import * as path from 'path';
@@ -182,6 +183,12 @@ export interface CmosReviewResult {
     focus: string | null;
     /** s84-m03: the sprint's own project_id — a foreign sprint's title/focus is framed. */
     projectId?: string | null;
+    /**
+     * s91-m07: `open` when the sprint's own status is an open status; `fallback` when the
+     * read-side resolver named a Planned or Completed sprint because none was open. Derived from
+     * `status`, so it is true by construction and needs no resolver change.
+     */
+    resolvedBy: 'open' | 'fallback';
   } | null;
 
   /** Project-only work queue. Cross-project status is explicitly excluded. */
@@ -438,6 +445,9 @@ function buildDigest(
         status: onboard.currentSprint.status,
         focus: sprintFocus,
         projectId: onboard.currentSprint.projectId ?? null,
+        resolvedBy: isOpenStatus(onboard.currentSprint.status)
+          ? ('open' as const)
+          : ('fallback' as const),
       }
     : null;
 
@@ -1155,7 +1165,7 @@ export function formatReviewForLLM(result: CmosToolResult<CmosReviewResult>): st
   lines.push(`**${d.project.name}** (${d.project.tier}) — ${d.project.cmos_address}`);
   if (d.sprint) {
     const title = frameInlineIfForeign(d.sprint.title, d.sprint.projectId, local);
-    lines.push(`Sprint ${d.sprint.id}: ${title} [${d.sprint.status ?? '—'}]`);
+    lines.push(`Sprint ${d.sprint.id}: ${title} [${sprintStatusLabel(d.sprint)}]`);
     if (d.sprint.focus)
       lines.push(`  ${frameInlineIfForeign(d.sprint.focus, d.sprint.projectId, local)}`);
   }
@@ -1253,4 +1263,22 @@ export function formatReviewForLLM(result: CmosToolResult<CmosReviewResult>): st
   appendWarnings(lines, result);
 
   return lines.join('\n');
+}
+
+/**
+ * s91-m07 — a fallback sprint is labelled so "the digest shows a Completed or Planned sprint as
+ * current" stops reading as drift: `[Completed, most recent; none open]`, `[Planned, next; none
+ * open]`. KNOWN EDGE, named rather than built around: the resolver's step 1 can pick a Planned
+ * sprint because it has work In Progress while another sprint is open; this label, derived from
+ * status alone, would still say "none open" there.
+ */
+function sprintStatusLabel(sprint: {
+  status: string | null;
+  resolvedBy: 'open' | 'fallback';
+}): string {
+  const status = sprint.status ?? '—';
+  if (sprint.resolvedBy === 'open') return status;
+  if (status === 'Completed') return 'Completed, most recent; none open';
+  if (status === 'Planned') return 'Planned, next; none open';
+  return `${status}; none open`;
 }

@@ -373,8 +373,10 @@ describe('ACTION_PARAMS vacuity floor (s86-m04)', () => {
       // whose ACTION_PARAMS list is 5 keys (action, missionId, toSprintId, reason, projectRoot).
       // Both moves are the arithmetic of adding exactly one action with exactly five params.
       // s88-m04: 384 -> 385 entries when capture adds the learning-only `evergreen` parameter.
-      expect(actionCount).toBe(80);
-      expect(entryCount).toBe(385);
+      // s91-m04: 80 -> 81 actions and 385 -> 394 entries when cmos_decisions adds `record` with
+      // exactly nine applicable params.
+      expect(actionCount).toBe(81);
+      expect(entryCount).toBe(394);
 
       // Floors, so a walker that silently stops producing branches fails here rather than passing
       // every applicability case with nothing to check.

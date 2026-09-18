@@ -28,7 +28,8 @@ describe('cmos_sprint_update', () => {
 
   beforeEach(() => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-sprint-update-test-'));
-    dbPath = path.join(tempDir, 'cmos.sqlite');
+    fs.mkdirSync(path.join(tempDir, 'cmos', 'db'), { recursive: true });
+    dbPath = path.join(tempDir, 'cmos', 'db', 'cmos.sqlite');
 
     const db = new Database(dbPath);
     db.exec(`
@@ -196,7 +197,38 @@ describe('cmos_sprint_update', () => {
 
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe(CMOS_ERROR_CODES.INVALID_PARAMETER);
-      expect(result.error?.suggestion).toContain('at least one field');
+      // s91-m02: the refusal names the wrapper the caller was missing, not bare field names.
+      expect(result.error?.suggestion).toContain('fields');
+    });
+
+    it('refuses an unknown key inside fields by name instead of reporting it as written', async () => {
+      const result = await cmosSprintUpdateWithDb(dbPath, {
+        sprintId: 'sprint-14',
+        fields: { bogus: 'y', focus: 'x' } as unknown as SprintUpdateFields,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(CMOS_ERROR_CODES.INVALID_PARAMETER);
+      expect(result.error?.field).toBe('fields.bogus');
+      expect(result.error?.validValues).toContain('focus');
+      const db = new Database(dbPath, { readonly: true });
+      const row = db.prepare('SELECT focus FROM sprints WHERE id = ?').get('sprint-14') as {
+        focus: string;
+      };
+      db.close();
+      expect(row.focus).toBe('Initial Focus');
+    });
+
+    it('refuses an all-unknown fields object instead of executing an empty UPDATE', async () => {
+      const result = await cmosSprintUpdateWithDb(dbPath, {
+        sprintId: 'sprint-14',
+        fields: { bogus: 'y' } as unknown as SprintUpdateFields,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(CMOS_ERROR_CODES.INVALID_PARAMETER);
+      expect(result.error?.field).toBe('fields.bogus');
+      expect(result.error?.suggestion ?? '').not.toContain('SQL');
     });
 
     it('should return error when all fields are undefined', async () => {
@@ -295,96 +327,17 @@ describe('cmos_sprint_update', () => {
 });
 
 /**
- * Helper to run cmosSprintUpdate with explicit database path.
+ * s91-m02: drive the REAL handler. This helper used to re-implement cmosSprintUpdate line for line,
+ * so no assertion in this file could fail when src/ changed — the s91-m02 RED stayed red against a
+ * fixed handler because the copy, not the handler, was under test. The fixture's store sits in the
+ * standard `cmos/db/cmos.sqlite` layout so the handler resolves it from `projectRoot`.
  */
 async function cmosSprintUpdateWithDb(
   dbPath: string,
   params: Omit<CmosSprintUpdateParams, 'projectRoot'>
 ): Promise<CmosToolResult<SprintUpdateResult>> {
-  const { withClient } = await import('../../../src/tools/cmos/client');
-  const { createSuccess, createError, CmosErrors, CMOS_ERROR_CODES } =
-    await import('../../../src/tools/cmos/errors');
-
-  const { sprintId, fields } = params;
-
-  if (!sprintId || sprintId.trim() === '') {
-    return createError(CmosErrors.missingParameter('sprintId'));
-  }
-
-  const fieldKeys = Object.keys(fields).filter(
-    (k) => fields[k as keyof SprintUpdateFields] !== undefined
-  );
-
-  if (fieldKeys.length === 0) {
-    return createError({
-      code: CMOS_ERROR_CODES.INVALID_PARAMETER,
-      message: 'No fields provided to update',
-      suggestion:
-        'Provide at least one field to update (e.g., title, focus, status, startDate, endDate)',
-    });
-  }
-
-  return withClient(
-    (client) => {
-      // Check if sprint exists
-      const sprintResult = client.getOne<{ id: string }>('SELECT id FROM sprints WHERE id = ?', [
-        sprintId,
-      ]);
-
-      if (!sprintResult.success) {
-        return createError<SprintUpdateResult>(
-          sprintResult.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to query sprint' }
-        );
-      }
-
-      if (!sprintResult.data) {
-        return createError<SprintUpdateResult>(CmosErrors.sprintNotFound(sprintId));
-      }
-
-      const setClauses: string[] = [];
-      const queryParams: (string | null)[] = [];
-
-      const fieldMapping: Record<string, string> = {
-        title: 'title',
-        focus: 'focus',
-        status: 'status',
-        startDate: 'start_date',
-        endDate: 'end_date',
-      };
-
-      for (const key of fieldKeys) {
-        const dbColumn = fieldMapping[key];
-        if (!dbColumn) continue;
-
-        const value = fields[key as keyof SprintUpdateFields];
-        if (value === undefined) continue;
-
-        setClauses.push(`${dbColumn} = ?`);
-        queryParams.push(value.trim() || null);
-      }
-
-      queryParams.push(sprintId);
-
-      const updateQuery = `
-        UPDATE sprints
-        SET ${setClauses.join(', ')}
-        WHERE id = ?
-      `;
-
-      const updateResult = client.execute(updateQuery, queryParams);
-
-      if (!updateResult.success) {
-        return createError<SprintUpdateResult>(
-          updateResult.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to update sprint' }
-        );
-      }
-
-      return createSuccess({
-        sprintId,
-        updatedFields: fieldKeys,
-        message: `Sprint '${sprintId}' updated successfully (${fieldKeys.length} field${fieldKeys.length === 1 ? '' : 's'})`,
-      });
-    },
-    { dbPath }
-  );
+  return cmosSprintUpdate({
+    ...params,
+    projectRoot: path.dirname(path.dirname(path.dirname(dbPath))),
+  });
 }

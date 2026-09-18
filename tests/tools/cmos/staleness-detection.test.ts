@@ -14,6 +14,7 @@ import * as path from 'path';
 import {
   detectAndFlagStaleness,
   getStaleCounts,
+  reviewDecisionStaleness,
   DEFAULT_STALENESS_THRESHOLD,
 } from '../../../src/tools/cmos/staleness-detection';
 import { CmosDetector } from '../../../src/intelligence/cmos-detector';
@@ -178,6 +179,33 @@ describe('staleness-detection', () => {
     }
     db.close();
   }
+
+  // s91-m08 — untagged decisions used to be filtered out of review by `sprint_id IS NOT NULL`, so
+  // a 300-day-old one could never be flagged. They now age on wall-clock time (14 days/sprint).
+  it('scores untagged decisions by wall-clock age instead of excluding them', async () => {
+    seedSprints(DEFAULT_STALENESS_THRESHOLD + 5);
+    const db = new Database(dbPath);
+    const insert = db.prepare(
+      `INSERT INTO strategic_decisions (decision_text, created_at, sprint_id, status)
+       VALUES (?, ?, NULL, 'active')`
+    );
+    const daysAgo = (d: number): string =>
+      new Date(Date.now() - d * 24 * 60 * 60 * 1000).toISOString();
+    const old = Number(insert.run('Untagged, 300 days old', daysAgo(300)).lastInsertRowid);
+    const fresh = Number(insert.run('Untagged, 10 days old', daysAgo(10)).lastInsertRowid);
+    db.close();
+
+    const review = await runWithClient((client) =>
+      reviewDecisionStaleness(client, { threshold: DEFAULT_STALENESS_THRESHOLD })
+    );
+
+    const oldRow = review.decisions.find((d) => d.id === old);
+    expect(oldRow).toBeDefined();
+    expect(oldRow!.sprintId).toBeNull();
+    expect(oldRow!.sprintAge).toBe(Math.floor(300 / 14));
+    const freshScore = review.decisions.find((d) => d.id === fresh)?.stalenessScore ?? 0;
+    expect(oldRow!.stalenessScore).toBeGreaterThan(freshScore);
+  });
 
   it('flags stale decisions when sprint age exceeds threshold', async () => {
     const totalSprints = DEFAULT_STALENESS_THRESHOLD + 5;

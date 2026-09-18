@@ -40,7 +40,16 @@ import { resolveProjectRootEnhanced } from '../../intelligence/project-resolutio
 import * as path from 'path';
 import { appendWarnings, appendWriteFailures, attachWarnings } from './format-warnings';
 import { isParkedMissionStatus } from './terminal-status';
-import type { WriteFailure } from './write-guard';
+import { countWrite, type WriteFailure } from './write-guard';
+import { applySprintTracking, openSprintPointer, type SprintPointer } from './sprint-tracking';
+import {
+  CLOSES_SURVIVED_SQL,
+  LEASED_STATUS_SQL,
+  LEASE_COUNTING_RULE,
+  LEASE_LAPSE_AT,
+  LEASE_WARN_AT,
+  reopenCommand,
+} from './next-step-lease';
 import { summarizeSessionCaptures } from './session-capture-state';
 
 type CloseoutContextType = 'master_context' | 'project_context';
@@ -186,6 +195,21 @@ export interface SprintPendingNextStep {
   content: string;
   sprintId: string | null;
   missionId: string | null;
+  /** s91-m06: `pending` or `carried` — the survey covers every open row. */
+  status: 'pending' | 'carried';
+  /** s91-m06: closes survived going INTO this close (next-step-lease.ts counting rule). */
+  closesSurvived: number;
+}
+
+/** s91-m06 — the lease as this close applied it, published with its thresholds and rule. */
+export interface SprintNextStepLease {
+  warnAt: number;
+  lapseAt: number;
+  countingRule: string;
+  /** Open rows at the warning age: the next close warns again, the one after drops. */
+  warned: number[];
+  /** Open rows at or past the lapse age: this close drops them (see lapsedDroppedIds). */
+  lapsed: number[];
 }
 
 export interface SprintPendingNextStepGroups {
@@ -198,8 +222,13 @@ export interface SprintPendingNextStepGroups {
 /** Whole-ledger pending-work survey. Null totals/groups distinguish a failed read from zero rows. */
 export interface SprintPendingNextStepsSurvey {
   available: boolean;
+  /** Pending rows only — unchanged in name and meaning. */
   totalPending: number | null;
+  /** s91-m06: pending plus carried. */
+  totalOpen: number | null;
   groups: SprintPendingNextStepGroups | null;
+  /** s91-m06: null when the survey is unavailable. */
+  lease: SprintNextStepLease | null;
 }
 
 /**
@@ -225,8 +254,13 @@ export interface CmosSprintCompleteResult {
     totalAfterSizeKb: number;
   };
   lifecycle: SprintLifecycleTriggers;
-  /** Every pending next-step in the ledger, grouped by provenance for explicit disposition. */
+  /** Every open next-step in the ledger, grouped by provenance for explicit disposition. */
   nextStepsSurvey: SprintPendingNextStepsSurvey;
+  /**
+   * s91-m06 — ids this close set `dropped` because their lease lapsed, inside the close
+   * transaction. Undo with the reopen command the rendered receipt prints beside them.
+   */
+  lapsedDroppedIds: number[];
   /** Build-freshness report, included ONLY when stale=true (omitted on the happy path
    *  to keep the response shape unchanged for fresh-build sprints). */
   buildFreshness?: BuildFreshnessReport;
@@ -628,9 +662,17 @@ export async function cmosSprintComplete(
         'project_context'
       );
 
-      // Survey the WHOLE pending ledger. Sprint close cannot prove delivery, so it performs no
-      // next_steps status write and gives the operator grouped rows for explicit disposition.
+      // Survey the WHOLE open ledger. Sprint close cannot prove delivery, so it never writes
+      // `completed`; s91-m06 narrows the s90-m05 rule to one write — `dropped` for rows whose
+      // lease lapsed — and names every id it drops.
       const nextStepsSurvey = surveyPendingNextSteps(client, sprintId, warnings);
+      const leaseSink = { failures: [] as WriteFailure[] };
+      const lapsedDroppedIds = dropLapsedNextSteps(
+        client,
+        nextStepsSurvey.lease?.lapsed ?? [],
+        completedAt,
+        leaseSink
+      );
 
       // --- Lifecycle Trigger: Archive sprint-scoped decisions/learnings ---
       // s87-m02: the function now carries its own warnings (the per-table `ids.length === changes`
@@ -645,6 +687,14 @@ export async function cmosSprintComplete(
 
       // --- Lifecycle Trigger: Update project_context working_memory & current_sprint ---
       clearProjectContextWorkingMemory(projectContext.data.parsedContent, sprintId);
+
+      // s91-m07: sprint_tracking rides in the master_context persist below, inside this
+      // transaction, so a rolled-back close leaves the pointers exactly as they were.
+      applySprintTracking(
+        masterContext.data.parsedContent as Record<string, unknown>,
+        nextOpenSprint(client, sprintId),
+        sprintId
+      );
 
       const masterPersist = persistCloseoutContext(client, masterContext.data, completedAt);
       if (!masterPersist.success || !masterPersist.data) {
@@ -863,7 +913,8 @@ export async function cmosSprintComplete(
         },
         lifecycle,
         nextStepsSurvey,
-        writeFailures: [],
+        lapsedDroppedIds,
+        writeFailures: leaseSink.failures,
         message: buildCloseoutMessage(sprintId, condensation, readiness),
       };
 
@@ -1128,18 +1179,26 @@ function surveyPendingNextSteps(
   const unavailable: SprintPendingNextStepsSurvey = {
     available: false,
     totalPending: null,
+    totalOpen: null,
     groups: null,
+    lease: null,
   };
+  // s91-m06: every OPEN row (pending and carried). Ages are computed HERE, before
+  // completeSprintRecord writes this sprint's end_date, so the closing sprint never counts
+  // toward its own survey.
   const rows = client.getMany<{
     id: number;
     content: string;
     sprint_id: string | null;
     mission_id: string | null;
+    status: 'pending' | 'carried';
+    closes_survived: number;
   }>(
-    `SELECT id, content, sprint_id, mission_id
-       FROM next_steps
-      WHERE status = 'pending'
-      ORDER BY id ASC`,
+    `SELECT n.id, n.content, n.sprint_id, n.mission_id, n.status,
+            ${CLOSES_SURVIVED_SQL} AS closes_survived
+       FROM next_steps n
+      WHERE ${LEASED_STATUS_SQL}
+      ORDER BY n.id ASC`,
     []
   );
 
@@ -1165,6 +1224,8 @@ function surveyPendingNextSteps(
       content: row.content,
       sprintId: row.sprint_id,
       missionId: row.mission_id,
+      status: row.status,
+      closesSurvived: row.closes_survived,
     };
     if (row.sprint_id === null) {
       groups.noSprintProvenance.push(item);
@@ -1179,9 +1240,51 @@ function surveyPendingNextSteps(
 
   return {
     available: true,
-    totalPending: rows.data.length,
+    totalPending: rows.data.filter((row) => row.status === 'pending').length,
+    totalOpen: rows.data.length,
     groups,
+    lease: {
+      warnAt: LEASE_WARN_AT,
+      lapseAt: LEASE_LAPSE_AT,
+      countingRule: LEASE_COUNTING_RULE,
+      warned: rows.data
+        .filter(
+          (row) => row.closes_survived >= LEASE_WARN_AT && row.closes_survived < LEASE_LAPSE_AT
+        )
+        .map((row) => row.id),
+      lapsed: rows.data.filter((row) => row.closes_survived >= LEASE_LAPSE_AT).map((row) => row.id),
+    },
   };
+}
+
+/** The open sprint that remains once `closingSprintId` completes, or null. */
+function nextOpenSprint(client: CmosDatabaseClient, closingSprintId: string): SprintPointer | null {
+  const open = openSprintPointer(client);
+  return open && open.id !== closingSprintId ? open : null;
+}
+
+/**
+ * s91-m06 — drop every lapsed row INSIDE the close transaction, so the receipt describes one
+ * stable boundary: a drop that landed after COMMIT could succeed while the receipt reported the
+ * row pending. The close still never writes `completed` and never infers delivery (s90-m05); it
+ * writes `dropped` only for rows at or past LEASE_LAPSE_AT, and names each.
+ */
+function dropLapsedNextSteps(
+  client: CmosDatabaseClient,
+  lapsedIds: readonly number[],
+  droppedAt: string,
+  writeSink: { failures: WriteFailure[] }
+): number[] {
+  const dropped: number[] = [];
+  for (const id of lapsedIds) {
+    const result = client.execute(
+      `UPDATE next_steps SET status = 'dropped', resolved_at = ?
+        WHERE id = ? AND status IN ('pending','carried')`,
+      [droppedAt, id]
+    );
+    if (countWrite(result, writeSink, `next_steps.lease_drop #${id}`) > 0) dropped.push(id);
+  }
+  return dropped;
 }
 
 /**
@@ -1750,8 +1853,30 @@ export function formatSprintCompleteForLLM(
     lines.push('Next-steps survey: unavailable (pending total unknown)');
   } else {
     lines.push(
-      `Next-steps survey: ${data.nextStepsSurvey.totalPending} pending across the whole ledger`
+      `Next-steps survey: ${data.nextStepsSurvey.totalPending} pending across the whole ledger ` +
+        `(${data.nextStepsSurvey.totalOpen ?? data.nextStepsSurvey.totalPending} open including carried)`
     );
+    const lease = data.nextStepsSurvey.lease;
+    if (lease) {
+      lines.push(
+        `Lease: warn at ${lease.warnAt}, drop at ${lease.lapseAt} unless carried. ${lease.countingRule}.`
+      );
+      lines.push(
+        `  Warned (next close warns again, the one after drops): ${
+          lease.warned.length > 0 ? lease.warned.map((id) => `#${id}`).join(', ') : 'none'
+        }`
+      );
+      lines.push(
+        `  Dropped by this close (lease lapsed): ${
+          data.lapsedDroppedIds.length > 0
+            ? data.lapsedDroppedIds.map((id) => `#${id}`).join(', ')
+            : 'none'
+        }`
+      );
+      if (data.lapsedDroppedIds.length > 0) {
+        lines.push(`  Undo: ${reopenCommand(data.lapsedDroppedIds)}`);
+      }
+    }
     formatPendingNextStepGroup(
       lines,
       'Closing sprint with mission provenance (not delivery)',

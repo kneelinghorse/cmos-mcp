@@ -16,6 +16,9 @@ import { ensureReviewTimestamps, ensureLearningsTable } from './schema-migration
 import { sprintIdOrderSql } from './sprint-ordering';
 import { countWrite } from './write-guard';
 
+/** A sprint's length on the wall clock (~14 days), used where a row carries no sprint tag. */
+const MS_PER_SPRINT = 14 * 24 * 60 * 60 * 1000;
+
 /**
  * Default staleness threshold in sprints.
  *
@@ -255,7 +258,8 @@ export function reviewDecisionStaleness(
   // Get referenced decision IDs (supersession targets)
   const referencedIds = getReferencedDecisionIds(client);
 
-  // Load candidates: stale + active decisions with sprint IDs
+  // Load candidates: stale + active decisions. s91-m08: untagged rows are candidates too — they
+  // used to be filtered out by `sprint_id IS NOT NULL` and could never be flagged, however old.
   const statusFilter = includeApproaching ? `status IN ('stale', 'active')` : `status = 'stale'`;
 
   const result = client.getMany<{
@@ -265,11 +269,12 @@ export function reviewDecisionStaleness(
     sprint_id: string | null;
     category: string | null;
     evidence: string | null;
+    created_at: string | null;
   }>(
-    `SELECT id, decision_text, status, sprint_id, category, evidence
+    `SELECT id, decision_text, status, sprint_id, category, evidence, created_at
      FROM strategic_decisions
-     WHERE ${statusFilter} AND sprint_id IS NOT NULL
-     ORDER BY ${sprintIdOrderSql('sprint_id', 'ASC')}, id ASC`,
+     WHERE ${statusFilter}
+     ORDER BY sprint_id IS NULL, ${sprintIdOrderSql('sprint_id', 'ASC')}, id ASC`,
     []
   );
 
@@ -279,11 +284,19 @@ export function reviewDecisionStaleness(
 
   const decisions: StaleDecisionDetail[] = [];
 
+  const now = Date.now();
   for (const row of result.data) {
-    const sprintNum = extractSprintNumber(row.sprint_id!);
-    if (sprintNum === null) continue;
-
-    const sprintAge = currentSprintNumber - sprintNum;
+    let sprintAge: number;
+    if (row.sprint_id === null) {
+      // s91-m08: an untagged decision ages on wall-clock time, one sprint per MS_PER_SPRINT.
+      const created = row.created_at ? Date.parse(row.created_at) : NaN;
+      if (Number.isNaN(created)) continue;
+      sprintAge = Math.floor((now - created) / MS_PER_SPRINT);
+    } else {
+      const sprintNum = extractSprintNumber(row.sprint_id);
+      if (sprintNum === null) continue;
+      sprintAge = currentSprintNumber - sprintNum;
+    }
     if (sprintAge < 1) continue; // Skip current sprint decisions
 
     // Only include decisions beyond half the threshold (approaching) or already stale
@@ -536,8 +549,7 @@ function flagStaleLearnings(
  * triaged" and exempt from re-flagging.
  */
 function computeReviewCutoffIso(): string {
-  const msPerSprint = 14 * 24 * 60 * 60 * 1000;
-  return new Date(Date.now() - DEFAULT_STALENESS_THRESHOLD * msPerSprint).toISOString();
+  return new Date(Date.now() - DEFAULT_STALENESS_THRESHOLD * MS_PER_SPRINT).toISOString();
 }
 
 function countStale(client: CmosDatabaseClient, tableName: string): number {

@@ -433,13 +433,22 @@ describe('Mission Protocol entry lifecycle', () => {
       const callHandler = mockServer.setRequestHandler.mock.calls[1][1] as (
         request: any
       ) => Promise<any>;
+      // s91-m02: undeclared keys are now refused at the preflight, so the >10-key sanitizer
+      // input is built from keys the published cmos_project schema actually declares.
+      const projectSchema = (await import('../src/tools/cmos')).CMOS_TOOL_DEFINITIONS.find(
+        (definition) => definition.name === 'cmos_project'
+      )!.inputSchema as { properties: Record<string, unknown> };
+      const declaredKeys = Object.keys(projectSchema.properties).filter(
+        (key) => key !== 'action' && key !== 'projectRoot'
+      );
+      expect(declaredKeys.length).toBeGreaterThanOrEqual(10);
       const result = await callHandler({
         params: {
           name: 'cmos_project',
           arguments: {
             action: 'init',
             projectRoot,
-            ...Object.fromEntries(Array.from({ length: 12 }, (_, idx) => [`key${idx}`, idx])),
+            ...Object.fromEntries(declaredKeys.map((key, idx) => [key, idx])),
           },
         },
       });
@@ -461,7 +470,7 @@ describe('Mission Protocol entry lifecycle', () => {
         module: 'server',
         data: expect.objectContaining({
           tool: 'cmos_project',
-          args: expect.objectContaining({ key0: 0 }),
+          args: expect.objectContaining({ [declaredKeys[0]]: 0 }),
         }),
       });
     } finally {

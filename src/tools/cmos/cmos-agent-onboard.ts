@@ -67,6 +67,7 @@ import { computeAuthState, type AuthState } from '../../auth/auth-state';
 import { getStaleConstraintCount as getStaleConstraintCountFromConstraints } from './cmos-constraints';
 import { loadTierConfig, type TierConfig } from './tier-config';
 import { appendWarnings } from './format-warnings';
+import { leaseState, readLeaseAges, type LeaseAge } from './next-step-lease';
 
 /**
  * Project identity from master context.
@@ -694,8 +695,18 @@ export async function cmosAgentOnboard(
         warnings.push(selfCaptureWarning);
       }
 
-      // Detect stale next-steps (pending from >1 sprint ago)
-      const staleNextStepsCount = getStaleNextStepsCount(client, currentSprint?.id ?? null);
+      // s91-m06 — the next-steps lease replaces the pending-only "stale" count: it sees carried
+      // rows too, and names the ids the next close will drop.
+      const leaseRead = readLeaseAges(client);
+      const nextStepsTable = client.getOne<{ name: string }>(
+        `SELECT name FROM sqlite_master WHERE type='table' AND name='next_steps'`
+      );
+      if (leaseRead === null && nextStepsTable.success && nextStepsTable.data) {
+        warnings.push(
+          'next-steps lease ages could not be read; no lapse warning is shown, which does not mean none is due.'
+        );
+      }
+      const leaseAges = leaseRead ?? [];
 
       // Detect stale/expired constraints
       const staleConstraintCount = getStaleConstraintCountForOnboard(client);
@@ -730,7 +741,7 @@ export async function cmosAgentOnboard(
           decisions: stalenessResult.totalStaleDecisions,
           learnings: stalenessResult.totalStaleLearnings,
         },
-        staleNextStepsCount,
+        leaseAges,
         staleConstraintCount,
         contextSizes,
         senderAttributionAmbiguity,
@@ -944,7 +955,8 @@ function getLastSession(client: CmosDatabaseClient, tier: string): LastSessionDa
   const openItems: string[] = [];
   if (nextStepsTableExists.success && nextStepsTableExists.data) {
     const openItemsResult = client.getMany<{ content: string }>(
-      `SELECT content FROM next_steps WHERE status = 'pending' ORDER BY id DESC LIMIT 10`,
+      // s91-m06: open means pending OR carried — carried rows were invisible here.
+      `SELECT content FROM next_steps WHERE status IN ('pending','carried') ORDER BY id DESC LIMIT 10`,
       []
     );
     if (openItemsResult.success && openItemsResult.data) {
@@ -1165,38 +1177,6 @@ function getRecentDecisions(client: CmosDatabaseClient): RecentDecisionSummary[]
     createdAt: d.created_at,
     projectId: d.project_id,
   }));
-}
-
-/**
- * Count stale next-steps: pending next-steps from sprints older than the current one.
- * Returns 0 if the next_steps table doesn't exist.
- */
-function getStaleNextStepsCount(
-  client: CmosDatabaseClient,
-  currentSprintId: string | null
-): number {
-  // Check if next_steps table exists
-  const tableCheck = client.getOne<{ name: string }>(
-    `SELECT name FROM sqlite_master WHERE type='table' AND name='next_steps'`
-  );
-  if (!tableCheck.success || !tableCheck.data) return 0;
-
-  if (!currentSprintId) {
-    // No active sprint — all pending next-steps are stale
-    const result = client.getOne<{ count: number }>(
-      `SELECT COUNT(*) AS count FROM next_steps WHERE status = 'pending'`
-    );
-    return result.success && result.data ? result.data.count : 0;
-  }
-
-  // Pending next-steps from sprints other than the current one
-  const result = client.getOne<{ count: number }>(
-    `SELECT COUNT(*) AS count FROM next_steps
-     WHERE status = 'pending'
-       AND (sprint_id IS NOT NULL AND sprint_id != ?)`,
-    [currentSprintId]
-  );
-  return result.success && result.data ? result.data.count : 0;
 }
 
 /**
@@ -1888,7 +1868,7 @@ function generateSuggestedActions(state: {
   orphans: OrphanDetectionResult;
   serverHealth: ServerHealthStatus;
   staleCounts: { decisions: number; learnings: number };
-  staleNextStepsCount: number;
+  leaseAges: LeaseAge[];
   staleConstraintCount: number;
   contextSizes: CmosAgentOnboardResult['contextSizes'];
   senderAttributionAmbiguity: SenderAttributionAmbiguity;
@@ -2008,13 +1988,31 @@ function generateSuggestedActions(state: {
     });
   }
 
-  // If stale next-steps exist, suggest review
-  if (state.staleNextStepsCount > 0) {
+  // s91-m06 — the lease squawks where agents look, not only at the close. `lapsing` rows are
+  // dropped by the NEXT close unless carried; `warning` rows by the one after.
+  const lapsing = state.leaseAges.filter((row) => leaseState(row.closesSurvived) === 'lapsing');
+  const warned = state.leaseAges.filter((row) => leaseState(row.closesSurvived) === 'warning');
+  if (lapsing.length > 0 || warned.length > 0) {
+    const ids = (rows: LeaseAge[]): string =>
+      rows.length <= 8
+        ? rows.map((row) => `#${row.id}`).join(', ')
+        : `${rows
+            .slice(0, 8)
+            .map((row) => `#${row.id}`)
+            .join(', ')}, +${rows.length - 8} more`;
+    const parts = [
+      lapsing.length > 0
+        ? `${lapsing.length} next-step(s) lapse at the next close unless carried: ${ids(lapsing)}`
+        : null,
+      warned.length > 0 ? `${warned.length} at the warning age: ${ids(warned)}` : null,
+    ].filter((part): part is string => part !== null);
     actions.push({
-      action: `${state.staleNextStepsCount} stale next-step(s) from older sprints still pending — review and resolve`,
+      action: parts.join('; '),
       command:
-        'cmos_context(action="next_steps", nextStepAction="list") to review, then complete/carry/drop',
-      priority: 3,
+        'cmos_context(action="next_steps", nextStepAction="carry"|"complete"|"drop", nextStepIds=[...])',
+      // Priority 1 while rows are lapsing: the next sprint close — often the very action this list
+      // also suggests — writes `dropped` to them.
+      priority: lapsing.length > 0 ? 1 : 3,
     });
   }
 
@@ -2139,6 +2137,17 @@ function generateSuggestedActions(state: {
       action: missionActionText('Start current mission', current),
       command: `cmos_mission_transition(action="start", missionId="${current.id}")`,
       priority: 5,
+    });
+  }
+
+  // s91-m06 (feedback #40) — work in flight with no session: captures made now carry no session,
+  // and nothing else on the digest says so.
+  const inFlight = state.pendingMissions.find((m) => m.status === 'In Progress');
+  if (inFlight && !state.activeSession && !skippedTools.has('cmos_session')) {
+    actions.push({
+      action: `Mission ${inFlight.id} is In Progress with no active session`,
+      command: 'cmos_session(action="start", type="custom", title="...")',
+      priority: 3,
     });
   }
 

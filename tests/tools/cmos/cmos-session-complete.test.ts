@@ -303,6 +303,42 @@ describe('cmos_session_complete', () => {
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe(CMOS_ERROR_CODES.MISSING_PARAMETER);
     });
+
+    // s91-m03 — the session-complete twin of the mission-complete loss guard. Completing a session
+    // is unrepeatable; a sibling absorbed into `summary` must refuse before it, not warn after.
+    it.each(['decisions', 'nextSteps', 'agentFeedback'])(
+      'refuses to complete when summary absorbed a missing %s parameter',
+      async (sibling) => {
+        const result = await cmosSessionComplete({
+          sessionId: activeSessionId,
+          summary: `Wrapped the session. <parameter name="${sibling}">lost payload`,
+          projectRoot: tempDir,
+        });
+
+        expect(result.success).toBe(false);
+        expect(result.error).toMatchObject({ code: 'INVALID_PARAMETER', field: sibling });
+        expect(result.error?.message).toContain('was not completed');
+
+        const db = new Database(dbPath);
+        const session = db
+          .prepare('SELECT status FROM sessions WHERE id = ?')
+          .get(activeSessionId) as { status: string };
+        db.close();
+        expect(session.status).toBe('active');
+      }
+    );
+
+    it('still completes when the absorbed sibling arrived intact', async () => {
+      const result = await cmosSessionComplete({
+        sessionId: activeSessionId,
+        summary: 'Wrapped. <parameter name="nextSteps">dup',
+        nextSteps: ['the real next step'],
+        projectRoot: tempDir,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.sanitizedFields?.map((f) => f.field)).toContain('summary');
+    });
   });
 
   describe('context aggregation', () => {

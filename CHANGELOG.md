@@ -2,6 +2,107 @@
 
 All notable changes to cmos-mcp are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 3.1.0 — 2026-09-18
+
+Sprint 91 "What the Field Said". Fifteen days of field use of 3.0.0 reported that the write surface
+still dropped data silently at the boundary an adopter touches first, and that a decision's
+lifecycle status stood in for whether it was still true. This release fixes the first and encodes
+the operator's three-lifecycle policy for the second. It is a **MINOR** release under this project's
+rule: no published receipt field is removed or renamed. Every receipt change is additive, and
+supersession candidates keep `decisionText` with a bounded value. Two behaviour changes are
+disclosed under Changed with their consequence, because a caller of 3.0.0 can observe them:
+undeclared top-level parameters are now refused, and a sprint close drops next-steps whose lease
+lapsed.
+
+### Added
+
+- **`cmos_decisions(action="record")` writes a decision without a session, and supersedes what it
+  corrects in the same call.** Parameters: `content` (required), `missionId`, `sprintId`,
+  `supersedes` (decision ids), `evidence`, `citesLearningIds`, `domain`. The row's sprint is the
+  mission's sprint when `missionId` is given, else an existing `sprintId`, else the open sprint, else
+  `null` (disclosed as a warning). Each `supersedes` id must exist and is set
+  `status='superseded', superseded_by=<new id>` in the same transaction as the INSERT; the receipt
+  echoes `previousStatus → newStatus` per target. A retry with identical text by the same author
+  returns the existing row (`materialization: "existing"`) instead of writing a second one. This is
+  the recovery path for decisions lost on `cmos_mission_transition(action="complete")`: record them
+  with `missionId` after the mission has completed. Decision text is never amended in place; a
+  correction is a new row that names what it supersedes.
+
+### Changed
+
+- **Unknown top-level parameters are refused before dispatch; update refusals name the `fields`
+  wrapper.** Every published tool schema has declared `additionalProperties: false` since it was
+  published, and nothing enforced it: a misplaced key was dropped silently and the call succeeded
+  without it. A call carrying a key its tool does not declare now returns `INVALID_PARAMETER` with
+  `field` set to that key, after the existing action and `projectRoot` checks and before any store
+  is opened; when the key belongs to a nested object on the same tool, the suggestion names it (for
+  example `metadata` → `fields` on `cmos_mission(update)`). **Consequence:** a caller that sends an
+  undeclared key and received a success on 3.0.0 receives a refusal on this release. Inside
+  `fields`, `cmos_mission(update)` and `cmos_sprint(update)` refuse an unknown key by name instead of
+  skipping it while reporting it in `updatedFields` — and an all-unknown `fields` object no longer
+  executes an empty `UPDATE` that failed with `DB_QUERY_FAILED` and the advice "Check the SQL syntax".
+  The no-fields refusal now says `fields: { ... }` and that a bare top-level `notes`/`status` is not
+  read.
+- **Mission and session completion refuse to transition when a sibling array was absorbed into a
+  free-text field.** When a host drops a closing tag, `decisions=[...]` (or `agentFeedback`, or for
+  sessions `nextSteps`) lands inside `notes`/`summary` as a literal `<parameter name="…">` token;
+  the sanitizer strips it and the parameter arrives empty. The server used to complete the mission
+  anyway, report "no decisions captured", and answer a retry with "No action needed". It now
+  refuses with `INVALID_PARAMETER` (`field` = the lost parameter) before the transition, so the
+  mission or session stays open, and names the retry plus `cmos_decisions(action="record")`. An
+  absorbed tag that names no missing sibling completes as before with `sanitizedFields`. An
+  already-Completed retry that carries `decisions` or `agentFeedback` now names the record remedy.
+  The build tier guide, getting-started guide, and build-session prompt now teach notes-only
+  completion with a separate `record` per decision.
+- **Sprint close drops next-steps whose lease lapsed; the survey includes carried rows and per-row
+  age.** A next-step now holds a lease. Its age is the number of sprint closes it has survived:
+  Completed sprints with a recorded `end_date` later than its last carry (or, if never carried, its
+  creation). The closing sprint never counts toward its own close. At 3 the row is warned; at 4,
+  unless carried in between, `cmos_sprint(action="complete")` sets it `dropped` inside the close
+  transaction and lists it in the new `lapsedDroppedIds`, with the exact
+  `cmos_context(action="next_steps", nextStepAction="reopen", nextStepIds=[...])` undo printed
+  beside it. Carrying renews the lease; reopening restarts it from creation. The close still never
+  writes `completed`. `nextStepsSurvey` now covers pending **and carried** rows and gains
+  `totalOpen` and a `lease` block (thresholds, counting rule, warned and lapsed ids); `totalPending`
+  keeps its meaning. `cmos_context(action="next_steps", nextStepAction="list")` with no status now
+  lists every open row with `closesSurvived` and `lease`, and `cmos_review` names the ids the next
+  close will drop. **Consequence:** a store taking this release with rows already four or more
+  closes old drops them at its first close, before any earlier warning could have appeared; each is
+  one pasted `reopen` from restored.
+- **Sprint transitions write the identity pointers the digest reads; the digest labels a fallback
+  sprint.** `cmos_sprint` add (with an open status), update (on a status change), and complete now
+  keep `master_context.sprint_tracking.current_sprint` (`{id, title, status, focus}`, or `null` when
+  nothing is open) and `last_completed_sprint` in step; the close writes them inside its transaction.
+  `project_identity.status` is not written by sprint handlers (it is the project's status), and no
+  `metadata.current_sprint` / `metadata.sprint_status` keys are created (nothing reads them).
+  `cmos_review`'s `sprint` block gains `resolvedBy: "open" | "fallback"`, and a sprint named because
+  none is open renders as `[Completed, most recent; none open]` or `[Planned, next; none open]`.
+- **Untagged decisions age on wall-clock time in staleness review.** `cmos_decisions(action="review")`
+  used to filter out every decision with no sprint tag, so one captured while no sprint was open
+  could never be flagged stale however old it was. Untagged rows are now scored by age in 14-day
+  periods since creation, and the advisory says so.
+- **Supersession candidates are scoped to the capturing sprint and rare-term weighted; receipts are
+  bounded.** Eight field reports showed decision capture offering the historical review verdicts a
+  close cites as rows to supersede. Candidates now come only from the new decision's own sprint
+  (untagged matches untagged); overlap is counted on whole tokens (`sprint` no longer matches
+  `sprints`), weighted by inverse document frequency over active decisions with house-style terms
+  in more than 30% of them contributing nothing, and ranked by length-normalized similarity; a
+  decision the new text cites as `#<id>` is never offered. Each candidate carries a new
+  100-character `preview` and a `score`; `decisionText` is kept and now holds the same preview
+  rather than the full text, so no key is removed. The rendered capture receipt echoes the first
+  100 characters of the content plus its stored length. **Consequence:** a genuine supersession of
+  a decision from an earlier sprint is no longer suggested; record it explicitly with
+  `cmos_decisions(action="record", supersedes=[...])`.
+
+### Fixed
+
+- **Dependency advisories cleared within existing ranges.** `package-lock.json` moves
+  `@hono/node-server`, `hono`, `body-parser`, `qs`, `ip-address`, `fast-uri`, and `fast-xml-parser`
+  in the production tree (and eight dev-only packages) to patched versions without changing any
+  declared range; `npm audit --omit=dev` goes from 9 findings to 2. The two that remain are
+  `@xenova/transformers` → `sharp`, accepted because the text-embedding path never decodes an image
+  and the only fix npm offers is a semver-major downgrade of `@xenova/transformers`.
+
 ## 3.0.0 — 2026-09-01
 
 Sprint 90 "The Front Door". This is a **MAJOR** release because

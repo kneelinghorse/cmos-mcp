@@ -141,6 +141,26 @@ export function sanitizeContentField(input: string): SanitizerResult {
   return { cleaned, wasModified: true, reason };
 }
 
+/** Matches a `<parameter name="X">` open tag and captures X. */
+const PARAMETER_OPEN_PATTERN = /<parameter\s+name\s*=\s*["']([A-Za-z_][A-Za-z0-9_]*)["'][^>]*>/g;
+
+/**
+ * s91-m03 — the names of the sibling parameters a marshalling artifact absorbed into this field:
+ * every `<parameter name="X">` open tag outside a code fence or inline span, in order. Detection
+ * only; it changes nothing about what `sanitizeContentField` strips or keeps.
+ */
+export function absorbedParameterNames(input: string): string[] {
+  if (!input || typeof input !== 'string') return [];
+  const fences = findCodeFenceRanges(input);
+  const names: string[] = [];
+  PARAMETER_OPEN_PATTERN.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = PARAMETER_OPEN_PATTERN.exec(input)) !== null) {
+    if (!isInsideAny(match.index, fences)) names.push(match[1]);
+  }
+  return names;
+}
+
 /**
  * Sanitize a named record of fields in one pass.
  *

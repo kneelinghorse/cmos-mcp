@@ -15,6 +15,7 @@ import { createError, createSuccess, CmosErrors } from './errors';
 import { isOpenStatus } from './terminal-status';
 import { buildDemotionWarning, writeSingleCurrentSprint } from './sprint-current-invariant';
 import { appendWarnings, attachWarnings } from './format-warnings';
+import { syncSprintTracking } from './sprint-tracking';
 
 /**
  * Result type for cmos_sprint_add.
@@ -195,6 +196,8 @@ export async function cmosSprintAdd(
       const warning = buildDemotionWarning(invariant.data!.demoted);
       const warnings = [...(invariant.warnings ?? [])];
       if (warning) warnings.push(warning);
+      // s91-m07: an open sprint was added, so master_context.sprint_tracking now points at it.
+      syncSprintTracking(client, warnings);
       return success(warnings.length > 0 ? warnings : undefined);
     },
     { projectRoot: params.projectRoot }
