@@ -1,8 +1,11 @@
 # AI Agent Configuration
 
-**Instructions**: Copy this file to your project root and customize for YOUR project.
+**Instructions**: Customize this file for YOUR project: replace the bracketed placeholders.
+`cmos_project(action="init")` writes it to your project root when the root has no agents file of its
+own.
 
-**Location**: This file should live at `project-root/agents.md` (NOT in cmos/)
+**Location**: This file lives at `project-root/AGENTS.md` (NOT in cmos/). Many coding agents read
+AGENTS.md from the project root; an existing lowercase `agents.md` works too.
 
 **Purpose**: Define repository-wide operating rules, application conventions, and CMOS workflow.
 
@@ -390,6 +393,6 @@ Before using this template, update:
 ---
 
 **Template Version**: 2.0  
-**Last Updated**: 2026-08-28
-**Copy to**: `project-root/agents.md` (NOT cmos/)  
+**Last Updated**: 2026-10-07
+**Lives at**: `project-root/AGENTS.md` (NOT cmos/)  
 **Customize**: Replace all [placeholders] with your project details

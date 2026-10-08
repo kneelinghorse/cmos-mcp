@@ -272,7 +272,8 @@ export async function syncPull(params: SyncPullParams): Promise<CmosToolResult<S
       if (tally.skippedMissingProvenance > 0) {
         warnings.push(
           `${tally.skippedMissingProvenance} genesis event(s) lacked the provenance/data needed to ` +
-            `reconstruct a replica row faithfully (a pre-s71-m01 origin, or a malformed payload) and ` +
+            `reconstruct a replica row faithfully (an event written before events carried their ` +
+            `full row, or a malformed payload) and ` +
             `were skipped — not re-stamped, to preserve cross-machine event identity.`
         );
       }

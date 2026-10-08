@@ -11,6 +11,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { debugLog } from './debug-log';
 
 /**
  * Build manifest written by scripts/generate-build-manifest.js
@@ -98,7 +99,7 @@ export function initServerHealth(distDir?: string): void {
   startupManifest = readBuildManifest(distDir);
 
   if (startupManifest) {
-    console.error(
+    debugLog(
       `[INFO] Server health initialized: buildHash=${startupManifest.buildHash.slice(0, 12)}… buildTime=${startupManifest.buildTime}`
     );
   } else {

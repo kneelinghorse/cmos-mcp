@@ -1,158 +1,105 @@
+// SPDX-License-Identifier: Apache-2.0
+// ABOUTME: The build-manifest generator, run for real against a temporary dist/ (s92-m10): it must
+// ABOUTME: hash every .js file with its path, and a test run must never rewrite the real manifest.
+
 /**
- * Build Manifest Generation Tests
- *
- * Tests for the generate-build-manifest.js script.
- *
- * @module tests/scripts/generate-build-manifest
+ * The earlier version of this file hashed buffers with `crypto` and asserted crypto's own
+ * behaviour, then ran the real script against the REAL dist/, so every full `jest` run rewrote
+ * dist/.build-manifest.json with a new buildTime (feedback #31). The server compares that
+ * manifest with the one it started from to report a stale build, so a test run could make a
+ * running server report itself stale. The script now takes `--dist <dir>`, and every case here
+ * runs it against a temporary directory. tests/jest-global-teardown.ts checks the real manifest
+ * is byte-identical after the whole suite.
  */
 
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from '@jest/globals';
+import { execFileSync } from 'child_process';
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { execSync } from 'child_process';
+
+const REPO_ROOT = path.resolve(__dirname, '../..');
+const SCRIPT = path.join(REPO_ROOT, 'scripts', 'generate-build-manifest.js');
+const REAL_MANIFEST = path.join(REPO_ROOT, 'dist', '.build-manifest.json');
+
+interface Manifest {
+  buildHash: string;
+  buildTime: string;
+  fileCount: number;
+}
+
+let distDir: string;
+let realManifestBefore: Buffer | null = null;
+
+beforeAll(() => {
+  realManifestBefore = fs.existsSync(REAL_MANIFEST) ? fs.readFileSync(REAL_MANIFEST) : null;
+});
+
+afterAll(() => {
+  const after = fs.existsSync(REAL_MANIFEST) ? fs.readFileSync(REAL_MANIFEST) : null;
+  expect(after?.equals(realManifestBefore ?? Buffer.alloc(0)) ?? realManifestBefore === null).toBe(
+    true
+  );
+});
+
+beforeEach(() => {
+  distDir = fs.mkdtempSync(path.join(os.tmpdir(), 'build-manifest-test-'));
+});
+
+afterEach(() => {
+  fs.rmSync(distDir, { recursive: true, force: true });
+});
+
+function write(rel: string, content: string): void {
+  fs.mkdirSync(path.dirname(path.join(distDir, rel)), { recursive: true });
+  fs.writeFileSync(path.join(distDir, rel), content);
+}
+
+function generate(): Manifest {
+  execFileSync(process.execPath, [SCRIPT, '--dist', distDir], { stdio: 'pipe' });
+  return JSON.parse(
+    fs.readFileSync(path.join(distDir, '.build-manifest.json'), 'utf8')
+  ) as Manifest;
+}
+
+/** The documented hash: every .js file, sorted by path, its relative path then its bytes. */
+function expectedHash(files: Record<string, string>): string {
+  const hash = crypto.createHash('sha256');
+  for (const rel of Object.keys(files).sort()) {
+    hash.update(rel);
+    hash.update(Buffer.from(files[rel]));
+  }
+  return hash.digest('hex');
+}
 
 describe('generate-build-manifest', () => {
-  const scriptPath = path.resolve(__dirname, '../../scripts/generate-build-manifest.js');
-  let tempDir: string;
-  let originalDistDir: string;
-
-  beforeEach(() => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'build-manifest-test-'));
+  it('hashes every .js file under the given dist, by path and content, and counts them', () => {
+    const files = { 'index.js': 'console.log(1);', [path.join('tools', 'a.js')]: 'exports.a = 1;' };
+    for (const [rel, content] of Object.entries(files)) write(rel, content);
+    write('README.md', 'not hashed');
+    const manifest = generate();
+    expect(manifest.buildHash).toBe(expectedHash(files));
+    expect(manifest.fileCount).toBe(2);
+    expect(Number.isNaN(Date.parse(manifest.buildTime))).toBe(false);
   });
 
-  afterEach(() => {
-    fs.rmSync(tempDir, { recursive: true, force: true });
+  it('is deterministic for the same content, and changes when content or a path changes', () => {
+    write('a.js', 'const x = 1;');
+    const first = generate().buildHash;
+    expect(generate().buildHash).toBe(first);
+
+    write('a.js', 'const x = 2;');
+    const edited = generate().buildHash;
+    expect(edited).not.toBe(first);
+
+    fs.renameSync(path.join(distDir, 'a.js'), path.join(distDir, 'b.js'));
+    expect(generate().buildHash).not.toBe(edited);
   });
 
-  it('generates manifest with hash, timestamp, and file count', () => {
-    // Create a fake dist/ with some JS files
-    const distDir = path.join(tempDir, 'dist');
-    fs.mkdirSync(distDir);
-    fs.writeFileSync(path.join(distDir, 'index.js'), 'console.log("hello");');
-    fs.writeFileSync(path.join(distDir, 'utils.js'), 'module.exports = {};');
-
-    // Run the script with overridden __dirname context
-    // We need to create a wrapper that sets the right paths
-    const wrapper = `
-      const path = require('path');
-      // Override __dirname for the script
-      const origResolve = path.resolve;
-      let callCount = 0;
-      path.resolve = function(...args) {
-        if (args.length === 3 && args[1] === '..' && args[2] === 'dist') {
-          return '${distDir.replace(/\\/g, '\\\\')}';
-        }
-        return origResolve.apply(this, args);
-      };
-      // Set __dirname to the scripts dir
-      require('${scriptPath.replace(/\\/g, '\\\\')}');
-    `;
-
-    // Simpler approach: just run the script against the actual dist/ if it exists
-    // or test the manifest output format
-    const manifestPath = path.join(distDir, '.build-manifest.json');
-
-    // Create manifest manually to test format
-    const crypto = require('crypto');
-    const hash = crypto.createHash('sha256');
-    hash.update('index.js');
-    hash.update(fs.readFileSync(path.join(distDir, 'index.js')));
-    hash.update('utils.js');
-    hash.update(fs.readFileSync(path.join(distDir, 'utils.js')));
-    const expectedHash = hash.digest('hex');
-
-    // Write expected manifest
-    const manifest = {
-      buildHash: expectedHash,
-      buildTime: new Date().toISOString(),
-      fileCount: 2,
-    };
-    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
-
-    // Verify manifest structure
-    const written = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
-    expect(written.buildHash).toBe(expectedHash);
-    expect(written.fileCount).toBe(2);
-    expect(typeof written.buildTime).toBe('string');
-    expect(new Date(written.buildTime).getTime()).not.toBeNaN();
-  });
-
-  it('produces deterministic hash for same content', () => {
-    const crypto = require('crypto');
-
-    // Same files, same order → same hash
-    const hash1 = crypto.createHash('sha256');
-    hash1.update('a.js');
-    hash1.update(Buffer.from('const x = 1;'));
-    hash1.update('b.js');
-    hash1.update(Buffer.from('const y = 2;'));
-    const digest1 = hash1.digest('hex');
-
-    const hash2 = crypto.createHash('sha256');
-    hash2.update('a.js');
-    hash2.update(Buffer.from('const x = 1;'));
-    hash2.update('b.js');
-    hash2.update(Buffer.from('const y = 2;'));
-    const digest2 = hash2.digest('hex');
-
-    expect(digest1).toBe(digest2);
-  });
-
-  it('produces different hash when content changes', () => {
-    const crypto = require('crypto');
-
-    const hash1 = crypto.createHash('sha256');
-    hash1.update('a.js');
-    hash1.update(Buffer.from('const x = 1;'));
-    const digest1 = hash1.digest('hex');
-
-    const hash2 = crypto.createHash('sha256');
-    hash2.update('a.js');
-    hash2.update(Buffer.from('const x = 2;'));
-    const digest2 = hash2.digest('hex');
-
-    expect(digest1).not.toBe(digest2);
-  });
-
-  it('produces different hash when file is renamed', () => {
-    const crypto = require('crypto');
-    const content = Buffer.from('same content');
-
-    const hash1 = crypto.createHash('sha256');
-    hash1.update('old-name.js');
-    hash1.update(content);
-    const digest1 = hash1.digest('hex');
-
-    const hash2 = crypto.createHash('sha256');
-    hash2.update('new-name.js');
-    hash2.update(content);
-    const digest2 = hash2.digest('hex');
-
-    expect(digest1).not.toBe(digest2);
-  });
-
-  it('script runs successfully against real dist/ if present', () => {
-    const realDistDir = path.resolve(__dirname, '../../dist');
-    if (!fs.existsSync(realDistDir)) {
-      // Skip if dist doesn't exist (CI might not have built yet)
-      return;
-    }
-
-    // Run the actual script
-    const output = execSync(`node "${scriptPath}"`, {
-      cwd: path.resolve(__dirname, '../..'),
-      encoding: 'utf-8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-
-    // Check manifest was created
-    const manifestPath = path.join(realDistDir, '.build-manifest.json');
-    expect(fs.existsSync(manifestPath)).toBe(true);
-
-    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
-    expect(typeof manifest.buildHash).toBe('string');
-    expect(manifest.buildHash.length).toBe(64); // SHA-256 hex length
-    expect(typeof manifest.buildTime).toBe('string');
-    expect(manifest.fileCount).toBeGreaterThan(0);
+  it('writes nothing when the directory holds no .js files', () => {
+    write('notes.txt', 'nothing to hash');
+    execFileSync(process.execPath, [SCRIPT, '--dist', distDir], { stdio: 'pipe' });
+    expect(fs.existsSync(path.join(distDir, '.build-manifest.json'))).toBe(false);
   });
 });

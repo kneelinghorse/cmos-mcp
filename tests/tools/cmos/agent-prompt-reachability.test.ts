@@ -553,7 +553,17 @@ describe("cmos-seed's own recommended first command (s86-m05 Instrument 1)", () 
  * got a missing file.
  */
 describe('seed templates name only paths init creates (s86-m05 Instrument 1)', () => {
-  const templates = ['PROJECT-README-template.md', 'agents.md'];
+  // s92-m10: listed from the directory, exact case, so a rename cannot desync this list again. The
+  // template became AGENTS.md in s92-m06, and a hard-coded 'agents.md' still resolved on macOS's
+  // case-insensitive filesystem while Linux CI could not open it.
+  const templates = fs
+    .readdirSync(r('cmos-seed', 'templates'))
+    .filter((f) => f.endsWith('.md'))
+    .sort();
+
+  it('reads every shipped template, by its exact name', () => {
+    expect(templates).toEqual(['AGENTS.md', 'PROJECT-README-template.md']);
+  });
 
   it('names no cli.py — cmos_project(init) has never created one', () => {
     // copySeedDir copies cmos-seed verbatim and cmos-seed contains no cli.py; scripts/ does not

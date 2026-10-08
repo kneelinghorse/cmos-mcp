@@ -12,7 +12,6 @@ import { z } from 'zod';
 import * as crypto from 'crypto';
 import { withClientValidated, type CmosDatabaseClient } from './client';
 import { genesisColumns, getProjectId } from './genesis-columns';
-import { snapshotDedupPrunedFilter } from './schema-migrations';
 import type { CmosToolResult, Context } from './types';
 import { createError, createSuccess, CMOS_ERROR_CODES } from './errors';
 import {
@@ -27,6 +26,7 @@ import {
   resolveContextSizeSettings,
 } from './context-retention';
 import { appendWarnings } from './format-warnings';
+import { findReusableSnapshot, snapshotStorage } from './snapshot-content-policy';
 
 /**
  * Capture item from session captures JSON.
@@ -891,23 +891,21 @@ function createSnapshot(
   const contentHash = crypto.createHash('sha256').update(content).digest('hex').substring(0, 16);
   const now = new Date().toISOString();
 
-  // Check for duplicate. s84-m04: exclude a content-tombstoned row so identical content
-  // re-persists fresh instead of deduping onto the emptied row.
-  const existingResult = client.getOne<{ id: number }>(
-    `SELECT id FROM context_snapshots WHERE context_id = ? AND content_hash = ?${snapshotDedupPrunedFilter(client)}`,
-    [contextId, contentHash]
-  );
-
-  if (existingResult.success && existingResult.data) {
-    return { success: true, snapshotId: existingResult.data.id };
+  // Check for duplicate (snapshot-content-policy.ts: any content-bearing row is at least as
+  // protected as an update copy, and a content-less row is never a hit).
+  const reusable = findReusableSnapshot(client, { contextId, contentHash, kind: 'post-write' });
+  if (reusable.ok && reusable.row) {
+    return { success: true, snapshotId: reusable.row.id };
   }
 
   // Create new snapshot
   const g = genesisColumns(client, 'context_snapshots', getProjectId(client));
+  // s92-m09: a copy of an explicit update, so it keeps its content (snapshot-content-policy.ts).
+  const storage = snapshotStorage('post-write', content, { contentHash });
   const insertResult = client.execute(
-    `INSERT INTO context_snapshots (context_id, source, content_hash, content, created_at, ${g.columns.join(', ')})
-     VALUES (?, ?, ?, ?, ?, ${g.placeholders})`,
-    [contextId, source, contentHash, content, now, ...g.values]
+    `INSERT INTO context_snapshots (context_id, source, content_hash, content, created_at, ${[...storage.columns, ...g.columns].join(', ')})
+     VALUES (?, ?, ?, ?, ?, ${[...storage.columns.map(() => '?'), g.placeholders].join(', ')})`,
+    [contextId, source, storage.contentHash, storage.content, now, ...storage.values, ...g.values]
   );
 
   if (!insertResult.success) {

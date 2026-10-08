@@ -28,7 +28,6 @@ import {
   ensureLearningsTable,
   ensureAuthorNamespaceColumns,
   ensureFirehoseEventColumns,
-  snapshotDedupPrunedFilter,
 } from './schema-migrations';
 import {
   checkBuildFreshness,
@@ -45,12 +44,18 @@ import { applySprintTracking, openSprintPointer, type SprintPointer } from './sp
 import {
   CLOSES_SURVIVED_SQL,
   LEASED_STATUS_SQL,
+  LEASE_AGE_DAYS_SQL,
   LEASE_COUNTING_RULE,
+  LEASE_IDLE_WARN_DAYS,
   LEASE_LAPSE_AT,
+  LEASE_MIN_AGE_DAYS,
   LEASE_WARN_AT,
+  leaseState,
   reopenCommand,
 } from './next-step-lease';
+import { repairCompletedSprintEndDates, type SprintEndDateRepair } from './sprint-end-date-repair';
 import { summarizeSessionCaptures } from './session-capture-state';
+import { findReusableSnapshot, snapshotStorage } from './snapshot-content-policy';
 
 type CloseoutContextType = 'master_context' | 'project_context';
 type CloseoutCondensationStrategy = 'none' | 'conservative' | 'auto' | 'aggressive';
@@ -97,6 +102,13 @@ export interface SprintKPIs {
  * Lifecycle trigger results from sprint completion.
  */
 export interface SprintLifecycleTriggers {
+  /**
+   * s92-m05 (operator Q1, decision #1160) — whether this close archived anything. Since 3.2.0 a
+   * close leaves the sprint's decisions and learnings ACTIVE unless it was called with
+   * `archive: true`; the counts and id arrays below are then 0 and [] (kept, so a receipt audit
+   * that checks `Array.isArray` on both arrays still holds).
+   */
+  archived: boolean;
   decisionsArchived: number;
   learningsArchived: number;
 
@@ -199,6 +211,8 @@ export interface SprintPendingNextStep {
   status: 'pending' | 'carried';
   /** s91-m06: closes survived going INTO this close (next-step-lease.ts counting rule). */
   closesSurvived: number;
+  /** s92-m02: days since the row's lease anchor (last carry, else creation); null if unparseable. */
+  ageDays: number | null;
 }
 
 /** s91-m06 — the lease as this close applied it, published with its thresholds and rule. */
@@ -210,6 +224,14 @@ export interface SprintNextStepLease {
   warned: number[];
   /** Open rows at or past the lapse age: this close drops them (see lapsedDroppedIds). */
   lapsed: number[];
+  /** s92-m02 (operator Q4): no row is dropped before it is this many days past its lease anchor. */
+  minAgeDays: number;
+  /** s92-m02: rows at or past the lapse age that the minimum-age floor kept — not dropped. */
+  heldByMinAge: number[];
+  /** s92-m02: rows that survived no close are flagged idle after this many days (never dropped). */
+  idleWarnDays: number;
+  /** s92-m02: rows that have survived no close for idleWarnDays days or more. */
+  idle: number[];
 }
 
 export interface SprintPendingNextStepGroups {
@@ -261,6 +283,18 @@ export interface CmosSprintCompleteResult {
    * transaction. Undo with the reopen command the rendered receipt prints beside them.
    */
   lapsedDroppedIds: number[];
+  /**
+   * s92-m02 — the sprint's end_date BEFORE this close, when one was planned. The close now writes
+   * the actual close time into end_date (it used to keep a planned date, which the next-step
+   * lease then counted as a close every later carry had survived). Null when none was set.
+   */
+  plannedEndDate: string | null;
+  /**
+   * s92-m02 — present ONLY on the close that ran the one-time end_date repair: the Completed
+   * sprints re-dated from a planned date to their recorded close, and every Completed sprint left
+   * as found because nothing on disk records when it closed.
+   */
+  endDateRepair?: SprintEndDateRepair;
   /** Build-freshness report, included ONLY when stale=true (omitted on the happy path
    *  to keep the response shape unchanged for fresh-build sprints). */
   buildFreshness?: BuildFreshnessReport;
@@ -271,9 +305,9 @@ export interface CmosSprintCompleteResult {
 
 /**
  * s84-m04 — context_snapshots growth thresholds for the non-blocking sprint-close advisory.
- * Either the row count OR the total content bytes crossing its threshold fires the advisory,
- * which describes the retention decision and names no command (s86-m05, fork f05 — the tooling
- * for reclaiming this content lives in `scripts/`, which does not ship). Advisory-only — never
+ * Either the count of snapshots still holding content OR their content bytes crossing its
+ * threshold fires the advisory. s92-m09: it counts only rows that hold content, so a prune clears
+ * it, and it names the shipped `cmos_db(action="prune_snapshots")` dry run. Advisory-only — never
  * gates the close.
  */
 const SNAPSHOT_GROWTH_ROW_THRESHOLD = 500;
@@ -309,6 +343,12 @@ export const cmosSprintCompleteSchema = z.object({
     .describe(
       'No-op, kept for backward compatibility. Build-freshness is advisory as of the s74 review — staleness is surfaced as a warning and never blocks closeout, so no override is needed.'
     ),
+  archive: z
+    .boolean()
+    .optional()
+    .describe(
+      "Also archive this sprint's active decisions and learnings (evergreen learnings kept), naming every archived id. Off by default since 3.2.0."
+    ),
   projectRoot: z
     .string()
     .optional()
@@ -330,10 +370,11 @@ export const cmosSprintCompleteToolDefinition = {
   // disclosure had to land. Kept in sync anyway so the two do not drift, and labelled so the next
   // reader does not mistake editing it for having fixed the published contract.
   description:
-    'Close out a sprint in one operation. Validates sprint readiness, marks the sprint Completed with endDate, ' +
-    "ARCHIVES the sprint's active decisions and learnings (evergreen learnings are kept active) and names every " +
-    'archived id in the result, takes a pre-close database snapshot as an undo handle, snapshots both contexts, ' +
-    'retains bounded next-step prose by count, and optionally runs context condensation.',
+    'Close out a sprint in one operation. Validates sprint readiness, marks the sprint Completed with the actual ' +
+    "close time as endDate, applies the next-step lease, leaves the sprint's decisions and learnings ACTIVE unless " +
+    'archive is true (then archives them and names every archived id), takes a pre-close database snapshot as an ' +
+    'undo handle, snapshots both contexts, retains bounded next-step prose by count, and optionally runs context ' +
+    'condensation.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -365,6 +406,11 @@ export const cmosSprintCompleteToolDefinition = {
         type: 'boolean',
         description:
           'No-op, kept for backward compatibility. Build-freshness is advisory — staleness is surfaced as a warning and never blocks closeout.',
+      },
+      archive: {
+        type: 'boolean',
+        description:
+          "Also archive this sprint's active decisions and learnings, naming every archived id. Off by default since 3.2.0.",
       },
       projectRoot: {
         type: 'string',
@@ -462,13 +508,13 @@ export async function cmosSprintComplete(
         } else {
           warnings.push(
             'Pre-close database snapshot failed — this close is NOT reversible from a snapshot. ' +
-              'The decision/learning archival below still runs; its ids are enumerated in the result.'
+              'The close still runs; what it changes (lease drops, and archival when archive: true) is enumerated in the result.'
           );
         }
       } catch {
         warnings.push(
           'Pre-close database snapshot failed — this close is NOT reversible from a snapshot. ' +
-            'The decision/learning archival below still runs; its ids are enumerated in the result.'
+            'The close still runs; what it changes (lease drops, and archival when archive: true) is enumerated in the result.'
         );
       }
 
@@ -529,6 +575,8 @@ export async function cmosSprintComplete(
       // membership through session_missions: an unscoped session that happened to touch one
       // sprint mission is not a session the sprint owns. This read stays inside the same
       // BEGIN IMMEDIATE transaction as the close so the receipt describes one stable boundary.
+      // s92-m03: implicit sessions never appear here. They carry no sprint_id by construction
+      // (a process outlives sprints), so `sprint_id = ?` already excludes them.
       const activeSessionsResult = client.getMany<ActiveSessionAtCloseRow>(
         `SELECT id, title, captures
          FROM sessions
@@ -662,6 +710,16 @@ export async function cmosSprintComplete(
         'project_context'
       );
 
+      // s92-m02 — the one-time end_date repair runs INSIDE this transaction and BEFORE the
+      // survey: the lease ages below then count real closes, and a close that refuses or rolls
+      // back also rolls back the repair and its marker, so the next close retries it.
+      const endDateRepair = repairCompletedSprintEndDates(client, completedAt);
+      if (endDateRepair && endDateRepair.failures.length > 0) {
+        warnings.push(
+          `end_date repair incomplete (it will be retried at the next close): ${endDateRepair.failures.join('; ')}`
+        );
+      }
+
       // Survey the WHOLE open ledger. Sprint close cannot prove delivery, so it never writes
       // `completed`; s91-m06 narrows the s90-m05 rule to one write — `dropped` for rows whose
       // lease lapsed — and names every id it drops.
@@ -679,7 +737,17 @@ export async function cmosSprintComplete(
       // invariant and each arm's failure), spliced here in the same shape as the two pre-BEGIN
       // `ensure*` calls above. It has no `warnings` array in scope of its own — it is a
       // module-level function taking `(client, sprintId)`.
-      const archiveResult = archiveSprintDecisionsAndLearnings(client, sprintId);
+      // s92-m05 (operator Q1, decision #1160): "data is being lost and teams are working around
+      // it" — 78% of fleet decisions were archived, mostly here. The close no longer archives by
+      // default; `archive: true` runs exactly the s87-m02 archival and its itemized receipt.
+      const archiveRequested = params.archive === true;
+      const archiveResult: ArchiveOutcome = archiveRequested
+        ? archiveSprintDecisionsAndLearnings(client, sprintId)
+        : {
+            decisions: { ok: true, count: 0, ids: [] },
+            learnings: { ok: true, count: 0, ids: [] },
+            warnings: [],
+          };
       warnings.push(...archiveResult.warnings);
 
       // --- Lifecycle Trigger: Compute sprint KPIs ---
@@ -779,6 +847,11 @@ export async function cmosSprintComplete(
       // licences and four docs — `scripts/` is in none of them, and `bin` is only cmos-mcp.
       // So the advisory described a retention DECISION instead, which is true for everyone.
       //
+      // s92-m09: f05's reason was that the command could not be run. cmos_db(action=
+      // "prune_snapshots") ships in the package and is a dry run unless confirm=true, so the
+      // advisory now names it. The advisory counts only snapshots that still hold content: the
+      // prune keeps every row, so a row count never fell and the advisory never cleared.
+      //
       // THE ALTERNATIVES WERE CONSIDERED AND REJECTED; do not re-open them:
       //  (a) add a bin/ entry so the command becomes real — rejected. It would drag scripts/
       //      (or a compiled equivalent) plus a ts-node runtime into installable surface, for a
@@ -792,7 +865,8 @@ export async function cmosSprintComplete(
       // otherwise mutate context_snapshots — it only counts rows and bytes.
       try {
         const growth = client.getOne<{ rows: number; bytes: number }>(
-          `SELECT COUNT(*) AS rows, COALESCE(SUM(LENGTH(content)), 0) AS bytes FROM context_snapshots`,
+          `SELECT COUNT(*) AS rows, COALESCE(SUM(LENGTH(content)), 0) AS bytes
+             FROM context_snapshots WHERE LENGTH(content) > 0`,
           []
         );
         if (
@@ -802,12 +876,12 @@ export async function cmosSprintComplete(
             growth.data.bytes > SNAPSHOT_GROWTH_BYTE_THRESHOLD)
         ) {
           warnings.push(
-            `context_snapshots has grown to ${growth.data.rows} rows / ` +
-              `${(growth.data.bytes / (1024 * 1024)).toFixed(1)} MB. That content is write-only — ` +
-              `no read path in CMOS returns it, and the row, its metadata and its audit event are ` +
-              `all kept whether or not the bytes are. Reclaiming it is a deliberate operator ` +
-              `decision, not something a sprint close should do for you, and it is irreversible ` +
-              `apart from a database backup.`
+            `context_snapshots has grown to ${growth.data.rows} snapshots holding ` +
+              `${(growth.data.bytes / (1024 * 1024)).toFixed(1)} MB of content. Most are copies ` +
+              `CMOS wrote on its own, and no read path returns them. cmos_db(action=` +
+              `"prune_snapshots") shows what emptying those copies would reclaim without ` +
+              `changing anything; confirm=true applies it after a database snapshot, and every ` +
+              `row, id and reference is kept. A sprint close never prunes on its own.`
           );
         }
       } catch {
@@ -872,6 +946,7 @@ export async function cmosSprintComplete(
       // been archived and COMMITTED. A count that a different table's failure can zero is not a
       // report of what happened.
       const lifecycle: SprintLifecycleTriggers = {
+        archived: archiveRequested,
         decisionsArchived: archiveResult.decisions.count,
         learningsArchived: archiveResult.learnings.count,
         archivedDecisionIds: archiveResult.decisions.ids,
@@ -914,6 +989,8 @@ export async function cmosSprintComplete(
         lifecycle,
         nextStepsSurvey,
         lapsedDroppedIds,
+        plannedEndDate: sprint.end_date ?? null,
+        ...(endDateRepair ? { endDateRepair } : {}),
         writeFailures: leaseSink.failures,
         message: buildCloseoutMessage(sprintId, condensation, readiness),
       };
@@ -1144,21 +1221,25 @@ function createSnapshot(
   source: string
 ): { success: boolean; snapshotId?: number } {
   const contentHash = crypto.createHash('sha256').update(content).digest('hex').substring(0, 16);
-  const existing = client.getOne<{ id: number }>(
-    // s84-m04: exclude a content-tombstoned row so identical content re-persists fresh.
-    `SELECT id FROM context_snapshots WHERE context_id = ? AND content_hash = ?${snapshotDedupPrunedFilter(client)}`,
-    [contextType, contentHash]
-  );
-  if (existing.success && existing.data) {
-    return { success: true, snapshotId: existing.data.id };
+  // s92-m09: reuse an identical snapshot only when it is itself never prunable (a milestone, a
+  // named snapshot); landing on an update or close copy would lose the milestone to a prune.
+  const reusable = findReusableSnapshot(client, {
+    contextId: contextType,
+    contentHash,
+    kind: 'milestone',
+  });
+  if (reusable.ok && reusable.row) {
+    return { success: true, snapshotId: reusable.row.id };
   }
 
   const now = new Date().toISOString();
   const g = genesisColumns(client, 'context_snapshots', getProjectId(client));
+  // s92-m09: a sprint-close milestone; it keeps its content.
+  const storage = snapshotStorage('milestone', content, { contentHash });
   const insertResult = client.execute(
-    `INSERT INTO context_snapshots (context_id, source, content_hash, content, created_at, ${g.columns.join(', ')})
-     VALUES (?, ?, ?, ?, ?, ${g.placeholders})`,
-    [contextType, source, contentHash, content, now, ...g.values]
+    `INSERT INTO context_snapshots (context_id, source, content_hash, content, created_at, ${[...storage.columns, ...g.columns].join(', ')})
+     VALUES (?, ?, ?, ?, ?, ${[...storage.columns.map(() => '?'), g.placeholders].join(', ')})`,
+    [contextType, source, storage.contentHash, storage.content, now, ...storage.values, ...g.values]
   );
   if (!insertResult.success) {
     return { success: false };
@@ -1193,9 +1274,11 @@ function surveyPendingNextSteps(
     mission_id: string | null;
     status: 'pending' | 'carried';
     closes_survived: number;
+    age_days: number | null;
   }>(
     `SELECT n.id, n.content, n.sprint_id, n.mission_id, n.status,
-            ${CLOSES_SURVIVED_SQL} AS closes_survived
+            ${CLOSES_SURVIVED_SQL} AS closes_survived,
+            ${LEASE_AGE_DAYS_SQL} AS age_days
        FROM next_steps n
       WHERE ${LEASED_STATUS_SQL}
       ORDER BY n.id ASC`,
@@ -1226,6 +1309,7 @@ function surveyPendingNextSteps(
       missionId: row.mission_id,
       status: row.status,
       closesSurvived: row.closes_survived,
+      ageDays: row.age_days,
     };
     if (row.sprint_id === null) {
       groups.noSprintProvenance.push(item);
@@ -1252,7 +1336,22 @@ function surveyPendingNextSteps(
           (row) => row.closes_survived >= LEASE_WARN_AT && row.closes_survived < LEASE_LAPSE_AT
         )
         .map((row) => row.id),
-      lapsed: rows.data.filter((row) => row.closes_survived >= LEASE_LAPSE_AT).map((row) => row.id),
+      // s92-m02: the drop also needs the 14-day floor (leaseState applies both bounds).
+      lapsed: rows.data
+        .filter((row) => leaseState(row.closes_survived, row.age_days) === 'lapsing')
+        .map((row) => row.id),
+      minAgeDays: LEASE_MIN_AGE_DAYS,
+      heldByMinAge: rows.data
+        .filter(
+          (row) =>
+            row.closes_survived >= LEASE_LAPSE_AT &&
+            leaseState(row.closes_survived, row.age_days) !== 'lapsing'
+        )
+        .map((row) => row.id),
+      idleWarnDays: LEASE_IDLE_WARN_DAYS,
+      idle: rows.data
+        .filter((row) => leaseState(row.closes_survived, row.age_days) === 'idle')
+        .map((row) => row.id),
     },
   };
 }
@@ -1345,10 +1444,13 @@ function completeSprintRecord(
   sprintId: string,
   completedAt: string
 ): ReturnType<CmosDatabaseClient['execute']> {
+  // s92-m02: the ACTUAL close time, always. `COALESCE(end_date, ?)` kept a planned end date,
+  // and the next-step lease counted that future date as a close later carries had survived.
+  // The planned date is reported on the receipt as plannedEndDate instead.
   const updateWithEndDate = client.execute(
     `UPDATE sprints
         SET status = 'Completed',
-            end_date = COALESCE(end_date, ?)
+            end_date = ?
       WHERE id = ?`,
     [completedAt, sprintId]
   );
@@ -1813,13 +1915,17 @@ export function formatSprintCompleteForLLM(
     `✓ Sprint '${data.sprintId}' completed`,
     '',
     `Status: ${data.previousStatus ?? 'Unknown'} → ${data.currentStatus}`,
-    `Completed at: ${data.completedAt}`,
+    `Completed at: ${data.completedAt} (stamped as end_date${
+      data.plannedEndDate ? `; the planned end date was ${data.plannedEndDate}` : ''
+    })`,
     `Summary: ${data.summary}`,
     '',
     `Readiness: ${data.readiness.completedMissions}/${data.readiness.totalMissions} completed, ${data.readiness.blockedMissions} blocked, ${data.readiness.openMissions} open, ${data.readiness.parkedMissions} parked (outside the total)`,
     '',
     `KPIs: completion rate ${(data.lifecycle.kpis.completionRate * 100).toFixed(0)}%, avg cycle time ${data.lifecycle.kpis.avgCycleTimeDays !== null ? `${data.lifecycle.kpis.avgCycleTimeDays}d` : 'N/A'}, ${data.lifecycle.kpis.decisionCount} decisions, ${data.lifecycle.kpis.learningCount} learnings`,
-    `Archived: ${data.lifecycle.decisionsArchived} decisions${formatArchivedIds(data.lifecycle.archivedDecisionIds)}, ${data.lifecycle.learningsArchived} learnings${formatArchivedIds(data.lifecycle.learningIds)}`,
+    data.lifecycle.archived
+      ? `Archived: ${data.lifecycle.decisionsArchived} decisions${formatArchivedIds(data.lifecycle.archivedDecisionIds)}, ${data.lifecycle.learningsArchived} learnings${formatArchivedIds(data.lifecycle.learningIds)}`
+      : "Archived: nothing — this sprint's decisions and learnings stay active (pass archive: true to archive them)",
     `Pre-close snapshot (undo handle): ${data.lifecycle.preCloseSnapshotId ?? 'FAILED — this close is not reversible from a snapshot'}`,
     `DB snapshot: ${data.lifecycle.dbSnapshotId ?? 'failed'}`,
     `Runtime build at close: ${runtimeBuildAtClose}`,
@@ -1875,6 +1981,18 @@ export function formatSprintCompleteForLLM(
       );
       if (data.lapsedDroppedIds.length > 0) {
         lines.push(`  Undo: ${reopenCommand(data.lapsedDroppedIds)}`);
+      }
+      if (lease.heldByMinAge.length > 0) {
+        lines.push(
+          `  Kept by the ${lease.minAgeDays}-day floor (past the drop age, too young to drop): ` +
+            lease.heldByMinAge.map((id) => `#${id}`).join(', ')
+        );
+      }
+      if (lease.idle.length > 0) {
+        lines.push(
+          `  Idle (no close survived in ${lease.idleWarnDays}+ days; never dropped by the calendar): ` +
+            lease.idle.map((id) => `#${id}`).join(', ')
+        );
       }
     }
     formatPendingNextStepGroup(

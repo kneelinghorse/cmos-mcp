@@ -17,7 +17,6 @@ import { z } from 'zod';
 import * as crypto from 'crypto';
 import { withClientValidated, type CmosDatabaseClient } from './client';
 import { genesisColumns, getProjectId } from './genesis-columns';
-import { snapshotDedupPrunedFilter } from './schema-migrations';
 import type { CmosToolResult, Context } from './types';
 import { createError, createSuccess, CMOS_ERROR_CODES } from './errors';
 import {
@@ -26,6 +25,7 @@ import {
   type ContextSizeMetrics,
 } from './context-retention';
 import { appendWarnings } from './format-warnings';
+import { findReusableSnapshot, snapshotStorage } from './snapshot-content-policy';
 
 /**
  * Per-section condensation detail.
@@ -625,21 +625,20 @@ function createAutoSnapshot(
   const contentHash = crypto.createHash('sha256').update(content).digest('hex').substring(0, 16);
   const now = new Date().toISOString();
 
-  // Check for duplicate. s84-m04: exclude a content-tombstoned row so identical content
-  // re-persists fresh instead of deduping onto the emptied row.
-  const existing = client.getOne<{ id: number }>(
-    `SELECT id FROM context_snapshots WHERE context_id = ? AND content_hash = ?${snapshotDedupPrunedFilter(client)}`,
-    [contextId, contentHash]
-  );
-  if (existing.success && existing.data) {
-    return existing.data.id;
+  // Reuse an identical snapshot only when it is at least as protected as this backup (s92-m09):
+  // a backup that landed on an update copy would be pruned as an update copy.
+  const reusable = findReusableSnapshot(client, { contextId, contentHash, kind: 'pre-mutation' });
+  if (reusable.ok && reusable.row) {
+    return reusable.row.id;
   }
 
   const g = genesisColumns(client, 'context_snapshots', getProjectId(client));
+  // s92-m09: the backup taken before condense mutates the context; it keeps its content.
+  const storage = snapshotStorage('pre-mutation', content, { contentHash });
   const insertResult = client.execute(
-    `INSERT INTO context_snapshots (context_id, source, content_hash, content, created_at, ${g.columns.join(', ')})
-     VALUES (?, ?, ?, ?, ?, ${g.placeholders})`,
-    [contextId, source, contentHash, content, now, ...g.values]
+    `INSERT INTO context_snapshots (context_id, source, content_hash, content, created_at, ${[...storage.columns, ...g.columns].join(', ')})
+     VALUES (?, ?, ?, ?, ?, ${[...storage.columns.map(() => '?'), g.placeholders].join(', ')})`,
+    [contextId, source, storage.contentHash, storage.content, now, ...storage.values, ...g.values]
   );
 
   if (!insertResult.success) return null;

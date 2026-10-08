@@ -23,7 +23,9 @@ import * as serverHealth from '../../../src/server-health';
 import type { BuildManifest } from '../../../src/server-health';
 import {
   LEASE_COUNTING_RULE,
+  LEASE_IDLE_WARN_DAYS,
   LEASE_LAPSE_AT,
+  LEASE_MIN_AGE_DAYS,
   LEASE_WARN_AT,
 } from '../../../src/tools/cmos/next-step-lease';
 
@@ -575,7 +577,8 @@ describe('cmos_sprint_complete', () => {
       db.close();
     }
 
-    it('archives sprint-scoped decisions and learnings on completion', async () => {
+    /** Two sprint-22 decisions and learnings (direct and via mission), plus rows that never move. */
+    function seedArchivalScenario(): void {
       seedDecisionsAndLearningsTables();
       seedMissions([
         { id: 's22-m01', status: 'Completed' },
@@ -613,14 +616,64 @@ describe('cmos_sprint_complete', () => {
          VALUES ('Session capture flow', 'process', 'active', 's22-m02', '2026-03-02T00:00:00Z')`
       ).run();
       db.close();
+    }
+
+    function countWhere(sql: string): number {
+      const db = new Database(dbPath);
+      try {
+        return (db.prepare(sql).get() as { count: number }).count;
+      } finally {
+        db.close();
+      }
+    }
+
+    it('leaves sprint-scoped decisions and learnings active by default (s92-m05, decision #1160)', async () => {
+      seedArchivalScenario();
 
       const result = await cmosSprintComplete({
         sprintId: 'sprint-22',
-        summary: 'Lifecycle triggers test',
+        summary: 'Default close keeps the record',
         projectRoot: getProjectRoot(),
       });
 
       expect(result.success).toBe(true);
+      const lifecycle = result.data!.lifecycle;
+      expect(lifecycle.archived).toBe(false);
+      expect(lifecycle.decisionsArchived).toBe(0);
+      expect(lifecycle.learningsArchived).toBe(0);
+      // The arrays stay present, so the agents.md receipt audit (Array.isArray on both) holds.
+      expect(lifecycle.archivedDecisionIds).toEqual([]);
+      expect(lifecycle.learningIds).toEqual([]);
+      // The close still writes (end date, lease), so it still takes its undo handle.
+      expect(lifecycle.preCloseSnapshotId).toEqual(expect.any(String));
+
+      expect(
+        countWhere("SELECT COUNT(*) AS count FROM strategic_decisions WHERE status = 'active'")
+      ).toBe(3);
+      expect(
+        countWhere("SELECT COUNT(*) AS count FROM strategic_decisions WHERE status = 'archived'")
+      ).toBe(0);
+      expect(countWhere("SELECT COUNT(*) AS count FROM learnings WHERE status = 'active'")).toBe(2);
+
+      const formatted = formatSprintCompleteForLLM(result);
+      expect(formatted).toContain(
+        "Archived: nothing — this sprint's decisions and learnings stay active"
+      );
+      expect(formatted).not.toMatch(/Archived: \d+ decisions/);
+    });
+
+    it('archives sprint-scoped decisions and learnings when archive: true', async () => {
+      seedArchivalScenario();
+
+      const result = await cmosSprintComplete({
+        sprintId: 'sprint-22',
+        summary: 'Lifecycle triggers test',
+        archive: true,
+        projectRoot: getProjectRoot(),
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.data?.lifecycle.archived).toBe(true);
       expect(result.data?.lifecycle.decisionsArchived).toBe(2);
       expect(result.data?.lifecycle.learningsArchived).toBe(2);
 
@@ -757,9 +810,11 @@ describe('cmos_sprint_complete', () => {
       seedMissions([{ id: 's22-m01', status: 'Completed' }]);
       seedContexts({}, {});
 
+      // archive: true so the archival arm runs against the missing tables (s92-m05 made it opt-in).
       const result = await cmosSprintComplete({
         sprintId: 'sprint-22',
         summary: 'No decision tables',
+        archive: true,
         projectRoot: getProjectRoot(),
       });
 
@@ -810,6 +865,7 @@ describe('cmos_sprint_complete', () => {
       const result = await cmosSprintComplete({
         sprintId: 'sprint-22',
         summary: 'Pre-migration DB archival',
+        archive: true,
         projectRoot: getProjectRoot(),
       });
 
@@ -1388,6 +1444,8 @@ describe('cmos_sprint_complete', () => {
               missionId: 's22-m01',
               status: 'pending',
               closesSurvived: 0,
+              // s92-m02: days since the lease anchor (created_at here)
+              ageDays: expect.any(Number),
             },
             {
               id: 2,
@@ -1396,6 +1454,8 @@ describe('cmos_sprint_complete', () => {
               missionId: 's22-m02',
               status: 'pending',
               closesSurvived: 0,
+              // s92-m02: days since the lease anchor (created_at here)
+              ageDays: expect.any(Number),
             },
             ...[7, 8, 9, 10].map((id) => ({
               id,
@@ -1404,6 +1464,8 @@ describe('cmos_sprint_complete', () => {
               missionId: 's22-m01',
               status: 'pending',
               closesSurvived: 0,
+              // s92-m02: days since the lease anchor (created_at here)
+              ageDays: expect.any(Number),
             })),
           ],
           closingSprintWithoutMissionProvenance: [
@@ -1414,6 +1476,8 @@ describe('cmos_sprint_complete', () => {
               missionId: null,
               status: 'pending',
               closesSurvived: 0,
+              // s92-m02: days since the lease anchor (created_at here)
+              ageDays: expect.any(Number),
             },
           ],
           otherSprintProvenance: [
@@ -1424,6 +1488,8 @@ describe('cmos_sprint_complete', () => {
               missionId: null,
               status: 'pending',
               closesSurvived: 0,
+              // s92-m02: days since the lease anchor (created_at here)
+              ageDays: expect.any(Number),
             },
           ],
           noSprintProvenance: [
@@ -1434,6 +1500,8 @@ describe('cmos_sprint_complete', () => {
               missionId: null,
               status: 'pending',
               closesSurvived: 0,
+              // s92-m02: days since the lease anchor (created_at here)
+              ageDays: expect.any(Number),
             },
           ],
         },
@@ -1443,6 +1511,12 @@ describe('cmos_sprint_complete', () => {
           countingRule: LEASE_COUNTING_RULE,
           warned: [],
           lapsed: [],
+          // s92-m02: the fixture rows were created 2026-03-05 and no close followed, so every one
+          // is past the 6-week idle line — warned, never dropped by the calendar.
+          minAgeDays: LEASE_MIN_AGE_DAYS,
+          heldByMinAge: [],
+          idleWarnDays: LEASE_IDLE_WARN_DAYS,
+          idle: [1, 2, 3, 4, 6, 7, 8, 9, 10],
         },
       });
 
@@ -1506,6 +1580,8 @@ describe('cmos_sprint_complete', () => {
               missionId: null,
               status: 'pending',
               closesSurvived: 0,
+              // s92-m02: days since the lease anchor (created_at here)
+              ageDays: expect.any(Number),
             },
           ],
           noSprintProvenance: [],
@@ -1516,6 +1592,10 @@ describe('cmos_sprint_complete', () => {
           countingRule: LEASE_COUNTING_RULE,
           warned: [],
           lapsed: [],
+          minAgeDays: LEASE_MIN_AGE_DAYS,
+          heldByMinAge: [],
+          idleWarnDays: LEASE_IDLE_WARN_DAYS,
+          idle: [1],
         },
       });
       expect(readNextStep(1).status).toBe('pending'); // untouched

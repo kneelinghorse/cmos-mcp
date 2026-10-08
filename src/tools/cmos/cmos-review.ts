@@ -51,13 +51,19 @@ import * as path from 'path';
 import { z } from 'zod';
 import type { CmosToolResult } from './types';
 import { createError, createSuccess } from './errors';
+import { withClientAsync } from './client';
+import { tableHasColumn } from './genesis-columns';
 import { findWrongTypedStringParam } from './param-type-guard';
 import { cmosAgentOnboard, type CmosAgentOnboardResult } from './cmos-agent-onboard';
 import type { SelfCaptureGap } from './self-capture-guard';
 import { cmosMissionStatus, type StatusMissionItem } from './cmos-mission-status';
 import { checkBuildFreshness, type BuildFreshnessReport } from './build-freshness';
 import { resolveProjectRootEnhanced } from '../../intelligence/project-resolution';
-import { ProjectGraphRegistry } from '../../intelligence/project-graph-registry';
+import {
+  ProjectGraphRegistry,
+  unappliedDefaultNotice,
+} from '../../intelligence/project-graph-registry';
+import type { ResolvedBy } from '../../intelligence/sender-context';
 import { activeMissionsAcrossProjects } from '../../intelligence/cross-store-queries';
 import {
   frameForeignInline,
@@ -202,8 +208,25 @@ export interface CmosReviewResult {
 
   /** Up to 5 most recent decisions in compact {text, createdAt} form. `projectId`
    *  carries genesis provenance so the renderer can frame a pull-merged FOREIGN
-   *  decision (project_id != localProjectId) as untrusted (s83-m06). */
-  recentDecisions: Array<{ text: string; createdAt: string; projectId: string | null }>;
+   *  decision (project_id != localProjectId) as untrusted (s83-m06). s92-m04: `id` lets the
+   *  capped text be read in full with cmos_decisions(action="show"). */
+  recentDecisions: Array<{
+    id: number;
+    text: string;
+    createdAt: string;
+    projectId: string | null;
+  }>;
+
+  /**
+   * s92-m04: up to 3 most recent active learnings, capped like decisions. Learnings never reached
+   * the digest before. Trimmed first when the digest is over budget.
+   */
+  recentLearnings: Array<{
+    id: number;
+    text: string;
+    createdAt: string;
+    projectId: string | null;
+  }>;
 
   /** s83-m06: the local project_id, so the renderer frames foreign recent decisions
    *  and foreign portfolio mission names. */
@@ -242,6 +265,20 @@ export interface CmosReviewResult {
    *  Closes the s65 retro footgun where missions were marked Complete against
    *  stale runtime code because nobody had rebuilt dist/. */
   buildFreshness?: BuildFreshnessReport;
+
+  /**
+   * s92-m01 — a registry default that exists but is not applied (written before 3.2.0 and never
+   * re-confirmed). Present only then; resolution never uses such a default.
+   */
+  registryDefault?: string;
+
+  /**
+   * s92-m01 — the store this digest describes and how it was chosen. Carried INSIDE the digest
+   * (rather than stamped on afterwards by the dispatcher) so the 4KB budget and
+   * `digestSizeBytes` both account for them. Present when the dispatcher supplies `resolvedBy`.
+   */
+  projectRoot?: string | null;
+  resolvedBy?: ResolvedBy;
 
   /** Self-reported payload size in bytes (matches Buffer.byteLength of JSON). */
   digestSizeBytes: number;
@@ -302,6 +339,9 @@ const WORK_ITEM_NAME_CAP_CHARS = 80;
 /** Maximum recent-decisions retained in the digest. */
 const RECENT_DECISIONS_MAX = 5;
 
+/** s92-m04: maximum recent learnings retained in the digest. */
+const RECENT_LEARNINGS_MAX = 3;
+
 /** Payload budget in bytes (mission spec). */
 const DIGEST_BUDGET_BYTES = 4096;
 
@@ -353,7 +393,16 @@ export async function cmosReview(
   // s79-m06 — internal, NON-schema seam: an injectable ProjectGraphRegistry for
   // deterministic tests of the portfolio section. NOT exposed on the tool
   // inputSchema (it must never reach the MCP boundary).
-  internalOpts: { registry?: ProjectGraphRegistry } = {}
+  // s92-m01: `resolvedBy` is how the dispatcher chose this project, so the digest can carry it
+  // inside its own budget. Also internal and non-schema.
+  // s92-m04: the client's advertised roots and whether the caller named the project, so the
+  // nested onboard does not call an unambiguous project ambiguous (the whoami nudge).
+  internalOpts: {
+    registry?: ProjectGraphRegistry;
+    resolvedBy?: ResolvedBy;
+    advertisedRoots?: readonly string[];
+    callerProvidedProjectRoot?: boolean;
+  } = {}
 ): Promise<CmosToolResult<CmosReviewResult>> {
   // s89-m08 — ONE schema-driven boundary guard, placed at the router entry so no handler can be
   // reached with a wrong-typed published string parameter. It reads this tool's OWN shipped
@@ -377,8 +426,22 @@ export async function cmosReview(
 
   const projectRoot = params.projectRoot;
 
-  const [onboardResult, missionStatusResult, buildFreshness, portfolio] = await Promise.all([
-    cmosAgentOnboard(projectRoot ? { projectRoot } : {}),
+  const [
+    onboardResult,
+    missionStatusResult,
+    buildFreshness,
+    portfolio,
+    ,
+    registryDefault,
+    recentLearningsRead,
+  ] = await Promise.all([
+    cmosAgentOnboard({
+      ...(projectRoot ? { projectRoot } : {}),
+      ...(internalOpts.advertisedRoots ? { advertisedRoots: internalOpts.advertisedRoots } : {}),
+      ...(internalOpts.callerProvidedProjectRoot !== undefined
+        ? { callerProvidedProjectRoot: internalOpts.callerProvidedProjectRoot }
+        : {}),
+    }),
     cmosMissionStatus(
       projectRoot ? { projectRoot, includeBlocked: true } : { includeBlocked: true }
     ),
@@ -392,6 +455,10 @@ export async function cmosReview(
     // A read-classified opener must not register a store it merely names; the first write or an
     // explicit cmos_project(register) owns that transition. Never throws or blocks the opener.
     touchProjectGraphRegistry(projectRoot),
+    // s92-m01 — say when a registry default exists but is not applied. Never throws.
+    readUnappliedDefaultNotice(internalOpts.registry),
+    // s92-m04 — the learnings line. Never throws; a failed read leaves it empty.
+    readRecentLearnings(projectRoot),
   ]);
 
   if (!onboardResult.success || !onboardResult.data) {
@@ -415,7 +482,13 @@ export async function cmosReview(
   // 'build', so it keeps the signal.
   const gatedBuildFreshness = onboard.project.projectType === 'build' ? buildFreshness : null;
 
-  const digest = buildDigest(onboard, missionStatus, gatedBuildFreshness, portfolio);
+  const digest = buildDigest(onboard, missionStatus, gatedBuildFreshness, portfolio, {
+    registryDefault,
+    recentLearnings: recentLearningsRead,
+    resolution: internalOpts.resolvedBy
+      ? { projectRoot: projectRoot ?? null, resolvedBy: internalOpts.resolvedBy }
+      : null,
+  });
 
   // Filter to auth + sync warnings only. Drop staleness/orphan/context-size
   // warnings — those live on the long-form cmos_agent_onboard payload.
@@ -432,7 +505,17 @@ function buildDigest(
   onboard: CmosAgentOnboardResult,
   missionStatus: import('./cmos-mission-status').CmosMissionStatusResult | null,
   buildFreshness: BuildFreshnessReport | null,
-  portfolio: PortfolioSection | null
+  portfolio: PortfolioSection | null,
+  extras: {
+    registryDefault: string | null;
+    recentLearnings?: ReadonlyArray<{
+      id: number;
+      text: string;
+      createdAt: string;
+      projectId: string | null;
+    }>;
+    resolution: { projectRoot: string | null; resolvedBy: ResolvedBy } | null;
+  } = { registryDefault: null, resolution: null }
 ): CmosReviewResult {
   const sprintFocus = onboard.currentSprint?.focus
     ? truncate(onboard.currentSprint.focus, SPRINT_FOCUS_CAP_CHARS)
@@ -470,10 +553,16 @@ function buildDigest(
   const workQueue = missionStatus
     ? bucketFromMissionStatus(missionStatus)
     : bucketFromOnboardFallback(onboard);
+  // s92-m06: a general-tier project has no missions or sprints (cmos-seed/tiers/general.md), so
+  // an empty queue prescribes nothing to it; the text answer also omits the queue lines.
+  if (project.tier === 'general' && workQueueIsEmpty(workQueue)) {
+    workQueue.nextAction = GENERAL_TIER_IDLE;
+  }
 
   // Recent decisions trimmed to compact form. cmos_agent_onboard already
   // ordered by created_at DESC and LIMIT 10 — we slice to 5 and drop domain.
   const recentDecisions = onboard.recentDecisions.slice(0, RECENT_DECISIONS_MAX).map((d) => ({
+    id: d.id,
     text: truncate(d.decision, DECISION_TEXT_CAP_CHARS),
     createdAt: d.createdAt,
     projectId: d.projectId,
@@ -486,7 +575,21 @@ function buildDigest(
 
   // Promote top-3 suggestedActions to a flat top-level next_actions array.
   // suggestedActions is already priority-sorted by the onboard handler.
-  const promotedActions = onboard.suggestedActions.slice(0, NEXT_ACTIONS_TOP_N).map((a) => ({
+  // s92-m04: never an onboard-only action (it points at a field this digest does not have); a
+  // fresh project instead gets the action that does exist here: run the onboard flow.
+  const reviewActions = [
+    ...(onboard.freshProject
+      ? [
+          {
+            action: 'Fresh project: cmos_agent_onboard walks the first-session setup',
+            command: 'cmos_agent_onboard()',
+            priority: 0,
+          },
+        ]
+      : []),
+    ...onboard.suggestedActions.filter((a) => a.scope !== 'onboard'),
+  ];
+  const promotedActions = reviewActions.slice(0, NEXT_ACTIONS_TOP_N).map((a) => ({
     action: a.action,
     command: a.command,
     priority: a.priority,
@@ -526,6 +629,10 @@ function buildDigest(
     sprint,
     workQueue,
     recentDecisions,
+    recentLearnings: (extras.recentLearnings ?? []).slice(0, RECENT_LEARNINGS_MAX).map((l) => ({
+      ...l,
+      text: truncate(l.text, DECISION_TEXT_CAP_CHARS),
+    })),
     localProjectId: onboard.localProjectId ?? null,
     portfolio,
     freshness,
@@ -542,6 +649,14 @@ function buildDigest(
   // rides in via onboard.suggestedActions → next_actions when it ranks in the top-3.
   if (onboard.selfCapture?.fires) {
     draft.selfCapture = onboard.selfCapture;
+  }
+
+  if (extras.registryDefault) {
+    draft.registryDefault = extras.registryDefault;
+  }
+  if (extras.resolution) {
+    draft.projectRoot = extras.resolution.projectRoot;
+    draft.resolvedBy = extras.resolution.resolvedBy;
   }
 
   const trimmed = trimToBudget(draft);
@@ -583,6 +698,61 @@ async function resolveReviewFreshness(
   }
   try {
     return await checkBuildFreshness(root);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * s92-m04 — the newest active learnings for the digest's learnings line. Swallows every error and
+ * answers [] (an empty line is honest; a failed opener is not).
+ */
+async function readRecentLearnings(
+  projectRoot: string | undefined
+): Promise<Array<{ id: number; text: string; createdAt: string; projectId: string | null }>> {
+  try {
+    const read = await withClientAsync(
+      async (client) => {
+        const projExpr = tableHasColumn(client, 'learnings', 'project_id') ? 'project_id' : 'NULL';
+        const rows = client.getMany<{
+          id: number;
+          content: string;
+          created_at: string;
+          project_id: string | null;
+        }>(
+          `SELECT id, content, created_at, ${projExpr} AS project_id FROM learnings
+            WHERE status = 'active' ORDER BY created_at DESC, id DESC LIMIT ?`,
+          [RECENT_LEARNINGS_MAX]
+        );
+        return createSuccess(
+          rows.success && rows.data
+            ? rows.data.map((r) => ({
+                id: r.id,
+                text: r.content,
+                createdAt: r.created_at,
+                projectId: r.project_id,
+              }))
+            : []
+        );
+      },
+      projectRoot ? { projectRoot } : {}
+    );
+    return read.success && read.data ? read.data : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * s92-m01 — the "registry default: X — not applied" line, or null. Reads the injected registry in
+ * tests, else the per-user graph. Swallows every error: a registry hiccup never breaks the opener.
+ */
+async function readUnappliedDefaultNotice(
+  registry: ProjectGraphRegistry | undefined
+): Promise<string | null> {
+  try {
+    const graph = registry ?? (await ProjectGraphRegistry.create());
+    return unappliedDefaultNotice(graph.getDefaultStatus());
   } catch {
     return null;
   }
@@ -932,6 +1102,12 @@ function trimToBudget(digest: CmosReviewResult): CmosReviewResult {
   let current = digest;
   let size = measure(current);
 
+  // Stage 0 (s92-m04): drop recentLearnings one at a time, before any decision.
+  while (size > DIGEST_BUDGET_BYTES && current.recentLearnings.length > 0) {
+    current = { ...current, recentLearnings: current.recentLearnings.slice(0, -1) };
+    size = measure(current);
+  }
+
   // Stage 1: drop recentDecisions one at a time (largest existing field).
   while (size > DIGEST_BUDGET_BYTES && current.recentDecisions.length > 0) {
     current = { ...current, recentDecisions: current.recentDecisions.slice(0, -1) };
@@ -1031,6 +1207,15 @@ function trimToBudget(digest: CmosReviewResult): CmosReviewResult {
   }
 
   return current;
+}
+
+/** What review says of a general-tier project with no missions: nothing to prescribe. */
+export const GENERAL_TIER_IDLE = 'Nothing in progress.';
+
+function workQueueIsEmpty(queue: CmosReviewResult['workQueue']): boolean {
+  return (
+    queue.inProgress.count + queue.current.count + queue.queued.count + queue.blocked.count === 0
+  );
 }
 
 function bucketFromMissionStatus(
@@ -1170,9 +1355,13 @@ export function formatReviewForLLM(result: CmosToolResult<CmosReviewResult>): st
       lines.push(`  ${frameInlineIfForeign(d.sprint.focus, d.sprint.projectId, local)}`);
   }
   lines.push('');
-  lines.push(
-    `Work queue — InProgress:${d.workQueue.inProgress.count} Current:${d.workQueue.current.count} Queued:${d.workQueue.queued.count} Blocked:${d.workQueue.blocked.count}`
-  );
+  // s92-m06: a general-tier project with no missions sees no queue: that tier has none.
+  const showQueue = !(d.project.tier === 'general' && workQueueIsEmpty(d.workQueue));
+  if (showQueue) {
+    lines.push(
+      `Work queue — InProgress:${d.workQueue.inProgress.count} Current:${d.workQueue.current.count} Queued:${d.workQueue.queued.count} Blocked:${d.workQueue.blocked.count}`
+    );
+  }
   // s84-m03 (FORK-5): the mission-status nextAction embeds `<id>: <FULL name>` of the
   // referenced work-queue mission (determineNextAction; the name is the UNTRUNCATED source,
   // not the byte-capped WorkItem.name). When that mission is FOREIGN, render id-only — cut
@@ -1192,7 +1381,7 @@ export function formatReviewForLLM(result: CmosToolResult<CmosReviewResult>): st
     // which carries no name) simply don't match → left unchanged.
     if (idx !== -1) nextAction = nextAction.slice(0, idx) + refItem.id;
   }
-  lines.push(`Next: ${nextAction}`);
+  if (showQueue) lines.push(`Next: ${nextAction}`);
 
   if (d.next_actions.length > 0) {
     lines.push('');
@@ -1213,9 +1402,36 @@ export function formatReviewForLLM(result: CmosToolResult<CmosReviewResult>): st
       const isForeign =
         dec.projectId != null && (localProjectId == null || dec.projectId !== localProjectId);
       lines.push(
-        `  • ${isForeign ? frameForeignInline(dec.text, `proj:${dec.projectId}`) : dec.text}`
+        `  • #${dec.id} ${
+          isForeign ? frameForeignInline(dec.text, `proj:${dec.projectId}`) : dec.text
+        }`
       );
     }
+  }
+
+  if (d.recentLearnings.length > 0) {
+    lines.push('');
+    lines.push('Recent learnings:');
+    // Same framing rule as decisions: a pull-merged FOREIGN learning is untrusted.
+    const localLearningProject = d.localProjectId ?? null;
+    for (const learning of d.recentLearnings) {
+      const isForeign =
+        learning.projectId != null &&
+        (localLearningProject == null || learning.projectId !== localLearningProject);
+      lines.push(
+        `  • #${learning.id} ${
+          isForeign
+            ? frameForeignInline(learning.text, `proj:${learning.projectId}`)
+            : learning.text
+        }`
+      );
+    }
+  }
+
+  if (d.recentDecisions.length > 0 || d.recentLearnings.length > 0) {
+    lines.push(
+      'Read one in full: cmos_decisions(action="show", decisionId=N) or cmos_learnings(action="show", learningId=N).'
+    );
   }
 
   if (d.portfolio) {
@@ -1228,7 +1444,7 @@ export function formatReviewForLLM(result: CmosToolResult<CmosReviewResult>): st
     if (p.unreadable > 0) parts.push(`${p.unreadable} unreadable`);
     lines.push(
       `🌐 Portfolio — ${p.activeMissions.count} active mission(s) across ${p.projects} store(s): ` +
-        `${parts.join(', ')} · fan-in p95 ${p.fanInP95Ms}ms`
+        `${parts.join(', ')} · read in ${p.fanInP95Ms}ms (p95)`
     );
     // s84-m03 (#485): a portfolio mission from another project is FOREIGN — frame its
     // name inline (the [proj:X] tag is metadata, not a trust boundary). The local
@@ -1243,6 +1459,11 @@ export function formatReviewForLLM(result: CmosToolResult<CmosReviewResult>): st
         lines.push(`    · ${s.name} — ${s.reason}${s.hint ? ` (${s.hint})` : ''}`);
       }
     }
+  }
+
+  if (d.registryDefault) {
+    lines.push('');
+    lines.push(`⚙ ${d.registryDefault}`);
   }
 
   // s80-m07 — self-capture advisory (present only when it fires). Rendered here, not

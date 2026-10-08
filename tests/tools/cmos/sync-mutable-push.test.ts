@@ -42,7 +42,8 @@ let callOrder: string[] = [];
 
 const PULL_PROVENANCE_WARNING =
   '1 genesis event(s) lacked the provenance/data needed to reconstruct a replica row ' +
-  'faithfully (a pre-s71-m01 origin, or a malformed payload) and were skipped — not ' +
+  'faithfully (an event written before events carried their full row, or a malformed payload) ' +
+  'and were skipped — not ' +
   're-stamped, to preserve cross-machine event identity.';
 
 function arrangeSuccessfulPullWithWarning(): void {

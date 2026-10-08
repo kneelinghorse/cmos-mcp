@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-// ABOUTME: s91-m06 — cmos_review's next_actions names the next-steps the next close will drop, and
-// ABOUTME: flags a mission In Progress with no active session (feedback #40), inside the 4 KB budget.
+// ABOUTME: s91-m06 — cmos_review's next_actions names the next-steps the next close will drop,
+// ABOUTME: inside the 4 KB budget. s92-m03 retired the no-session nudge (feedback #40).
 
 import { afterEach, describe, expect, it } from '@jest/globals';
 import Database from 'better-sqlite3';
@@ -67,10 +67,12 @@ describe('s91-m06 review digest', () => {
     expect(formatReviewForLLM(result)).toContain('#11');
   });
 
-  it('flags a mission In Progress with no active session, within budget with the lease line', async () => {
+  it('no longer flags a mission In Progress with no active session (s92-m03), within budget', async () => {
+    // Feedback #40's nudge rested on "captures made now carry no session". Since s92-m03 a capture
+    // with no session open lands in the calling process's implicit session, so it is gone.
     const project = await seeded(true);
     const onboard = await cmosAgentOnboard({ projectRoot: project.projectRoot });
-    expect(onboard.data!.suggestedActions.map((a) => a.action)).toContain(
+    expect(onboard.data!.suggestedActions.map((a) => a.action)).not.toContain(
       'Mission m-now is In Progress with no active session'
     );
 

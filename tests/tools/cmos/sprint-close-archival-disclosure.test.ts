@@ -242,10 +242,16 @@ function snapshotPath(snapshotId: string): string {
   return path.join(tempDir, 'cmos', 'db', 'snapshots', `${snapshotId}.sqlite`);
 }
 
+/**
+ * s92-m05 (operator Q1, decision #1160): since 3.2.0 a close archives only when called with
+ * `archive: true`. This file is the archival path's gate, so every close here opts in; the
+ * default close is fenced in `sprint-close-keeps-record.test.ts`.
+ */
 async function closeSprint(): ReturnType<typeof cmosSprintComplete> {
   return cmosSprintComplete({
     sprintId: SPRINT,
     summary: 's87-m02 archival disclosure fixture',
+    archive: true,
     projectRoot: tempDir,
   });
 }

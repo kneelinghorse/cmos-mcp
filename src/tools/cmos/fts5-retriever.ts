@@ -2,7 +2,12 @@
 // recency applied after fusion) is the Sprint 66 m04 backend covering decisions, learnings, and missions
 // per cmos/planning/adr/s66-vector-retrieval.md. (s80-m03: the dead sync FTS5Retriever was removed.)
 
-import { getEmbedder, packEmbedding, type Embedder } from '../../intelligence/embedding-pipeline';
+import {
+  getEmbedder,
+  isEmbedderUnavailable,
+  packEmbedding,
+  type Embedder,
+} from '../../intelligence/embedding-pipeline';
 import type { CmosDatabaseClient } from './client';
 import { ensureDecisionsFts5, ensureVectorStorage } from './schema-migrations';
 import { extractKeywords } from './supersession-detection';
@@ -47,6 +52,13 @@ export interface RankedResult {
   /** Item category (decisions only, null otherwise) */
   category: string | null;
 
+  /**
+   * s92-m08: the row's status (decision and learning: active, archived, superseded, stale;
+   * mission: its lifecycle status), so a caller can tell what kind of row a preview stands for.
+   * Null only when the store does not record one.
+   */
+  status: string | null;
+
   /** Evidence references (decisions only, null otherwise) */
   evidence: string | null;
 
@@ -78,13 +90,17 @@ export interface RetrievalOptions {
   /** Last N sprints to include (0 = all, default: 0) */
   sprintRange?: number;
 
-  /** Weight given to recency decay: 0 = pure BM25, 1 = full decay (default: 0.5) */
+  /** Weight given to recency decay: 0 = none, 1 = full decay (default: DEFAULT_RECENCY_WEIGHT, 0.2) */
   recencyWeight?: number;
 
   /** Minimum combined score to include in results (default: 0) */
   minScore?: number;
 
-  /** Status filter for decisions (default: ['active']) */
+  /**
+   * Statuses to include for decisions and learnings. Absent: every status except `superseded`
+   * (s92-m07, R1). `[]` disables the filter. Applied inside the candidate queries, so a page is
+   * never short because the pool was cut before the filter ran.
+   */
   statusFilter?: string[];
 
   /** RRF k parameter for the hybrid backend (default: 60 per s66 ADR Decision 3). */
@@ -155,6 +171,52 @@ const CANDIDATE_POOL_MULTIPLIER = 5;
 export const DEFAULT_RRF_K = 30;
 
 /**
+ * s92-m07 (retrieval R2): the keyword arm reads every distinct query keyword, up to this many. It
+ * read only the first 10, so for a long query (a citing decision, a mission objective) BM25 saw the
+ * first 15-25 words. Measured on 2,132 natural citation labels: BM25 alone 0.423 -> 0.632 R@10,
+ * fused +0.079 (cmos/research/2026-10-strategy/retrieval-natural-labels.md §4.2).
+ */
+export const FTS_MAX_KEYWORDS = 64;
+
+/**
+ * s92-m07: the vector term's weight in the fusion. On the same labels, once the keyword arm reads
+ * every keyword, keyword-only beats equal-weight hybrid (+0.045 R@10), weight 0.25 is neutral
+ * (+0.004) and 1.0 hurts. Embeddings are an optional peer dependency; when they are installed,
+ * their term counts a quarter.
+ */
+export const VECTOR_RRF_WEIGHT = 0.25;
+
+/** sqlite-vec's largest accepted `k` for a KNN query. */
+const VECTOR_MAX_K = 4096;
+
+/** s92-m07 (retrieval R1): the one status a recall surface drops when the caller names none. */
+export const DEFAULT_EXCLUDED_STATUSES: readonly string[] = ['superseded'];
+
+/**
+ * The status predicate for decisions and learnings, as SQL over `column`, or null for no filter.
+ *
+ * `statusFilter` absent: every status except superseded (R1). A row archived at a sprint close is
+ * still the record of what was decided; 46% of the rows later records cite were no longer active
+ * when they were cited. An explicit list keeps its include-list meaning, and [] means no filter.
+ */
+function statusPredicate(
+  statusFilter: readonly string[] | undefined,
+  column: string
+): { sql: string; params: string[] } | null {
+  if (statusFilter === undefined) {
+    return {
+      sql: `(${column} IS NULL OR ${column} NOT IN (${DEFAULT_EXCLUDED_STATUSES.map(() => '?').join(', ')}))`,
+      params: [...DEFAULT_EXCLUDED_STATUSES],
+    };
+  }
+  if (statusFilter.length === 0) return null;
+  return {
+    sql: `${column} IN (${statusFilter.map(() => '?').join(', ')})`,
+    params: [...statusFilter],
+  };
+}
+
+/**
  * s82-m04 graph-neighbor arm parameters (MISSION-ONLY — see searchHybridForType).
  *
  * `GRAPH_WEIGHT` is < 1 to dampen the graph term relative to the direct BM25/vector arms. Because
@@ -206,6 +268,7 @@ interface SourceRow {
   text: string;
   sprintId: string | null;
   category: string | null;
+  status: string | null;
   evidence: string | null;
   createdAt: string | null;
   /** s83-m06: genesis project_id (null on ancient stores lacking the column). */
@@ -220,8 +283,10 @@ interface SourceRow {
  *   Pulls `limit × CANDIDATE_POOL_MULTIPLIER` neighbours, scores `cosine × recency`,
  *   returns top-`limit`.
  * - `hybrid` — Reciprocal Rank Fusion of BM25 (FTS5 `<type>_fts`) and vector cosine.
- *   RRF score: `Σ 1 / (k + rank_i)` across both arms (k=60). Recency is applied
- *   multiplicatively to the fused score, keeping recency orthogonal to ranking.
+ *   RRF score: `1 / (k + bm25Rank) + VECTOR_RRF_WEIGHT / (k + vectorRank)` (k = DEFAULT_RRF_K, 30;
+ *   the vector weight is 0.25 since s92-m07). Recency is applied multiplicatively to the fused
+ *   score, keeping recency orthogonal to ranking. Without an embedder (the optional package is not
+ *   installed) only the BM25 term remains.
  *
  * Covers all three retrievable types (decision, learning, mission). Async because
  * query embedding via `@xenova/transformers` is async (~10–50 ms after warmup;
@@ -259,7 +324,7 @@ export class HybridRetriever implements IAsyncRetriever {
       types = ['decision'],
       recencyWeight = DEFAULT_RECENCY_WEIGHT,
       minScore = 0,
-      statusFilter = ['active'],
+      statusFilter,
       rrfK = DEFAULT_RRF_K,
       expandGraph = false,
       graphWeight = DEFAULT_GRAPH_WEIGHT,
@@ -318,6 +383,7 @@ export class HybridRetriever implements IAsyncRetriever {
       ageDays,
       sprintId: row.sprintId,
       projectId: row.projectId,
+      status: row.status,
       category: row.category,
       evidence: row.evidence,
       createdAt: row.createdAt,
@@ -331,6 +397,9 @@ export class HybridRetriever implements IAsyncRetriever {
   private async embedQuery(query: string): Promise<Float32Array | null> {
     try {
       const embedder = this.hybridOptions.embedder ?? (await getEmbedder());
+      // s92-m07: with no embedder in this process (the optional package is absent, or its load
+      // failed and was reported once), search is keyword-only, quietly.
+      if (!this.hybridOptions.embedder && isEmbedderUnavailable()) return null;
       return await embedder(query);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'unknown error';
@@ -346,10 +415,15 @@ export class HybridRetriever implements IAsyncRetriever {
     queryVec: Float32Array | null,
     candidateLimit: number,
     recencyWeight: number,
-    statusFilter: string[]
+    statusFilter: string[] | undefined
   ): RankedResult[] {
     if (queryVec === null) return [];
-    const vecCandidates = this.vectorCandidatesForType(type, queryVec, candidateLimit);
+    const vecCandidates = this.vectorCandidatesForType(
+      type,
+      queryVec,
+      candidateLimit,
+      statusFilter
+    );
     if (vecCandidates.length === 0) return [];
 
     const ids = vecCandidates.map((c) => c.id);
@@ -374,6 +448,7 @@ export class HybridRetriever implements IAsyncRetriever {
         ageDays,
         sprintId: row.sprintId,
         projectId: row.projectId,
+        status: row.status,
         category: row.category,
         evidence: row.evidence,
         createdAt: row.createdAt,
@@ -392,14 +467,17 @@ export class HybridRetriever implements IAsyncRetriever {
     queryVec: Float32Array | null,
     candidateLimit: number,
     recencyWeight: number,
-    statusFilter: string[],
+    statusFilter: string[] | undefined,
     rrfK: number,
     expandGraph: boolean,
     graphWeight: number
   ): RankedResult[] {
-    const bm25Candidates = this.fts5CandidatesForType(type, query, candidateLimit);
+    // s92-m07 (R1): both arms apply the status filter while filling their pools, not after.
+    const bm25Candidates = this.fts5CandidatesForType(type, query, candidateLimit, statusFilter);
     const vecCandidates =
-      queryVec !== null ? this.vectorCandidatesForType(type, queryVec, candidateLimit) : [];
+      queryVec !== null
+        ? this.vectorCandidatesForType(type, queryVec, candidateLimit, statusFilter)
+        : [];
 
     // Build per-arm rank maps keyed by stringified id (the canonical cross-type identifier).
     // Ranks are 1-indexed for RRF: `Σ 1 / (k + rank_i)`.
@@ -461,7 +539,8 @@ export class HybridRetriever implements IAsyncRetriever {
           const bm = bm25Rank.get(key);
           const vk = vecRank.get(key);
           const prelim =
-            (bm !== undefined ? 1 / (rrfK + bm) : 0) + (vk !== undefined ? 1 / (rrfK + vk) : 0);
+            (bm !== undefined ? 1 / (rrfK + bm) : 0) +
+            (vk !== undefined ? VECTOR_RRF_WEIGHT / (rrfK + vk) : 0);
           return { id, key, prelim };
         })
         .sort((a, b) => b.prelim - a.prelim)
@@ -496,7 +575,8 @@ export class HybridRetriever implements IAsyncRetriever {
       const gr = graphRank.get(key);
       const rrf =
         (bm !== undefined ? 1 / (rrfK + bm) : 0) +
-        (vk !== undefined ? 1 / (rrfK + vk) : 0) +
+        // s92-m07: the vector term is weighted (VECTOR_RRF_WEIGHT); see the constant's note.
+        (vk !== undefined ? VECTOR_RRF_WEIGHT / (rrfK + vk) : 0) +
         // Third, smaller-weighted graph-recall term (mission-only). graphWeight < 1 dampens the
         // graph contribution; because the term is ADDED to a candidate's own direct term it can
         // still re-rank a borderline mission neighbor into the top-3 (the intended recall lift) or,
@@ -524,6 +604,7 @@ export class HybridRetriever implements IAsyncRetriever {
         ageDays,
         sprintId: row.sprintId,
         projectId: row.projectId,
+        status: row.status,
         category: row.category,
         evidence: row.evidence,
         createdAt: row.createdAt,
@@ -597,7 +678,8 @@ export class HybridRetriever implements IAsyncRetriever {
   private fts5CandidatesForType(
     type: RetrievableType,
     query: string,
-    candidateLimit: number
+    candidateLimit: number,
+    statusFilter: string[] | undefined
   ): Array<{ id: number | string; rank: number }> {
     const keywords = extractKeywords(query);
     if (keywords.length === 0) return [];
@@ -610,19 +692,33 @@ export class HybridRetriever implements IAsyncRetriever {
     if (!tableCheck.success || !tableCheck.data) return [];
 
     const ftsQuery = keywords
-      .slice(0, 10)
+      .slice(0, FTS_MAX_KEYWORDS)
       .map((k) => `"${k.replace(/"/g, '""')}"`)
       .join(' OR ');
 
+    // s92-m07 (R1): decisions and learnings join their own table so the status predicate runs
+    // before LIMIT. FTS5 ranks over its whole index either way, so the order is unchanged.
+    const base = type === 'mission' ? null : baseTableForType(type);
+    const predicate = base ? statusPredicate(statusFilter, 'base.status') : null;
     let raw: Array<{ rowid: number; rank: number }>;
     try {
-      const result = this.client.getMany<{ rowid: number; rank: number }>(
-        `SELECT rowid, rank FROM ${ftsTable}
-         WHERE ${ftsTable} MATCH ?
-         ORDER BY rank
-         LIMIT ?`,
-        [ftsQuery, candidateLimit]
-      );
+      const result =
+        base && predicate
+          ? this.client.getMany<{ rowid: number; rank: number }>(
+              `SELECT ${ftsTable}.rowid AS rowid, ${ftsTable}.rank AS rank
+                 FROM ${ftsTable} JOIN ${base} base ON base.id = ${ftsTable}.rowid
+                WHERE ${ftsTable} MATCH ? AND ${predicate.sql}
+                ORDER BY ${ftsTable}.rank
+                LIMIT ?`,
+              [ftsQuery, ...predicate.params, candidateLimit]
+            )
+          : this.client.getMany<{ rowid: number; rank: number }>(
+              `SELECT rowid, rank FROM ${ftsTable}
+               WHERE ${ftsTable} MATCH ?
+               ORDER BY rank
+               LIMIT ?`,
+              [ftsQuery, candidateLimit]
+            );
       if (!result.success || !result.data) return [];
       raw = result.data;
     } catch {
@@ -657,23 +753,45 @@ export class HybridRetriever implements IAsyncRetriever {
   private vectorCandidatesForType(
     type: RetrievableType,
     queryVec: Float32Array,
-    candidateLimit: number
+    candidateLimit: number,
+    statusFilter: string[] | undefined
   ): Array<{ id: number | string; distance: number }> {
     const vecTable = vecTableForType(type);
     const idColumn = vecIdColumnForType(type);
+    const base = type === 'mission' ? null : baseTableForType(type);
+    const predicate = base ? statusPredicate(statusFilter, 'status') : null;
 
     const blob = packEmbedding(queryVec);
-    try {
-      const result = this.client.getMany<{ id: number | string; distance: number }>(
-        `SELECT ${idColumn} AS id, distance FROM ${vecTable}
-         WHERE embedding MATCH ? AND k = ?
-         ORDER BY distance`,
-        [blob, candidateLimit]
+    // s92-m07 (R1): vec0's KNN cannot take the status predicate, so the arm widens k until the
+    // eligible rows fill the pool or the index is exhausted, instead of cutting the pool first.
+    let k = Math.min(candidateLimit, VECTOR_MAX_K);
+    for (;;) {
+      let nearest: Array<{ id: number | string; distance: number }>;
+      try {
+        const result = this.client.getMany<{ id: number | string; distance: number }>(
+          `SELECT ${idColumn} AS id, distance FROM ${vecTable}
+           WHERE embedding MATCH ? AND k = ?
+           ORDER BY distance`,
+          [blob, k]
+        );
+        if (!result.success || !result.data) return [];
+        nearest = result.data.map((r) => ({ id: r.id, distance: r.distance }));
+      } catch {
+        return [];
+      }
+      if (!base || !predicate || nearest.length === 0) return nearest.slice(0, candidateLimit);
+
+      const ids = nearest.map((c) => c.id);
+      const allowed = this.client.getMany<{ id: number }>(
+        `SELECT id FROM ${base} WHERE id IN (${ids.map(() => '?').join(', ')}) AND ${predicate.sql}`,
+        [...ids, ...predicate.params]
       );
-      if (!result.success || !result.data) return [];
-      return result.data.map((r) => ({ id: r.id, distance: r.distance }));
-    } catch {
-      return [];
+      const keep = new Set((allowed.data ?? []).map((r) => String(r.id)));
+      const eligible = nearest.filter((c) => keep.has(String(c.id)));
+      if (eligible.length >= candidateLimit || nearest.length < k || k >= VECTOR_MAX_K) {
+        return eligible.slice(0, candidateLimit);
+      }
+      k = Math.min(k * 4, VECTOR_MAX_K);
     }
   }
 
@@ -700,7 +818,7 @@ export class HybridRetriever implements IAsyncRetriever {
   private fetchSourceRows(
     type: RetrievableType,
     ids: Array<number | string>,
-    statusFilter: string[]
+    statusFilter: string[] | undefined
   ): SourceRow[] {
     if (ids.length === 0) return [];
     if (type === 'decision') return this.fetchDecisionRows(ids as number[], statusFilter);
@@ -708,12 +826,10 @@ export class HybridRetriever implements IAsyncRetriever {
     return this.fetchMissionRows(ids as string[]);
   }
 
-  private fetchDecisionRows(ids: number[], statusFilter: string[]): SourceRow[] {
+  private fetchDecisionRows(ids: number[], statusFilter: string[] | undefined): SourceRow[] {
     const idPlaceholders = ids.map(() => '?').join(', ');
-    const applyStatus = statusFilter.length > 0;
-    const statusClause = applyStatus
-      ? ` AND status IN (${statusFilter.map(() => '?').join(', ')})`
-      : '';
+    const predicate = statusPredicate(statusFilter, 'status');
+    const statusClause = predicate ? ` AND ${predicate.sql}` : '';
     const result = this.client.getMany<{
       id: number;
       decision_text: string;
@@ -722,12 +838,13 @@ export class HybridRetriever implements IAsyncRetriever {
       evidence: string | null;
       created_at: string | null;
       project_id: string | null;
+      status: string | null;
     }>(
-      `SELECT id, decision_text, category, sprint_id, evidence, created_at,
+      `SELECT id, decision_text, category, sprint_id, evidence, created_at, status,
               ${this.projectIdExpr('strategic_decisions')} AS project_id
        FROM strategic_decisions
        WHERE id IN (${idPlaceholders})${statusClause}`,
-      applyStatus ? [...ids, ...statusFilter] : ids
+      predicate ? [...ids, ...predicate.params] : ids
     );
     if (!result.success || !result.data) return [];
     return result.data.map((r) => ({
@@ -735,18 +852,17 @@ export class HybridRetriever implements IAsyncRetriever {
       text: r.decision_text,
       sprintId: r.sprint_id,
       category: r.category,
+      status: r.status,
       evidence: r.evidence,
       createdAt: r.created_at,
       projectId: r.project_id,
     }));
   }
 
-  private fetchLearningRows(ids: number[], statusFilter: string[]): SourceRow[] {
+  private fetchLearningRows(ids: number[], statusFilter: string[] | undefined): SourceRow[] {
     const idPlaceholders = ids.map(() => '?').join(', ');
-    const applyStatus = statusFilter.length > 0;
-    const statusClause = applyStatus
-      ? ` AND status IN (${statusFilter.map(() => '?').join(', ')})`
-      : '';
+    const predicate = statusPredicate(statusFilter, 'status');
+    const statusClause = predicate ? ` AND ${predicate.sql}` : '';
     const result = this.client.getMany<{
       id: number;
       content: string;
@@ -754,12 +870,13 @@ export class HybridRetriever implements IAsyncRetriever {
       sprint_id: string | null;
       created_at: string | null;
       project_id: string | null;
+      status: string | null;
     }>(
-      `SELECT id, content, category, sprint_id, created_at,
+      `SELECT id, content, category, sprint_id, created_at, status,
               ${this.projectIdExpr('learnings')} AS project_id
        FROM learnings
        WHERE id IN (${idPlaceholders})${statusClause}`,
-      applyStatus ? [...ids, ...statusFilter] : ids
+      predicate ? [...ids, ...predicate.params] : ids
     );
     if (!result.success || !result.data) return [];
     return result.data.map((r) => ({
@@ -767,6 +884,7 @@ export class HybridRetriever implements IAsyncRetriever {
       text: r.content,
       sprintId: r.sprint_id,
       category: r.category,
+      status: r.status,
       evidence: null,
       createdAt: r.created_at,
       projectId: r.project_id,
@@ -786,8 +904,9 @@ export class HybridRetriever implements IAsyncRetriever {
       sprint_id: string | null;
       created_at: string | null;
       project_id: string | null;
+      status: string | null;
     }>(
-      `SELECT id, name, objective, notes, sprint_id, created_at,
+      `SELECT id, name, objective, notes, sprint_id, created_at, status,
               ${this.projectIdExpr('missions')} AS project_id
        FROM missions
        WHERE id IN (${idPlaceholders})`,
@@ -799,6 +918,7 @@ export class HybridRetriever implements IAsyncRetriever {
       text: formatMissionText(r.name, r.objective, r.notes),
       sprintId: r.sprint_id,
       category: null,
+      status: r.status,
       evidence: null,
       createdAt: r.created_at,
       projectId: r.project_id,
@@ -807,6 +927,11 @@ export class HybridRetriever implements IAsyncRetriever {
 }
 
 // ─── Type metadata helpers ────────────────────────────────────────────────────
+
+/** The source table of a status-bearing type. */
+function baseTableForType(type: 'decision' | 'learning'): string {
+  return type === 'decision' ? 'strategic_decisions' : 'learnings';
+}
 
 function ftsTableForType(type: RetrievableType): string {
   switch (type) {

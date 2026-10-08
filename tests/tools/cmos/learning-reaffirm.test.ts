@@ -1,18 +1,16 @@
-// ABOUTME: Sprint 61 m01 — auto-reaffirm learnings on cite. Verifies explicit
-// citesLearningIds path, implicit FTS5/keyword-overlap path, sanitizer wiring,
-// and the regression guard against over-bumping below the keyword floor.
+// ABOUTME: Sprint 61 m01 — reaffirm learnings on cite: the explicit citesLearningIds path and its
+// ABOUTME: sanitizer wiring. s92-m04 retired the implicit keyword-overlap path; these tests pin that.
 
 import Database from 'better-sqlite3';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { CmosDatabaseClient } from '../../../src/tools/cmos/client';
+import * as learningReaffirm from '../../../src/tools/cmos/learning-reaffirm';
 import {
   applyLearningReaffirm,
-  detectImplicitLearningCites,
   reaffirmLearningsByIds,
   sanitizeLearningIds,
-  IMPLICIT_REAFFIRM_KEYWORD_FLOOR,
 } from '../../../src/tools/cmos/learning-reaffirm';
 import { ensureReviewTimestamps } from '../../../src/tools/cmos/schema-migrations';
 import { cmosSessionCapture } from '../../../src/tools/cmos/cmos-session-capture';
@@ -167,10 +165,21 @@ function readLastReviewedAt(dbPath: string, learningId: number): string | null {
   }
 }
 
-describe('IMPLICIT_REAFFIRM_KEYWORD_FLOOR', () => {
-  it('is exported as a stable named constant set to 15', () => {
-    // Floor calibrated against supersession-detection MIN_KEYWORDS_FOR_SEARCH=2 noise floor.
-    expect(IMPLICIT_REAFFIRM_KEYWORD_FLOOR).toBe(15);
+/**
+ * Used to clear the retired 15-keyword overlap floor against itself, so before s92-m04 a capture
+ * carrying this text bumped a learning carrying it. Every test below that uses it asserts that
+ * nothing is bumped now.
+ */
+const HIGH_OVERLAP_LEARNING =
+  'cursor-based pagination must always advance forwards with monotonic offset preventing duplicate row emission and skipped batch boundaries during streaming response handling for downstream consumers';
+
+describe('s92-m04 — the implicit reaffirm is retired', () => {
+  it('the module exports no implicit path', () => {
+    expect(Object.keys(learningReaffirm).sort()).toEqual([
+      'applyLearningReaffirm',
+      'reaffirmLearningsByIds',
+      'sanitizeLearningIds',
+    ]);
   });
 });
 
@@ -244,117 +253,33 @@ describe('reaffirmLearningsByIds', () => {
   });
 });
 
-describe('detectImplicitLearningCites', () => {
-  // The floor is 15 keywords. Stop-word filtering happens in extractKeywords —
-  // these strings are deliberately verbose to exceed the floor cleanly.
-  const HIGH_OVERLAP_LEARNING =
-    'cursor-based pagination must always advance forwards with monotonic offset preventing duplicate row emission and skipped batch boundaries during streaming response handling for downstream consumers';
-
-  it('returns matching learning IDs when overlap meets the floor', async () => {
-    const { tempDir, dbPath } = makeTempDb();
-    const client = await openClient(dbPath);
-    try {
-      const matchId = seedLearning(dbPath, HIGH_OVERLAP_LEARNING);
-      seedLearning(dbPath, 'Completely unrelated note about brand voice copywriting');
-
-      const matched = await detectImplicitLearningCites(client, HIGH_OVERLAP_LEARNING);
-      expect(matched).toContain(matchId);
-    } finally {
-      cleanup(tempDir, client);
-    }
-  });
-
-  it('returns empty when the new content has fewer than the floor in keywords', async () => {
-    const { tempDir, dbPath } = makeTempDb();
-    const client = await openClient(dbPath);
-    try {
-      seedLearning(dbPath, HIGH_OVERLAP_LEARNING);
-      // Short content — well under 15 unique non-stop-word keywords.
-      const matched = await detectImplicitLearningCites(client, 'cursor pagination advance');
-      expect(matched).toEqual([]);
-    } finally {
-      cleanup(tempDir, client);
-    }
-  });
-
-  it('does NOT match learnings whose overlap is below the floor (regression guard)', async () => {
-    const { tempDir, dbPath } = makeTempDb();
-    const client = await openClient(dbPath);
-    try {
-      const lowOverlapId = seedLearning(
-        dbPath,
-        'Brand color palette uses Court Classic Navy and Vintage Blue for header accents'
-      );
-
-      // Content has 15+ keywords but shares only ~2 with the seeded learning.
-      const matched = await detectImplicitLearningCites(client, HIGH_OVERLAP_LEARNING);
-      expect(matched).not.toContain(lowOverlapId);
-    } finally {
-      cleanup(tempDir, client);
-    }
-  });
-
-  it('skips learnings whose status is not active', async () => {
-    const { tempDir, dbPath } = makeTempDb();
-    const client = await openClient(dbPath);
-    try {
-      const archivedId = seedLearning(dbPath, HIGH_OVERLAP_LEARNING, 'archived');
-      const matched = await detectImplicitLearningCites(client, HIGH_OVERLAP_LEARNING);
-      expect(matched).not.toContain(archivedId);
-    } finally {
-      cleanup(tempDir, client);
-    }
-  });
-});
-
-describe('applyLearningReaffirm — explicit + implicit pipeline', () => {
-  const HIGH_OVERLAP_LEARNING =
-    'cursor-based pagination must always advance forwards with monotonic offset preventing duplicate row emission and skipped batch boundaries during streaming response handling for downstream consumers';
-
-  it('combines explicit IDs and implicit overlap matches without double-bumping', async () => {
+describe('applyLearningReaffirm — explicit ids only', () => {
+  it('bumps the cited ids and nothing else, however much another learning overlaps', async () => {
     const { tempDir, dbPath } = makeTempDb();
     const client = await openClient(dbPath);
     try {
       const explicitId = seedLearning(dbPath, 'Unrelated explicit learning');
-      const implicitId = seedLearning(dbPath, HIGH_OVERLAP_LEARNING);
+      const overlappingId = seedLearning(dbPath, HIGH_OVERLAP_LEARNING);
+      ensureReviewTimestamps(client);
 
       const outcome = await applyLearningReaffirm(client, {
         explicitIds: [explicitId],
-        newContent: HIGH_OVERLAP_LEARNING,
         reaffirmedAt: '2026-05-07T01:00:00Z',
       });
-      expect(outcome.explicitlyReaffirmedIds).toEqual([explicitId]);
-      expect(outcome.implicitlyReaffirmedIds).toEqual([implicitId]);
-      expect(outcome.missingIds).toEqual([]);
-    } finally {
-      cleanup(tempDir, client);
-    }
-  });
-
-  it('does not implicitly bump excluded IDs (e.g. the freshly-inserted learning)', async () => {
-    const { tempDir, dbPath } = makeTempDb();
-    const client = await openClient(dbPath);
-    try {
-      const selfId = seedLearning(dbPath, HIGH_OVERLAP_LEARNING);
-
-      const outcome = await applyLearningReaffirm(client, {
-        explicitIds: [],
-        newContent: HIGH_OVERLAP_LEARNING,
-        reaffirmedAt: '2026-05-07T01:00:00Z',
-        excludeIds: [selfId],
+      expect(outcome).toEqual({
+        explicitlyReaffirmedIds: [explicitId],
+        missingIds: [],
+        writeFailures: [],
       });
-      expect(outcome.implicitlyReaffirmedIds).toEqual([]);
-      expect(readLastReviewedAt(dbPath, selfId)).toBeNull();
+      expect(readLastReviewedAt(dbPath, explicitId)).toBe('2026-05-07T01:00:00Z');
+      expect(readLastReviewedAt(dbPath, overlappingId)).toBeNull();
     } finally {
       cleanup(tempDir, client);
     }
   });
 });
 
-describe('cmos_session_capture wiring — citesLearningIds and implicit reaffirm', () => {
-  const HIGH_OVERLAP_LEARNING =
-    'cursor-based pagination must always advance forwards with monotonic offset preventing duplicate row emission and skipped batch boundaries during streaming response handling for downstream consumers';
-
+describe('cmos_session_capture wiring — citesLearningIds, and no implicit reaffirm', () => {
   it('explicitly reaffirms learnings cited via citesLearningIds (decision capture)', async () => {
     const { tempDir, dbPath } = makeTempDb();
     try {
@@ -377,10 +302,10 @@ describe('cmos_session_capture wiring — citesLearningIds and implicit reaffirm
     }
   });
 
-  it('implicitly reaffirms learnings whose content overlaps the new capture (decision capture)', async () => {
+  it('a decision capture that repeats a learning word for word bumps no learning', async () => {
     const { tempDir, dbPath } = makeTempDb();
     try {
-      const matchId = seedLearning(dbPath, HIGH_OVERLAP_LEARNING);
+      const overlappingId = seedLearning(dbPath, HIGH_OVERLAP_LEARNING);
       const unrelatedId = seedLearning(dbPath, 'Brand voice document drafted');
 
       const result = await cmosSessionCapture({
@@ -390,38 +315,19 @@ describe('cmos_session_capture wiring — citesLearningIds and implicit reaffirm
         projectRoot: tempDir,
       });
       expect(result.success).toBe(true);
-      expect(result.data?.implicitlyReaffirmedLearningIds).toContain(matchId);
-      expect(result.data?.implicitlyReaffirmedLearningIds ?? []).not.toContain(unrelatedId);
-      expect(readLastReviewedAt(dbPath, matchId)).not.toBeNull();
+      expect(result.data?.implicitlyReaffirmedLearningIds).toBeUndefined();
+      expect(readLastReviewedAt(dbPath, overlappingId)).toBeNull();
       expect(readLastReviewedAt(dbPath, unrelatedId)).toBeNull();
     } finally {
       cleanup(tempDir);
     }
   });
 
-  it('does NOT reaffirm anything when overlap is below the floor (regression guard)', async () => {
+  it('a learning capture that repeats another learning bumps neither', async () => {
     const { tempDir, dbPath } = makeTempDb();
     try {
-      const id1 = seedLearning(dbPath, HIGH_OVERLAP_LEARNING);
+      const existingId = seedLearning(dbPath, HIGH_OVERLAP_LEARNING);
 
-      const result = await cmosSessionCapture({
-        sessionId: 'PS-2026-05-07-100',
-        category: 'decision',
-        // Short content — fewer than 15 keywords post-stop-word filter.
-        content: 'Use TypeScript for all new tools',
-        projectRoot: tempDir,
-      });
-      expect(result.success).toBe(true);
-      expect(result.data?.implicitlyReaffirmedLearningIds).toBeUndefined();
-      expect(readLastReviewedAt(dbPath, id1)).toBeNull();
-    } finally {
-      cleanup(tempDir);
-    }
-  });
-
-  it('does not implicitly reaffirm the freshly-inserted learning itself', async () => {
-    const { tempDir, dbPath } = makeTempDb();
-    try {
       const result = await cmosSessionCapture({
         sessionId: 'PS-2026-05-07-100',
         category: 'learning',
@@ -429,8 +335,8 @@ describe('cmos_session_capture wiring — citesLearningIds and implicit reaffirm
         projectRoot: tempDir,
       });
       expect(result.success).toBe(true);
-      // The learning we just inserted should not appear in the implicit list.
-      expect(result.data?.implicitlyReaffirmedLearningIds ?? []).toEqual([]);
+      expect(result.data?.implicitlyReaffirmedLearningIds).toBeUndefined();
+      expect(readLastReviewedAt(dbPath, existingId)).toBeNull();
     } finally {
       cleanup(tempDir);
     }
@@ -483,15 +389,12 @@ describe('cmos_session_capture wiring — citesLearningIds and implicit reaffirm
   });
 });
 
-describe('cmos_session_complete wiring — citesLearningIds and implicit reaffirm', () => {
-  const HIGH_OVERLAP_LEARNING =
-    'cursor-based pagination must always advance forwards with monotonic offset preventing duplicate row emission and skipped batch boundaries during streaming response handling for downstream consumers';
-
-  it('reaffirms explicit IDs and implicitly-overlapping learnings on complete', async () => {
+describe('cmos_session_complete wiring — citesLearningIds, and no implicit reaffirm', () => {
+  it('reaffirms the explicit IDs on complete and leaves an overlapping learning alone', async () => {
     const { tempDir, dbPath } = makeTempDb();
     try {
       const explicitId = seedLearning(dbPath, 'Unrelated explicit cite');
-      const implicitId = seedLearning(dbPath, HIGH_OVERLAP_LEARNING);
+      const overlappingId = seedLearning(dbPath, HIGH_OVERLAP_LEARNING);
 
       const result = await cmosSessionComplete({
         sessionId: 'PS-2026-05-07-100',
@@ -502,7 +405,9 @@ describe('cmos_session_complete wiring — citesLearningIds and implicit reaffir
       });
       expect(result.success).toBe(true);
       expect(result.data?.explicitlyReaffirmedLearningIds).toEqual([explicitId]);
-      expect(result.data?.implicitlyReaffirmedLearningIds).toContain(implicitId);
+      expect(result.data?.implicitlyReaffirmedLearningIds).toBeUndefined();
+      expect(readLastReviewedAt(dbPath, explicitId)).not.toBeNull();
+      expect(readLastReviewedAt(dbPath, overlappingId)).toBeNull();
     } finally {
       cleanup(tempDir);
     }

@@ -20,6 +20,8 @@
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { ListRootsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { pathToFileURL } from 'url';
 
 /** Minimal shape of an MCP tool-call result we read from. */
 export interface ToolResult {
@@ -77,18 +79,26 @@ export async function connectStdioServer(opts: {
   cwd: string;
   env: Record<string, string>;
   clientName?: string;
+  /** Extra server arguments, e.g. `['--project-root', dir]` (the s92-m01 Desktop recipe). */
+  serverArgs?: string[];
+  /** s92-m04: workspace roots this client advertises (the roots capability), as paths. */
+  roots?: string[];
 }): Promise<StdioHarness> {
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: [opts.serverPath],
+    args: [opts.serverPath, ...(opts.serverArgs ?? [])],
     cwd: opts.cwd,
     env: opts.env,
     stderr: 'ignore',
   });
   const client = new Client(
     { name: opts.clientName ?? 'cmos-stdio-harness', version: '0.0.0' },
-    { capabilities: {} }
+    { capabilities: opts.roots ? { roots: { listChanged: false } } : {} }
   );
+  if (opts.roots) {
+    const roots = opts.roots.map((root) => ({ uri: pathToFileURL(root).href }));
+    client.setRequestHandler(ListRootsRequestSchema, async () => ({ roots }));
+  }
   await client.connect(transport);
 
   const callTool = async (name: string, args: Record<string, unknown>): Promise<ToolResult> =>

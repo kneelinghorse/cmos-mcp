@@ -33,11 +33,13 @@
  *
  *   - the WRITE half  — a `BEFORE UPDATE ON contexts` RAISE(ABORT) trigger. Surgical: it hits
  *     exactly the UPDATE arm of persistContext and nothing else in the handler.
- *   - the READ half   — `ALTER TABLE contexts RENAME TO ...`, which makes the existence SELECT
- *     that chooses UPDATE-vs-INSERT error out. Blunt by necessity (no SQL construct fails a
- *     SELECT while sparing an UPDATE on the same columns), and blunt is FINE here, because the
- *     claim under test is that NEITHER arm is attempted — which the op names in `writeFailures`
- *     record precisely.
+ *   - the READ half   — `ALTER TABLE contexts RENAME TO ...`, which makes every read of the
+ *     context error out. Blunt by necessity (no SQL construct fails a SELECT while sparing an
+ *     UPDATE on the same columns), and blunt is FINE here, because the claim under test is that
+ *     NEITHER arm is attempted — which the op names in `writeFailures` record precisely. Since
+ *     s92-m09 the close reads each context before aggregating into it, and that read is what
+ *     fails first on this fixture (`contexts.read(<id>)`); persistContext's own existence-SELECT
+ *     guard (fork f10) stays as defense in depth behind it.
  *
  *   - the SNAPSHOT half — a `BEFORE INSERT ON context_snapshots` RAISE(ABORT) trigger, which
  *     separates the two rows persistContext writes so neither can be blamed for the other.
@@ -57,23 +59,29 @@
  * left unasserted on purpose: pinning it would freeze the imprecision into the suite.
  */
 
-import { afterAll, describe, expect, it } from '@jest/globals';
+import { afterAll, afterEach, describe, expect, it, jest } from '@jest/globals';
 import Database from 'better-sqlite3';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
+import { CmosDatabaseClient } from '../../../src/tools/cmos/client';
 import {
   cmosSessionComplete,
   formatSessionCompleteForLLM,
   type CmosSessionCompleteResult,
 } from '../../../src/tools/cmos/cmos-session-complete';
+import { ONLY_COPY_SOURCE_SUFFIX } from '../../../src/tools/cmos/snapshot-content-policy';
 import type { CmosToolResult } from '../../../src/tools/cmos/types';
 import { seedCmosDb } from '../../helpers/seedCmosDb';
 
 const CONTEXT_IDS = ['master_context', 'project_context'] as const;
 
 const tmpDirs: string[] = [];
+
+afterEach(() => {
+  jest.restoreAllMocks();
+});
 
 afterAll(() => {
   for (const dir of tmpDirs) {
@@ -274,7 +282,13 @@ describe('s86-m02b criterion 5: persistContext discloses a rejected context writ
     // failed — this mission's own defect class, mirrored.
     expect(data.aggregation.masterSnapshotId).not.toBeNull();
     expect(data.aggregation.projectSnapshotId).not.toBeNull();
-    expect(countSnapshotsFor(dbPath, `session_complete:${sessionId}`)).toBe(2);
+    // s92-m09: a close copy normally stores no content (the context row holds it). Here the
+    // context write failed, so each copy keeps its content and is marked the only copy, which no
+    // snapshot prune reclaims.
+    expect(countSnapshotsFor(dbPath, `session_complete:${sessionId}`)).toBe(0);
+    expect(
+      countSnapshotsFor(dbPath, `session_complete:${sessionId}${ONLY_COPY_SOURCE_SUFFIX}`)
+    ).toBe(2);
 
     // --- contextsUpdated is COMPUTED now, not a hardcoded `true`, and it tracks the CONTEXT
     //     write specifically ---
@@ -322,11 +336,13 @@ describe('s86-m02b criterion 5: persistContext discloses a rejected context writ
     expect(text).toContain('**Context Aggregation**');
   });
 
-  it('READ HALF: when the existence SELECT fails, NEITHER arm is attempted and the answer says so', async () => {
+  it('READ HALF: when the context cannot be read, NEITHER arm is attempted and the answer says so', async () => {
     // fork f10, non-cuttable. The SELECT at persistContext chooses UPDATE (row exists) vs INSERT
     // (row absent). A FAILED select used to be indistinguishable from "absent", so the handler
     // took the INSERT arm against a row that already exists — turning a transient read error into
-    // a constraint violation on a path that then reported success anyway.
+    // a constraint violation on a path that then reported success anyway. s92-m09: the close now
+    // reads each context before aggregating into it, and a context it cannot read is left exactly
+    // as it is, so on this fixture the refusal comes from that read, one step earlier.
     const { projectRoot, dbPath } = makeStore('select-fail');
     const sessionId = `PS-${todayStamp()}-913`;
     seedActiveSession(dbPath, sessionId);
@@ -348,14 +364,13 @@ describe('s86-m02b criterion 5: persistContext discloses a rejected context writ
 
     // Disclosed, per context id.
     expect(ops).toEqual(
-      expect.arrayContaining([
-        'contexts.persist(master_context)',
-        'contexts.persist(project_context)',
-      ])
+      expect.arrayContaining(['contexts.read(master_context)', 'contexts.read(project_context)'])
     );
     for (const contextId of CONTEXT_IDS) {
-      const failure = failures.find((f) => f.op === `contexts.persist(${contextId})`);
-      expect(failure?.message).toContain('neither UPDATE nor INSERT was attempted');
+      const failure = failures.find((f) => f.op === `contexts.read(${contextId})`);
+      expect(failure?.code).toBe('CONTEXT_UNREADABLE');
+      expect(failure?.message).toContain('could not be read');
+      expect(failure?.message).toContain('did not condense or overwrite it');
     }
 
     // THE CLAUSE THAT CATCHES THE OLD BUG: no INSERT arm was taken. Under the pre-fix code the
@@ -375,9 +390,60 @@ describe('s86-m02b criterion 5: persistContext discloses a rejected context writ
     expect(text).toContain(
       'Write failures (the database rejected these; the counts above exclude them):'
     );
-    expect(text).toContain('contexts.persist(master_context)');
-    expect(text).toContain('neither UPDATE nor INSERT was attempted');
+    expect(text).toContain('contexts.read(master_context)');
+    expect(text).toContain('did not condense or overwrite it');
     expect(text).not.toContain('**Context Aggregation**');
+  });
+
+  it('EXISTENCE SELECT (fork f10): when only the UPDATE-or-INSERT probe fails, neither arm is attempted and the answer says so', async () => {
+    // Since s92-m09 the READ HALF fixture above stops at the close's content read, one step
+    // earlier, so it no longer reaches persistContext's own guard. No SQL construct fails
+    // `SELECT id FROM contexts WHERE id = ?` while sparing `SELECT id, content FROM contexts ...`
+    // on the same table, so this one case fails that exact statement on the real client and lets
+    // every other statement run against the real store. If the handler's SQL changes, the spy
+    // stops matching and the disclosure assertions below go red.
+    const { projectRoot, dbPath } = makeStore('existence-select');
+    const sessionId = `PS-${todayStamp()}-915`;
+    seedActiveSession(dbPath, sessionId);
+    const before = readContexts(dbPath);
+
+    const realGetOne = CmosDatabaseClient.prototype.getOne;
+    let probed = 0;
+    jest.spyOn(CmosDatabaseClient.prototype, 'getOne').mockImplementation(function (
+      this: CmosDatabaseClient,
+      sql: string,
+      params?: Parameters<CmosDatabaseClient['getOne']>[1]
+    ) {
+      if (sql === 'SELECT id FROM contexts WHERE id = ?') {
+        probed += 1;
+        return {
+          success: false,
+          error: { code: 'DB_QUERY_FAILED', message: 'forced failure: existence SELECT' },
+        };
+      }
+      return realGetOne.call(this, sql, params);
+    });
+
+    const { result, text } = await completeSession(projectRoot, sessionId);
+    expect(probed).toBe(2);
+    expect(result.success).toBe(true);
+    const data = result.data as CmosSessionCompleteResult;
+    const ops = (data.writeFailures ?? []).map((f) => f.op);
+    expect(ops).toEqual(
+      expect.arrayContaining([
+        'contexts.persist(master_context)',
+        'contexts.persist(project_context)',
+      ])
+    );
+    for (const contextId of CONTEXT_IDS) {
+      const failure = data.writeFailures?.find((f) => f.op === `contexts.persist(${contextId})`);
+      expect(failure?.message).toContain('neither UPDATE nor INSERT was attempted');
+    }
+    expect(ops.some((op) => op.startsWith('contexts.insert('))).toBe(false);
+    expect(ops.some((op) => op.startsWith('contexts.update('))).toBe(false);
+    expect(data.aggregation.contextsUpdated).toBe(false);
+    expect(readContexts(dbPath)).toEqual(before);
+    expect(text).toContain('neither UPDATE nor INSERT was attempted');
   });
 
   it('SNAPSHOT HALF: a rejected snapshot INSERT is disclosed and yields no snapshot id, while the context write that DID land is not rolled back', async () => {

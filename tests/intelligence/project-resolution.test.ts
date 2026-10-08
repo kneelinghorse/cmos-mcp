@@ -23,6 +23,7 @@ import {
   resolveProjectRootPath,
   ProjectResolutionError,
 } from '../../src/intelligence/project-resolution';
+import { setServerProjectRoot } from '../../src/intelligence/resolution-policy';
 import { seedCmosDb } from '../helpers/seedCmosDb';
 
 async function createTempWorkspace(prefix: string): Promise<string> {
@@ -133,22 +134,81 @@ describe('resolveProjectRootEnhanced (graph-native)', () => {
     }
   });
 
-  it('step 4: falls back to the graph default project', async () => {
-    // Seed a default project in the GRAPH registry.
+  it('step 4: a contextless cwd falls back to a CONFIRMED graph default', async () => {
+    // s92-m01: a default only serves a contextless call (cwd of /, $HOME or the install root).
     const defaultWorkspace = await createTempWorkspace('default-');
     await ensureCmosDatabase(defaultWorkspace);
 
     const graph = ProjectGraphRegistry.getInstance({ configDir });
     graph.registerStore(defaultWorkspace, { setAsDefault: true });
 
-    // Point cwd to empty directory (no CMOS)
-    process.cwd = () => workspace;
+    process.cwd = () => '/';
 
     const result = await resolveProjectRootEnhanced(undefined, { silent: true });
     expect(result.source).toBe('registry');
     expect(result.projectRoot).toBe(path.resolve(defaultWorkspace));
 
     await fs.rm(defaultWorkspace, { recursive: true, force: true });
+  });
+
+  it('step 4: an unconfirmed (pre-3.2.0) default is never applied', async () => {
+    const defaultWorkspace = await createTempWorkspace('unconfirmed-default-');
+    await ensureCmosDatabase(defaultWorkspace);
+
+    const graph = ProjectGraphRegistry.getInstance({ configDir });
+    const entry = graph.registerStore(defaultWorkspace);
+    graph.setDefault(entry.project_id); // written the pre-3.2.0 way: no confirmation
+
+    process.cwd = () => '/';
+    await expect(resolveProjectRootEnhanced(undefined, { silent: true })).rejects.toThrow(
+      ProjectResolutionError
+    );
+
+    await fs.rm(defaultWorkspace, { recursive: true, force: true });
+  });
+
+  it('step 4: a real working folder never falls back to a default, even a confirmed one', async () => {
+    const defaultWorkspace = await createTempWorkspace('confirmed-default-');
+    await ensureCmosDatabase(defaultWorkspace);
+    ProjectGraphRegistry.getInstance({ configDir }).registerStore(defaultWorkspace, {
+      setAsDefault: true,
+    });
+
+    process.cwd = () => workspace; // a store-less working folder, not contextless
+    await expect(resolveProjectRootEnhanced(undefined, { silent: true })).rejects.toThrow(
+      `No CMOS project in '${workspace}'`
+    );
+
+    await fs.rm(defaultWorkspace, { recursive: true, force: true });
+  });
+
+  it('step 4: a contextless cwd uses the server --project-root before the registry', async () => {
+    const pinned = await createTempWorkspace('pinned-');
+    await ensureCmosDatabase(pinned);
+    setServerProjectRoot(pinned);
+    try {
+      process.cwd = () => '/';
+      const result = await resolveProjectRootEnhanced(undefined, { silent: true });
+      expect(result.source).toBe('server-project-root');
+      expect(result.projectRoot).toBe(path.resolve(pinned));
+    } finally {
+      setServerProjectRoot(undefined);
+      await fs.rm(pinned, { recursive: true, force: true });
+    }
+  });
+
+  it('step 3: a cwd inside a project resolves to the enclosing store', async () => {
+    await ensureCmosDatabase(workspace);
+    const nested = path.join(workspace, 'src', 'deep');
+    await fs.mkdir(nested, { recursive: true });
+    process.cwd = () => nested;
+
+    const result = await resolveProjectRootEnhanced(undefined, {
+      autoRegister: false,
+      silent: true,
+    });
+    expect(result.source).toBe('auto-discover');
+    expect(result.projectRoot).toBe(workspace);
   });
 
   it('step 4: skips a stale graph default and throws', async () => {
@@ -161,7 +221,7 @@ describe('resolveProjectRootEnhanced (graph-native)', () => {
     // Remove the store's CMOS so the default no longer detects.
     await fs.rm(path.join(defaultWorkspace, 'cmos'), { recursive: true, force: true });
     CmosDetector.resetInstance();
-    process.cwd = () => workspace;
+    process.cwd = () => '/';
 
     await expect(resolveProjectRootEnhanced(undefined, { silent: true })).rejects.toThrow(
       ProjectResolutionError
@@ -180,22 +240,31 @@ describe('resolveProjectRootEnhanced (graph-native)', () => {
   });
 
   it('error includes actionable suggestion', async () => {
-    process.cwd = () => workspace;
+    const suggestionFrom = async (cwd: string): Promise<string> => {
+      process.cwd = () => cwd;
+      try {
+        await resolveProjectRootEnhanced(undefined, { silent: true });
+      } catch (error) {
+        expect(error).toBeInstanceOf(ProjectResolutionError);
+        return (error as ProjectResolutionError).suggestion;
+      }
+      throw new Error('Should have thrown');
+    };
 
-    try {
-      await resolveProjectRootEnhanced(undefined, { silent: true });
-      fail('Should have thrown');
-    } catch (error) {
-      expect(error).toBeInstanceOf(ProjectResolutionError);
-      const resolutionError = error as ProjectResolutionError;
-      // Sprint 53 m02: the env-var hint was removed from the suggestion because
-      // env is no longer a resolution option. Callers should pass projectRoot
-      // explicitly or register a default project.
-      expect(resolutionError.suggestion).toContain('projectRoot');
-      // s85-m01: suggestions now name the CONSOLIDATED tool — the pre-s85 name was removed in the 38→15 consolidation.
-      expect(resolutionError.suggestion).toContain('cmos_project(action="register"');
-      expect(resolutionError.suggestion).not.toContain('CMOS_PROJECT_ROOT');
-    }
+    // Sprint 53 m02: the env-var hint was removed because env is no longer a resolution option.
+    const fromFolder = await suggestionFrom(workspace);
+    expect(fromFolder).toContain('projectRoot');
+    expect(fromFolder).toContain(
+      `cmos_project(action="init", projectRoot=${JSON.stringify(workspace)})`
+    );
+    expect(fromFolder).not.toContain('CMOS_PROJECT_ROOT');
+    // s92-m01: a default cannot serve a real working folder, so none is offered there…
+    expect(fromFolder).not.toContain('setAsDefault');
+
+    // …while a contextless cwd is offered both default routes.
+    const fromRoot = await suggestionFrom('/');
+    expect(fromRoot).toContain('--project-root');
+    expect(fromRoot).toContain('cmos_project(action="register"');
   });
 
   it('respects priority order', async () => {

@@ -96,11 +96,13 @@ describe('cmos_decisions', () => {
 
   describe('CMOS_DECISIONS_ACTIONS', () => {
     // s91-m04: `record` is the sixth — a decision written outside a session, with supersedes.
-    it('contains 6 actions', () => {
-      expect(CMOS_DECISIONS_ACTIONS).toHaveLength(6);
+    it('contains 7 actions', () => {
+      // s92-m08: show reads one decision in full by id.
+      expect(CMOS_DECISIONS_ACTIONS).toHaveLength(7);
       expect([...CMOS_DECISIONS_ACTIONS]).toEqual([
         'list',
         'search',
+        'show',
         'update',
         'review',
         'batch_update',

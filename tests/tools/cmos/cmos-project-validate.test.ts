@@ -45,7 +45,9 @@ describe('cmos_project_validate', () => {
     CmosDetector.resetInstance();
     ProjectGraphRegistry.resetInstance();
     // s79-m03 — cmos_project validate reads/prunes the graph registry.
-    graph = await ProjectGraphRegistry.create({ configDir });
+    // s92-m01: every Jest store lives under os.tmpdir(), which counts as EPHEMERAL; these cases are
+    // about durable stores, so this registry declares no ephemeral locations.
+    graph = await ProjectGraphRegistry.create({ configDir, ephemeralRoots: [] });
   });
 
   afterEach(async () => {
@@ -122,6 +124,54 @@ describe('cmos_project_validate', () => {
       expect(result.data?.validations).toHaveLength(2);
       expect(result.data?.summary.active).toBe(1);
       expect(result.data?.summary.missing).toBe(1);
+    });
+  });
+
+  describe('ephemeral stores (s92-m01, feedback #41)', () => {
+    async function ephemeralGraph(): Promise<ProjectGraphRegistry> {
+      // The workspaces live under os.tmpdir(); declare that location ephemeral.
+      ProjectGraphRegistry.resetInstance();
+      return ProjectGraphRegistry.create({ configDir, ephemeralRoots: [os.tmpdir()] });
+    }
+
+    it('reports a live store under an ephemeral location as ephemeral, not active', async () => {
+      await ensureCmosDatabase(workspace);
+      const ephemeral = await ephemeralGraph();
+      ephemeral.registerStore(workspace, { name: 'Scratch' });
+
+      const result = await cmosProjectValidate({});
+
+      expect(result.data?.validations[0]).toMatchObject({
+        status: 'ephemeral',
+        projectRoot: path.resolve(workspace),
+      });
+      expect(result.data?.summary).toMatchObject({ active: 0, ephemeral: 1 });
+      expect(formatProjectValidateForLLM(result)).toContain('Ephemeral Projects');
+    });
+
+    it('prune archives an ephemeral row even though its store still exists', async () => {
+      await ensureCmosDatabase(workspace);
+      const ephemeral = await ephemeralGraph();
+      ephemeral.registerStore(workspace, { name: 'Scratch' });
+
+      await cmosProjectValidate({ prune: true });
+
+      expect(ephemeral.list()).toHaveLength(0);
+      // Archived, not deleted: the row is restorable and the store is untouched.
+      expect(ephemeral.list({ includeArchived: true })).toHaveLength(1);
+      await expect(fs.access(path.join(workspace, 'cmos', 'db', 'cmos.sqlite'))).resolves.toBe(
+        undefined
+      );
+    });
+
+    it('validate without prune leaves an ephemeral row registered', async () => {
+      await ensureCmosDatabase(workspace);
+      const ephemeral = await ephemeralGraph();
+      ephemeral.registerStore(workspace, { name: 'Scratch' });
+
+      await cmosProjectValidate({ prune: false });
+
+      expect(ephemeral.list()).toHaveLength(1);
     });
   });
 

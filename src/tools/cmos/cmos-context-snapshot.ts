@@ -12,10 +12,14 @@ import { z } from 'zod';
 import * as crypto from 'crypto';
 import { withClientValidated } from './client';
 import { genesisColumns, getProjectId } from './genesis-columns';
-import { snapshotDedupPrunedFilter } from './schema-migrations';
 import type { CmosToolResult, Context } from './types';
 import { CmosErrors, createError, createSuccess, CMOS_ERROR_CODES } from './errors';
 import { appendWarnings } from './format-warnings';
+import {
+  findReusableSnapshot,
+  isReservedExplicitSource,
+  snapshotStorage,
+} from './snapshot-content-policy';
 
 /**
  * Result of context snapshot operation.
@@ -131,6 +135,19 @@ export async function cmosContextSnapshot(
 
   const contextType = params.contextType;
   const source = params.source.trim();
+  // s92-m09: a name CMOS writes for its own automatic copies would make a prune read this
+  // snapshot as one of them and reclaim it.
+  if (isReservedExplicitSource(source)) {
+    return createError({
+      code: CMOS_ERROR_CODES.INVALID_PARAMETER,
+      message:
+        `source "${source}" begins like the sources CMOS gives its own automatic snapshot copies, ` +
+        'so a snapshot prune could reclaim it as one. Choose another name.',
+      field: 'source',
+      providedValue: params.source,
+      suggestion: 'Name the snapshot for what it marks, for example "Before the schema rewrite".',
+    });
+  }
 
   return withClientValidated(
     (client) => {
@@ -160,24 +177,26 @@ export async function cmosContextSnapshot(
         .digest('hex')
         .substring(0, 16);
 
-      // Check if we already have a snapshot with the same hash. s84-m04: exclude a
-      // content-tombstoned row (content emptied by the prune) so a re-appearing identical
-      // content forces a fresh content-bearing insert instead of deduping onto the empty row.
-      const existingResult = client.getOne<{ id: number; created_at: string }>(
-        `SELECT id, created_at FROM context_snapshots WHERE context_id = ? AND content_hash = ?${snapshotDedupPrunedFilter(client)}`,
-        [contextType, contentHash]
-      );
+      // Check if we already have a snapshot with the same hash. s84-m04: never a
+      // content-tombstoned row. s92-m09: only a row a prune never reclaims (a milestone or another
+      // named snapshot) can stand for this one; identical content held only by an automatic copy
+      // gets a row of its own, under this name.
+      const reusable = findReusableSnapshot(client, {
+        contextId: contextType,
+        contentHash,
+        kind: 'explicit',
+      });
 
-      if (existingResult.success && existingResult.data) {
+      if (reusable.ok && reusable.row) {
         // Duplicate detected - return existing snapshot info
         return createSuccess<CmosContextSnapshotResult>({
-          snapshotId: existingResult.data.id,
+          snapshotId: reusable.row.id,
           contextId: contextType,
           source,
           contentHash,
-          createdAt: existingResult.data.created_at,
+          createdAt: reusable.row.createdAt,
           isNew: false,
-          message: `Duplicate snapshot detected. Content unchanged since ${existingResult.data.created_at}. No new snapshot created.`,
+          message: `Duplicate snapshot detected. Content unchanged since ${reusable.row.createdAt}. No new snapshot created.`,
         });
       }
 
@@ -185,10 +204,21 @@ export async function cmosContextSnapshot(
       const now = new Date().toISOString();
 
       const g = genesisColumns(client, 'context_snapshots', getProjectId(client));
+      // s92-m09: someone asked for this snapshot; it keeps its content.
+      const storage = snapshotStorage('explicit', content, { contentHash });
       const insertResult = client.execute(
-        `INSERT INTO context_snapshots (context_id, session_id, source, content_hash, content, created_at, ${g.columns.join(', ')})
-         VALUES (?, ?, ?, ?, ?, ?, ${g.placeholders})`,
-        [contextType, params.sessionId ?? null, source, contentHash, content, now, ...g.values]
+        `INSERT INTO context_snapshots (context_id, session_id, source, content_hash, content, created_at, ${[...storage.columns, ...g.columns].join(', ')})
+         VALUES (?, ?, ?, ?, ?, ?, ${[...storage.columns.map(() => '?'), g.placeholders].join(', ')})`,
+        [
+          contextType,
+          params.sessionId ?? null,
+          source,
+          storage.contentHash,
+          storage.content,
+          now,
+          ...storage.values,
+          ...g.values,
+        ]
       );
 
       if (!insertResult.success) {

@@ -11,6 +11,7 @@
 import type { CmosDatabaseClient } from './client';
 import { HybridRetriever } from './fts5-retriever';
 import { extractKeywords } from './supersession-detection';
+import { previewText } from './text-preview';
 
 const MAX_RELEVANT_DECISIONS = 5;
 const MIN_RELEVANCE_KEYWORDS = 2;
@@ -19,8 +20,18 @@ export interface RelevantDecision {
   /** Decision ID */
   id: number;
 
-  /** Decision text */
+  /**
+   * s92-m08: a preview of the decision text, at most 300 characters (retrieval R5). Scoring
+   * read the full text; read it in full with cmos_decisions(action="show", decisionId).
+   */
   decisionText: string;
+
+  /** s92-m08: whether decisionText was cut, and the full text's length. */
+  truncated: boolean;
+  fullLength: number;
+
+  /** s92-m08: the decision's status. */
+  status: string | null;
 
   /** Category (architectural, process, tooling, etc.) */
   category: string | null;
@@ -43,7 +54,8 @@ export interface RelevantDecision {
 }
 
 /**
- * Find active decisions relevant to a mission's objective and criteria.
+ * Find decisions relevant to a mission's objective and criteria: every status but superseded
+ * (s92-m07), each carrying its status.
  *
  * Routes the mission text through HybridRetriever (BM25 + sqlite-vec) and
  * maps the top hits into RelevantDecision rows. The keyword-overlap count is
@@ -65,22 +77,31 @@ export async function findRelevantDecisions(
   const results = await retriever.search(missionText, {
     types: ['decision'],
     limit: MAX_RELEVANT_DECISIONS,
-    statusFilter: ['active'],
+    // s92-m07 (R1): no statusFilter, so only superseded rows drop out. A decision archived at a
+    // sprint close is still the record; on 276 mission -> decision citations, active-only surfacing
+    // found 0.192 of what the mission text named (R@5), and dropping only superseded rows 0.320.
     // s82-m04: no expandGraph — the graph arm is mission-only (decisions never expand), and this
     // path additionally gates on a countOverlap>=2 keyword filter that would strip graph-only
     // rescues anyway. Left off deliberately.
   });
 
   return results
-    .map((r) => ({
-      id: typeof r.id === 'number' ? r.id : Number(r.id),
-      decisionText: r.text,
-      category: r.category,
-      sprintId: r.sprintId,
-      projectId: r.projectId,
-      evidence: r.evidence,
-      relevanceScore: countOverlap(r.text, keywords),
-    }))
+    .map((r) => {
+      const preview = previewText(r.text);
+      return {
+        id: typeof r.id === 'number' ? r.id : Number(r.id),
+        decisionText: preview.preview,
+        truncated: preview.truncated,
+        fullLength: preview.fullLength,
+        status: r.status,
+        category: r.category,
+        sprintId: r.sprintId,
+        projectId: r.projectId,
+        evidence: r.evidence,
+        // Scored on the FULL text: the preview would undercount long decisions.
+        relevanceScore: countOverlap(r.text, keywords),
+      };
+    })
     .filter((d) => d.relevanceScore >= MIN_RELEVANCE_KEYWORDS);
 }
 

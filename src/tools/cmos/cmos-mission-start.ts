@@ -506,6 +506,8 @@ export function formatMissionStartForLLM(result: CmosToolResult<MissionStartResu
     for (const d of data.relevantDecisions) {
       const cat = d.category ? ` [${d.category}]` : '';
       const sprint = d.sprintId ? ` (${d.sprintId})` : '';
+      // s92-m07: archived and stale decisions surface too, so every row names its status.
+      const status = d.status ? `, ${d.status}` : '';
       // s83-m06: a relevant decision pull-merged from ANOTHER project is foreign,
       // untrusted content — render its text inside the provenance fence instead of
       // as a bare bullet that could read as an instruction. Mirrors the ratified
@@ -513,7 +515,7 @@ export function formatMissionStartForLLM(result: CmosToolResult<MissionStartResu
       const isForeign =
         d.projectId != null && (localProjectId == null || d.projectId !== localProjectId);
       if (isForeign) {
-        lines.push(`  • #${d.id}${cat}${sprint} [proj:${d.projectId}]`);
+        lines.push(`  • #${d.id}${status}${cat}${sprint} [proj:${d.projectId}]`);
         lines.push(frameForeignText(d.decisionText, `proj:${d.projectId}`));
         // s83-m06 (review): evidence is also foreign-author-controlled free text —
         // it MUST stay inside the fence, not render bare after [END UNTRUSTED DATA].
@@ -522,14 +524,19 @@ export function formatMissionStartForLLM(result: CmosToolResult<MissionStartResu
           lines.push(frameForeignText(d.evidence, `proj:${d.projectId}`));
         }
       } else {
-        const preview =
-          d.decisionText.length > 100 ? d.decisionText.slice(0, 100) + '...' : d.decisionText;
-        lines.push(`  • #${d.id}${cat}${sprint}: ${preview}`);
+        // s92-m08: decisionText is already a preview of at most 300 characters.
+        lines.push(`  • #${d.id}${status}${cat}${sprint}: ${d.decisionText}`);
         if (d.evidence) {
           lines.push(`    Evidence: ${d.evidence}`);
         }
       }
     }
+  }
+
+  if (data.relevantDecisions?.some((d) => d.truncated)) {
+    lines.push(
+      '  (Previews; read one in full with cmos_decisions(action="show", decisionId=<id>).)'
+    );
   }
 
   // Surface warnings (incl. the m05 collab-sync warnings the transition dispatcher

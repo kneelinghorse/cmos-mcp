@@ -255,12 +255,7 @@ export const cmosContextSchema = z
       .array(z.number().int().positive())
       .optional()
       .describe('Constraint IDs to archive'),
-    missionId: z
-      .string()
-      .optional()
-      .describe(
-        's85-m04: filter next_steps to rows stamped with this mission (#487 mission -> row trail)'
-      ),
+    missionId: z.string().optional().describe('Only next steps recorded for this mission'),
 
     constraintId: z
       .number()
@@ -272,8 +267,8 @@ export const cmosContextSchema = z
       .boolean()
       .optional()
       .describe(
-        's84-m05: on reaffirm, set/clear the durable evergreen flag (true = never trip staleness ' +
-          'review/count — for institutional rules). Omit to leave it unchanged.'
+        'On reaffirm, set or clear the evergreen flag (true = never flagged as stale, for ' +
+          'standing rules). Omit to leave it unchanged.'
       ),
     stalenessThresholdDays: z
       .number()
@@ -313,7 +308,7 @@ export const cmosContextSchema = z
       .array(z.string())
       .optional()
       .describe(
-        "Status values to include in search results (default: ['active']). Applies to decision and learning results ONLY — ignored for mission and session results. An empty array disables status filtering entirely rather than matching nothing."
+        'Status values to include in search results (default: every status except superseded). Applies to decision and learning results ONLY — ignored for mission and session results. An empty array disables status filtering entirely rather than matching nothing.'
       ),
     projectRoot: z
       .string()
@@ -455,8 +450,7 @@ export const cmosContextToolDefinition = {
       },
       missionId: {
         type: 'string',
-        description:
-          'Filter next_steps to rows stamped with this mission (#487 mission -> row trail)',
+        description: 'Only next steps recorded for this mission',
       },
       constraintId: {
         type: 'integer',
@@ -467,7 +461,7 @@ export const cmosContextToolDefinition = {
       evergreen: {
         type: 'boolean',
         description:
-          's84-m05: on reaffirm, set/clear the durable evergreen flag (true = never trip staleness review/count, for institutional rules). Omit to leave unchanged.',
+          'On reaffirm, set or clear the evergreen flag (true = never flagged as stale, for standing rules). Omit to leave unchanged.',
       },
       stalenessThresholdDays: {
         type: 'integer',
@@ -499,7 +493,7 @@ export const cmosContextToolDefinition = {
         type: 'array',
         items: { type: 'string' },
         description:
-          "Status values to include in search results (default: ['active']). Applies to decision and learning results ONLY — ignored for mission and session results. An empty array disables status filtering entirely rather than matching nothing.",
+          'Status values to include in search results (default: every status except superseded). Applies to decision and learning results ONLY — ignored for mission and session results. An empty array disables status filtering entirely rather than matching nothing.',
       },
       projectRoot: {
         type: 'string',

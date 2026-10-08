@@ -32,9 +32,12 @@ describe('sign-up nudges repointed to /register (s78-m06)', () => {
   test('dashboardNotConfigured points sign-up at /register', () => {
     const err = CmosErrors.dashboardNotConfigured();
     expect(err.message).toContain('https://cmos.aquex.ai/register');
-    // The CMOS_DASHBOARD_URL config example stays the bare base URL (not /register).
-    expect(err.suggestion).toContain('CMOS_DASHBOARD_URL=https://cmos.aquex.ai');
-    expect(err.suggestion).not.toContain('CMOS_DASHBOARD_URL=https://cmos.aquex.ai/register');
+    // s92-m06: the suggestion no longer tells the user to set CMOS_DASHBOARD_URL — the URL has a
+    // default, so a missing sign-in, not the URL, is what this error means. It names the sign-in
+    // and the bare base URL, never /register.
+    expect(err.suggestion).toContain('cmos_auth(action="login_init")');
+    expect(err.suggestion).toContain('https://cmos.aquex.ai');
+    expect(err.suggestion).not.toContain('/register');
   });
 
   test('dashboardUpgradeRequired points upgrade at /register', () => {

@@ -166,6 +166,7 @@ describe('cmos_learnings', () => {
       expect(cmosLearningsToolDefinition.inputSchema.properties.action.enum).toEqual([
         'list',
         'search',
+        'show',
         'update',
         'reaffirm',
       ]);
@@ -205,9 +206,10 @@ describe('cmos_learnings', () => {
   });
 
   describe('CMOS_LEARNINGS_ACTIONS', () => {
-    it('contains 4 actions', () => {
-      expect(CMOS_LEARNINGS_ACTIONS).toHaveLength(4);
-      expect([...CMOS_LEARNINGS_ACTIONS]).toEqual(['list', 'search', 'update', 'reaffirm']);
+    it('contains 5 actions', () => {
+      // s92-m08: show reads one learning in full by id.
+      expect(CMOS_LEARNINGS_ACTIONS).toHaveLength(5);
+      expect([...CMOS_LEARNINGS_ACTIONS]).toEqual(['list', 'search', 'show', 'update', 'reaffirm']);
     });
   });
 

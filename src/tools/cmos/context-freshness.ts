@@ -12,7 +12,7 @@
 import * as crypto from 'crypto';
 import type { CmosDatabaseClient } from './client';
 import { genesisColumns, getProjectId } from './genesis-columns';
-import { snapshotDedupPrunedFilter } from './schema-migrations';
+import { findReusableSnapshot, snapshotStorage } from './snapshot-content-policy';
 
 const MILLIS_PER_DAY = 24 * 60 * 60 * 1000;
 
@@ -431,28 +431,28 @@ function createContextSnapshotWithDedup(
 ): number | null {
   const hash = crypto.createHash('sha256').update(content).digest('hex').substring(0, 16);
 
-  const existingResult = client.getOne<{ id: number }>(
-    // s84-m04: exclude a content-tombstoned row so identical content re-persists fresh.
-    `SELECT id FROM context_snapshots WHERE context_id = ? AND content_hash = ?${snapshotDedupPrunedFilter(client)}`,
-    [contextId, hash]
-  );
+  const reusable = findReusableSnapshot(client, {
+    contextId,
+    contentHash: hash,
+    kind: 'post-write',
+  });
 
-  if (existingResult.success && existingResult.data) {
-    return existingResult.data.id;
+  if (reusable.ok && reusable.row) {
+    return reusable.row.id;
   }
 
-  if (!existingResult.success) {
-    warnings.push(
-      `Auto-refresh snapshot dedupe lookup failed: ${existingResult.error?.message ?? 'Unknown error'}.`
-    );
+  if (!reusable.ok) {
+    warnings.push(`Auto-refresh snapshot dedupe lookup failed: ${reusable.message}.`);
     return null;
   }
 
   const g = genesisColumns(client, 'context_snapshots', getProjectId(client));
+  // s92-m09: a copy of the auto-refreshed context; not a close copy, so it keeps its content.
+  const storage = snapshotStorage('post-write', content, { contentHash: hash });
   const insertResult = client.execute(
-    `INSERT INTO context_snapshots (context_id, source, content_hash, content, created_at, ${g.columns.join(', ')})
-     VALUES (?, ?, ?, ?, ?, ${g.placeholders})`,
-    [contextId, source, hash, content, now, ...g.values]
+    `INSERT INTO context_snapshots (context_id, source, content_hash, content, created_at, ${[...storage.columns, ...g.columns].join(', ')})
+     VALUES (?, ?, ?, ?, ?, ${[...storage.columns.map(() => '?'), g.placeholders].join(', ')})`,
+    [contextId, source, storage.contentHash, storage.content, now, ...storage.values, ...g.values]
   );
 
   if (!insertResult.success) {

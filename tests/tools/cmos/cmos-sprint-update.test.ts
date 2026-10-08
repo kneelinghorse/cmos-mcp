@@ -167,6 +167,75 @@ describe('cmos_sprint_update', () => {
     });
   });
 
+  // s92-m02: closing a sprint by status update is a real close, and the next-step lease counts
+  // closes by end_date — so the update stamps the actual close time unless told otherwise.
+  describe('s92-m02 close by status update', () => {
+    function endDateOf(id: string): string | null {
+      const db = new Database(dbPath);
+      try {
+        return (
+          db.prepare('SELECT end_date FROM sprints WHERE id = ?').get(id) as {
+            end_date: string | null;
+          }
+        ).end_date;
+      } finally {
+        db.close();
+      }
+    }
+
+    it('stamps the actual close time into end_date and reports the planned date', async () => {
+      const planned = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+      const db = new Database(dbPath);
+      db.prepare('UPDATE sprints SET end_date = ? WHERE id = ?').run(planned, 'sprint-14');
+      db.close();
+      const before = Date.now();
+
+      const result = await cmosSprintUpdateWithDb(dbPath, {
+        sprintId: 'sprint-14',
+        fields: { status: 'Completed' },
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.data?.plannedEndDate).toBe(planned);
+      const stamped = result.data?.endDateStamped as string;
+      expect(Date.parse(stamped)).toBeGreaterThanOrEqual(before);
+      expect(Date.parse(stamped)).toBeLessThanOrEqual(Date.now());
+      expect(endDateOf('sprint-14')).toBe(stamped);
+      expect(formatSprintUpdateForLLM(result)).toContain(`the planned end date was ${planned}`);
+    });
+
+    it('honours an explicit endDate on the same update, and warns when it is in the future', async () => {
+      const future = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
+      const result = await cmosSprintUpdateWithDb(dbPath, {
+        sprintId: 'sprint-14',
+        fields: { status: 'Completed', endDate: future },
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.data?.endDateStamped).toBeUndefined();
+      expect(endDateOf('sprint-14')).toBe(future);
+      expect(result.warnings?.join('\n')).toContain(
+        'the next-step lease does not count this close'
+      );
+    });
+
+    it('stamps nothing when the sprint was already Completed or the update is not a close', async () => {
+      const recompleted = await cmosSprintUpdateWithDb(dbPath, {
+        sprintId: 'sprint-13',
+        fields: { status: 'Completed' },
+      });
+      expect(recompleted.data?.endDateStamped).toBeUndefined();
+      expect(endDateOf('sprint-13')).toBe('2025-12-10');
+
+      const retitled = await cmosSprintUpdateWithDb(dbPath, {
+        sprintId: 'sprint-14',
+        fields: { title: 'Still open' },
+      });
+      expect(retitled.data?.endDateStamped).toBeUndefined();
+      expect(endDateOf('sprint-14')).toBeNull();
+    });
+  });
+
   describe('validation', () => {
     it('should return error for non-existent sprint', async () => {
       const result = await cmosSprintUpdateWithDb(dbPath, {

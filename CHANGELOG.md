@@ -2,6 +2,361 @@
 
 All notable changes to cmos-mcp are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 3.2.0 — 2026-10-07
+
+Sprint 92 "Safe & Light": a stranger's first hour is safe and quiet, and no ceremony is destructive
+by default. This is a **MINOR** release under this project's rule: no published receipt field is
+removed or renamed. A 3.1.0 caller can observe four behaviour changes, each detailed below:
+
+- **Every answer names its project.** `projectRoot` and `resolvedBy` are on every response's data. A
+  call from a folder that is not a CMOS project is refused instead of routed to the one registered
+  project.
+- **A capture never fails for lack of a session.** With none open, it lands in the calling process's
+  implicit session, which the server closes when the process ends.
+- **A registry default set before 3.2.0 must be re-confirmed** with
+  `cmos_project(action="register", projectRoot=…, setAsDefault=true)` before it is applied.
+- **Sprint close no longer archives decisions and learnings by default.** `archive: true` opts in,
+  with the itemized receipt.
+
+Install and audit, measured on the packed tree installed with `npm install --omit=dev` into an empty
+project: 44.9 MB on disk across 138 production dependencies (3.1.0: 305.7 MB), and
+`npm audit --omit=dev` reports no vulnerabilities (3.1.0: 1 critical and 5 high, all through the
+embedding stack, now an optional peer). The tarball is 1.19 MB, 5.17 MB unpacked.
+
+### Changed
+
+- **A call never acts on a project the caller did not name.** With exactly one registered project,
+  3.1.0 answered every folder with that project: a decision and a session recorded from an
+  uninitialised folder B were written into project A. That registry-singleton step is gone for reads
+  and writes. Resolution now selects one store by detection — the explicit `projectRoot`, then the
+  first MCP root inside a CMOS project, then the working directory or the nearest folder above it
+  that is a CMOS project (one holding `cmos/db/`; a plain folder named `cmos`, such as a source
+  module, does not count) — and the selected store is final: when it cannot be used, the call is
+  refused instead of falling through to another project. **Consequences a 3.1.0 caller can
+  observe:**
+  - `projectRoot` naming a folder that is not a CMOS project is refused (`CMOS_NOT_DETECTED`); 3.1.0
+    fell through and acted on the cwd project. A folder inside a project is refused with the
+    enclosing project's path as the remedy.
+  - A call from a folder that is not a CMOS project is refused: a write names
+    `cmos_project(action="init", projectRoot=…)`, a read answers "No CMOS project in '<dir>'".
+  - A working directory, or an advertised MCP root, inside a project now resolves to that project
+    (the walk-up stops below `$HOME`). 3.1.0 only looked at the folder itself.
+  - When the client advertised roots that hold no CMOS project and the working directory answered
+    instead, the answer says so in one rendered line.
+  - `cmos_message(action="send")` from the server's own install directory resolves to the store
+    there; the 3.1.0 cwd-vs-install-root guard is retired.
+  - A registry default applies only to a call with no project context at all (no `projectRoot`, no
+    MCP roots, and a working directory of `/`, `$HOME` or the install directory), and only once
+    confirmed with `cmos_project(action="register", projectRoot=…, setAsDefault=true)`. **A default
+    set before this release is not applied until re-confirmed**; the startup log,
+    `cmos_message(action="whoami")` and `cmos_review` say so.
+  - `cmos_project(action="unregister")` takes its path literally: a path that is no longer a CMOS
+    project is unregistered by path, and no longer unregisters the cwd project instead.
+    `cmos_project` list/validate/prune/sweep and the user-level `cmos_auth` actions no longer need a
+    resolvable project.
+- **`cmos_message` validates an explicit `projectRoot` on every action.** list, get, respond, ack and
+  directory used to pass it through unchecked; a folder that is not a CMOS project is now refused.
+- **`SenderResolutionSource`** (`whoami`'s `resolved.source`, candidate traces) loses
+  `registry-singleton` and gains `server-project-root` and `registry-default`.
+  **`ProjectValidationItem.status`** gains `ephemeral`.
+
+- **The next-step lease counts real closes, within the operator's calendar bounds.** In 3.1.0,
+  `cmos_sprint(action="complete")` kept a sprint's planned end date (`COALESCE(end_date, ?)`), and the
+  lease counts a close by `end_date` — so a sprint planned for next week but closed today counted as a
+  close every row carried after it had survived. TraceLab lost 58 freshly carried rows that way.
+  - A close now stamps its **actual close time** into `end_date`; the receipt reports the planned date
+    as `plannedEndDate`. `cmos_sprint(action="update", fields: {status: "Completed"})` — the close by
+    status update some projects use — stamps it too (`endDateStamped`, `plannedEndDate`), unless the
+    same update sets `endDate`; a future `endDate` is honoured with a warning.
+  - The lease ignores any `end_date` still in the future.
+  - **One-time repair, at the first close after upgrading:** Completed sprints whose `end_date` is later
+    than their recorded close (the `sprint_complete` event, else its context snapshot) are re-dated to
+    it. The close receipt's `endDateRepair` lists each re-dated sprint (`from` → `to`) and every
+    Completed sprint left as found because nothing records when it closed. Only later dates move, so a
+    correctly dated store sees no lease change. Measured: 9 sprints on a TraceLab copy, 1 here.
+  - **Calendar bounds (operator decision #1161):** no row is dropped before it is 14 days past its last
+    carry or creation, however many closes it survived (the close receipt lists such rows under
+    `heldByMinAge`); a row that has survived no close for 6 weeks is flagged `idle` — in the
+    next-steps list, the close receipt and the opener's next actions — and is never dropped by the
+    calendar alone. `LeaseState` gains `idle`; the published counting rule says all of this.
+- **A sprint close no longer archives the sprint's decisions and learnings** (operator decision
+  #1160). Through 3.1.0, `cmos_sprint(action="complete")` archived every active decision and learning
+  bound to the closing sprint. Across the fleet 78% of decisions ended up archived, mostly by that
+  step, and projects worked around it by closing sprints with a status update or recording
+  corrections without a sprint. They now stay active; a decision still leaves the active set when a
+  new row supersedes it.
+  - `archive: true` opts back in and reproduces the old step exactly: the same rows, evergreen
+    learnings kept active, every archived id named. Measured on identical copies of this repo's
+    store: the pre-change close and `archive: true` archived the same 12 decisions and 2 learnings
+    and rendered the same receipt line.
+  - The receipt's `lifecycle` gains `archived`, true only when `archive: true` was passed. By default
+    `decisionsArchived` and `learningsArchived` read 0 and `archivedDecisionIds` and `learningIds`
+    read `[]`; all four stay in the receipt.
+  - The pre-close database snapshot is still taken: the close still writes the end date and the
+    lease drops.
+- **A capture never fails for lack of a session.** In 3.1.0, `cmos_session(action="capture")` with
+  no session open was refused with `SESSION_NOT_ACTIVE`. Neither `cmos_review` nor
+  `cmos_agent_onboard` opens a session, so the first capture of most conversations failed. Since
+  3.2.0 a capture, a `cmos_decisions` record, or a mission completion with `decisions[]` that names
+  no session lands in the caller's session. That is the project's open explicit session when one
+  exists, as before. Otherwise it is the calling process's own **implicit session**, opened on first
+  use.
+  - **Attribution is per process.** Each server process writes under its own implicit session, and
+    no call writes into another process's. Naming another live process's implicit session on
+    `capture` is refused however idle that session is (`INVALID_PARAMETER` on `sessionId`). On
+    `complete` it is refused until the session has been idle for more than 12 hours. A recorded
+    decision is now attributed to the caller's session, where 3.1.0 left `author_session_id` NULL
+    when no session was open. One limit: on a store that pulls collaborators' sessions through
+    collab sync, a pulled active session counts as the project's explicit session, as it did in
+    3.1.0.
+  - **Who closes them.** The server closes its implicit sessions when its client goes away (stdin
+    end, SIGINT, SIGTERM). A process's first write to a store, of any kind, also closes implicit
+    sessions there whose process is gone from this host, or that have been idle for more than 12
+    hours. Each carries a deterministic summary and is listed under `closedSessions` on a capture,
+    record or start, or as a warning line on a mission completion. These closes call the session
+    handler directly and **never upload a checkpoint**.
+  - **Sprint tagging.** An implicit session carries no sprint. Every row it writes resolves its
+    sprint when it is written, as any untagged write does, instead of inheriting the sprint that was
+    open when its process started.
+  - **Explicit sessions** keep one-at-a-time per project, and implicit sessions never block a start.
+    A start first closes an explicit session idle for more than 12 hours, and lists it under
+    `closedSessions`. A start refused by a live session closes nothing.
+  - Orphan detection, the cross-project sweep and the onboard active session list explicit sessions
+    only.
+  - `sessions` gains `implicit` and `owner_key`, added by a one-time migration. `owner_key` stores a
+    hash of the hostname, never the name.
+
+- **Retrieval answers carry previews, not bodies.** Hits in `cmos_context(action="search")` and
+  `cmos_learnings(action="search")`, and the decisions `cmos_mission_transition(action="start")`
+  surfaces, now carry a preview of at most 300 characters. Each one keeps its id and gains `status`,
+  `truncated` and `fullLength`. The fields keep their names (`text`, `content`, `decisionText`), so
+  a caller that read the full text from them now reads the preview; the full text comes from the new
+  `show` actions. Measured on a fixture of 2,000-character rows, a 10-hit search answer went from
+  24,796 characters to 7,226. Rows are still scored on their full text.
+- **`tools/list` is about half the size.** The descriptions clients receive are short:
+  18,906 characters, about 4,700 tokens, where they were 38,141. The schemas are unchanged, and
+  TOOL_REFERENCE.md keeps every full description. A test holds the list under 6,000 tokens at four
+  characters a token.
+- **Completing a mission counts the decisions it recorded.** The recommended path records each
+  decision with `cmos_decisions(action="record", missionId)` and then completes the mission. 3.1.0
+  counted only the completion call's own `decisions[]`, so that path was told "No decisions captured
+  for this mission" — the most reported pain since 3.1.0. The advice now fires only when the mission
+  has no non-superseded decision at all, counting rows recorded at any time: before the mission
+  started, and on missions with no recorded start. The receipt gains `missionDecisionCount` and
+  renders "Decisions recorded for this mission: N"; `decisionCount` still counts this call's own
+  inserts.
+- **No more automatic supersession offers or implicit reaffirms.** A captured or recorded decision
+  used to come back with `supersessionCandidates` and a `supersessionMessage`, and a capture bumped
+  `last_reviewed_at` on any learning whose text it resembled (`implicitlyReaffirmedLearningIds`).
+  Replayed over every historical capture, 69 of 9,035 offers were true, and 20 of 3,973 implicit
+  bumps touched a learning the author cited. Both are retired. The three fields stay in the answer
+  types, deprecated and never populated. Explicit paths are unchanged: `supersedes=[…]` on record,
+  `citesLearningIds`, and `cmos_learnings(action="reaffirm")`.
+- **The opener tells the truth.** On a fresh project, `cmos_review`'s top next actions used to be a
+  pointer to a `tierSelectionPrompt` the digest does not carry, a whoami nudge, and a dashboard login
+  nag. Now:
+  - The review never forwards an action that points into onboard's own payload. On a fresh project
+    it leads with `cmos_agent_onboard()`.
+  - Whoami is prescribed only when the project was inferred rather than named. An explicit
+    `projectRoot`, the client's MCP roots and the server's `--project-root` all name it, and the
+    review now passes the client's roots through.
+  - The login nag and the "messaging block omitted" warning appear only after the user opts into the
+    dashboard: a stored credential, a legacy env credential, or an explicit `CMOS_DASHBOARD_URL`. The
+    built-in default URL is not a choice the user made.
+  - "Start a planning or review session" is retired, since a session is optional.
+  - The digest gains `recentLearnings`: up to three, trimmed before any decision when its 4 KB budget
+    binds. Decisions and learnings carry their ids, in the data and on each rendered line.
+- **`cmos_agent_onboard` is bounded, and says so.** It claimed "<4KB" and measured 36,142 bytes on
+  this repository's store. Recent decisions are now 300-character previews with `id`, `truncated` and
+  `fullLength`. Open items and the top-level next steps are previews too. The last session's summary
+  is capped at 1,000 characters, and its decisions and next steps at the newest five previews (the
+  full session is on `cmos_session(action="list")`). The same store now measures about 21,000
+  characters, and a test holds a long-history fixture under the documented 28,000.
+- **Search finds archived decisions, and fills its page.** In 3.1.0, `cmos_context(action="search")`
+  and mission-start surfacing returned active rows only, but a sprint close archived decisions: 46%
+  of the rows later records cite were no longer active when cited. The filter also ran after the
+  candidate pool was cut, so 26-33% of searches came back short; one returned a single row for
+  `limit 5`.
+  - Both surfaces now drop only superseded rows, and each hit shows its status: search labels each
+    hit `decision #N, archived`, and mission start marks its bullets the same way. An explicit
+    `statusFilter` keeps its include-list meaning (`["active"]` restores the old behaviour), and
+    `[]` still disables the filter.
+  - The search answer's `options` gains `excludedStatuses`: `["superseded"]` when the caller named no
+    statuses. `statusFilter` then reads `[]`, where 3.1.0 reported `["active"]`.
+  - The filter runs inside the candidate queries, so a page is never short because the pool was cut
+    first.
+  - The keyword arm reads every distinct query keyword, up to 64, where it read the first 10.
+  - Measured on 2,154 natural citation labels in four stores, with no embedding package installed:
+    recall@10 went from 0.331 to 0.638, mission-start recall@5 from 0.149 to 0.429, and short pages
+    from 54.8% to 0% (`cmos/docs/s92-m07-retrieval-evaluation.md`).
+- **The embedding stack is an optional peer dependency.** `@xenova/transformers` is no longer
+  installed with cmos-mcp. On the same labels, keyword-only retrieval beats the old equal-weight
+  hybrid, and the stack was most of the install.
+  - Measured on packed tarballs installed with `npm install --omit=dev`: 305.7 MB → 44.7 MB, and
+    `npm audit` went from 1 critical and 5 high advisories (all through `@xenova/transformers`:
+    protobufjs, onnx-proto, onnxruntime-web, sharp) to none.
+  - Without the package, writes record no embedding and searches are keyword-only, both silently,
+    and nothing contacts HuggingFace. To keep semantic search, install `@xenova/transformers` next to
+    cmos-mcp; the vector term then counts 0.25 in the fusion (it counted 1.0).
+- **A normal start writes two stderr lines**: the version, and the project a call with no context
+  would use. A clean-room 3.1.0 start wrote 16. Startup and per-call diagnostics (the `.env` loader,
+  attribution self-test, registry, health, MCP roots probe) are behind `CMOS_DEBUG=1`. Real
+  misconfigurations still print.
+- **Launch recipes pin the version.** README and getting-started recommend
+  `npm install -g @aquex/cmos-mcp@3.2.0`, or `npx --prefer-offline -y @aquex/cmos-mcp@3.2.0` in every
+  client config. An unpinned `npx -y` could look the package up again on every launch and silently
+  move to the latest release.
+
+- **Session and mission closes stop storing snapshot content.** The copy a close writes after
+  persisting its context is now content-less: its row is written with `content` empty,
+  `content_pruned_at` stamped and its hash prefixed `pruned:`, so it is never a dedup hit, and
+  `cmos_context(action="history")` marks it `contentPruned`. These copies were 282.7 MB of the
+  367.6 MB of snapshot content on the 24 stores measured, and no query reads them; the context row
+  holds the same content. Sprint milestones, explicit snapshots, update and auto-refresh copies, and
+  every recovery copy taken before a trim, condense or migration keep their content.
+  - When the context write fails, the copy keeps its content as the only durable copy, and its
+    source ends `:only_copy` so no prune reclaims it.
+  - A session close no longer overwrites a context it cannot read or parse. It leaves it as it is
+    and reports a `CONTEXT_UNREADABLE` write failure.
+  - Retention archives now carry the source `retention_archive:<caller source>`, so a session
+    close's archive no longer shares its source string with that close's content-less copy.
+- **A snapshot no longer stands on a row a prune would reclaim sooner.** Every snapshot site skips
+  writing when a row of the same context already holds identical content. A milestone, a named
+  snapshot or a recovery copy now does so only when that row is never pruned, so its own retention
+  holds. A recovery copy is kept 30 days from its own creation, so it may also stand on an identical
+  recovery copy under a minute old: a retried migration still writes one row. Before, a named
+  snapshot, a sprint-close milestone or a condense backup taken just after an update returned the
+  update copy's id under the copy's source, and on this repository's store 67 of 70 recorded sprint
+  closes left no milestone row of their own. `cmos_context(action="snapshot")` now refuses a source
+  that reads as one of CMOS's automatic copies (`Context update:`, `session_complete:`,
+  `context_condense:` and the like).
+- **The sprint-close growth advisory counts only snapshots that still hold content**, so it clears
+  once a prune has run (the prune keeps every row), and it names
+  `cmos_db(action="prune_snapshots")`.
+- **`cmos_project(action="init")` writes `AGENTS.md`** at the project root, the file many coding
+  agents read, unless an agents file of any case is already there; an existing `agents.md` is left
+  as it is. The seed template now ships as `cmos-seed/templates/AGENTS.md`, and the CLAUDE.md init
+  writes points at whichever agents file the project has.
+- **Node.js 20 or newer.** `engines` now says `>=20`, which is what `better-sqlite3` 12 needs; the
+  docs said 18.
+- **`cmos_review` no longer prescribes missions to a general-tier project.** With no missions, its
+  answer leaves out the work-queue and `Next:` lines, and `workQueue.nextAction` reads "Nothing in
+  progress." Other tiers are unchanged.
+
+### Removed
+
+- **`fast-xml-parser`**, a runtime dependency nothing imported.
+
+### Fixed
+
+- **`acrossProjects=true` no longer redirects a write.** `cmos_mission`, `cmos_decisions` and
+  `cmos_learnings` skipped project resolution whenever the flag was set, on every action — so
+  `cmos_decisions(action="record", projectRoot=B, acrossProjects=true)` dropped `B` and wrote the
+  working directory's project. Only the three portfolio reads (`cmos_mission` status, `cmos_decisions`
+  list, `cmos_learnings` list) skip the local requirement now; every other action resolves normally.
+- **The docs are true for a stranger.** Each item was re-checked against the code:
+  - Snapshots: README, SECURITY.md and getting-started now say the same thing. `cmos_db` takes a
+    snapshot on demand, and CMOS takes one before and after every sprint close and before a
+    snapshot prune applies; restore copies the live database aside first. They used to say backups
+    were manual only, or that nothing snapshots before a destructive step.
+  - SECURITY.md states that once any dashboard credential exists, every session or sprint close
+    uploads the entire SQLite file, and documents `CMOS_CHECKPOINT_SYNC=off`, now also in README's
+    environment block.
+  - `cmos_message`'s full description no longer says it requires password environment variables; it
+    names the device-code sign-in. `maxSnapshots` is described as the retention cap it is.
+  - `DASHBOARD_NOT_CONFIGURED` means there is no sign-in. Its suggestion, README and the
+    troubleshooting guide no longer blame an empty `CMOS_DASHBOARD_URL`, which has a default.
+  - getting-started: `cmos_project(action="register")` records the project locally; the first close
+    after you sign in registers it on the dashboard. The no-network claim says when it holds, and the
+    loop opens with `cmos_review`.
+  - README's first call starts with `cmos_project(action="init")`; onboard refuses without a
+    database like every other tool.
+  - SECURITY.md cites source by repository link and symbol name instead of line numbers that drifted
+    and were dead links in the npm package.
+- **No internal references in published text.** Tool descriptions, TOOL_REFERENCE.md, SECURITY.md
+  and the seed schema every project receives no longer cite this repository's sprint, mission,
+  decision or issue numbers, and a test keeps them out. Runtime messages that cited them (the
+  `CMOS_PROJECT_ROOT` warnings, a pull warning, the untagged-decision advisory) say what they mean
+  instead.
+
+### Added
+
+- **`cmos_db(action="prune_snapshots")`**, a supported prune for old context snapshots, requested by
+  Stage1 (1,192 snapshots, 49.2 MB, and no safe way to remove them).
+  - It is a dry run unless `confirm=true`. The dry run reports counts and bytes per context and why
+    each kept snapshot is kept.
+  - Applying takes a database snapshot first and stops if that fails. It then empties content in one
+    transaction and never deletes a row, so ids, foreign keys and `snapshot_taken` events survive and
+    a pull or backfill has nothing to restore.
+  - It reclaims only copies the server wrote on its own (close copies, including legacy
+    `session_runtime`/`mission_runtime` rows, update copies, and recovery copies older than 30 days).
+    It always keeps:
+    - the newest and last `keepLast` (default 30) per context, counting only snapshots that still
+      hold content;
+    - every snapshot a decision or a context's `archived_sprint_summaries` references;
+    - sprint milestones, and the state each sprint close landed on when that close stored no
+      milestone of its own. The answer counts closes as recorded (an event, or the close's own
+      milestone row) or approximate (only an end_date), and counts Completed sprints with neither;
+    - snapshots someone named;
+    - the caller's `keepIds`, `keepSince` and `keepSources` (`*` patterns).
+  - It refuses to apply while a decision column, a context, the event log or the sprints table
+    cannot be read, since a reference or a sprint close there could not be honoured. It re-reads
+    and re-selects under the write lock, and empties only rows the database snapshot holds.
+  - The applied answer reports the content emptied, counted row by row per context and in total,
+    and the content left.
+  - A retention archive is kept while a context's `archived_sprint_summaries` names it. Once a
+    re-archive, an aggressive condense or the 100-summary cap drops that entry, it is an ordinary
+    recovery copy and is reclaimed once it is 30 days old.
+- **`cmos_db(action="health")` reports `semanticSearch`**: whether the vector term can take part
+  (`loaded`, `installed`, `not-installed` or `failed`) and why, without loading anything.
+- **`CMOS_DEBUG=1`** brings back every startup and per-call diagnostic on stderr.
+- **Server instructions.** `initialize` now returns instructions every MCP client can use without a
+  rules file. The first 512 characters state the loop on their own: open with `cmos_review`, record
+  a decision with `cmos_decisions(action="record")`, never edit one (supersede it), and pass
+  `projectRoot` outside the project folder.
+- **`cmos_decisions(action="show", decisionId)` and `cmos_learnings(action="show", learningId)`**
+  read one row in full by id, the way to expand a preview. An id the project does not hold is
+  refused by name (`INVALID_PARAMETER`).
+- **An explicit `sprintId` on `cmos_session` start and capture.** It names an existing sprint of any
+  status, for example a planned sprint for a planning session. A sprint that does not exist is
+  refused by name (`SPRINT_NOT_FOUND`). On capture it tags the rows the capture writes, including
+  the next-steps and constraints materialized at the session's close. A mission's sprint still wins
+  when `missionId` is given, and since this release it decides those deferred rows too, where 3.1.0
+  gave them the session's sprint.
+- **Every success payload names the store it touched**: `data.projectRoot` and `data.resolvedBy`
+  (`explicit`, `mcp-roots`, `cwd`, `server-project-root`, `registry-default`, or `none` with a null
+  `projectRoot` for a portfolio, registry or dashboard-only call), plus one rendered line
+  ("Project: <root> (resolved by …)") whenever `resolvedBy` is not `explicit` or `cwd`.
+  `cmos_review` carries both fields inside its 4 KB digest budget.
+- **`--project-root <dir>`**, a server argument for one MCP config: the project used by calls that
+  carry no project context. This is the Claude Desktop recipe — local to that config, unlike a
+  machine-global default.
+- **Ephemeral stores.** `cmos_project(action="register")` returns `ephemeral` (with a warning) for a
+  store under the OS temp directory, `/tmp`, `/private/tmp`, or a path in the new
+  `CMOS_EPHEMERAL_PATHS` variable; `validate` reports them as `ephemeral`, and `validate` with
+  `prune=true` archives them even while the store exists. Registry rows gain `defaultApplied`
+  (`register`, `list`); `whoami` gains `registryDefault` and `serverProjectRoot`; `cmos_review`
+  gains `registryDefault` when a default exists but is not applied.
+
+### Internal
+
+- **A test run can no longer rewrite the real build manifest.** The manifest generator takes
+  `--dist <dir>`, its tests run the real script against a temporary directory, and the suite's
+  global teardown fails the run if `dist/.build-manifest.json` changed. The server reads that file to
+  report a stale build, so a full run used to make a running server think it was stale.
+- **The unit suite denies outbound network.** A connection to any host that is not loopback fails,
+  and fails the test that made it even when the code swallowed the error; a test opts in per origin
+  with `allowNetworkOrigins`. A nested-jest test proves the failure is loud.
+- **The packed-tarball E2E lane runs the clean-room scenarios** against the installed package: no
+  write lands in another project from an unrelated folder or an explicit non-project root, a fresh
+  project's opener carries nothing misleading, record → start → complete counts the decision, and
+  `tools/list` stays under its ceiling. The publish workflow now runs the lane before it publishes.
+- The session-capture tests drive the shipped handler instead of a private copy of an older one.
+- The first test of the server-runtime suite no longer pays the module-compile cost under load; a
+  warm-up does, under its own timeout.
+- The Last Updated provenance oracle follows a renamed file across an older merge when every such
+  merge predates the latest body change it found.
+
 ## 3.1.0 — 2026-09-18
 
 Sprint 91 "What the Field Said". Fifteen days of field use of 3.0.0 reported that the write surface

@@ -23,3 +23,9 @@ TOOL_REFERENCE.md
 # precisely this sprint's defect class. Plans are read by humans and agents, never
 # imported or rendered by the build, so nothing is lost by exempting them.
 cmos/planning/
+
+# s92: research evidence packs are the exact scripts and reports that produced the numbers the
+# plans cite. They are read, re-run and quoted — never imported or built — so reformatting them
+# only changes bytes a reader verifies against. The 2026-10 pack's .cjs scripts were committed
+# unformatted and failed `prettier --check` in CI at 275ce6f.
+cmos/research/

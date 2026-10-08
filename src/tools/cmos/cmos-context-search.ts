@@ -9,13 +9,32 @@ import { getProjectId } from './genesis-columns';
 import { frameForeignText } from '../../intelligence/provenance-frame';
 import {
   HybridRetriever,
+  DEFAULT_EXCLUDED_STATUSES,
   DEFAULT_RECENCY_WEIGHT,
   type RankedResult,
   type RankedResultType,
 } from './fts5-retriever';
 import { appendWarnings } from './format-warnings';
+import { PREVIEW_MAX_CHARS, previewText } from './text-preview';
 
 export type { RankedResultType } from './fts5-retriever';
+
+/**
+ * s92-m08 (retrieval R5): a hit as the answer carries it. `text` is a preview of at most
+ * PREVIEW_MAX_CHARS characters, `truncated` says whether it was cut, and the row's id, type and
+ * status say how to read it in full (show by id). Graph neighbours carry previews too.
+ */
+export interface ContextSearchHit extends RankedResult {
+  truncated: boolean;
+  fullLength: number;
+}
+
+/** The call that reads one hit in full. */
+export function showCallFor(hit: Pick<RankedResult, 'type' | 'id'>): string {
+  if (hit.type === 'decision') return `cmos_decisions(action="show", decisionId=${hit.id})`;
+  if (hit.type === 'learning') return `cmos_learnings(action="show", learningId=${hit.id})`;
+  return `cmos_mission(action="show", missionId="${hit.id}")`;
+}
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -23,8 +42,8 @@ export interface ContextSearchResult {
   /** The query that was run */
   query: string;
 
-  /** Ranked results, ordered by combined score (descending) */
-  results: RankedResult[];
+  /** Ranked results, ordered by combined score (descending), as previews */
+  results: ContextSearchHit[];
 
   /** Total results returned */
   count: number;
@@ -34,7 +53,13 @@ export interface ContextSearchResult {
     limit: number;
     recencyWeight: number;
     types: RankedResultType[];
+    /** The caller's include list; `[]` when none was given (or an explicit no-filter). */
     statusFilter: string[];
+    /**
+     * s92-m07: statuses left out when the caller named none: `['superseded']`. Empty when the
+     * caller passed `statusFilter`, whose include-list meaning then applies alone.
+     */
+    excludedStatuses: string[];
   };
 
   /** Retriever backend used */
@@ -57,10 +82,10 @@ export interface ContextSearchParams {
   /** Content types to search (default: ['decision']) */
   types?: RankedResultType[];
 
-  /** Recency weight 0–1 (default: 0.5) */
+  /** Recency weight 0–1 (default: DEFAULT_RECENCY_WEIGHT, 0.2) */
   recencyWeight?: number;
 
-  /** Status filter (default: ['active']) */
+  /** Statuses to include. Absent: every status except superseded (s92-m07). `[]`: no filter. */
   statusFilter?: string[];
 
   /** Project root */
@@ -92,7 +117,9 @@ export async function cmosContextSearch(
   // s82-m04 (FORK-E5): default to the retriever's tuned DEFAULT_RECENCY_WEIGHT (0.2), not the
   // stale 0.5 — so this production recall path matches the measurement gate and the s67-m02 sweep.
   const recencyWeight = params.recencyWeight ?? DEFAULT_RECENCY_WEIGHT;
-  const statusFilter = params.statusFilter ?? ['active'];
+  // s92-m07 (R1): no default include list. The retriever then drops only superseded rows: a row
+  // archived at a sprint close is still the record, and 46% of cited rows were inactive when cited.
+  const statusFilter = params.statusFilter;
 
   return withClientAsync(
     async (client) => {
@@ -108,11 +135,35 @@ export async function cmosContextSearch(
         expandGraph: true,
       });
 
+      const hits: ContextSearchHit[] = results.map((r) => {
+        const preview = previewText(r.text);
+        return {
+          ...r,
+          text: preview.preview,
+          truncated: preview.truncated,
+          fullLength: preview.fullLength,
+          ...(r.graphNeighbors
+            ? {
+                graphNeighbors: r.graphNeighbors.map((n) => ({
+                  id: n.id,
+                  text: previewText(n.text).preview,
+                })),
+              }
+            : {}),
+        };
+      });
+
       return createSuccess<ContextSearchResult>({
         query: params.query,
-        results,
-        count: results.length,
-        options: { limit, recencyWeight, types, statusFilter },
+        results: hits,
+        count: hits.length,
+        options: {
+          limit,
+          recencyWeight,
+          types,
+          statusFilter: statusFilter ?? [],
+          excludedStatuses: statusFilter === undefined ? [...DEFAULT_EXCLUDED_STATUSES] : [],
+        },
         backend: caps.backend,
         localProjectId: getProjectId(client),
       });
@@ -160,17 +211,27 @@ export function formatContextSearchForLLM(result: CmosToolResult<ContextSearchRe
     // rows stay bare.
     const isForeign =
       r.projectId != null && (localProjectId == null || r.projectId !== localProjectId);
+    const label = `${r.type} #${r.id}${r.status ? `, ${r.status}` : ''}`;
     if (isForeign) {
-      lines.push(`**${i + 1}.**${sprintStr}${catStr} [proj:${r.projectId}]`);
+      lines.push(`**${i + 1}.** [${label}]${sprintStr}${catStr} [proj:${r.projectId}]`);
       lines.push(frameForeignText(r.text, `proj:${r.projectId}`));
     } else {
-      lines.push(`**${i + 1}.** ${r.text}${sprintStr}${catStr}`);
+      lines.push(`**${i + 1}.** [${label}] ${r.text}${sprintStr}${catStr}`);
     }
     lines.push(
       `   *score: ${scoreStr} | age: ${ageDaysStr} | recency: ${r.recencyFactor.toFixed(2)}*`
     );
     lines.push('');
   });
+
+  // s92-m08: previews are cut at PREVIEW_MAX_CHARS; say once how to read one in full.
+  const cut = results.find((r) => r.truncated);
+  if (cut) {
+    lines.push(
+      `Previews are cut at ${PREVIEW_MAX_CHARS} characters. Read one in full with ${showCallFor(cut)}.`
+    );
+    lines.push('');
+  }
 
   appendWarnings(lines, result);
 

@@ -10,7 +10,7 @@
 import * as crypto from 'crypto';
 import { z } from 'zod';
 import { withClientAsync, type CmosDatabaseClient } from './client';
-import { genesisColumns, getProjectId } from './genesis-columns';
+import { genesisColumns, getProjectId, tableHasColumn } from './genesis-columns';
 import type { CmosToolResult, MissionStatus, SanitizedFieldReport } from './types';
 import { recordAgentFeedback } from './agent-feedback';
 import {
@@ -21,9 +21,10 @@ import {
   transitionsFrom,
 } from './errors';
 import {
+  ensureContentPrunedColumn,
+  ensureImplicitSessionColumns,
   ensureStrategicDecisionsSchema,
   ensureMissionTimestamps,
-  snapshotDedupPrunedFilter,
 } from './schema-migrations';
 import {
   absorbedParameterNames,
@@ -35,6 +36,8 @@ import { patchProjectIdentity, type ProjectIdentityData } from './project-identi
 import { appendWarnings, attachWarnings } from './format-warnings';
 import { checkWrite } from './write-guard';
 import { isOpenStatus } from './terminal-status';
+import { resolveCallerSession, storeNeedsReconcile } from './session-owner';
+import { findReusableSnapshot, snapshotStorage } from './snapshot-content-policy';
 
 interface MissionCompletionRecord {
   id: string;
@@ -79,6 +82,14 @@ export interface MissionCompleteResult {
 
   /** Total decisions captured for this mission's sprint */
   sprintDecisionCount?: number;
+
+  /**
+   * s92-m04: non-superseded decisions stamped with this mission, recorded at any time, including
+   * this call's. The recommended path records decisions with cmos_decisions(action="record",
+   * missionId) before completing, so `decisionCount` (this call's) is often 0 while this is not.
+   * Absent when the count could not be read.
+   */
+  missionDecisionCount?: number;
 
   /** Number of learnings captured for this mission */
   learningCount?: number;
@@ -235,6 +246,8 @@ export async function cmosMissionComplete(
   }
 
   const warnings: string[] = [];
+  // s92-m03: set when this completion attributes decisions to the caller's session.
+  let storePath: string | null = null;
   const result = await withClientAsync(
     async (client) => {
       // Query mission by ID
@@ -296,6 +309,8 @@ export async function cmosMissionComplete(
 
       // Ensure timestamp columns exist (migration)
       warnings.push(...(ensureMissionTimestamps(client).warnings ?? []));
+      // s92-m09: the content tombstone column, so this close's persist copy can be content-less.
+      warnings.push(...(ensureContentPrunedColumn(client).warnings ?? []));
 
       // Build update query - include notes, completed_at, and updated_at
       let updateQuery: string;
@@ -377,6 +392,13 @@ export async function cmosMissionComplete(
         );
       }
 
+      // s92-m03: decisions[] are attributed to the caller's session, which may be an implicit
+      // session opened for them; its columns are ensured here, at the answer boundary.
+      if ((cleanDecisions?.length ?? 0) > 0) {
+        warnings.push(...(ensureImplicitSessionColumns(client).warnings ?? []));
+        storePath = client.path;
+      }
+
       // Decision capture soft gate
       const decisionResult = await captureDecisions(
         client,
@@ -441,6 +463,9 @@ export async function cmosMissionComplete(
           contextSnapshotId: aggregationResult.snapshotId,
           decisionCount: decisionResult.decisionCount,
           sprintDecisionCount: decisionResult.sprintDecisionCount,
+          ...(decisionResult.missionDecisionCount !== null
+            ? { missionDecisionCount: decisionResult.missionDecisionCount }
+            : {}),
           learningCount,
           ...(feedbackId !== undefined ? { feedbackId } : {}),
         },
@@ -450,6 +475,14 @@ export async function cmosMissionComplete(
     },
     { projectRoot: params.projectRoot }
   );
+  // s92-m03: this process's first write to a store reconciles it, whichever handler made that
+  // write. The lifecycle module is loaded only then, and lazily: it closes sessions through
+  // cmos-session-complete, which imports this module.
+  if (storePath !== null && storeNeedsReconcile(storePath)) {
+    const lifecycle = await import('./implicit-session-lifecycle');
+    const reconciled = await lifecycle.reconcileStoreOnce(storePath);
+    warnings.push(...reconciled.warnings, ...lifecycle.closedSessionLines(reconciled.receipts));
+  }
   return attachWarnings(result, warnings);
 }
 
@@ -464,6 +497,8 @@ interface DecisionCaptureResult {
   /** Rows the strategic_decisions INSERT actually landed — NOT `decisions.length` (s86-m02b). */
   decisionCount: number;
   sprintDecisionCount: number;
+  /** s92-m04: null when the count could not be read. */
+  missionDecisionCount: number | null;
   warning?: string;
 }
 
@@ -487,12 +522,18 @@ async function captureDecisions(
     );
     const projectDomain = domainResult.success ? (domainResult.data?.value ?? null) : null;
 
-    // Get active session ID if one exists
-    const sessionResult = client.getOne<{ id: string }>(
-      "SELECT id FROM sessions WHERE status = 'active' LIMIT 1",
-      []
-    );
-    const sessionId = sessionResult.success ? (sessionResult.data?.id ?? null) : null;
+    // s92-m03: the caller's session (the open explicit session, else this process's implicit
+    // session, opened for these decisions), never another process's. If this is the process's
+    // first write to the store, the handler reconciles after its connection closes.
+    const caller = resolveCallerSession(client, { open: true });
+    if (!caller.ok) {
+      warnings.push(
+        `Decisions are stored without an author session: ${caller.error.message ?? 'session lookup failed'}`
+      );
+    } else {
+      warnings.push(...caller.warnings);
+    }
+    const sessionId = caller.ok ? (caller.session?.sessionId ?? null) : null;
 
     for (const decision of decisions) {
       const trimmed = decision.trim();
@@ -551,15 +592,28 @@ async function captureDecisions(
   const result: DecisionCaptureResult = {
     decisionCount: insertedCount,
     sprintDecisionCount,
+    missionDecisionCount: null,
   };
 
-  // Soft gate warning when no decisions provided. Deliberately keyed on what the CALLER supplied,
-  // not on `insertedCount`: this nudge is "you documented no architectural choices", and firing it
-  // when the agent supplied decisions the database then rejected would give misdirected advice for
-  // a failure `warnings` already names (s86-m02b).
-  if (decisions.length === 0) {
+  // Soft gate: "you documented no architectural choices". s92-m04 (the #1 pain since 3.1.0, 24 of
+  // 105 friction items): the recommended path records each decision with
+  // cmos_decisions(action="record", missionId) BEFORE completing, and this nudge counted only the
+  // call's own decisions[], so it fired on exactly the agents who did it right. It now counts every
+  // non-superseded decision stamped with this mission, at any time, which includes the rows this
+  // call just wrote. No time window: 74 Completed missions here have no started_at, and 17 of 300
+  // recorded a decision before starting. Still keyed on what was SUPPLIED or RECORDED, never on
+  // `insertedCount`, so a rejected insert is named by `warnings`, not by this advice (s86-m02b).
+  const recorded = client.getOne<{ count: number }>(
+    `SELECT COUNT(*) AS count FROM strategic_decisions WHERE mission_id = ? AND status <> 'superseded'`,
+    [input.missionId]
+  );
+  const recordedCount = recorded.success && recorded.data ? recorded.data.count : null;
+  result.missionDecisionCount = recordedCount;
+  if (decisions.length === 0 && (recordedCount === null || recordedCount === 0)) {
     result.warning =
-      'No decisions captured for this mission. Consider documenting architectural choices made during implementation.';
+      recordedCount === null
+        ? 'No decisions were passed with this completion, and the recorded ones could not be counted.'
+        : 'No decisions captured for this mission. Consider documenting architectural choices made during implementation.';
   }
 
   return result;
@@ -779,21 +833,24 @@ function createContextSnapshot(
   const contentHash = crypto.createHash('sha256').update(content).digest('hex').substring(0, 16);
   const now = new Date().toISOString();
 
-  const existingSnapshot = client.getOne<{ id: number }>(
-    // s84-m04: exclude a content-tombstoned row so identical content re-persists fresh.
-    `SELECT id FROM context_snapshots WHERE context_id = ? AND content_hash = ?${snapshotDedupPrunedFilter(client)}`,
-    [contextId, contentHash]
-  );
-
-  if (existingSnapshot.success && existingSnapshot.data) {
-    return existingSnapshot.data.id;
+  // Any content-bearing row with this content can stand for this close's copy.
+  const reusable = findReusableSnapshot(client, { contextId, contentHash, kind: 'close-persist' });
+  if (reusable.ok && reusable.row) {
+    return reusable.row.id;
   }
 
   const g = genesisColumns(client, 'context_snapshots', getProjectId(client));
+  // s92-m09: a close's persist copy of content the master_context row now holds (this runs only
+  // after that UPDATE succeeded), so it stores no content and stamps content_pruned_at. On a store
+  // where the tombstone column did not land, it keeps its content instead.
+  const storage = snapshotStorage('close-persist', content, {
+    contentHash,
+    canStamp: tableHasColumn(client, 'context_snapshots', 'content_pruned_at'),
+  });
   const insertResult = client.execute(
-    `INSERT INTO context_snapshots (context_id, source, content_hash, content, created_at, ${g.columns.join(', ')})
-     VALUES (?, ?, ?, ?, ?, ${g.placeholders})`,
-    [contextId, source, contentHash, content, now, ...g.values]
+    `INSERT INTO context_snapshots (context_id, source, content_hash, content, created_at, ${[...storage.columns, ...g.columns].join(', ')})
+     VALUES (?, ?, ?, ?, ?, ${[...storage.columns.map(() => '?'), g.placeholders].join(', ')})`,
+    [contextId, source, storage.contentHash, storage.content, now, ...storage.values, ...g.values]
   );
 
   if (!insertResult.success) {
@@ -861,6 +918,10 @@ export function formatMissionCompleteForLLM(result: CmosToolResult<MissionComple
 
   if (data.decisionCount !== undefined) {
     lines.push(`Decisions captured: ${data.decisionCount}`);
+  }
+
+  if (data.missionDecisionCount !== undefined) {
+    lines.push(`Decisions recorded for this mission: ${data.missionDecisionCount}`);
   }
 
   if (data.sprintDecisionCount !== undefined) {

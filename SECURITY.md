@@ -1,8 +1,11 @@
 # Security posture
 
 This document describes what CMOS-MCP does with your data, credentials, and network — plainly and
-truthfully. Every claim below is backed by a `file:line` reference so you can verify it in the source.
-If something here does not match the code, that is a bug in this document — please report it.
+truthfully. Every claim below names the source it rests on — a file in the
+[source repository](https://github.com/kneelinghorse/cmos-mcp) and, where it helps, the function or
+constant to look for — so you can verify it. (The npm package ships compiled code, so the links point
+at the repository.) If something here does not match the code, that is a bug in this document —
+please report it.
 
 CMOS-MCP is a **local-first** MCP server. The default, fully-supported mode is: a stdio server running
 on your machine, reading and writing a single SQLite file in your project. Nothing listens on a
@@ -33,44 +36,57 @@ network surface.
 
 CMOS makes outbound requests in exactly two situations, both optional:
 
-1. **Dashboard-backed workflows and conditional startup key recovery.** For normal MCP calls, the
-   effective URL resolves from `CMOS_DASHBOARD_URL`, then the baked `https://cmos.aquex.ai` default;
-   internal callers and tests may supply an explicit override
-   ([dashboard-client.ts:36](src/tools/cmos/dashboard-client.ts)). Once a project is initialized and
-   resolved, invoking `cmos_auth(action="login")` or `login_init` deliberately contacts that
-   effective host even when no URL environment variable or credential exists. `login_complete`
-   polls only when supplied a `deviceCode`; without one it returns local `MISSING_PARAMETER` and
-   sends nothing. Other conditional dashboard-backed paths include messaging and its onboard/review
-   summaries, status/sync health, database sync/backfill, sprint carry-forward, and startup recovery
-   of a missing project key when a registered project and usable user-scoped credential already
-   exist. The baked address alone does not make ordinary local-only operations send project data.
-2. **HuggingFace (`huggingface.co`)**, on first use of semantic retrieval, to download the embedding
-   model `Xenova/all-MiniLM-L6-v2` (~25 MB, [embedding-pipeline.ts:38](src/intelligence/embedding-pipeline.ts))
-   and, for token counting, `Xenova/claude-tokenizer` ([tokenizer-bootstrap.ts:70](src/intelligence/tokenizer-bootstrap.ts)).
-   After the first download the models are cached locally. You can force **embedding-model loading
-   to remain offline** with `CMOS_OFFLINE_EMBEDDINGS=1` (and optionally a pre-seeded
-   `CMOS_MODEL_CACHE_DIR`): the loader
-   sets `env.allowRemoteModels=false` before loading
-   ([transformers-offline-env.ts](src/intelligence/transformers-offline-env.ts)), and if the model is
-   not present locally the vector arm degrades to BM25-only retrieval instead of blocking on a fetch
-   ([embedding-pipeline.ts](src/intelligence/embedding-pipeline.ts) `getEmbedder`). A local-forever
-   install never _hard-requires_ a network fetch.
+1. **The dashboard, once you have a credential, or when you ask for it.** The URL resolves from
+   `CMOS_DASHBOARD_URL`, then the baked `https://cmos.aquex.ai` default (`DEFAULT_DASHBOARD_URL` in
+   [dashboard-client.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/dashboard-client.ts)).
+   - **Sign-in.** `cmos_auth(action="login")` or `login_init` contacts that host even when no URL
+     variable or credential exists. `login_complete` polls only when given a `deviceCode`; without
+     one it returns a local `MISSING_PARAMETER` and sends nothing.
+   - **Every close uploads the whole database.** Once any dashboard credential exists — a stored
+     device-code key, `CMOS_DASHBOARD_API_KEY`, or the `CMOS_DASHBOARD_USER` and
+     `CMOS_DASHBOARD_PASSWORD` pair — every `cmos_session(action="complete")` and
+     `cmos_sprint(action="complete")` uploads the **entire SQLite file** of the project to the
+     dashboard in the background. The first upload also registers the project there and stores its
+     project-scoped key. A close made by an implicit session, when the server process ends, uploads
+     nothing. Set **`CMOS_CHECKPOINT_SYNC=off`** to stop the upload
+     (`triggerCheckpointBackfill` in [checkpoint-backfill.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/checkpoint-backfill.ts)).
+   - **Calls you make.** Messaging, status and sync health, `cmos_db` sync actions (backfill, pull,
+     clone, purge), sprint carry-forward, and the onboard and review summaries of messages.
+   - **Startup key recovery**, when a registered project and a usable user-scoped credential exist
+     but the project's key is missing.
+
+   Without a credential, ordinary local work sends nothing: the baked address alone does not make
+   any tool upload project data.
+
+2. **HuggingFace (`huggingface.co`)**, only when the optional `@xenova/transformers` package is
+   installed next to cmos-mcp. The default install does not include it, and then cmos-mcp never
+   contacts HuggingFace: retrieval is keyword-only and `cmos_db(action="health")` reports semantic
+   search off. With the package installed, the first write that records an embedding (a decision,
+   learning or mission) or the first search downloads the embedding model
+   `Xenova/all-MiniLM-L6-v2` (~25 MB, [embedding-pipeline.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/intelligence/embedding-pipeline.ts)),
+   which is then cached locally. You can force **embedding-model loading to remain offline** with
+   `CMOS_OFFLINE_EMBEDDINGS=1` (and optionally a pre-seeded `CMOS_MODEL_CACHE_DIR`): the loader sets
+   `env.allowRemoteModels=false` before loading
+   ([transformers-offline-env.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/intelligence/transformers-offline-env.ts)), and if the model is
+   not present locally the vector arm degrades to keyword-only retrieval instead of blocking on a
+   fetch (`getEmbedder` in [embedding-pipeline.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/intelligence/embedding-pipeline.ts)). The token
+   counter's tokenizer (`Xenova/claude-tokenizer`) loads only when something counts tokens, and no
+   tool does. A local-forever install never _hard-requires_ a network fetch.
 
 ## Authentication model
 
 Dashboard authentication is **optional**. Device-code bootstrap uses the effective dashboard URL
 described above and does not require an existing credential. After bootstrap, credential-bearing
 project clients are constructed by `DashboardClient.fromEnvForProject()`
-([dashboard-client.ts](src/tools/cmos/dashboard-client.ts)); the selected credential source is
-surfaced as an `authTier` ([auth-state.ts:39](src/auth/auth-state.ts), `deriveAuthTier` at
-[auth-state.ts:209](src/auth/auth-state.ts)):
+([dashboard-client.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/dashboard-client.ts)); the selected credential source is
+surfaced as an `authTier` (the `AuthTier` type and `deriveAuthTier` in
+[auth-state.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/auth/auth-state.ts)):
 
 - **`device-code` (preferred).** RFC 8628 device-code flow via `cmos_auth(action="login_init")` +
   `login_complete`. Mints user-scoped and project-scoped `cmk_` keys stored locally.
-- **`legacy-env`.** A `CMOS_DASHBOARD_API_KEY` environment variable
-  ([dashboard-client.ts:26](src/tools/cmos/dashboard-client.ts)). Kept as a CI/script fallback; the
-  server emits a one-time `[WARN]` nudging migration to device-code
-  ([dashboard-client.ts](src/tools/cmos/dashboard-client.ts) `warnLegacyAuth`).
+- **`legacy-env`.** A `CMOS_DASHBOARD_API_KEY` environment variable (`CMOS_DASHBOARD_API_KEY_ENV`
+  in [dashboard-client.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/dashboard-client.ts)). Kept as a CI/script fallback; the
+  server emits a one-time `[WARN]` nudging migration to device-code (`warnLegacyAuth`, same file).
 - **`password-fallback`.** Email + password login. Also emits the migration `[WARN]`.
 - **`none`.** No stored credential — ordinary local work remains local and credential-requiring
   dashboard operations refuse gracefully. Credential bootstrap remains available: `login` /
@@ -82,26 +98,34 @@ surfaced as an `authTier` ([auth-state.ts:39](src/auth/auth-state.ts), `deriveAu
   encrypted at rest (it is an ordinary SQLite database on your disk, with your filesystem's
   permissions).
 - **Credentials** live at `<configDir>/credentials.json`, where `configDir` defaults to
-  `~/.config/cmos-mcp` and honors `CMOS_CONFIG_DIR`
-  ([credential-store.ts:13-14](src/intelligence/credential-store.ts)). The file is written with
-  **`0600`** permissions ([credential-store.ts:116](src/intelligence/credential-store.ts)).
+  `~/.config/cmos-mcp` and honors `CMOS_CONFIG_DIR` (`CMOS_CONFIG_DIR_ENV` in
+  [credential-store.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/intelligence/credential-store.ts)). The file is written atomically with
+  **`0600`** permissions (`writeFileAtomic(…, { mode: 0o600 })`, same file).
 - **The `cmk_` keys in that file are stored in plaintext** — there is **no** encryption at rest and
-  we make no such claim ([credential-store.ts:47](src/intelligence/credential-store.ts) and
-  [:72](src/intelligence/credential-store.ts) label the fields "Plaintext `cmk_…` key"). The
-  protection is filesystem permissions (`0600`), not cryptography. Treat `credentials.json` like an
-  SSH private key.
+  we make no such claim (the key fields in
+  [credential-store.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/intelligence/credential-store.ts) are documented "Plaintext `cmk_…`
+  key"). The protection is filesystem permissions (`0600`), not cryptography. Treat
+  `credentials.json` like an SSH private key.
 
 ## Backups & deletion — the honest reality
 
-- Backups are **manual only.** `cmos_db(action="snapshot")` copies the database on demand; the number
-  of retained snapshots is capped by `CMOS_MAX_SNAPSHOTS` (default 50,
-  [cmos-db-snapshot.ts:338](src/tools/cmos/cmos-db-snapshot.ts)). There is **no automatic snapshot**
-  before destructive operations.
+- **Database snapshots** are copies of the SQLite file under `cmos/db/snapshots/`.
+  `cmos_db(action="snapshot")` takes one on demand. CMOS takes one itself in three places: before
+  and after every `cmos_sprint(action="complete")`, and before `cmos_db(action="prune_snapshots")`
+  applies. `cmos_db(action="restore")` copies the live database to `cmos/db/snapshots/pre-restore/`
+  before replacing it. Nothing else snapshots first.
+- **Retention deletes.** `CMOS_MAX_SNAPSHOTS` (default 50, `resolveMaxSnapshots` in
+  [cmos-db-snapshot.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/cmos-db-snapshot.ts)) caps how many snapshots are kept:
+  taking one deletes the oldest beyond the cap, automatic ones included.
 - The environment variables `CMOS_AUTO_SNAPSHOT`, `CMOS_SNAPSHOT_RETENTION_DAYS`, and `DB_PATH`
   appear in older docs but are **vestigial — no code reads them.** Do not rely on them.
 - There is **no `deleted_at` soft-delete net** on the main store. Decisions and learnings carry a
-  status (`active`/`superseded`/`archived`/`stale`), but `cmos_db(action="purge")` and
-  `cmos_db(action="restore")` are genuinely destructive. Take a manual snapshot first.
+  status (`active`/`superseded`/`archived`/`stale`), but `cmos_db(action="restore")` replaces the
+  whole database (its pre-restore copy is the way back), and `cmos_db(action="purge")` deletes this
+  project's data from the dashboard mirror.
+- **Snapshot content can be emptied.** `cmos_db(action="prune_snapshots")` is a dry run unless
+  `confirm=true`; applied, it empties the content of context-snapshot copies CMOS wrote on its own
+  (rows, ids, references and events stay) after taking a database snapshot.
 
 ## Untrusted / foreign content
 
@@ -109,19 +133,19 @@ Text that CMOS did not author locally — inbound message bodies and summaries, 
 descriptions, and decision/learning rows synced from _other_ projects — is treated as **data, not
 instructions**. It is rendered inside a source-labeled, self-escaping "untrusted" fence and carries an
 additive `{source, trust:"foreign"}` descriptor
-([provenance-frame.ts](src/intelligence/provenance-frame.ts)), applied across the message list,
+([provenance-frame.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/intelligence/provenance-frame.ts)), applied across the message list,
 onboarding, directory, and cross-store/pull-merged decision & learning renders. The `cmos_message` and
 `cmos_agent_onboard` tool descriptions state this contract to the calling agent.
 
-- **Decision & learning read surfaces framed (s83-m06):** after a `cmos_db pull`, the local
+- **Decision & learning read surfaces framed:** after a `cmos_db pull`, the local
   `strategic_decisions` / `learnings` tables can hold rows authored in another project. `project_id` is
   derived read-time (no migration; column-presence guarded so ancient stores degrade to `NULL` and
   render bare, never throw) and a foreign **decision or learning** row — its `project_id` ≠ the resolved
   local project — renders inside the untrusted fence, while local rows stay bare, at **every** surface
   that renders such rows:
   - the retrieval/search reads: mission-start "relevant decisions"
-    ([relevance-surfacing.ts](src/tools/cmos/relevance-surfacing.ts) →
-    [cmos-mission-start.ts](src/tools/cmos/cmos-mission-start.ts), decision text **and** evidence),
+    ([relevance-surfacing.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/relevance-surfacing.ts) →
+    [cmos-mission-start.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/cmos-mission-start.ts), decision text **and** evidence),
     `cmos_context(action="search")`, `cmos_decisions(action="search")`, `cmos_learnings(action="search")`
     (threaded through the retriever's `RankedResult` and the two direct-SELECT search paths);
   - the aggregate/digest reads: `cmos_context(action="view")` (full + compact),
@@ -129,7 +153,7 @@ onboarding, directory, and cross-store/pull-merged decision & learning renders. 
 
   This closes the former mission-start "relevant decisions" limitation for decision/learning content.
 
-- **MISSION / SPRINT / SESSION read surfaces framed (s84-m03, closes #485):** the same pull-merge path
+- **MISSION / SPRINT / SESSION read surfaces framed:** the same pull-merge path
   stamps a foreign `project_id` onto pulled `missions` / `sprints` / `sessions` rows. Their
   name / objective / context / title / focus / summary fields are now derived read-time (same
   column-presence PRAGMA guard, so ancient stores degrade to `NULL` and render bare, never throw) and a
@@ -149,7 +173,7 @@ onboarding, directory, and cross-store/pull-merged decision & learning renders. 
   - `cmos_session(action="list")` title/summary and `cmos_session(action="search")` title + matched
     snippets.
 
-  This closes the former foreign MISSION/SPRINT/SESSION limitation; the decision/learning sweep (s83-m06)
+  This closes the former foreign MISSION/SPRINT/SESSION limitation; the decision/learning sweep above
   and this row-type sweep together frame every local-store read surface that can carry a pull-merged row.
   Scope boundary (ratified): the framed field set is name / objective / context / title / focus / summary
   (+ success_criteria / deliverables on `mission show`). Mission `notes` and `reference_docs` are **not**
@@ -157,15 +181,21 @@ onboarding, directory, and cross-store/pull-merged decision & learning renders. 
   narrow set of surfaces, and were deliberately left out of the sweep; revisit if a real cross-owner share
   makes them an injection vector.
 
-- The separate content sanitizer ([content-sanitizer.ts](src/intelligence/content-sanitizer.ts))
+- The separate content sanitizer ([content-sanitizer.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/intelligence/content-sanitizer.ts))
   guards CMOS's own **write** paths against a specific tool-call-marshalling corruption; it is not the
   inbound-rendering mechanism above.
 
 ## Dependency posture
 
-`npm audit` is clear of critical and high advisories in the transformers/protobuf chain: the
-transitive `protobufjs` is pinned to `^7` via `package.json` `overrides` (the fix for the critical
-`onnx-proto → protobufjs` cluster), guarded by [tests/release/dependency-overrides.test.ts](tests/release/dependency-overrides.test.ts).
+Since 3.2.0 a consumer install carries no embedding stack. Measured on packed tarballs installed with
+`npm install --omit=dev` into an empty project: 3.1.0's install was 305.7 MB and `npm audit` reported
+1 critical and 5 high advisories, all through `@xenova/transformers` (`protobufjs`, `onnx-proto`,
+`onnxruntime-web`, `sharp`); the 3.2.0 install is 44.7 MB and reports none. `@xenova/transformers` is an
+optional peer dependency. If you install it for semantic search, its chain carries those advisories
+into your tree, and this package's `overrides` cannot reach a dependent's tree: pin `protobufjs` to
+`^7` in your own `overrides`. In this repository the override still pins it for the development tree
+(where the package is a dev dependency), guarded by
+[tests/release/dependency-overrides.test.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/tests/release/dependency-overrides.test.ts).
 A small number of **moderate, dev-only** advisories remain in the `jest-cucumber → @cucumber/* → uuid`
 test-framework chain; clearing them requires a breaking downgrade of the test framework, so they are
 an accepted residual. They are not in any shipped runtime path.
@@ -175,35 +205,35 @@ an accepted residual. They are not in any shipped runtime path.
 **Recommended: one project-local stdio server per project.** Launch CMOS from the project directory
 (or let your MCP host advertise the project via `roots/list`) so attribution resolves to the right
 project. Sender/attribution resolution never consults `CMOS_PROJECT_ROOT` at tool-dispatch time — that
-env var is retained only as a bootstrap hint so the server can find its own `.env`
-([sender-context.ts:27-29](src/intelligence/sender-context.ts)).
+env var is retained only as a bootstrap hint so the server can find its own `.env` (the module note
+in [sender-context.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/intelligence/sender-context.ts)).
 
 **The one topology to avoid:** a single _global_ MCP entry that pins `CMOS_PROJECT_ROOT` to one repo
-while you work across several registered projects. That configuration ties `.env` bootstrap and
-fallback attribution to one repo that every sibling session shares. The server emits a startup
-`[WARN]` when it detects exactly this — `CMOS_PROJECT_ROOT` pinned **and** more than one project
-registered ([index.ts](src/index.ts) `evaluateStartupTopology`). If you see that warning, prefer a
-project-local server or pass `projectRoot` explicitly per call.
+while you work across several registered projects. That configuration ties `.env` bootstrap — and
+any dashboard key that `.env` holds — to one repo that every sibling session shares. The server emits
+a startup `[WARN]` when it detects exactly this — `CMOS_PROJECT_ROOT` pinned **and** more than one
+project registered (`evaluateStartupTopology` in [index.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/index.ts)). If you see that warning,
+prefer a project-local server or pass `projectRoot` explicitly per call.
 
 **Credentials belong in `~/.config/cmos-mcp`, not a repo `.env`.** Keeping `cmk_` keys out of any
 repository avoids committing or mirroring them. The publish/mirror tooling additionally fails hard if
-a real `.env` (anything but `.env.template`) ever reaches the public tree
-([scripts/mirror-to-public.sh:78-88](scripts/mirror-to-public.sh)).
+a real `.env` (anything but `.env.template`) ever reaches the public tree (the leak guard in
+[scripts/mirror-to-public.sh](https://github.com/kneelinghorse/cmos-mcp/blob/main/scripts/mirror-to-public.sh)).
 
 ### Read-only review agents (the review deployment)
 
 CMOS ships a fail-closed **read-only mode** for agents that should never mutate your store — e.g. a
 code-review agent. When `CMOS_AGENT_ROLE=review` is set, a dispatch-layer guard
-([read-only-agent-guard.ts](src/tools/cmos/read-only-agent-guard.ts), classifying every action via the
-fail-closed [action-taxonomy.ts](src/tools/cmos/action-taxonomy.ts)) hard-rejects every write-classified
+([read-only-agent-guard.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/read-only-agent-guard.ts), classifying every action via the
+fail-closed [action-taxonomy.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/action-taxonomy.ts)) hard-rejects every write-classified
 tool call **before any database is opened** and is a strict no-op when the env is unset.
 
 To close the _other_ data-loss vector — a review agent running `git reset`/`stash`/`clean`/etc. — the
-repo ships a PreToolUse hook ([scripts/hooks/block-git-mutations.sh](scripts/hooks/block-git-mutations.sh))
+repo ships a PreToolUse hook ([scripts/hooks/block-git-mutations.sh](https://github.com/kneelinghorse/cmos-mcp/blob/main/scripts/hooks/block-git-mutations.sh))
 that rejects destructive git commands. It is **role-gated**: a strict no-op unless
 `CMOS_AGENT_ROLE=review`, so it is safe to wire into any settings. To run a review deployment, use a
 **separate** Claude Code / MCP host instance and apply
-[scripts/hooks/review-agent.settings.json](scripts/hooks/review-agent.settings.json) (copy it to that
+[scripts/hooks/review-agent.settings.json](https://github.com/kneelinghorse/cmos-mcp/blob/main/scripts/hooks/review-agent.settings.json) (copy it to that
 instance's `.claude/settings.json`) — it sets `CMOS_AGENT_ROLE=review` and wires the hook, activating
 both guards together.
 
@@ -216,5 +246,4 @@ subagent type (e.g. the `Explore` agent) — that is a mitigation, not the machi
 
 ---
 
-_Last verified against the source: Sprint 86 (s86-m05, "Say Only What You Know"). Authored in
-Sprint 78 (Arc C, "Trustworthy Base"); the body documents work through s84-m03._
+_Last verified against the source for release 3.2.0._

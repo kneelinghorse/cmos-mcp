@@ -25,8 +25,11 @@ export interface ProjectValidationItem {
   /** Project display name */
   name: string;
 
-  /** Validation status */
-  status: 'active' | 'stale' | 'missing';
+  /**
+   * Validation status. s92-m01: `ephemeral` = the store exists but lies under an ephemeral
+   * location (OS temp dir, /tmp, /private/tmp, CMOS_EPHEMERAL_PATHS); prune archives it.
+   */
+  status: 'active' | 'stale' | 'missing' | 'ephemeral';
 
   /** Human-readable status message */
   message: string;
@@ -47,6 +50,9 @@ export interface ValidationSummary {
 
   /** Number of missing projects (directory gone) */
   missing: number;
+
+  /** s92-m01 — number of projects whose store lies under an ephemeral location */
+  ephemeral: number;
 }
 
 /**
@@ -118,13 +124,17 @@ export async function cmosProjectValidate(
         ? 'missing'
         : !dbExists
           ? 'stale'
-          : 'active';
+          : graph.isEphemeral(row.store_path)
+            ? 'ephemeral'
+            : 'active';
       const message =
         status === 'missing'
           ? `Project directory does not exist: ${row.store_path}`
           : status === 'stale'
             ? `CMOS database no longer exists at: ${row.store_path}`
-            : `Project is active: ${row.name ?? row.store_path}`;
+            : status === 'ephemeral'
+              ? `Store is in an ephemeral location: ${row.store_path}`
+              : `Project is active: ${row.name ?? row.store_path}`;
       return { projectRoot: row.store_path, name: row.name ?? row.store_path, status, message };
     });
 
@@ -133,12 +143,17 @@ export async function cmosProjectValidate(
       active: items.filter((v) => v.status === 'active').length,
       stale: items.filter((v) => v.status === 'stale').length,
       missing: items.filter((v) => v.status === 'missing').length,
+      ephemeral: items.filter((v) => v.status === 'ephemeral').length,
     };
 
     // Optionally prune invalid entries — archive stale/missing rows in the graph.
     // s80-m02: the graph is the single source — no JSON mirror to re-derive.
     if (prune && (summary.stale > 0 || summary.missing > 0)) {
       graph.pruneMissingStores();
+    }
+    // s92-m01: ephemeral rows are archived even though their store still exists (feedback #41).
+    if (prune && summary.ephemeral > 0) {
+      graph.pruneEphemeralStores();
     }
 
     return createSuccess({
@@ -192,11 +207,15 @@ export function formatProjectValidateForLLM(result: CmosToolResult<ProjectValida
 
   // Summary header
   const statusIcon =
-    summary.stale === 0 && summary.missing === 0 ? '✓' : summary.active === 0 ? '❌' : '⚠️';
+    summary.stale === 0 && summary.missing === 0 && summary.ephemeral === 0
+      ? '✓'
+      : summary.active === 0
+        ? '❌'
+        : '⚠️';
   lines.push(`${statusIcon} Validation Complete`);
   lines.push('');
   lines.push(
-    `   Active: ${summary.active}  |  Stale: ${summary.stale}  |  Missing: ${summary.missing}`
+    `   Active: ${summary.active}  |  Stale: ${summary.stale}  |  Missing: ${summary.missing}  |  Ephemeral: ${summary.ephemeral}`
   );
   lines.push('');
 
@@ -204,6 +223,7 @@ export function formatProjectValidateForLLM(result: CmosToolResult<ProjectValida
   const active = data.validations.filter((v) => v.status === 'active');
   const stale = data.validations.filter((v) => v.status === 'stale');
   const missing = data.validations.filter((v) => v.status === 'missing');
+  const ephemeral = data.validations.filter((v) => v.status === 'ephemeral');
 
   if (active.length > 0) {
     lines.push('Active Projects:');
@@ -231,7 +251,16 @@ export function formatProjectValidateForLLM(result: CmosToolResult<ProjectValida
     lines.push('');
   }
 
-  if (stale.length > 0 || missing.length > 0) {
+  if (ephemeral.length > 0) {
+    lines.push('Ephemeral Projects (scratch locations; prune archives them):');
+    for (const v of ephemeral) {
+      lines.push(`   ⏳ ${v.name}`);
+      lines.push(`      ${v.projectRoot}`);
+    }
+    lines.push('');
+  }
+
+  if (stale.length > 0 || missing.length > 0 || ephemeral.length > 0) {
     lines.push('Tip: Use cmos_project(action="validate", prune=true) to remove invalid entries.');
   }
 

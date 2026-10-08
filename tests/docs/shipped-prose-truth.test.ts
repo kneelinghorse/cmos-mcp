@@ -672,7 +672,7 @@ const TOOL_ACTION_CLAIM_FLOORS: Readonly<Record<string, number>> = {
   'cmos-seed/docs/session-management-guide.md': 19,
   'cmos-seed/docs/sqlite-schema-reference.md': 0,
   'cmos-seed/templates/PROJECT-README-template.md': 3,
-  'cmos-seed/templates/agents.md': 1,
+  'cmos-seed/templates/AGENTS.md': 1,
   'cmos-seed/tiers/build.md': 13,
   'cmos-seed/tiers/general.md': 3,
   'cmos-seed/tiers/managed.md': 3,
@@ -1221,8 +1221,10 @@ describePrivate('agents.md environment-variable block is derived, not maintained
     // states 16 server-read names. The deriver finds 17 — the plan's enumeration omitted
     // CMOS_CHECKPOINT_SYNC, a genuine shape-(ii) read at checkpoint-backfill.ts:348
     // (`process.env[CMOS_CHECKPOINT_SYNC_ENV]`, constant declared :64). 17 is the measured
-    // number and the one the document carries.
-    expect(srcReads.size).toBe(17);
+    // number and the one the document carries. s92-m01 adds CMOS_EPHEMERAL_PATHS (the extra
+    // ephemeral store locations, resolution-policy.ts), making 18. s92-m07 adds CMOS_DEBUG (the
+    // stderr diagnostics gate, debug-log.ts), making 19.
+    expect(srcReads.size).toBe(19);
     expect(agentsMdEnvSections().server.sort()).toEqual([...srcReads].sort());
   });
 
@@ -1279,17 +1281,34 @@ describe('shipped-document stamps and citations (s86-m05)', () => {
     ).toBeGreaterThanOrEqual(1);
   });
 
-  it('stamps SECURITY.md against a sprint at least as new as the ones it documents', () => {
+  it('stamps SECURITY.md against the release it ships in', () => {
+    // s92-m06: SECURITY.md no longer cites this repository's sprints (an internal reference a
+    // stranger cannot follow; tests/docs/internal-references.test.ts), so the stamp is a release.
+    // Same purpose as the sprint stamp it replaces: a footer older than the package carrying it
+    // says the document was checked before what it describes. It may name the release being
+    // prepared while CHANGELOG.md opens with "## Unreleased", as the launch recipes may.
     const security = fs.readFileSync(r('SECURITY.md'), 'utf8');
-    const footer = security.match(/_Last verified against the source: Sprint (\d+)/);
+    const footer = security.match(
+      /_Last verified against the source for release (\d+\.\d+\.\d+)\._/
+    );
     expect(footer).not.toBeNull();
-    const verified = Number((footer as RegExpMatchArray)[1]);
-
-    // The highest sprint the BODY cites. A footer older than the newest thing documented tells
-    // a reader the document was checked before content that is in it was written.
-    const cited = [...security.matchAll(/\bs(\d{2,})-m\d+\b/g)].map((m) => Number(m[1]));
-    expect(cited.length).toBeGreaterThan(0);
-    expect(verified).toBeGreaterThanOrEqual(Math.max(...cited));
+    const verified = (footer as RegExpMatchArray)[1];
+    const pkgVersion = (
+      JSON.parse(fs.readFileSync(r('package.json'), 'utf8')) as { version: string }
+    ).version;
+    const order = (a: string, b: string): number => {
+      const pa = a.split('.').map(Number);
+      const pb = b.split('.').map(Number);
+      for (let i = 0; i < 3; i += 1) if (pa[i] !== pb[i]) return pa[i] - pb[i];
+      return 0;
+    };
+    const preparing = /^## Unreleased\b/m.test(fs.readFileSync(r('CHANGELOG.md'), 'utf8'));
+    const cmp = order(verified, pkgVersion);
+    expect({ verified, pkgVersion, ok: cmp === 0 || (cmp > 0 && preparing) }).toEqual({
+      verified,
+      pkgVersion,
+      ok: true,
+    });
   });
 
   PRIVATE.describe('private authority-document stamps', () => {
@@ -1448,7 +1467,7 @@ describePrivate('build-session-prompt ↔ agents.md process-hardening parity (s8
    * This block runs only in the private tree. Both targets are PRIVATE_PATHS in
    * scripts/mirror-to-public.sh; the enclosing private-only block skips by scope in the public
    * mirror and prints what it skipped. The complement — cmos-seed/docs/build-session-prompt.md,
-   * cmos-seed/templates/agents.md, and cmos/templates/agents.md — deliberately has no Process
+   * cmos-seed/templates/AGENTS.md, and cmos/templates/agents.md — deliberately has no Process
    * Hardening section, as the existing seed assertion below requires. Finally, this gates two of
    * the twenty standing process-rule decision rows absent from both authority documents before
    * this mission; the other eighteen remain out of scope and are named as a next-step. Historical
@@ -1669,10 +1688,10 @@ describe('the seed ships stamps that describe the seed (s87-m04 + s88-m03 + s88-
       'cmos-seed/docs/getting-started.md',
       'cmos-seed/docs/session-management-guide.md',
       'cmos-seed/docs/sqlite-schema-reference.md',
-      'cmos-seed/templates/agents.md',
+      'cmos-seed/templates/AGENTS.md',
     ].sort();
 
-    // The count is a regression floor, not prose: six docs + the seed README + templates/agents.md.
+    // The count is a regression floor, not prose: six docs + the seed README + templates/AGENTS.md.
     // Both template files are also ordinary identifier/contradiction targets even though only one
     // currently carries a date stamp.
     expect(stamps).toHaveLength(8);

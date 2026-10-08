@@ -2562,6 +2562,76 @@ export function ensureAuthorNamespaceColumns(client: CmosDatabaseClient): Migrat
   return { columnsAdded, indexesCreated, rowsUpdated: 0, alreadyCurrent: !anyWork, warnings };
 }
 
+// ── Sprint 92 m03 — implicit sessions ──────────────────────────────────────
+
+/** Schema version stamped in `metadata` after the implicit-session migration. */
+export const IMPLICIT_SESSION_SCHEMA_VERSION = '1.0';
+/** Marker key in `metadata`, set only after the implicit-session columns exist. */
+const IMPLICIT_SESSION_MARKER_KEY = 'implicit_session_columns';
+
+/**
+ * s92-m03 — the two `sessions` columns implicit sessions need:
+ *
+ *   - `implicit INTEGER NOT NULL DEFAULT 0` — 1 for a session the server opened because a write
+ *     named none. Every pre-existing row is an explicit session (0).
+ *   - `owner_key TEXT` — whose implicit session it is (see session-owner.ts). NULL on explicit
+ *     sessions, which stay project-wide.
+ *
+ * Bare `ADD COLUMN`s only: no rebuild and no `foreign_keys` toggle, so this is safe inside an open
+ * transaction. A later firehose 12-step rebuild derives its DDL from `sqlite_master`, which an
+ * `ALTER … ADD COLUMN` updates, so both columns survive it. The marker short-circuits the hot path
+ * once applied; a store with no `sessions` table is left alone and unmarked.
+ */
+export function ensureImplicitSessionColumns(client: CmosDatabaseClient): MigrationResult {
+  const marker = client.getOne<{ value: string }>(
+    `SELECT value FROM metadata WHERE key='${IMPLICIT_SESSION_MARKER_KEY}'`,
+    []
+  );
+  if (marker.success && marker.data?.value === IMPLICIT_SESSION_SCHEMA_VERSION) {
+    return { columnsAdded: [], indexesCreated: [], rowsUpdated: 0, alreadyCurrent: true };
+  }
+
+  const columns = getTableColumns(client, 'sessions');
+  if (columns.size === 0) {
+    return { columnsAdded: [], indexesCreated: [], rowsUpdated: 0, alreadyCurrent: true };
+  }
+
+  const columnsAdded: string[] = [];
+  const warnings: string[] = [];
+  const wanted: ReadonlyArray<readonly [string, string]> = [
+    ['implicit', 'INTEGER NOT NULL DEFAULT 0'],
+    ['owner_key', 'TEXT'],
+  ];
+  for (const [name, definition] of wanted) {
+    if (columns.has(name)) continue;
+    const added = client.execute(`ALTER TABLE sessions ADD COLUMN ${name} ${definition}`, []);
+    if (!added.success) {
+      throw new SchemaMigrationError(
+        `ensureImplicitSessionColumns: ADD COLUMN ${name} on "sessions" failed: ${added.error?.message ?? 'unknown'}`
+      );
+    }
+    columnsAdded.push(`sessions.${name}`);
+  }
+
+  // A store without a metadata table (a bare fixture) cannot carry the marker; the columns are in
+  // place, so later calls re-check two columns instead of warning on every call.
+  if (getTableColumns(client, 'metadata').size > 0) {
+    const markerResult = client.execute(
+      `INSERT OR REPLACE INTO metadata (key, value) VALUES ('${IMPLICIT_SESSION_MARKER_KEY}', '${IMPLICIT_SESSION_SCHEMA_VERSION}')`,
+      []
+    );
+    checkWrite(markerResult, warnings, `metadata.${IMPLICIT_SESSION_MARKER_KEY} marker`);
+  }
+
+  return {
+    columnsAdded,
+    indexesCreated: [],
+    rowsUpdated: 0,
+    alreadyCurrent: columnsAdded.length === 0,
+    warnings,
+  };
+}
+
 /**
  * s86-m08 — bring a store's `sprint_summary` view up to the current definition.
  *

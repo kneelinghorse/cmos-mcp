@@ -32,22 +32,28 @@ describe('s88-m04 active-session refusal state', () => {
     fs.rmSync(projectRoot, { recursive: true, force: true });
   });
 
-  function insertActiveSession(captures: string): void {
+  /**
+   * s92-m03: started NOW. A start closes an explicit blocker idle past 12 h with a receipt, so
+   * the refusal this suite pins is the refusal by a live session.
+   */
+  function insertActiveSession(captures: string): string {
+    const startedAt = new Date().toISOString();
     const db = new Database(dbPath);
     try {
       db.prepare(
         `INSERT INTO sessions
            (id, type, title, started_at, agent, status, captures, project_id)
          VALUES ('PS-ACTIVE', 'review', 'Existing review',
-                 '2026-08-28T20:00:00Z', 'tester', 'active', ?, 's88-m04-active-session')`
-      ).run(captures);
+                 ?, 'tester', 'active', ?, 's88-m04-active-session')`
+      ).run(startedAt, captures);
     } finally {
       db.close();
     }
+    return startedAt;
   }
 
   it('returns and renders the active session type, title, start time, and capture count', async () => {
-    insertActiveSession(
+    const startedAt = insertActiveSession(
       JSON.stringify([
         { category: 'decision', content: 'one' },
         { category: 'next-step', content: 'two' },
@@ -65,14 +71,14 @@ describe('s88-m04 active-session refusal state', () => {
       id: 'PS-ACTIVE',
       type: 'review',
       title: 'Existing review',
-      startedAt: '2026-08-28T20:00:00Z',
+      startedAt,
       captureCount: 2,
     });
     const rendered = formatSessionStartForLLM(result);
     expect(rendered).toContain('PS-ACTIVE');
     expect(rendered).toContain('review');
     expect(rendered).toContain('Existing review');
-    expect(rendered).toContain('2026-08-28T20:00:00Z');
+    expect(rendered).toContain(startedAt);
     expect(rendered).toMatch(/2 capture/i);
   });
 

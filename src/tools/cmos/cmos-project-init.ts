@@ -99,7 +99,47 @@ function copySeedDir(
   return created;
 }
 
-function buildClaudeMd(projectName: string): string {
+/** The agents file's name at a project root: uppercase, the cross-agent convention. */
+export const AGENTS_FILE_NAME = 'AGENTS.md';
+
+/**
+ * s92-m06: the agents file already at a project root, in whatever case it was written, or null.
+ * It reads a directory listing, so a case-sensitive and a case-insensitive filesystem give the same
+ * answer, and it looks only at the project root, never at the CMOS layout beneath it.
+ */
+export function findAgentsFile(projectRoot: string): string | null {
+  let names: string[];
+  try {
+    names = fs.readdirSync(projectRoot);
+  } catch {
+    return null;
+  }
+  return names.find((name) => name.toLowerCase() === AGENTS_FILE_NAME.toLowerCase()) ?? null;
+}
+
+/**
+ * s92-m06: write the seed's AGENTS.md to the project root unless an agents file is already there.
+ * The copy is exclusive, so it never overwrites a file, even one written since the check.
+ */
+function ensureAgentsMd(projectRoot: string, seedPath: string): { name: string; written: boolean } {
+  const existing = findAgentsFile(projectRoot);
+  if (existing) return { name: existing, written: false };
+  try {
+    fs.copyFileSync(
+      path.join(seedPath, 'templates', AGENTS_FILE_NAME),
+      path.join(projectRoot, AGENTS_FILE_NAME),
+      fs.constants.COPYFILE_EXCL
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+      return { name: findAgentsFile(projectRoot) ?? AGENTS_FILE_NAME, written: false };
+    }
+    throw error;
+  }
+  return { name: AGENTS_FILE_NAME, written: true };
+}
+
+function buildClaudeMd(projectName: string, agents: { name: string; written: boolean }): string {
   const title = projectName.trim().length > 0 ? projectName.trim() : 'This Project';
 
   return [
@@ -107,11 +147,11 @@ function buildClaudeMd(projectName: string): string {
     '',
     `## ${title}`,
     '',
-    // s86-m05: this used to say "Read `agents.md` first" — but init does not create a
-    // project-root agents.md. It copies the TEMPLATE to cmos/templates/agents.md, so point
-    // there and say what to do with it, rather than sending every new project to a file that
-    // is not going to be present.
-    '- Copy `cmos/templates/agents.md` to this project root and fill it in — it holds the repository-specific rules.',
+    // s92-m06: init writes AGENTS.md at the root (or finds the project's own agents file), so
+    // point at the file that is there.
+    agents.written
+      ? `- Read \`${agents.name}\` first and fill in its bracketed placeholders — it holds the repository-specific rules.`
+      : `- Read \`${agents.name}\` first — it holds the repository-specific rules.`,
     '- Use the shared `mcp__cmos-mcp__*` tools for CMOS operations.',
     '- If sender attribution looks wrong, run `cmos_message(action="whoami")` before sending messages.',
     '',
@@ -123,13 +163,17 @@ function buildClaudeMd(projectName: string): string {
   ].join('\n');
 }
 
-function ensureClaudeMd(projectRoot: string, projectName: string): boolean {
+function ensureClaudeMd(
+  projectRoot: string,
+  projectName: string,
+  agents: { name: string; written: boolean }
+): boolean {
   const claudePath = path.join(projectRoot, 'CLAUDE.md');
   if (fs.existsSync(claudePath)) {
     return false;
   }
 
-  fs.writeFileSync(claudePath, buildClaudeMd(projectName), 'utf-8');
+  fs.writeFileSync(claudePath, buildClaudeMd(projectName, agents), 'utf-8');
   return true;
 }
 
@@ -414,7 +458,9 @@ export async function cmosProjectInit(
       cmosDir,
       cmosDir
     );
-    if (ensureClaudeMd(projectRoot, projectName)) {
+    const agents = ensureAgentsMd(projectRoot, seedPath);
+    if (agents.written) createdFiles.push(path.join('..', AGENTS_FILE_NAME));
+    if (ensureClaudeMd(projectRoot, projectName, agents)) {
       createdFiles.push(path.join('..', 'CLAUDE.md'));
     }
 

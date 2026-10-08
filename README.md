@@ -15,31 +15,44 @@ Out of the box you get:
 - Session capture for decisions, learnings, constraints, next-steps
 - Strategic context that condenses across sprints, with FTS5 retrieval
 - Full-text search across decisions, learnings, missions, sessions
-- Snapshot-backed safety on destructive operations
+- Database snapshots on demand, and automatically before a restore, before and after a sprint close,
+  and before a snapshot prune
 - Per-project credential store and device-code auth (RFC 8628)
 
 The dashboard at [cmos.aquex.ai](https://cmos.aquex.ai) is **optional**. You can run cmos-mcp standalone forever — sign-up unlocks sync (SQLite ↔ Postgres mirror), the project registry (`cmos://you/*` addresses), and cross-project messaging. Without it, every other tool still works locally.
 
 ## Install
 
-```bash
-npm install -g @aquex/cmos-mcp
-```
-
-Or run on demand without a global install:
+Recommended: a global install of this release. The server then starts from disk, with no registry
+lookup on launch:
 
 ```bash
-npx -y @aquex/cmos-mcp
+npm install -g @aquex/cmos-mcp@3.2.0
 ```
 
-Requires Node.js 18+.
+Or run it on demand with `npx`. Pin the version and prefer the local cache: an unpinned `npx -y`
+can look the package up again on every launch.
+
+```bash
+npx --prefer-offline -y @aquex/cmos-mcp@3.2.0
+```
+
+Semantic (vector) search is optional. Without it, retrieval is keyword-only, and the install is
+about 45 MB instead of about 306 MB. To add a vector term to retrieval, install
+`@xenova/transformers` next to cmos-mcp. `cmos_db(action="health")` reports whether it is on.
+
+Requires Node.js 20 or newer.
 
 ## Configure your MCP client
+
+Each example below runs a pinned version through `npx`, preferring the local cache; to upgrade,
+change the version. With the global install, use `"command": "cmos-mcp"` and drop the `npx`
+arguments (keep `--project-root` where an example has it).
 
 ### Claude Code
 
 ```bash
-claude mcp add-json cmos-mcp '{"command":"npx","args":["-y","@aquex/cmos-mcp"]}'
+claude mcp add-json cmos-mcp '{"command":"npx","args":["--prefer-offline","-y","@aquex/cmos-mcp@3.2.0"]}'
 ```
 
 ### Claude Desktop
@@ -51,11 +64,23 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS)
   "mcpServers": {
     "cmos-mcp": {
       "command": "npx",
-      "args": ["-y", "@aquex/cmos-mcp"]
+      "args": [
+        "--prefer-offline",
+        "-y",
+        "@aquex/cmos-mcp@3.2.0",
+        "--project-root",
+        "/absolute/path/to/your/project"
+      ]
     }
   }
 }
 ```
+
+Claude Desktop starts servers with no project context (on macOS, from `/` with no workspace roots),
+so name the project in the config. `--project-root` applies only to this server entry, and only to
+calls with no project context: no `projectRoot`, no workspace roots, and a working directory of `/`,
+your home directory or the server's install directory. A client that starts the server from any
+other folder should pass `projectRoot` instead.
 
 ### Cursor
 
@@ -66,7 +91,7 @@ Add to `~/.cursor/mcp.json`:
   "mcpServers": {
     "cmos-mcp": {
       "command": "npx",
-      "args": ["-y", "@aquex/cmos-mcp"]
+      "args": ["--prefer-offline", "-y", "@aquex/cmos-mcp@3.2.0"]
     }
   }
 }
@@ -79,7 +104,7 @@ Add to `~/.cursor/mcp.json`:
   "context_servers": {
     "cmos-mcp": {
       "command": "npx",
-      "args": ["-y", "@aquex/cmos-mcp"]
+      "args": ["--prefer-offline", "-y", "@aquex/cmos-mcp@3.2.0"]
     }
   }
 }
@@ -92,7 +117,7 @@ Add to `~/.cursor/mcp.json`:
   "mcp.servers": {
     "cmos-mcp": {
       "command": "npx",
-      "args": ["-y", "@aquex/cmos-mcp"]
+      "args": ["--prefer-offline", "-y", "@aquex/cmos-mcp@3.2.0"]
     }
   }
 }
@@ -105,7 +130,7 @@ Add to `~/.cursor/mcp.json`:
   "mcpServers": {
     "cmos-mcp": {
       "command": "npx",
-      "args": ["-y", "@aquex/cmos-mcp"]
+      "args": ["--prefer-offline", "-y", "@aquex/cmos-mcp@3.2.0"]
     }
   }
 }
@@ -113,13 +138,24 @@ Add to `~/.cursor/mcp.json`:
 
 ## First call
 
-In your MCP client, open the project with the session digest:
+Project tools work on a folder that has a CMOS database, so a new project starts with init:
+
+```
+cmos_project(action="init", projectRoot="/absolute/path/to/your/project")
+```
+
+`init` creates `cmos/db/cmos.sqlite`, the seed files, and an `AGENTS.md` at the project root (unless
+one is already there). In a folder without that database, the tools that read or write a project
+refuse and name `init`; registry and sign-in actions need no project.
+
+Then run `cmos_agent_onboard` once: on a new project it walks the first-session setup. Open every
+later session with the session digest:
 
 ```
 Run cmos_review to see the project state.
 ```
 
-`cmos_review` returns a ≤4 KB digest — project identity, current sprint, work queue, recent decisions, freshness, and the top next actions — in one call. (For a brand-new project's cold start, or to carry the operational tier, use `cmos_agent_onboard`; it surfaces the fresh-project pathway when there's no database yet.)
+`cmos_review` returns a ≤4 KB digest — project identity, current sprint, work queue, recent decisions, freshness, and the top next actions — in one call.
 
 The full walkthrough — install → config → init → first sprint/mission/session loop — lives in [docs/getting-started.md](docs/getting-started.md).
 
@@ -135,11 +171,11 @@ cmos-mcp exposes 15 consolidated tools. 12 use an `action` parameter to select t
 | `cmos_mission`            | Missions — create, update, query, and link dependencies                       |
 | `cmos_mission_transition` | Mission state machine — start, complete, block, unblock, drop, defer          |
 | `cmos_sprint`             | Sprints — CRUD, closeout, retro, and cross-sprint analytics                   |
-| `cmos_session`            | Work sessions — start, capture insights, complete, list, and search           |
+| `cmos_session`            | Work sessions (optional) — start, capture insights, complete, list, search    |
 | `cmos_context`            | Master/project context — view, update, condense, snapshot, and search         |
-| `cmos_decisions`          | Strategic decisions — list, full-text search, update, and staleness review    |
-| `cmos_learnings`          | Cross-cutting learnings — list, search, update, and reaffirm                  |
-| `cmos_db`                 | Database ops — health, snapshot/restore, and sync (backfill, reconcile, pull) |
+| `cmos_decisions`          | Strategic decisions — record, show, list, search, update, staleness review    |
+| `cmos_learnings`          | Cross-cutting learnings — list, search, show, update, and reaffirm            |
+| `cmos_db`                 | Database ops — health, snapshot/restore, sync, and a context-snapshot prune   |
 | `cmos_project`            | Project registry — init, register, list, validate                             |
 | `cmos_auth`               | Dashboard credential lifecycle — device-code login, rotate, revoke            |
 | `cmos_message`            | Cross-project messaging (requires the hosted dashboard)                       |
@@ -163,19 +199,31 @@ export CMOS_DASHBOARD_URL=https://cmos.aquex.ai
 
 Then run `cmos_auth(action="login_init")` from your agent. It returns a one-time `userCode` and `verificationUri` — paste the code at the URL in your browser, then run `cmos_auth(action="login_complete", deviceCode=...)` to finish. Credentials persist atomically to `~/.config/cmos-mcp/credentials.json` (mode 0600).
 
-If `CMOS_DASHBOARD_URL` is unset or unreachable, the dashboard-relay tools (`cmos_message`, sync, registry) return a structured `DASHBOARD_NOT_CONFIGURED` or `DASHBOARD_UPGRADE_REQUIRED` error pointing at the sign-up URL. Local tools never depend on the dashboard.
+`CMOS_DASHBOARD_URL` defaults to `https://cmos.aquex.ai`. Until you sign in, the dashboard tools (`cmos_message`, sync, registry) return a structured `DASHBOARD_NOT_CONFIGURED` error that names `cmos_auth(action="login_init")`; a paid-tier feature on a free account returns `DASHBOARD_UPGRADE_REQUIRED`. Local tools never depend on the dashboard.
+
+Once any dashboard credential exists, every `cmos_session(action="complete")` and `cmos_sprint(action="complete")` uploads the whole SQLite file to the dashboard (see [SECURITY.md](SECURITY.md#outbound-network)). Set `CMOS_CHECKPOINT_SYNC=off` to stop that upload.
 
 ## Project resolution
 
-When an MCP tool is called, cmos-mcp resolves the target project root in this order:
+cmos-mcp never acts on a project you did not name. For each tool call it picks one project, in this
+order, and refuses rather than falling back when that project cannot be used:
 
-1. Explicit `projectRoot` parameter on the tool call (highest trust).
-2. `CMOS_PROJECT_ROOT` environment variable (CI/CD).
-3. Auto-discovery from the current working directory (looks for `cmos/db/cmos.sqlite`).
-4. Default project from the registry at `~/.config/cmos-mcp/project-registry.json`.
-5. Structured error pointing at `cmos_project(action="register")`.
+1. The `projectRoot` parameter on the call. A folder that is not a CMOS project is refused.
+2. The workspace roots your MCP client advertises: the first one inside a CMOS project.
+3. The working directory, or the nearest folder above it that is a CMOS project — one holding
+   `cmos/db/`; a plain folder named `cmos` does not count (the search stops below your home
+   directory).
+4. Only when the server has no project context at all — no `projectRoot`, no roots, and a working
+   directory of `/`, your home directory or the server's install directory (how Claude Desktop starts
+   servers): the `--project-root <dir>` argument in that server's config, then a registry default set
+   with `cmos_project(action="register", projectRoot="...", setAsDefault=true)`.
+5. Otherwise the call is refused. In a folder that is not a CMOS project, a write names
+   `cmos_project(action="init")` and a read answers "No CMOS project in '<dir>'".
 
-This is what makes Claude Code "just work" from a workspace, while Claude Desktop (no CWD context) needs an explicit `cmos_project(action="register", setAsDefault=true)` once.
+Every successful response names the project it used (`projectRoot` and `resolvedBy` in its data), and
+says so in its text whenever the project came from workspace roots, `--project-root` or the registry
+default. A registry default set before 3.2.0 is not applied until you re-run `setAsDefault`; the
+server, `cmos_message(action="whoami")` and `cmos_review` say so when one exists.
 
 ## Environment variables
 
@@ -184,7 +232,8 @@ This is what makes Claude Code "just work" from a workspace, while Claude Deskto
 # when unset; treat empty string as unset.
 CMOS_DASHBOARD_URL=https://cmos.aquex.ai
 
-# Optional — explicit project root (CI/CD). Otherwise auto-discovered.
+# Optional — the directory the server reads its own .env from. It does NOT select a project:
+# use the projectRoot parameter, or --project-root in a server's config.
 CMOS_PROJECT_ROOT=/path/to/your/project
 
 # Optional — override the credential + registry directory. Default: ~/.config/cmos-mcp
@@ -192,6 +241,10 @@ CMOS_CONFIG_DIR=/custom/path
 
 # Snapshot retention (default shown)
 CMOS_MAX_SNAPSHOTS=50
+
+# Optional — stop the whole-database upload that session and sprint closes make once you have
+# signed in to the dashboard.
+CMOS_CHECKPOINT_SYNC=off
 ```
 
 ## Error response shape
@@ -213,9 +266,9 @@ Every tool returns a uniform envelope:
 
 ## Safety
 
-- **Append-only audit.** Session events, context snapshots, and mission history are immutable rows.
+- **Append-only audit.** Session events and mission transitions are append-only rows. Context snapshots keep their rows, ids and events, but `cmos_db(action="prune_snapshots")` can empty the content of copies CMOS wrote on its own.
 - **Atomic credential writes.** `credentials.json` is written via temp-file + rename with 0600 permissions.
-- **Manual snapshots.** `cmos_db(action="snapshot")` copies the database on demand; `CMOS_MAX_SNAPSHOTS` caps how many are kept. There is no automatic snapshot before destructive operations, and no soft-delete net — `cmos_db(action="purge")` and `cmos_db(action="restore")` are genuinely destructive. See [SECURITY.md](SECURITY.md#backups--deletion--the-honest-reality).
+- **Database snapshots.** `cmos_db(action="snapshot")` copies the database on demand. CMOS also takes one before and after every `cmos_sprint(action="complete")` and before `cmos_db(action="prune_snapshots")` applies, and `cmos_db(action="restore")` first copies the live database to `cmos/db/snapshots/pre-restore/`. `CMOS_MAX_SNAPSHOTS` caps how many are kept: taking one deletes the oldest beyond it, automatic ones included. Nothing else snapshots first, and there is no soft-delete net — `cmos_db(action="purge")` deletes this project's data from the dashboard mirror. See [SECURITY.md](SECURITY.md#backups--deletion--the-honest-reality).
 - **Dry-run where it exists.** `cmos_context(action="condense")` and `cmos_db(action="backfill")` accept `dryRun` to preview without committing. It is not a general property of mutating tools.
 
 ## Known limits

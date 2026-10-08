@@ -193,14 +193,30 @@ describe('CmosDatabaseClient project resolution', () => {
       const graph = await ProjectGraphRegistry.create({ configDir });
       graph.registerStore(registeredWorkspace, { setAsDefault: true });
 
-      // Point cwd to non-CMOS directory
-      process.cwd = () => workspace;
+      // s92-m01: a default serves only a CONTEXTLESS cwd (/, $HOME, the install root).
+      process.cwd = () => '/';
 
       const result = await CmosDatabaseClient.create();
 
       expect(result.success).toBe(true);
       expect(result.data?.path).toContain(registeredWorkspace);
       result.data?.close();
+
+      await fs.rm(registeredWorkspace, { recursive: true, force: true });
+    });
+
+    it('never opens the default from a real working folder that is not a CMOS project', async () => {
+      const registeredWorkspace = await createTempWorkspace('registered-real-folder-');
+      await createCmosDatabase(registeredWorkspace);
+      const graph = await ProjectGraphRegistry.create({ configDir });
+      graph.registerStore(registeredWorkspace, { setAsDefault: true });
+
+      process.cwd = () => workspace;
+      const result = await CmosDatabaseClient.create();
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(CMOS_ERROR_CODES.CMOS_NOT_DETECTED);
+      expect(result.error?.message).toContain(`No CMOS project in '${workspace}'`);
 
       await fs.rm(registeredWorkspace, { recursive: true, force: true });
     });

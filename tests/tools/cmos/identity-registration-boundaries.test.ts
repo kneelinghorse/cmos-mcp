@@ -320,11 +320,14 @@ describe('s88-m08 — identity registration concurrency and probe boundaries', (
 
     expect(captured.value).toBeInstanceOf(SenderResolutionError);
     const resolutionError = captured.value as SenderResolutionError;
+    // s92-m01: the first root holding a store is SELECTED and final — rejected for its missing
+    // identity, the call refuses rather than trying B. Neither root may be minted or registered.
     expect(
       resolutionError.candidates
         .filter((candidate) => candidate.source === 'mcp-roots')
         .map((candidate) => candidate.projectRoot)
-    ).toEqual([rejectedA.projectRoot, rejectedB.projectRoot]);
+    ).toEqual([rejectedA.projectRoot]);
+    expect(resolutionError.outcome).toBe('selected-store-rejected');
     expect(recordedProjectId(rejectedA.dbPath)).toBeNull();
     expect(recordedProjectId(rejectedB.dbPath)).toBeNull();
     expect(await registeredProjectId(rejectedA.projectRoot)).toBeNull();

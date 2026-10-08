@@ -43,7 +43,7 @@ yourproject/
     │   └── cmos.sqlite  # All CMOS state
     ├── context/         # Seed snapshots; database wins after initialization
     ├── foundational-docs/
-    ├── templates/       # Project README and agents.md templates
+    ├── templates/       # Project README and AGENTS.md templates
     ├── tiers/           # Tier behavioral guides
     └── docs/            # Documentation (always copied)
 ```
@@ -71,7 +71,7 @@ cmos_mission_transition(action="start", missionId="s01-m01")  # Begin work
 ```
 yourproject/                    # Project root
 ├── README.md                   # About YOUR PROJECT
-├── agents.md                   # Repository-wide AI rules; copy/customize cmos/templates/agents.md
+├── AGENTS.md                   # Repository-wide AI rules, written by init; fill in its placeholders
 │
 ├── src/                        # YOUR APPLICATION CODE
 ├── tests/                      # YOUR APPLICATION TESTS
@@ -156,5 +156,5 @@ It creates a snapshot only when it changes `master_context`; it is not a routine
 
 ---
 
-**Last Updated**: 2026-08-28
+**Last Updated**: 2026-10-07
 **Schema Version**: 2.1

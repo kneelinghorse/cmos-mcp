@@ -312,6 +312,10 @@ describe('relevance-surfacing', () => {
               sprintId: 'sprint-1',
               projectId: null,
               evidence: null,
+              // s92-m08: decisionText is a preview; these rows are short.
+              truncated: false,
+              fullLength: 100,
+              status: 'active',
               relevanceScore: 3,
             },
           ],

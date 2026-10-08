@@ -16,8 +16,9 @@
  * heavy pack/install never runs in the unit suite or touches the coverage floors; run
  * it with `npm run test:e2e-firstrun` (its own jest.e2e.config.js) and in CI.
  *
- * The clean-room boot emits an expected P0 `SENDER_UNRESOLVABLE` on stderr — do NOT
- * assert clean stderr (it would flake). Assert on isError + key substrings.
+ * s92-m07: a normal start writes two stderr lines (the version, and the project resolved at
+ * startup); every other diagnostic is behind CMOS_DEBUG=1. The stderr test below spawns its own
+ * servers with a literal environment and pins that budget, with CMOS_DEBUG as its positive control.
  *
  * @module tests/e2e/first-run.e2e
  */
@@ -28,7 +29,8 @@ import * as os from 'os';
 import * as path from 'path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { connectStdioServer, textOf, dataOf } from './stdio-harness';
+import Database from 'better-sqlite3';
+import { connectStdioServer, textOf, dataOf, type StdioHarness } from './stdio-harness';
 
 const REPO_ROOT = path.resolve(__dirname, '../..');
 const PKG = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8')) as {
@@ -45,6 +47,7 @@ function mkTmp(prefix: string): string {
 }
 
 let installedServer = ''; // absolute path to the installed dist/index.js
+let hostDir = ''; // the consumer project the tarball was installed into
 let projectDir = ''; // fresh project cwd for the server
 let configDir = ''; // isolated CMOS_CONFIG_DIR
 let client: Client;
@@ -83,7 +86,7 @@ describe('first-run E2E: pack -> install -> drive quickstart over stdio (s77-m10
     const tarball = path.join(packDir, tgz);
 
     // 2. Install the tarball into a fresh host dir (as a consumer would).
-    const hostDir = mkTmp('cmos-e2e-host-');
+    hostDir = mkTmp('cmos-e2e-host-');
     fs.writeFileSync(
       path.join(hostDir, 'package.json'),
       JSON.stringify({ name: 'cmos-e2e-host', version: '1.0.0', private: true }) + '\n'
@@ -135,6 +138,70 @@ describe('first-run E2E: pack -> install -> drive quickstart over stdio (s77-m10
 
     const tools = await client.listTools();
     expect(tools.tools).toHaveLength(15);
+  });
+
+  it('s92-m07: a clean-room start writes at most two stderr lines; CMOS_DEBUG=1 brings the rest back', async () => {
+    const startupStderr = async (debug: boolean): Promise<string[]> => {
+      // A literal environment: nothing inherited from the developer's shell.
+      const env: Record<string, string> = {
+        HOME: mkTmp('cmos-e2e-quiet-home-'),
+        CMOS_CONFIG_DIR: mkTmp('cmos-e2e-quiet-config-'),
+        CMOS_CHECKPOINT_SYNC: 'off',
+        PATH: process.env.PATH ?? path.dirname(process.execPath),
+        ...(debug ? { CMOS_DEBUG: '1' } : {}),
+      };
+      const quietTransport = new StdioClientTransport({
+        command: process.execPath,
+        args: [installedServer],
+        cwd: mkTmp('cmos-e2e-quiet-cwd-'),
+        env,
+        stderr: 'pipe',
+      });
+      let stderr = '';
+      quietTransport.stderr?.on('data', (chunk: Buffer) => {
+        stderr += chunk.toString();
+      });
+      const quietClient = new Client(
+        { name: 's92-m07-stderr', version: '0.0.0' },
+        { capabilities: {} }
+      );
+      await quietClient.connect(quietTransport);
+      await quietClient.listTools();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await quietClient.close();
+      return stderr.split('\n').filter((line) => line.trim().length > 0);
+    };
+
+    const quiet = await startupStderr(false);
+    expect(quiet.length).toBeLessThanOrEqual(2);
+    expect(quiet[0]).toBe(`[cmos-mcp] v${PKG.version} ready on stdio (15 tools)`);
+    expect(quiet[1]).toMatch(/^\[cmos-mcp\] project: none at startup/);
+    // Positive control: the diagnostics still exist; they are gated, not deleted.
+    const verbose = await startupStderr(true);
+    expect(verbose.length).toBeGreaterThan(10);
+    expect(verbose.join('\n')).toContain('[INFO] Initializing MCP server');
+  }, 60000);
+
+  it('s92-m07: installing the package does not pull the embedding stack, and health says so', async () => {
+    // @xenova/transformers is an optional peer: npm installs it only when asked.
+    expect(fs.existsSync(path.join(hostDir, 'node_modules', '@xenova', 'transformers'))).toBe(
+      false
+    );
+    expect(fs.existsSync(path.join(hostDir, 'node_modules', 'onnxruntime-node'))).toBe(false);
+    expect(fs.existsSync(path.join(hostDir, 'node_modules', 'fast-xml-parser'))).toBe(false);
+
+    const healthProject = mkTmp('cmos-e2e-health-project-');
+    await callOk('cmos_project', {
+      action: 'init',
+      projectRoot: healthProject,
+      projectName: 'e2e-health',
+    });
+    const health = await callOk('cmos_db', { action: 'health', projectRoot: healthProject });
+    expect(dataOf(health)?.semanticSearch).toMatchObject({
+      enabled: false,
+      state: 'not-installed',
+    });
+    expect(textOf(health)).toMatch(/Semantic search\*\*: off/);
   });
 
   it('`--version` on the installed dist prints cmos-mcp <version> and exits 0', () => {
@@ -225,5 +292,186 @@ describe('first-run E2E: pack -> install -> drive quickstart over stdio (s77-m10
     const statusText = textOf(status) + JSON.stringify(dataOf(status) ?? {});
     expect(statusText).toContain('auth_tier');
     expect(statusText).toContain('none');
+  });
+
+  /**
+   * s92-m10 — the clean-room scenarios, promoted from the 2026-10-06 scripted client
+   * (cmos/research/2026-10-strategy/cleanroom-client/, which the public mirror excludes) and run
+   * against the INSTALLED package with a literal environment. Two more clean-room assertions live
+   * in this lane: two stderr lines (the s92-m07 test above) and no checkpoint upload on an
+   * implicit close (implicit-sessions.e2e.ts drives the upload path with a positive control,
+   * rather than asserting a zero at process exit, where a fire-and-forget upload can die unseen).
+   */
+  describe('s92-m10 clean-room scenarios on the installed package', () => {
+    const harnesses: StdioHarness[] = [];
+    let cleanHome = '';
+    let cleanConfig = '';
+
+    beforeAll(() => {
+      cleanHome = mkTmp('cmos-e2e-clean-home-');
+      cleanConfig = mkTmp('cmos-e2e-clean-config-');
+    });
+
+    afterAll(async () => {
+      for (const harness of harnesses) await harness.close();
+    });
+
+    async function server(cwd: string): Promise<StdioHarness> {
+      const harness = await connectStdioServer({
+        serverPath: installedServer,
+        cwd,
+        env: {
+          HOME: cleanHome,
+          CMOS_CONFIG_DIR: cleanConfig,
+          CMOS_CHECKPOINT_SYNC: 'off',
+          PATH: process.env.PATH ?? path.dirname(process.execPath),
+          NODE_ENV: 'test',
+        },
+        clientName: 's92-m10-clean-room',
+      });
+      harnesses.push(harness);
+      return harness;
+    }
+
+    /** Row counts that any write to the project would change. */
+    function rows(root: string): Record<string, number> {
+      const db = new Database(path.join(root, 'cmos', 'db', 'cmos.sqlite'), { readonly: true });
+      try {
+        const count = (table: string): number =>
+          (db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
+        return {
+          decisions: count('strategic_decisions'),
+          sessions: count('sessions'),
+          missions: count('missions'),
+          snapshots: count('context_snapshots'),
+        };
+      } finally {
+        db.close();
+      }
+    }
+
+    it('singleton: with one registered project, calls from an unrelated folder write nothing anywhere', async () => {
+      const projectA = mkTmp('cmos-e2e-clean-a-');
+      const setup = await server(projectA);
+      await setup.callOk('cmos_project', {
+        action: 'init',
+        projectRoot: projectA,
+        projectName: 'Clean A',
+      });
+      await setup.callOk('cmos_decisions', {
+        action: 'record',
+        content: 'Project A decision: use Rust for the CLI.',
+        projectRoot: projectA,
+      });
+      await setup.close();
+      const before = rows(projectA);
+
+      const elsewhere = mkTmp('cmos-e2e-clean-elsewhere-');
+      const stranger = await server(elsewhere);
+      const calls: Array<[string, Record<string, unknown>]> = [
+        ['cmos_review', {}],
+        [
+          'cmos_decisions',
+          { action: 'record', content: 'Project B decision: use Go for the API.' },
+        ],
+        ['cmos_session', { action: 'start', title: 'B work' }],
+        ['cmos_session', { action: 'capture', category: 'decision', content: 'B capture' }],
+      ];
+      for (const [tool, args] of calls) {
+        const result = await stranger.callTool(tool, args);
+        expect({ tool, refused: result.isError === true }).toEqual({ tool, refused: true });
+        expect(stranger.textOf(result)).toContain('No CMOS project in');
+        expect(stranger.textOf(result)).toContain(path.basename(elsewhere));
+      }
+      await stranger.close();
+      expect(rows(projectA)).toEqual(before);
+      expect(fs.existsSync(path.join(elsewhere, 'cmos'))).toBe(false);
+    });
+
+    it('an explicit root that is not a CMOS project is refused by name, and nothing is written', async () => {
+      const projectA = mkTmp('cmos-e2e-clean-explicit-a-');
+      const a = await server(projectA);
+      await a.callOk('cmos_project', { action: 'init', projectRoot: projectA, projectName: 'A' });
+      const before = rows(projectA);
+      const plain = mkTmp('cmos-e2e-clean-plain-');
+      const result = await a.callTool('cmos_decisions', {
+        action: 'record',
+        content: 'This must land nowhere.',
+        projectRoot: plain,
+      });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent?.error?.code).toBe('CMOS_NOT_DETECTED');
+      expect(a.textOf(result)).toContain(path.basename(plain));
+      expect(a.textOf(result)).toContain('cmos_project(action="init"');
+      expect(rows(projectA)).toEqual(before);
+      expect(fs.existsSync(path.join(plain, 'cmos'))).toBe(false);
+    });
+
+    it('a fresh project opens with the onboard flow and nothing misleading', async () => {
+      const fresh = mkTmp('cmos-e2e-clean-fresh-');
+      const s = await server(fresh);
+      await s.callOk('cmos_project', { action: 'init', projectRoot: fresh, projectName: 'Fresh' });
+      const review = await s.callOk('cmos_review', { projectRoot: fresh });
+      const actions = (s.dataOf(review)?.next_actions ?? []) as Array<{ command: string }>;
+      expect(actions[0]?.command).toBe('cmos_agent_onboard()');
+      const said = JSON.stringify(actions) + s.textOf(review);
+      for (const misleading of [
+        'tierSelectionPrompt',
+        'cmos_auth(action="login")',
+        'cmos_message(action="whoami")',
+      ]) {
+        expect({ misleading, present: said.includes(misleading) }).toEqual({
+          misleading,
+          present: false,
+        });
+      }
+    });
+
+    it('record, then start, then complete: no false warning, and the recorded decision is counted', async () => {
+      const root = mkTmp('cmos-e2e-clean-loop-');
+      const s = await server(root);
+      await s.callOk('cmos_project', { action: 'init', projectRoot: root, projectName: 'Loop' });
+      await s.callOk('cmos_sprint', {
+        action: 'add',
+        sprintId: 'sprint-01',
+        title: 'First sprint',
+        focus: 'The first feature',
+        projectRoot: root,
+      });
+      await s.callOk('cmos_mission', {
+        action: 'add',
+        missionId: 's01-m01',
+        name: 'First mission',
+        sprintId: 'sprint-01',
+        objective: 'Deliver the first feature',
+        projectRoot: root,
+      });
+      await s.callOk('cmos_decisions', {
+        action: 'record',
+        missionId: 's01-m01',
+        content: 'Chose event sourcing for the audit trail',
+        projectRoot: root,
+      });
+      await s.callOk('cmos_mission_transition', {
+        action: 'start',
+        missionId: 's01-m01',
+        projectRoot: root,
+      });
+      const done = await s.callOk('cmos_mission_transition', {
+        action: 'complete',
+        missionId: 's01-m01',
+        notes: 'Shipped',
+        projectRoot: root,
+      });
+      expect(s.textOf(done)).not.toContain('No decisions captured');
+      expect(s.dataOf(done)?.missionDecisionCount).toBe(1);
+    });
+
+    it('tools/list from the installed package stays under its 24,000-character ceiling', async () => {
+      const s = await server(mkTmp('cmos-e2e-clean-list-'));
+      const tools = await s.client.listTools();
+      expect(tools.tools).toHaveLength(15);
+      expect(JSON.stringify(tools.tools).length).toBeLessThanOrEqual(24_000);
+    });
   });
 });

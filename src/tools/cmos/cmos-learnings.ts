@@ -38,8 +38,14 @@ import {
   type CmosLearningsReaffirmParams,
   type CmosLearningsReaffirmResult,
 } from './cmos-learnings-reaffirm';
+import {
+  cmosLearningsShow,
+  formatLearningsShowForLLM,
+  type CmosLearningsShowParams,
+  type CmosLearningsShowResult,
+} from './cmos-learnings-show';
 
-export const CMOS_LEARNINGS_ACTIONS = ['list', 'search', 'update', 'reaffirm'] as const;
+export const CMOS_LEARNINGS_ACTIONS = ['list', 'search', 'show', 'update', 'reaffirm'] as const;
 
 export type CmosLearningsAction = (typeof CMOS_LEARNINGS_ACTIONS)[number];
 
@@ -78,6 +84,8 @@ export const CMOS_LEARNINGS_ACTION_PARAMS: ActionParamMap<
     'projectRoot',
   ],
   search: ['action', 'category', 'sprintId', 'query', 'limit', 'projectRoot'],
+  // s92-m08: expand one learning by id; search answers carry previews.
+  show: ['action', 'learningId', 'projectRoot'],
   update: ['action', 'status', 'learningId', 'evergreen', 'projectRoot'],
   reaffirm: ['action', 'learningId', 'evergreen', 'projectRoot'],
 };
@@ -86,13 +94,14 @@ export type CmosLearningsResult =
   | CmosLearningsListResult
   | CmosLearningsSearchResult
   | CmosLearningsUpdateResult
-  | CmosLearningsReaffirmResult;
+  | CmosLearningsReaffirmResult
+  | CmosLearningsShowResult;
 
 export const cmosLearningsSchema = z
   .object({
     action: z
       .enum(CMOS_LEARNINGS_ACTIONS)
-      .describe('Learnings action: list | search | update | reaffirm'),
+      .describe(`Learnings action: ${CMOS_LEARNINGS_ACTIONS.join(' | ')}`),
     // list params
     category: z
       .string()
@@ -101,10 +110,7 @@ export const cmosLearningsSchema = z
         'Filter by category for list/search actions (technical | process | agent-behavior | tooling)'
       ),
     sprintId: z.string().optional().describe('Filter by sprint ID for list/search actions'),
-    missionId: z
-      .string()
-      .optional()
-      .describe('s85-m04: filter to rows stamped with this mission (#487 mission -> row trail)'),
+    missionId: z.string().optional().describe('Only rows recorded for this mission'),
     status: z
       // s86-m04 (fork f04, fleet-resolved): four members, not three. CMOS ITSELF writes 'stale'
       // at staleness-detection.ts:494-499, and 246 such rows exist across 7 of 18 registered
@@ -141,7 +147,7 @@ export const cmosLearningsSchema = z
       .int()
       .positive()
       .optional()
-      .describe('Learning ID for update/reaffirm actions'),
+      .describe('Learning ID for show/update/reaffirm actions'),
     evergreen: z
       .boolean()
       .optional()
@@ -163,7 +169,8 @@ export const cmosLearningsToolDefinition = {
     'Consolidated learnings tool with action parameter support. ' +
     `Actions: ${CMOS_LEARNINGS_ACTIONS.join(', ')}. ` +
     'Use list to browse learnings with category/sprint/status filters. ' +
-    'Use search to find learnings by keyword. ' +
+    'Use search to find learnings by keyword; results carry 300-character previews. ' +
+    'Use show to read one learning in full by id. ' +
     'Use update to change status (active, archived, superseded). ' +
     'Use reaffirm to mark an evergreen learning as still valid (bumps last_reviewed_at without changing status).',
   inputSchema: {
@@ -172,7 +179,7 @@ export const cmosLearningsToolDefinition = {
       action: {
         type: 'string',
         enum: [...CMOS_LEARNINGS_ACTIONS],
-        description: 'Learnings action: list | search | update | reaffirm',
+        description: `Learnings action: ${CMOS_LEARNINGS_ACTIONS.join(' | ')}`,
       },
       category: {
         type: 'string',
@@ -185,7 +192,7 @@ export const cmosLearningsToolDefinition = {
       sprintId: { type: 'string', description: 'Filter by sprint ID' },
       missionId: {
         type: 'string',
-        description: 'Filter to rows stamped with this mission (#487 mission -> row trail)',
+        description: 'Only rows recorded for this mission',
       },
       status: {
         type: 'string',
@@ -216,7 +223,7 @@ export const cmosLearningsToolDefinition = {
       learningId: {
         type: 'integer',
         minimum: 1,
-        description: 'Learning ID for update/reaffirm actions',
+        description: 'Learning ID for show/update/reaffirm actions',
       },
       evergreen: {
         type: 'boolean',
@@ -290,6 +297,11 @@ export async function cmosLearnings(
         limit: params.limit,
         projectRoot: params.projectRoot,
       } satisfies CmosLearningsSearchParams);
+    case 'show':
+      return cmosLearningsShow({
+        learningId: params.learningId ?? 0,
+        projectRoot: params.projectRoot,
+      } satisfies CmosLearningsShowParams);
     case 'update':
       return cmosLearningsUpdate({
         learningId: params.learningId ?? 0,
@@ -343,6 +355,8 @@ export function formatLearningsForLLM(
       return formatLearningsListForLLM(result as CmosToolResult<CmosLearningsListResult>);
     case 'search':
       return formatLearningsSearchForLLM(result as CmosToolResult<CmosLearningsSearchResult>);
+    case 'show':
+      return formatLearningsShowForLLM(result as CmosToolResult<CmosLearningsShowResult>);
     case 'update':
       return formatLearningsUpdateForLLM(result as CmosToolResult<CmosLearningsUpdateResult>);
     case 'reaffirm':

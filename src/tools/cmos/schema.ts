@@ -116,23 +116,8 @@ CREATE TABLE IF NOT EXISTS metadata (
 
 -- Initialize standard metadata keys (no-op if already exists)
 --
--- s87-m04 -- THE THREE EMPTY-STRING IDENTITY ROWS ARE GONE, AND THIS CONSTANT IS THE ROOT CAUSE.
--- cmos-seed/db/schema.sql is GENERATED from here (scripts/regenerate-seed-schema.ts imports
--- CMOS_SCHEMA and writes it wholesale), and cmos-seed is inside package.json files[] -- so every
--- published tarball manufactured a store carrying project_id='', project_name='' and
--- tracelab_project_id='': rows that satisfy NOT NULL while being semantically absent. The #1038
--- immutable remeasurement found 45 stores: 32 identified, 13 identity-less, 0 unreadable; this is
--- where new identity-less instances came from.
---
--- DELETING THEM IS BEHAVIOUR-NEUTRAL, measured rather than assumed: genesis-columns.ts's read()
--- returns '' for an ABSENT row, so absent and empty resolve identically; every writer is
--- INSERT OR REPLACE (grep -rn "UPDATE metadata" src/ returns nothing), so cmos_project(init)
--- overwrites regardless of whether the row exists. A store made from the corrected seed STILL
--- resolves to unknown-project until an identity is set -- that is the point, and m04's
--- anti-symptom gate asserts exactly it. What is removed is a false claim, not a behaviour.
---
--- project_name had to go too: it is a LIVE ARM of the same fallback chain, so pinning project_id
--- alone would have left the second arm shipping in every tarball.
+-- No identity rows are seeded: cmos_project(init) writes project_id and project_name. An empty
+-- row would satisfy NOT NULL while meaning nothing, and reads treat an absent row as empty anyway.
 INSERT OR IGNORE INTO metadata (key, value) VALUES ('created_at', datetime('now'));
 INSERT OR IGNORE INTO metadata (key, value) VALUES ('schema_version', '${CMOS_SCHEMA_VERSION}');
 
@@ -145,7 +130,7 @@ CREATE TABLE IF NOT EXISTS sprints (
   end_date TEXT,
   total_missions INTEGER,
   completed_missions INTEGER,
-  -- s69-m03 per-row genesis columns (nullable here; the lazy migration upgrades
+  -- Per-row event columns (nullable here; the lazy migration upgrades
   -- to NOT NULL + CHECK on first genesis write — see schema-migrations.ts).
   project_id TEXT,
   stable_event_id TEXT,
@@ -153,7 +138,7 @@ CREATE TABLE IF NOT EXISTS sprints (
   origin_seq INTEGER,
   event_type TEXT,
   schema_version INTEGER NOT NULL DEFAULT 1,
-  -- s69-m04 author identity (nullable; bound when the multi-user layer lands).
+  -- Author identity (nullable; bound when the multi-user layer lands).
   author_user_id TEXT
 );
 
@@ -183,14 +168,14 @@ CREATE TABLE IF NOT EXISTS missions (
   -- Legacy metadata field (for backward compatibility)
   metadata TEXT,
 
-  -- s69-m03 per-row genesis columns (nullable here; lazy migration upgrades).
+  -- Per-row event columns (nullable here; the lazy migration upgrades them).
   project_id TEXT,
   stable_event_id TEXT,
   occurred_at INTEGER,
   origin_seq INTEGER,
   event_type TEXT,
   schema_version INTEGER NOT NULL DEFAULT 1,
-  -- s69-m04 author identity (nullable; bound when the multi-user layer lands).
+  -- Author identity (nullable; bound when the multi-user layer lands).
   author_user_id TEXT
 );
 
@@ -218,17 +203,17 @@ CREATE TABLE IF NOT EXISTS context_snapshots (
   content_hash TEXT NOT NULL,
   content TEXT NOT NULL,
   created_at TEXT NOT NULL,
-  -- s69-m03 per-row genesis columns (nullable here; lazy migration upgrades).
+  -- Per-row event columns (nullable here; the lazy migration upgrades them).
   project_id TEXT,
   stable_event_id TEXT,
   occurred_at INTEGER,
   origin_seq INTEGER,
   event_type TEXT,
   schema_version INTEGER NOT NULL DEFAULT 1,
-  -- s69-m04 author identity (nullable; bound when the multi-user layer lands).
+  -- Author identity (nullable; bound when the multi-user layer lands).
   author_user_id TEXT,
-  -- s84-m04 content-tombstone marker (#478): NULL = content intact; a timestamp = the
-  -- bounded-retention prune reclaimed this row's content (row/metadata/FK/event preserved).
+  -- Content-tombstone marker: NULL = content intact; a timestamp = the snapshot prune emptied
+  -- this row's content, or it was written without content (row, metadata, FK and event kept).
   content_pruned_at TEXT,
   FOREIGN KEY (context_id) REFERENCES contexts(id) ON DELETE CASCADE
 );
@@ -270,17 +255,21 @@ CREATE TABLE IF NOT EXISTS sessions (
   captures TEXT DEFAULT '[]',
   next_steps TEXT,
   metadata TEXT,
-  -- s69-m03 per-row genesis columns (nullable here; lazy migration upgrades).
+  -- Per-row event columns (nullable here; the lazy migration upgrades them).
   project_id TEXT,
   stable_event_id TEXT,
   occurred_at INTEGER,
   origin_seq INTEGER,
   event_type TEXT,
   schema_version INTEGER NOT NULL DEFAULT 1,
-  -- s69-m04 author identity (nullable; user_id is the author author_session_id
+  -- Author identity (nullable; user_id is the author author_session_id
   -- points at, bound when the multi-user layer lands).
   author_user_id TEXT,
-  user_id TEXT
+  user_id TEXT,
+  -- Implicit sessions: 1 for a session the server opened because a write
+  -- named none; owner_key says whose it is (NULL on explicit sessions).
+  implicit INTEGER NOT NULL DEFAULT 0,
+  owner_key TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_aggkey ON sessions (project_id, event_type, occurred_at);
@@ -304,7 +293,7 @@ CREATE TABLE IF NOT EXISTS strategic_decisions (
   sprint_id TEXT,
   snapshot_id INTEGER,
   project_domain TEXT,
-  author_session_id TEXT,  -- s69-m04: renamed from session_id (project-scoped session of origin)
+  author_session_id TEXT,  -- formerly session_id: the project-scoped session of origin
   mission_id TEXT,  -- Reference to mission that produced this decision
   source_chunk_ids TEXT,  -- JSON array of TraceLab chunk UUIDs for decision provenance
   category TEXT,          -- architectural | process | tooling | design | business
@@ -312,14 +301,14 @@ CREATE TABLE IF NOT EXISTS strategic_decisions (
   status TEXT NOT NULL DEFAULT 'active',  -- active | superseded | archived
   evidence TEXT,          -- JSON array of TraceLab evidence references [{type, id}]
   content_hash TEXT,      -- SHA-256 hash for client-side dedup (decision_text + project_domain)
-  -- s69-m03 per-row genesis columns (nullable here; lazy migration upgrades).
+  -- Per-row event columns (nullable here; the lazy migration upgrades them).
   project_id TEXT,
   stable_event_id TEXT,
   occurred_at INTEGER,
   origin_seq INTEGER,
   event_type TEXT,
   schema_version INTEGER NOT NULL DEFAULT 1,
-  -- s69-m04 author identity (nullable; bound when the multi-user layer lands).
+  -- Author identity (nullable; bound when the multi-user layer lands).
   author_user_id TEXT,
   FOREIGN KEY (context_id) REFERENCES contexts(id) ON DELETE CASCADE,
   FOREIGN KEY (sprint_id) REFERENCES sprints(id) ON DELETE SET NULL,
@@ -346,18 +335,18 @@ CREATE TABLE IF NOT EXISTS learnings (
   category TEXT,            -- technical | process | agent-behavior | tooling
   status TEXT NOT NULL DEFAULT 'active',  -- active | archived | superseded | stale (staleness-detection.ts writes 'stale'; no CHECK constraint)
   sprint_id TEXT,
-  author_session_id TEXT,  -- s69-m04: renamed from session_id (project-scoped session of origin)
+  author_session_id TEXT,  -- formerly session_id: the project-scoped session of origin
   mission_id TEXT,
   created_at TEXT NOT NULL,
   content_hash TEXT,    -- SHA-256 hash for client-side dedup (content + category)
-  -- s69-m03 per-row genesis columns (nullable here; lazy migration upgrades).
+  -- Per-row event columns (nullable here; the lazy migration upgrades them).
   project_id TEXT,
   stable_event_id TEXT,
   occurred_at INTEGER,
   origin_seq INTEGER,
   event_type TEXT,
   schema_version INTEGER NOT NULL DEFAULT 1,
-  -- s69-m04 author identity (nullable; bound when the multi-user layer lands).
+  -- Author identity (nullable; bound when the multi-user layer lands).
   author_user_id TEXT,
   FOREIGN KEY (sprint_id) REFERENCES sprints(id) ON DELETE SET NULL,
   FOREIGN KEY (author_session_id) REFERENCES sessions(id) ON DELETE SET NULL,
@@ -433,14 +422,14 @@ CREATE TABLE IF NOT EXISTS next_steps (
   resolved_at TEXT,
   carried_to_sprint TEXT REFERENCES sprints(id) ON DELETE SET NULL,
   content_hash TEXT,
-  -- s69-m03 per-row genesis columns (nullable here; lazy migration upgrades).
+  -- Per-row event columns (nullable here; the lazy migration upgrades them).
   project_id TEXT,
   stable_event_id TEXT,
   occurred_at INTEGER,
   origin_seq INTEGER,
   event_type TEXT,
   schema_version INTEGER NOT NULL DEFAULT 1,
-  -- s69-m04 author identity (nullable; bound when the multi-user layer lands).
+  -- Author identity (nullable; bound when the multi-user layer lands).
   author_user_id TEXT
 );
 
@@ -462,14 +451,14 @@ CREATE TABLE IF NOT EXISTS constraints (
   expires_at TEXT,
   archived_at TEXT,
   content_hash TEXT,
-  -- s69-m03 per-row genesis columns (nullable here; lazy migration upgrades).
+  -- Per-row event columns (nullable here; the lazy migration upgrades them).
   project_id TEXT,
   stable_event_id TEXT,
   occurred_at INTEGER,
   origin_seq INTEGER,
   event_type TEXT,
   schema_version INTEGER NOT NULL DEFAULT 1,
-  -- s69-m04 author identity (nullable; bound when the multi-user layer lands).
+  -- Author identity (nullable; bound when the multi-user layer lands).
   author_user_id TEXT
 );
 

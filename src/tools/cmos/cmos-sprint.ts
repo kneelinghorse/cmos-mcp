@@ -95,6 +95,7 @@ export const CMOS_SPRINT_ACTION_PARAMS: ActionParamMap<CmosSprintAction, CmosSpr
     'condensation',
     'targetSizePercent',
     'forceComplete',
+    'archive',
     'projectRoot',
   ],
   retro: ['action', 'sprintId', 'projectRoot'],
@@ -168,6 +169,12 @@ export const cmosSprintSchema = z
       .describe(
         'No-op for complete action, kept for backward compatibility. Build-freshness is advisory as of the s74 review — staleness is surfaced as a warning and never blocks closeout, so no override is needed.'
       ),
+    archive: z
+      .boolean()
+      .optional()
+      .describe(
+        "complete: also archive the sprint's active decisions and learnings (off by default since 3.2.0)"
+      ),
     targetAddress: z
       .string()
       .optional()
@@ -200,9 +207,10 @@ export const cmosSprintToolDefinition = {
     // demotes decisions and learnings — it regenerates into TOOL_REFERENCE.md and the definitions
     // snapshot, both of which ship. The counterpart edit on cmosSprintCompleteToolDefinition is a
     // consistency fix on an UNREGISTERED definition and reaches no MCP host.
-    "Use complete to close a sprint: it also ARCHIVES that sprint's active decisions and learnings " +
-    '(evergreen learnings are kept active), names every archived id in its result, and takes a ' +
-    'pre-close database snapshot you can restore from. ' +
+    // s92-m05 (operator Q1, decision #1160): the close stopped archiving by default.
+    'Use complete to close a sprint: it stamps the actual close time, applies the next-step lease, ' +
+    "and leaves the sprint's decisions and learnings ACTIVE unless archive is true (then it archives " +
+    'them and names every archived id); it takes a pre-close database snapshot you can restore from. ' +
     'Use retro to auto-generate a sprint retrospective report with KPIs, decisions, learnings, and git commit summary. ' +
     'Use carry_forward to detect sync gaps and blocked missions and send backlog_request messages to a target project. ' +
     'Use analytics to compute cross-sprint trend KPIs: velocity, completion rate, decision volume, cycle time.',
@@ -281,6 +289,11 @@ export const cmosSprintToolDefinition = {
         type: 'boolean',
         description:
           'No-op for complete action, kept for backward compatibility. Build-freshness is advisory — staleness is surfaced as a warning and never blocks closeout.',
+      },
+      archive: {
+        type: 'boolean',
+        description:
+          "complete: also archive the sprint's active decisions and learnings (off by default since 3.2.0)",
       },
       targetAddress: {
         type: 'string',
@@ -376,6 +389,7 @@ export async function cmosSprint(
         condensation: params.condensation,
         targetSizePercent: params.targetSizePercent,
         forceComplete: params.forceComplete,
+        archive: params.archive,
         projectRoot: params.projectRoot,
       } satisfies CmosSprintCompleteParams);
       if (result.success) {

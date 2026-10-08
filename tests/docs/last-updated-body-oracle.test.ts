@@ -9,6 +9,7 @@ import { pathToFileURL } from 'url';
 import {
   lastUpdatedBodyChangeFindings,
   latestNonStampBodyChangeDate,
+  mergeCanHideLaterChange,
 } from './last-updated-body-oracle';
 
 const DOC = 'docs/guide.md';
@@ -40,9 +41,9 @@ function git(repo: string, args: readonly string[], date?: string): void {
   );
 }
 
-function writeGuide(repo: string, stamp: string, body: string): void {
+function writeGuide(repo: string, stamp: string, body: string, rel: string = DOC): void {
   fs.mkdirSync(path.join(repo, 'docs'), { recursive: true });
-  fs.writeFileSync(path.join(repo, DOC), `# Guide\n\n${body}\n\n**Last Updated**: ${stamp}\n`);
+  fs.writeFileSync(path.join(repo, rel), `# Guide\n\n${body}\n\n**Last Updated**: ${stamp}\n`);
 }
 
 function currentBranch(repo: string): string {
@@ -224,6 +225,42 @@ describe('Last Updated body-change oracle', () => {
     ).toThrow('git --follow cannot prove merge history across renamed paths');
   });
 
+  it('trusts --follow across a rename when every merge in the history predates the latest body change', () => {
+    // s92-m06's seed template rename: a merge long before the rename, then a rename that edits the
+    // body. A merge can only hide changes dated no later than itself, so the walk stands. The file
+    // is long so git records the edited move as a rename, as it did for the 395-line template.
+    const long = (stamp: string, line: string): string =>
+      `# Guide\n\n${Array.from({ length: 40 }, (_, i) => `Stable line ${i}.`).join('\n')}\n` +
+      `${line}\n\n**Last Updated**: ${stamp}\n`;
+    fs.writeFileSync(path.join(repo, DOC), long('2026-01-01', 'Original line.'));
+    git(repo, ['add', DOC]);
+    git(repo, ['commit', '--quiet', '-m', 'lengthen'], '2026-01-01');
+
+    const mainBranch = currentBranch(repo);
+    git(repo, ['checkout', '--quiet', '-b', 'feature']);
+    fs.writeFileSync(path.join(repo, DOC), long('2026-01-02', 'Feature line.'));
+    git(repo, ['add', DOC]);
+    git(repo, ['commit', '--quiet', '-m', 'edit on feature'], '2026-01-02');
+    git(repo, ['checkout', '--quiet', mainBranch]);
+    fs.writeFileSync(path.join(repo, 'other.md'), 'unrelated\n');
+    git(repo, ['add', 'other.md']);
+    git(repo, ['commit', '--quiet', '-m', 'unrelated on main'], '2026-01-02');
+    git(repo, ['merge', '--quiet', '--no-ff', '-m', 'merge feature', 'feature'], '2026-01-03');
+
+    const renamed = 'docs/RENAMED.md';
+    git(repo, ['mv', DOC, renamed]);
+    fs.writeFileSync(path.join(repo, renamed), long('2026-01-05', 'Edited during the rename.'));
+    git(repo, ['add', '-A']);
+    git(repo, ['commit', '--quiet', '-m', 'rename and edit'], '2026-01-05');
+
+    expect(lastUpdatedBodyChangeFindings(repo, [{ rel: renamed, value: '2026-01-05' }])).toEqual(
+      []
+    );
+    expect(lastUpdatedBodyChangeFindings(repo, [{ rel: renamed, value: '2026-01-04' }])).toEqual([
+      'docs/RENAMED.md stamps Last Updated 2026-01-04, but its latest non-stamp body change is 2026-01-05',
+    ]);
+  });
+
   it('fails loudly for the mirror topology that keeps the original parent path', () => {
     const mainBranch = currentBranch(repo);
     const renamed = 'docs/renamed.md';
@@ -244,9 +281,95 @@ describe('Last Updated body-change oracle', () => {
     git(repo, ['add', '-A']);
     git(repo, ['commit', '--quiet', '-m', 'resolve merge at original path'], '2026-01-03');
 
-    expect(() => lastUpdatedBodyChangeFindings(repo, [{ rel: DOC, value: '2026-01-02' }])).toThrow(
-      'git --follow cannot prove merge history across renamed paths'
+    // s92-m10: the walk finds the merge's own resolution, dated 2026-01-03. No commit is later, and
+    // a merge can only hide changes dated no later than itself, so that date is proven, not guessed.
+    expect(lastUpdatedBodyChangeFindings(repo, [{ rel: DOC, value: '2026-01-02' }])).toEqual([
+      'docs/guide.md stamps Last Updated 2026-01-02, but its latest non-stamp body change is 2026-01-03',
+    ]);
+  });
+
+  /** A long guide, so git records an edited move as a rename (as for the 395-line seed template). */
+  const longGuide = (stamp: string, line: string): string =>
+    `# Guide\n\n${Array.from({ length: 40 }, (_, i) => `Stable line ${i}.`).join('\n')}\n` +
+    `${line}\n\n**Last Updated**: ${stamp}\n`;
+
+  it('trusts a later release merge that brings a renamed, edited file to a side that never touched it', () => {
+    fs.writeFileSync(path.join(repo, DOC), longGuide('2026-01-01', 'Original line.'));
+    git(repo, ['add', DOC]);
+    git(repo, ['commit', '--quiet', '-m', 'lengthen'], '2026-01-01');
+    const mainBranch = currentBranch(repo);
+    git(repo, ['checkout', '--quiet', '-b', 'release']);
+    const renamed = 'docs/RELEASED.md';
+    git(repo, ['mv', DOC, renamed]);
+    fs.writeFileSync(path.join(repo, renamed), longGuide('2026-01-05', 'Edited in the rename.'));
+    git(repo, ['add', '-A']);
+    git(repo, ['commit', '--quiet', '-m', 'rename and edit'], '2026-01-05');
+    git(repo, ['checkout', '--quiet', mainBranch]);
+    fs.writeFileSync(path.join(repo, 'other.md'), 'unrelated\n');
+    git(repo, ['add', 'other.md']);
+    git(repo, ['commit', '--quiet', '-m', 'unrelated on main'], '2026-01-06');
+    git(repo, ['merge', '--quiet', '--no-ff', '-m', 'release merge', 'release'], '2026-01-07');
+
+    expect(lastUpdatedBodyChangeFindings(repo, [{ rel: renamed, value: '2026-01-05' }])).toEqual(
+      []
     );
+    const mergeHash = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: repo,
+      encoding: 'utf8',
+    }).trim();
+    expect(
+      mergeCanHideLaterChange(
+        repo,
+        { hash: mergeHash, date: '2026-01-07' },
+        [DOC, renamed],
+        '2026-01-05'
+      )
+    ).toBe(false);
+  });
+
+  it('never trusts that later merge when the other side changed the body after the rename', () => {
+    fs.writeFileSync(path.join(repo, DOC), longGuide('2026-01-01', 'Original line.'));
+    git(repo, ['add', DOC]);
+    git(repo, ['commit', '--quiet', '-m', 'lengthen'], '2026-01-01');
+    const mainBranch = currentBranch(repo);
+    git(repo, ['checkout', '--quiet', '-b', 'release']);
+    const renamed = 'docs/RELEASED.md';
+    git(repo, ['mv', DOC, renamed]);
+    fs.writeFileSync(path.join(repo, renamed), longGuide('2026-01-05', 'Edited in the rename.'));
+    git(repo, ['add', '-A']);
+    git(repo, ['commit', '--quiet', '-m', 'rename and edit'], '2026-01-05');
+    git(repo, ['checkout', '--quiet', mainBranch]);
+    fs.writeFileSync(path.join(repo, DOC), longGuide('2026-01-01', 'Edited on main later.'));
+    git(repo, ['add', DOC]);
+    git(repo, ['commit', '--quiet', '-m', 'edit old path on main'], '2026-01-06');
+    try {
+      git(repo, ['merge', '--quiet', '--no-commit', '--no-ff', 'release']);
+    } catch {
+      // a rename/modify conflict, resolved below in favour of the release side
+    }
+    fs.rmSync(path.join(repo, DOC), { force: true });
+    fs.writeFileSync(path.join(repo, renamed), longGuide('2026-01-05', 'Edited in the rename.'));
+    git(repo, ['add', '-A']);
+    git(repo, ['commit', '--quiet', '-m', 'take the release side'], '2026-01-07');
+
+    // The merge took the release side whole, but main's 2026-01-06 edit is on the other side since
+    // the merge base, so against a latest of 2026-01-05 this merge could hide a later change.
+    const mergeHash = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: repo,
+      encoding: 'utf8',
+    }).trim();
+    const paths = [DOC, renamed];
+    expect(
+      mergeCanHideLaterChange(repo, { hash: mergeHash, date: '2026-01-07' }, paths, '2026-01-05')
+    ).toBe(true);
+    // Either answer is honest: refuse, or report the 2026-01-06 edit. Reporting 2026-01-05 is not.
+    let findings: string[] | null = null;
+    try {
+      findings = lastUpdatedBodyChangeFindings(repo, [{ rel: renamed, value: '2026-01-05' }]);
+    } catch (error) {
+      expect(String(error)).toContain('git --follow cannot prove merge history');
+    }
+    if (findings !== null) expect(findings).not.toEqual([]);
   });
 
   it('does not advance to an ordinary merge whose body equals one parent', () => {

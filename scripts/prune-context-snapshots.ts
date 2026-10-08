@@ -3,13 +3,12 @@
 // ABOUTME: audit blob). Dry-run by DEFAULT; --apply mutates. Content-tombstone unless --hard.
 
 import { withClientAsync } from '../src/tools/cmos/client';
+import { readPruneInputs, tombstoneSnapshot } from '../src/tools/cmos/cmos-db-prune-snapshots';
 import { createError, createSuccess } from '../src/tools/cmos/errors';
-import { tableHasColumn } from '../src/tools/cmos/genesis-columns';
 import { ensureContentPrunedColumn } from '../src/tools/cmos/schema-migrations';
 import {
   selectSnapshotsToPrune,
   resolveKeepN,
-  type SnapshotRow,
   type PruneSelection,
 } from '../src/tools/cmos/context-snapshot-prune';
 
@@ -53,70 +52,30 @@ async function main(): Promise<number> {
 
   const result = await withClientAsync<PruneReport>(
     async (client) => {
-      // DRY-RUN is strictly read-only: guard the content_pruned_at read so a store predating
-      // the column is NOT altered just to preview. The migration (ALTER ADD COLUMN) is deferred
-      // to the --apply path, which lands the column before any write filters on it (Hardening #4).
-      const prunedExpr = tableHasColumn(client, 'context_snapshots', 'content_pruned_at')
-        ? 'content_pruned_at'
-        : 'NULL AS content_pruned_at';
-
-      const rowsRes = client.getMany<{
-        id: number;
-        context_id: string;
-        source: string | null;
-        created_at: string;
-        content_len: number;
-        content_pruned_at: string | null;
-      }>(
-        `SELECT id, context_id, source, created_at, LENGTH(content) AS content_len, ${prunedExpr}
-         FROM context_snapshots`,
-        []
-      );
-      if (!rowsRes.success) {
-        return createError<PruneReport>(
-          rowsRes.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to read context_snapshots' }
-        );
+      // DRY-RUN is strictly read-only: the readers guard the content_pruned_at read, so a store
+      // predating the column is NOT altered just to preview. The migration (ALTER ADD COLUMN) is
+      // deferred to the --apply path, which lands the column before any write filters on it.
+      // s92-m09: the rows, references and sprint closes come from the same readers
+      // cmos_db(prune_snapshots) uses. Live references — NEVER hardcode. FAIL CLOSED: a source
+      // that could not be read could hold a reference, so --apply aborts rather than under-protect.
+      const read = readPruneInputs(client);
+      if (!read.ok) {
+        return createError<PruneReport>({ code: 'DB_QUERY_FAILED', message: read.message });
       }
-      const rows: SnapshotRow[] = (rowsRes.data ?? []).map((r) => ({
-        id: r.id,
-        contextId: r.context_id,
-        source: r.source,
-        createdAt: r.created_at,
-        contentLength: r.content_len,
-        contentPrunedAt: r.content_pruned_at,
-      }));
+      const { rows, references, sprintCloses, unreadable } = read.inputs;
       const totalContentBytes = rows.reduce((s, r) => s + r.contentLength, 0);
-
-      // Live FK set — NEVER hardcode; a decision's snapshot_id keeps that row's content.
-      const fkRes = client.getMany<{ snapshot_id: number }>(
-        `SELECT DISTINCT snapshot_id FROM strategic_decisions WHERE snapshot_id IS NOT NULL`,
-        []
-      );
-      // FAIL CLOSED (m04 review): the FK set is the ONLY thing keeping a decision-referenced
-      // snapshot's content (and, under --hard, its row + the decision's FK link) from being
-      // reclaimed. A silent empty-set fallback on a failed read would drop ALL FK protection
-      // and irreversibly prune an audit-referenced snapshot — so abort rather than under-protect.
-      // (A missing strategic_decisions table / snapshot_id column is a legitimate empty set —
-      // no refs can exist there; only a real read failure on a store that HAS refs is dangerous.
-      // The client wraps a missing table as "Table 'X' does not exist" and SQLite raw as
-      // "no such table/column" — accept BOTH phrasings as structural absence.)
-      if (
-        !fkRes.success &&
-        !/does not exist|no such (table|column)/i.test(fkRes.error?.message ?? '')
-      ) {
-        return createError<PruneReport>(
-          fkRes.error ?? {
-            code: 'DB_QUERY_FAILED',
-            message: 'Failed to read the live snapshot FK set (strategic_decisions.snapshot_id)',
-          }
-        );
+      if (args.apply && unreadable.length > 0) {
+        return createError<PruneReport>({
+          code: 'DB_QUERY_FAILED',
+          message: `${unreadable.join('; ')} could not be read; not applied.`,
+        });
       }
-      const fkIds = new Set<number>((fkRes.data ?? []).map((r) => r.snapshot_id));
 
-      const selection = selectSnapshotsToPrune(rows, fkIds, {
+      const selection = selectSnapshotsToPrune(rows, references, {
         keepPerContext: keepN,
         days: args.days,
         nowMs: Date.now(),
+        sprintCloses,
       });
 
       let applied = 0;
@@ -134,13 +93,11 @@ async function main(): Promise<number> {
         }
         try {
           for (const id of selection.prunableIds) {
+            // s92-m09: the tombstone is shared with cmos_db(prune_snapshots); it is idempotent
+            // (guarded on content_pruned_at IS NULL) and prefixes the hash `pruned:`.
             const res = args.hard
               ? client.execute('DELETE FROM context_snapshots WHERE id = ?', [id])
-              : client.execute(
-                  // Guard on content_pruned_at IS NULL so a concurrent/rerun is idempotent.
-                  "UPDATE context_snapshots SET content = '', content_pruned_at = ? WHERE id = ? AND content_pruned_at IS NULL",
-                  [nowIso, id]
-                );
+              : tombstoneSnapshot(client, id, nowIso);
             if (!res.success) throw new Error(res.error?.message ?? `prune failed on id ${id}`);
             applied += res.data?.changes ?? 0;
           }
@@ -186,7 +143,10 @@ async function main(): Promise<number> {
   const r = selection.preserveReasons;
   console.log(
     `[prune:snapshots] preserve reasons: newest=${r.newestPerContext} lastN=${r.lastN} ` +
-      `live-FK=${r.fkReferenced} sprint_complete=${r.sprintComplete} within-days=${r.withinDays}`
+      `live-FK=${r.fkReferenced} context-ref=${r.contextReferenced} ` +
+      `sprint_complete=${r.sprintComplete} sprint-close-state=${r.sprintCloseState} ` +
+      `not-automatic=${r.notAutomatic} recent-recovery=${r.recentRecoveryCopy} ` +
+      `within-days=${r.withinDays}`
   );
   for (const c of selection.perContext) {
     console.log(

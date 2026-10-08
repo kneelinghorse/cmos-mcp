@@ -386,7 +386,10 @@ export async function cmosMission(
       // backed queryAcrossStores), NOT the single-store work queue. index.ts skips
       // local-root resolution for this branch.
       if (params.acrossProjects) {
-        return missionStatusAcrossProjects({ limit: params.limit });
+        return missionStatusAcrossProjects({
+          limit: params.limit,
+          projectRoot: params.projectRoot,
+        });
       }
       return cmosMissionStatus({
         includeBlocked: params.includeBlocked,

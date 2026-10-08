@@ -17,7 +17,7 @@ CMOS uses MCP tools for database operations. Open the session with the bundled r
    - Returns project identity, current sprint, project-scoped work queue,
      recent decisions, freshness, and top-3 next_actions
    - Replaces the older onboard + context view + mission status opener
-2. LOAD RULES: Read agents.md for repository rules
+2. LOAD RULES: Read AGENTS.md for repository rules
 
 Then run missions in a loop:
 
@@ -131,5 +131,5 @@ The review response includes project identity:
 
 ---
 
-**Last Updated**: 2026-09-18
+**Last Updated**: 2026-10-07
 **For**: Build session mission loops

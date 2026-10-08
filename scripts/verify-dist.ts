@@ -137,6 +137,16 @@ async function main(): Promise<void> {
       'cmos_project(init) writes the seed store',
       fs.existsSync(path.join(projectDir, 'cmos', 'db', 'cmos.sqlite'))
     );
+    // s92-m06: init writes an uppercase AGENTS.md at the project root from the shipped template.
+    // A directory listing, not existsSync: a case-insensitive filesystem would accept agents.md.
+    check(
+      's92-m06: the shipped init writes AGENTS.md at the project root, from the shipped template',
+      fs.readdirSync(projectDir).includes('AGENTS.md') &&
+        fs
+          .readFileSync(path.join(projectDir, 'AGENTS.md'), 'utf8')
+          .includes('Hard Operating Rules'),
+      fs.readdirSync(projectDir).join(',')
+    );
 
     // s80-m02: init registers into the project-graph registry (single source) and
     // writes NO legacy project-registry.json.
@@ -1727,10 +1737,12 @@ async function main(): Promise<void> {
     );
     const seededDecisionId = Number(seededRow?.id);
 
+    // s92-m05: archival is opt-in since 3.2.0 (decision #1160), so this probe opts in.
     const closeRes = await h.callOk('cmos_sprint', {
       action: 'complete',
       sprintId: 'sprint-m02',
       summary: 'verify:dist s87-m02 probe',
+      archive: true,
       projectRoot: projectDirM02,
     });
     const m02CloseData = h.dataOf(closeRes) as {
@@ -1765,6 +1777,302 @@ async function main(): Promise<void> {
         .split('\n')
         .filter((l) => l.startsWith('Archived:'))
         .join(' | ')
+    );
+
+    // s92-m05 — a DEFAULT close keeps the sprint's decisions active (operator Q1, decision #1160).
+    // Seeded through the same shipped writer as the s87-m02 probe, in a store of its own.
+    const projectDirM05 = mkTmp('cmos-verify-s92m05-');
+    await h.callOk('cmos_project', {
+      action: 'init',
+      projectRoot: projectDirM05,
+      projectName: 'verify-s92m05',
+    });
+    await h.callOk('cmos_sprint', {
+      action: 'add',
+      sprintId: 'sprint-m05',
+      title: 'verify s92-m05',
+      projectRoot: projectDirM05,
+    });
+    await h.callOk('cmos_mission', {
+      action: 'add',
+      missionId: 'm05-probe',
+      name: 'verify-dist keeps-record probe',
+      sprintId: 'sprint-m05',
+      projectRoot: projectDirM05,
+    });
+    await h.callOk('cmos_mission_transition', {
+      action: 'start',
+      missionId: 'm05-probe',
+      projectRoot: projectDirM05,
+    });
+    await h.callOk('cmos_mission_transition', {
+      action: 'complete',
+      missionId: 'm05-probe',
+      notes: 'verify:dist keeps-record probe',
+      decisions: ['verify-dist seeded decision for the s92-m05 keeps-record gate'],
+      projectRoot: projectDirM05,
+    });
+    const activeM05Decisions = (): number[] => {
+      const db = new Database(path.join(projectDirM05, 'cmos', 'db', 'cmos.sqlite'));
+      try {
+        return (
+          db
+            .prepare(
+              `SELECT id FROM strategic_decisions
+                WHERE status = 'active'
+                  AND (sprint_id = 'sprint-m05' OR mission_id = 'm05-probe')
+                ORDER BY id`
+            )
+            .all() as Array<{ id: number }>
+        ).map((row) => row.id);
+      } finally {
+        db.close();
+      }
+    };
+    const keptBefore = activeM05Decisions();
+    check(
+      's92-m05: the probe really seeded a decision a 3.1.0 close would archive (precondition)',
+      keptBefore.length > 0,
+      'no active decision bound to sprint-m05 — the keeps-record assertions below would be vacuous'
+    );
+    const defaultCloseRes = await h.callOk('cmos_sprint', {
+      action: 'complete',
+      sprintId: 'sprint-m05',
+      summary: 'verify:dist s92-m05 probe',
+      projectRoot: projectDirM05,
+    });
+    const m05Lifecycle = (
+      h.dataOf(defaultCloseRes) as {
+        lifecycle?: { archived?: boolean; archivedDecisionIds?: number[] };
+      } | null
+    )?.lifecycle;
+    check(
+      's92-m05: the shipped default close reports archived: false and names no archived id',
+      m05Lifecycle?.archived === false &&
+        Array.isArray(m05Lifecycle.archivedDecisionIds) &&
+        m05Lifecycle.archivedDecisionIds.length === 0,
+      `archived=${String(m05Lifecycle?.archived)} ids=${JSON.stringify(m05Lifecycle?.archivedDecisionIds)}`
+    );
+    const keptAfter = activeM05Decisions();
+    check(
+      "s92-m05: the shipped default close leaves the sprint's decisions active",
+      JSON.stringify(keptAfter) === JSON.stringify(keptBefore),
+      `before=${JSON.stringify(keptBefore)} after=${JSON.stringify(keptAfter)}`
+    );
+
+    // s92-m04 — the recommended order (record, then start, then complete) is not told "No decisions
+    // captured", and the receipt reports the mission's true count. 3.1.0 counted only decisions[].
+    const projectDirM04 = mkTmp('cmos-verify-s92m04-');
+    await h.callOk('cmos_project', {
+      action: 'init',
+      projectRoot: projectDirM04,
+      projectName: 'verify-s92m04',
+    });
+    await h.callOk('cmos_sprint', {
+      action: 'add',
+      sprintId: 'sprint-m04',
+      title: 'verify s92-m04',
+      projectRoot: projectDirM04,
+    });
+    await h.callOk('cmos_mission', {
+      action: 'add',
+      missionId: 'm04-probe',
+      name: 'verify-dist recorded-decisions probe',
+      sprintId: 'sprint-m04',
+      projectRoot: projectDirM04,
+    });
+    for (const content of [
+      'verify-dist s92-m04: recorded before the mission started',
+      'verify-dist s92-m04: a second recorded decision',
+    ]) {
+      await h.callOk('cmos_decisions', {
+        action: 'record',
+        content,
+        missionId: 'm04-probe',
+        projectRoot: projectDirM04,
+      });
+    }
+    await h.callOk('cmos_mission_transition', {
+      action: 'start',
+      missionId: 'm04-probe',
+      projectRoot: projectDirM04,
+    });
+    const m04Complete = await h.callOk('cmos_mission_transition', {
+      action: 'complete',
+      missionId: 'm04-probe',
+      notes: 'verify:dist recorded-decisions probe',
+      projectRoot: projectDirM04,
+    });
+    const m04Data = h.dataOf(m04Complete) as { missionDecisionCount?: number } | null;
+    check(
+      "s92-m04: record, then start, then complete is not told 'No decisions captured'",
+      !textOf(m04Complete).includes('No decisions captured'),
+      textOf(m04Complete)
+        .split('\n')
+        .filter((l) => /decision/i.test(l))
+        .join(' | ')
+    );
+    check(
+      "s92-m04: the completion receipt reports the mission's recorded decisions",
+      m04Data?.missionDecisionCount === 2 &&
+        textOf(m04Complete).includes('Decisions recorded for this mission: 2'),
+      `missionDecisionCount=${String(m04Data?.missionDecisionCount)}`
+    );
+
+    // s92-m07 — search drops only superseded rows (R1), and health names the semantic-search state.
+    for (const content of [
+      'verify-dist s92-m07: quarantine the retired ledger shard, archived later',
+      'verify-dist s92-m07: quarantine the ledger shard in memory, superseded later',
+    ]) {
+      await h.callOk('cmos_decisions', { action: 'record', content, projectRoot: projectDirM04 });
+    }
+    {
+      const db = new Database(path.join(projectDirM04, 'cmos', 'db', 'cmos.sqlite'));
+      try {
+        db.prepare(
+          `UPDATE strategic_decisions SET status = 'archived' WHERE decision_text LIKE '%archived later'`
+        ).run();
+        db.prepare(
+          `UPDATE strategic_decisions SET status = 'superseded' WHERE decision_text LIKE '%superseded later'`
+        ).run();
+      } finally {
+        db.close();
+      }
+    }
+    const m07Search = await h.callOk('cmos_context', {
+      action: 'search',
+      query: 'quarantine ledger shard',
+      projectRoot: projectDirM04,
+    });
+    const m07Hits =
+      (h.dataOf(m07Search) as { results?: Array<{ status: string | null; text: string }> } | null)
+        ?.results ?? [];
+    check(
+      's92-m07: the shipped search returns an archived decision, marked archived, and no superseded one',
+      m07Hits.some((hit) => hit.status === 'archived' && hit.text.includes('archived later')) &&
+        !m07Hits.some((hit) => hit.status === 'superseded') &&
+        textOf(m07Search).includes(', archived'),
+      JSON.stringify(m07Hits.map((hit) => hit.status))
+    );
+    // s92-m09 — a session close's persist copies store no content, and the shipped prune dry-runs
+    // with bytes per context, then applies without deleting a row.
+    await h.callOk('cmos_session', {
+      action: 'start',
+      type: 'custom',
+      title: 'verify s92-m09',
+      projectRoot: projectDirM04,
+    });
+    await h.callOk('cmos_session', {
+      action: 'capture',
+      category: 'context',
+      content: 'verify-dist s92-m09 persist-copy probe',
+      projectRoot: projectDirM04,
+    });
+    await h.callOk('cmos_session', {
+      action: 'complete',
+      summary: 'verify:dist s92-m09',
+      projectRoot: projectDirM04,
+    });
+    const m09Db = path.join(projectDirM04, 'cmos', 'db', 'cmos.sqlite');
+    const m09Copies = (() => {
+      const db = new Database(m09Db, { readonly: true });
+      try {
+        return db
+          .prepare(
+            `SELECT content, content_pruned_at FROM context_snapshots WHERE source LIKE 'session_complete:%'`
+          )
+          .all() as Array<{ content: string; content_pruned_at: string | null }>;
+      } finally {
+        db.close();
+      }
+    })();
+    check(
+      's92-m09: the shipped session close writes content-less, stamped persist copies',
+      m09Copies.length > 0 &&
+        m09Copies.every((row) => row.content === '' && row.content_pruned_at !== null),
+      JSON.stringify(m09Copies.map((row) => [row.content.length, row.content_pruned_at !== null]))
+    );
+    const m09Dry = await h.callOk('cmos_db', {
+      action: 'prune_snapshots',
+      keepLast: 0,
+      projectRoot: projectDirM04,
+    });
+    const m09DryData = h.dataOf(m09Dry) as {
+      applied?: boolean;
+      perContext?: Array<{ bytes?: number }>;
+    } | null;
+    check(
+      's92-m09: the shipped prune dry run reports bytes per context and changes nothing',
+      m09DryData?.applied === false &&
+        Array.isArray(m09DryData.perContext) &&
+        m09DryData.perContext.length > 0 &&
+        m09DryData.perContext.every((c) => typeof c.bytes === 'number') &&
+        textOf(m09Dry).includes('confirm=true'),
+      JSON.stringify(m09DryData?.perContext)
+    );
+    const rowCount = (): number => {
+      const db = new Database(m09Db, { readonly: true });
+      try {
+        return (db.prepare('SELECT COUNT(*) AS n FROM context_snapshots').get() as { n: number }).n;
+      } finally {
+        db.close();
+      }
+    };
+    const rowsBefore = rowCount();
+    const m09Apply = await h.callOk('cmos_db', {
+      action: 'prune_snapshots',
+      keepLast: 0,
+      confirm: true,
+      projectRoot: projectDirM04,
+    });
+    const m09ApplyData = h.dataOf(m09Apply) as {
+      applied?: boolean;
+      dbSnapshotId?: string | null;
+      tombstoned?: number;
+      prunable?: number;
+    } | null;
+    check(
+      's92-m09: the shipped prune applies behind a database snapshot and keeps every row',
+      m09ApplyData?.applied === true &&
+        rowCount() === rowsBefore &&
+        (m09ApplyData.prunable === 0 || typeof m09ApplyData.dbSnapshotId === 'string'),
+      JSON.stringify(m09ApplyData)
+    );
+    // s92-m09 (the blocking critic's B2) — a named snapshot of content an update copy already
+    // holds gets its own row in the shipped build, so a prune that reclaims the copy keeps the name.
+    const m09Update = await h.callOk('cmos_context', {
+      action: 'update',
+      mode: 'manual',
+      contextType: 'master_context',
+      arrayUpdates: { context_notes: ['verify-dist s92-m09 protected dedup'] },
+      projectRoot: projectDirM04,
+    });
+    const m09UpdateId = (h.dataOf(m09Update) as { snapshotId?: number | null } | null)?.snapshotId;
+    const m09Named = await h.callOk('cmos_context', {
+      action: 'snapshot',
+      contextType: 'master_context',
+      source: 'verify-dist named save point',
+      projectRoot: projectDirM04,
+    });
+    const m09NamedData = h.dataOf(m09Named) as { snapshotId?: number; isNew?: boolean } | null;
+    check(
+      's92-m09: the shipped named snapshot gets its own row when only an update copy holds its content',
+      typeof m09UpdateId === 'number' &&
+        m09NamedData?.isNew === true &&
+        m09NamedData.snapshotId !== m09UpdateId,
+      JSON.stringify({ m09UpdateId, m09NamedData })
+    );
+
+    const m07Health = await h.callOk('cmos_db', { action: 'health', projectRoot: projectDirM04 });
+    const m07Semantic = (
+      h.dataOf(m07Health) as { semanticSearch?: { enabled?: boolean; state?: string } } | null
+    )?.semanticSearch;
+    check(
+      's92-m07: the shipped health check reports the semantic-search state',
+      typeof m07Semantic?.enabled === 'boolean' &&
+        ['loaded', 'installed', 'not-installed', 'failed'].includes(m07Semantic?.state ?? '') &&
+        /Semantic search\*\*: (on|off) — /.test(textOf(m07Health)),
+      JSON.stringify(m07Semantic)
     );
 
     // s87-m03 — the drift reason says what the mechanism measures. Asserted on the SHIPPED

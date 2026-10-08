@@ -65,7 +65,7 @@ This project uses CMOS for project memory and the workflow selected by its activ
 - Mission tracking, project history and session logs all live in `cmos/db/cmos.sqlite`
 
 **For AI agents**:
-- Application code guidance: See `agents.md` (this project root)
+- Application code guidance: See `AGENTS.md` (this project root)
 - CMOS operations guidance: See the active `cmos/tiers/{tier}.md`
 - Build session prompts: See `cmos/docs/build-session-prompt.md`
 

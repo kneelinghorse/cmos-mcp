@@ -55,6 +55,43 @@ describe('cmos_project_register', () => {
     await fs.rm(configDir, { recursive: true, force: true });
   });
 
+  describe('s92-m01: ephemeral locations and default confirmation', () => {
+    it('flags a store under an ephemeral location and warns that prune will archive it', async () => {
+      await ensureCmosDatabase(workspace); // under os.tmpdir(), an ephemeral location
+      const result = await cmosProjectRegister({ projectRoot: workspace });
+
+      expect(result.success).toBe(true);
+      expect(result.data?.ephemeral).toBe(true);
+      expect(result.warnings?.join('\n')).toContain('ephemeral location');
+      expect(formatProjectRegisterForLLM(result)).toContain('Ephemeral: Yes');
+    });
+
+    it('does not flag a store outside every ephemeral location', async () => {
+      ProjectGraphRegistry.resetInstance();
+      await ProjectGraphRegistry.create({ configDir, ephemeralRoots: [] });
+      await ensureCmosDatabase(workspace);
+      const result = await cmosProjectRegister({ projectRoot: workspace });
+
+      expect(result.data?.ephemeral).toBe(false);
+      expect(result.warnings ?? []).toEqual([]);
+    });
+
+    it('confirms the default with setAsDefault, and shows a pre-3.2.0 default as not applied', async () => {
+      await ensureCmosDatabase(workspace);
+      const graph = ProjectGraphRegistry.getInstance({ configDir });
+      const entry = graph.registerStore(workspace);
+      graph.setDefault(entry.project_id); // the pre-3.2.0 way: no confirmation
+
+      const unconfirmed = await cmosProjectRegister({ projectRoot: workspace });
+      expect(unconfirmed.data).toMatchObject({ isDefault: true, defaultApplied: false });
+      expect(formatProjectRegisterForLLM(unconfirmed)).toContain('Yes, not applied');
+
+      const confirmed = await cmosProjectRegister({ projectRoot: workspace, setAsDefault: true });
+      expect(confirmed.data).toMatchObject({ isDefault: true, defaultApplied: true });
+      expect(graph.getDefaultStatus().applied).toBe(true);
+    });
+  });
+
   describe('basic functionality', () => {
     it('should register a project with CMOS database', async () => {
       await ensureCmosDatabase(workspace);

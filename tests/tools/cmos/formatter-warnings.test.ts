@@ -141,9 +141,13 @@ const SRC_ROOT = path.resolve(__dirname, '../../../src');
 // unchanged at 10.
 // s91-m04: 87 -> 88 and 77 -> 78 — formatDecisionsRecordForLLM (cmos-decisions-record.ts), a
 // LEAF that calls appendWarnings; the dispatcher count stays 10.
-const EXPECTED_DECLARATIONS = 88;
+// s92-m08: 88 -> 90 and 78 -> 80 — formatDecisionsShowForLLM and formatLearningsShowForLLM, two
+// LEAVES that call appendWarnings on both branches; the dispatcher count stays 10.
+// s92-m09: 90 -> 91 and 80 -> 81 — formatPruneSnapshotsForLLM (cmos-db-prune-snapshots.ts), a
+// LEAF that calls appendWarnings on both branches; the dispatcher count stays 10.
+const EXPECTED_DECLARATIONS = 91;
 const EXPECTED_DISPATCHERS = 10;
-const EXPECTED_LEAVES = 78;
+const EXPECTED_LEAVES = 81;
 /** The one leaf with no CmosToolResult parameter — reported by name, never skipped silently. */
 const STRUCTURAL_EXCLUSION = 'formatSyncHealthForLLM';
 
@@ -667,10 +671,14 @@ describe('s86-m02 Step 1 — the envelope warnings channel is universal', () => 
     }).toEqual({
       // s91-m04: formatDecisionsRecordForLLM adds one error preamble, one render return, and the
       // cmos_decisions dispatcher gains one delegated return.
-      terminalReturns: 268,
-      errorPreambles: 92,
-      delegatedReturns: 72,
-      genuineRenderReturns: 104,
+      // s92-m08: the two show formatters add one error preamble and one render return each, and
+      // the cmos_decisions and cmos_learnings dispatchers gain one delegated return each.
+      // s92-m09: formatPruneSnapshotsForLLM adds one error preamble and one render return, and the
+      // cmos_db dispatcher gains one delegated return.
+      terminalReturns: 277,
+      errorPreambles: 95,
+      delegatedReturns: 75,
+      genuineRenderReturns: 107,
     });
     expect(
       uncoveredGenuineReturns.map(
@@ -692,7 +700,11 @@ describe('s86-m02 Step 1 — the envelope warnings channel is universal', () => 
         .size,
       formatters: warningEnvelopeFormatters.length,
       // s91-m04: cmos-decisions-record.ts adds one module whose formatter renders the envelope.
-    }).toEqual({ warningEnvelopeModules: 28, modulesWithFormatters: 26, formatters: 29 });
+      // s92-m03: cmos-session-start.ts joins (one attachWarnings sink on every answer, refusals
+      // included), and its formatter renders the envelope on both branches.
+      // s92-m09: cmos-db-prune-snapshots.ts joins (its refusals after the content_pruned_at
+      // migration carry the migration's warnings), and formatPruneSnapshotsForLLM renders them.
+    }).toEqual({ warningEnvelopeModules: 30, modulesWithFormatters: 28, formatters: 31 });
     expect(
       [...new Set(looseErrorPreambles.map((row) => row.errorPreambleCondition))].sort()
     ).toEqual(['!result.success || !result.data']);

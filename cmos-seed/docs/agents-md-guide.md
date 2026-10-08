@@ -8,9 +8,10 @@
 
 CMOS projects use **two complementary layers** of AI configuration:
 
-### 1. Project Root agents.md (REPOSITORY-WIDE CONTRACT)
+### 1. Project Root AGENTS.md (REPOSITORY-WIDE CONTRACT)
 
-**Location**: `project-root/agents.md`
+**Location**: `project-root/AGENTS.md`, which `cmos_project(action="init")` writes from the
+template when the root has none (an existing lowercase `agents.md` works too)
 
 **Purpose**: Hard operating rules, code/build/test conventions, and project-specific workflow for
 every task in the repository.
@@ -78,7 +79,7 @@ The active tier filters suggested actions and shapes onboarding fields.
 **Repository and implementation boundary**:
 
 ```
-Agent reads: project-root/agents.md for every task
+Agent reads: project-root/AGENTS.md for every task
 Implementation missions may write: src/, tests/, app/, and project docs
 Agent never puts application code in: cmos/
 ```
@@ -100,7 +101,7 @@ Agent does not edit cmos/db/cmos.sqlite or generated exports directly
 
 ---
 
-## Writing Effective agents.md (Project Root)
+## Writing Effective AGENTS.md (Project Root)
 
 ### Structure
 
@@ -234,7 +235,7 @@ tools. `tools_skip` filters suggested actions, and the onboard field lists shape
 
 ```
 project/
-├── agents.md              # Repository-wide operating and application rules
+├── AGENTS.md              # Repository-wide operating and application rules
 └── cmos/
     ├── db/
     │   └── cmos.sqlite    # All CMOS state
@@ -249,13 +250,13 @@ project/
 
 ## Quick Start Summary
 
-1. **Project root agents.md** — Repository-wide hard rules and project conventions
+1. **Project root AGENTS.md** — Repository-wide hard rules and project conventions
 2. **Tier guides in cmos/tiers/** — Additional CMOS behavior for the active tier
 3. **Clear boundaries** — Never mix application and management concerns
-4. **Be specific** — Give real commands and examples in agents.md
-5. **Keep updated** — Evolve agents.md with your project
+4. **Be specific** — Give real commands and examples in AGENTS.md
+5. **Keep updated** — Evolve AGENTS.md with your project
 
 ---
 
-**Last Updated**: 2026-08-28
+**Last Updated**: 2026-10-07
 **See Also**: `cmos/docs/getting-started.md` for full setup flow

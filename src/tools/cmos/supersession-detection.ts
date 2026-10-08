@@ -7,6 +7,12 @@
  * surface keywords are surfaced too. Returns candidate decisions that the new
  * one may supersede. No auto-supersession — returns suggestions only.
  *
+ * s92-m04: NO WRITE PATH CALLS THE DETECTOR ANY MORE. Replayed over every historical capture, 69 of
+ * 9,035 offers were true, and 28-61% of real supersessions crossed sprints where it could not see
+ * them (cmos/research/2026-10-strategy/retrieval-natural-labels.md §5), so capture and record stopped
+ * offering candidates; a correction names its target with supersedes=[...]. The module stays for
+ * `extractKeywords` (relevance surfacing and the FTS5 retriever use it) and for that replay.
+ *
  * @module tools/cmos/supersession-detection
  */
 

@@ -5,6 +5,11 @@ import { promises as fs } from 'fs';
 import os from 'os';
 import path from 'path';
 
+import {
+  DIST_MANIFEST_FINGERPRINT_ENV,
+  distManifestFingerprint,
+} from './helpers/dist-manifest-fingerprint';
+
 const CMOS_CONFIG_DIR_ENV = 'CMOS_CONFIG_DIR';
 
 /**
@@ -36,6 +41,10 @@ const CMOS_JEST_CONFIG_DIR_CANONICAL = 'CMOS_JEST_CONFIG_DIR_CANONICAL';
 const CMOS_CHECKPOINT_SYNC_ENV = 'CMOS_CHECKPOINT_SYNC';
 
 export default async function globalSetup(): Promise<void> {
+  // s92-m10: fingerprint the real build manifest; jest-global-teardown.ts fails the run if any
+  // test rewrote it (the server reads it to report a stale build).
+  process.env[DIST_MANIFEST_FINGERPRINT_ENV] = distManifestFingerprint();
+
   if (process.env[CMOS_CHECKPOINT_SYNC_ENV] === undefined) {
     process.env[CMOS_CHECKPOINT_SYNC_ENV] = 'off';
   }

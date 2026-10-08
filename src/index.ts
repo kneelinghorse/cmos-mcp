@@ -14,6 +14,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { debugEnabled, debugLog } from './debug-log';
 
 // Load .env if present (before any other imports that read process.env).
 // Resolve project root from: env var → directory containing this script.
@@ -43,8 +44,10 @@ try {
         loaded++;
       }
     }
-    process.stderr.write(`[env-loader] loaded ${loaded} vars from ${envPath}\n`);
-  } else {
+    // s92-m07: diagnostics, behind CMOS_DEBUG (checked after loading, so the .env can set it).
+    if (debugEnabled())
+      process.stderr.write(`[env-loader] loaded ${loaded} vars from ${envPath}\n`);
+  } else if (debugEnabled()) {
     process.stderr.write(`[env-loader] .env not found at ${envPath}\n`);
   }
 } catch (err) {
@@ -65,14 +68,25 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 
 import { CmosDetector } from './intelligence/cmos-detector';
-import { ProjectGraphRegistry } from './intelligence/project-graph-registry';
+import {
+  ProjectGraphRegistry,
+  reconfirmDefaultCall,
+  unappliedDefaultNotice,
+} from './intelligence/project-graph-registry';
 import {
   resolveSenderContext,
   SenderResolutionError,
   SERVER_INSTALL_ROOT,
-  type ResolutionCandidate,
+  type ResolvedBy,
   type SenderContext,
 } from './intelligence/sender-context';
+import {
+  findEnclosingStore,
+  getServerProjectRoot,
+  parseProjectRootArg,
+  PROJECT_ROOT_ARG,
+  setServerProjectRoot,
+} from './intelligence/resolution-policy';
 import {
   assertReadOnlyAgentAllowed,
   ReadOnlyAgentGuardError,
@@ -146,6 +160,10 @@ import type {
   CmosReviewParams,
 } from './tools/cmos';
 import { findWrongTypedStringParam } from './tools/cmos/param-type-guard';
+import { classifySenderResolutionError } from './tools/cmos/sender-refusal';
+import { toWireDefinition } from './tools/cmos/wire-descriptions';
+import { SERVER_INSTRUCTIONS } from './server-instructions';
+import { closeOwnImplicitSessions } from './tools/cmos/implicit-session-lifecycle';
 import { findUnknownTopLevelParam } from './tools/cmos/unknown-param-guard';
 import { TokenCounter } from './intelligence/token-counters';
 import { SupportedModel } from './intelligence/types';
@@ -203,6 +221,8 @@ const server = new Server(
     capabilities: {
       tools: {},
     },
+    // s92-m08: the loop, for every client, without a rules file.
+    instructions: SERVER_INSTRUCTIONS,
   }
 );
 
@@ -234,8 +254,12 @@ export interface ToolDefinition {
  *
  * @returns Array of CMOS tool definitions
  */
+/**
+ * What tools/list sends: every published definition in its fixed, declared order, with the short
+ * wire text (s92-m08). The full text stays on CMOS_TOOL_DEFINITIONS and in TOOL_REFERENCE.md.
+ */
 export function getToolDefinitions(): readonly ToolDefinition[] {
-  return [...(CMOS_TOOL_DEFINITIONS as unknown as ToolDefinition[])];
+  return (CMOS_TOOL_DEFINITIONS as unknown as ToolDefinition[]).map(toWireDefinition);
 }
 
 /**
@@ -330,6 +354,8 @@ export async function buildMissionProtocolContext(options?: {
 
 let contextBuilder: typeof buildMissionProtocolContext = buildMissionProtocolContext;
 let whoamiCliRunner: typeof runWhoamiCli = runWhoamiCli;
+// s92-m07: the second startup line; replaceable so a test never resolves the real working directory.
+let startupProjectDescriber: () => Promise<string> = describeStartupProject;
 let startupAttributionSelfTestRunner: typeof runStartupAttributionSelfTest =
   runStartupAttributionSelfTest;
 
@@ -375,12 +401,12 @@ async function getClientProjectRoots(): Promise<string[]> {
         }
       }
       if (roots.length > 0) {
-        console.error(`[INFO] Client project roots from MCP roots: ${roots.join(', ')}`);
+        debugLog(`[INFO] Client project roots from MCP roots: ${roots.join(', ')}`);
       }
     }
   } catch (error) {
     // Client may not support roots - this is fine, fall back to other methods
-    console.error(
+    debugLog(
       `[DEBUG] Could not get client roots: ${error instanceof Error ? error.message : 'unknown'}`
     );
   }
@@ -419,6 +445,127 @@ async function resolveToolSenderContext(
 }
 
 /**
+ * s92-m04 — whether the project was NAMED rather than inferred: an explicit projectRoot, the
+ * client's roots, or the operator's --project-root. A named project is not ambiguous for want of
+ * advertised roots, so onboard and the review opener stop prescribing whoami for it.
+ */
+function callerNamedProject(explicitRoot: unknown, source: ResolvedBy): boolean {
+  return (
+    typeof explicitRoot === 'string' ||
+    source === 'explicit' ||
+    source === 'mcp-roots' ||
+    source === 'server-project-root'
+  );
+}
+
+/**
+ * s92-m01 — which store a call touched and how it was chosen. Stamped onto every success
+ * payload so an agent never has to infer the project from context.
+ */
+export interface ResolutionStamp {
+  readonly projectRoot: string | null;
+  readonly resolvedBy: ResolvedBy;
+  /** Rendered instead of the plain "resolved by" label when the route needs saying out loud. */
+  readonly note?: string;
+}
+
+/** A call that touched no single project store: a portfolio, registry or dashboard-only action. */
+const NO_PROJECT: ResolutionStamp = { projectRoot: null, resolvedBy: 'none' };
+
+function stampOf(ctx: SenderContext | null): ResolutionStamp {
+  if (!ctx) return NO_PROJECT;
+  // The client advertised workspace roots, none of them is inside a CMOS project, and the
+  // server's working directory answered instead. That is the documented order, but the caller
+  // may be working in one of those roots — say so rather than resolve silently.
+  const rootsSkipped =
+    ctx.source === 'cwd' &&
+    ctx.candidates.some((candidate) => candidate.source === 'mcp-roots' && !candidate.accepted);
+  return rootsSkipped
+    ? {
+        projectRoot: ctx.projectRoot,
+        resolvedBy: ctx.source,
+        note: "resolved by the server's working directory — the client's MCP roots hold no CMOS project",
+      }
+    : { projectRoot: ctx.projectRoot, resolvedBy: ctx.source };
+}
+
+/**
+ * The sources an agent may not expect, so the answer says them out loud. `explicit` (the caller
+ * named it) and `cwd` (the caller is standing in it) stay silent.
+ */
+const RESOLVED_BY_LABELS: Partial<Record<ResolvedBy, string>> = {
+  'mcp-roots': "the client's MCP roots",
+  'server-project-root': "--project-root in this server's config",
+  'registry-default': 'the registry default project',
+};
+
+/**
+ * Build the MCP answer for a CMOS tool result. On success, `projectRoot` and `resolvedBy` are
+ * added to `data` (a handler's own `projectRoot` is kept), and one line naming the project is
+ * rendered when it was chosen by anything other than an explicit root or the cwd.
+ */
+export function buildResolvedToolResult(
+  result: { success: boolean; data?: unknown },
+  formatted: string,
+  stamp: ResolutionStamp
+): CallToolResult {
+  const structured: Record<string, unknown> = { ...result };
+  let text = formatted;
+  if (result.success) {
+    const data = result.data;
+    if (data && typeof data === 'object' && !Array.isArray(data)) {
+      const record = data as Record<string, unknown>;
+      structured.data = {
+        ...record,
+        projectRoot:
+          typeof record.projectRoot === 'string' ? record.projectRoot : stamp.projectRoot,
+        resolvedBy: stamp.resolvedBy,
+      };
+    } else {
+      structured.projectRoot = stamp.projectRoot;
+      structured.resolvedBy = stamp.resolvedBy;
+    }
+    const label = RESOLVED_BY_LABELS[stamp.resolvedBy];
+    const reason = stamp.note ?? (label ? `resolved by ${label}` : null);
+    if (reason && stamp.projectRoot) {
+      text = `Project: ${stamp.projectRoot} (${reason})\n\n${formatted}`;
+    }
+  }
+  return {
+    content: [{ type: 'text', text }],
+    structuredContent: structured,
+    isError: result.success === false,
+  };
+}
+
+/** whoami reports resolution itself; its stamp is the local project its resolution found. */
+function whoamiStamp(result: {
+  data?: { resolved?: { projectRoot: string | null; source: ResolvedBy | null } };
+}): ResolutionStamp {
+  const resolved = result.data?.resolved;
+  return resolved?.projectRoot && resolved.source
+    ? { projectRoot: resolved.projectRoot, resolvedBy: resolved.source }
+    : NO_PROJECT;
+}
+
+/**
+ * Resolve a project for an action that can run without one (a user-level dashboard action):
+ * use the caller's project when one resolves, and run project-free when none does. An explicit
+ * projectRoot is still final — naming a folder that is not a CMOS project is refused.
+ */
+async function resolveOptionalSenderContext(
+  explicitRoot: string | undefined
+): Promise<SenderContext | null> {
+  if (explicitRoot !== undefined) return resolveToolSenderContext(explicitRoot);
+  try {
+    return await resolveToolSenderContext(undefined);
+  } catch (error) {
+    if (error instanceof SenderResolutionError) return null;
+    throw error;
+  }
+}
+
+/**
  * Register tool handlers
  */
 export function registerToolHandlers(
@@ -428,7 +575,7 @@ export function registerToolHandlers(
   const targetServer = serverInstance || server;
   // Listen for roots changes and clear cache
   targetServer.setNotificationHandler(RootsListChangedNotificationSchema, async () => {
-    console.error(`[INFO] Client roots changed, clearing cache`);
+    debugLog(`[INFO] Client roots changed, clearing cache`);
     cachedClientProjectRoots = undefined;
   });
 
@@ -459,7 +606,12 @@ export function registerToolHandlers(
       const originalError = unwrapCapturedToolCallError(error);
       if (originalError instanceof SenderResolutionError) {
         return attachProjectIdentityDisclosures(
-          buildKnownToolErrorResult(await classifySenderResolutionError(originalError)),
+          buildKnownToolErrorResult(
+            await classifySenderResolutionError(
+              originalError,
+              refusalMode(classifyAction(name, extractActionArg(args)))
+            )
+          ),
           projectIdentityDisclosuresForError(error)
         );
       }
@@ -553,6 +705,11 @@ export function buildKnownToolErrorResult(error: CmosToolError): CallToolResult 
   };
 }
 
+/** s92-m01: a refusal tells a read how to read and anything else how to write. */
+function refusalMode(actionMode: string | undefined): 'read' | 'write' {
+  return actionMode === 'read' ? 'read' : 'write';
+}
+
 /** Best-effort read of the `action` discriminator from a tool's args, for the
  *  read-only-agent guard. Returns undefined for action-less tools or malformed args. */
 function extractActionArg(args: unknown): string | undefined {
@@ -563,134 +720,9 @@ function extractActionArg(args: unknown): string | undefined {
   return undefined;
 }
 
-function senderEvidenceMessage(error: SenderResolutionError, evidence: string): string {
-  return `${error.message} Resolution evidence: ${evidence}`;
-}
-
-function isDatabaseFailure(reason: string): boolean {
-  return reason === 'failed to open CMOS database' || reason.startsWith('DB read error:');
-}
-
-function isIdentityFailure(reason: string): boolean {
-  return (
-    reason.includes('dashboard_project_id') ||
-    reason.includes('project_identity.cmos_address') ||
-    reason.includes('cmos://unknown/')
-  );
-}
-
-async function classifyConcreteSenderCandidate(
-  error: SenderResolutionError,
-  candidate: ResolutionCandidate
-): Promise<CmosToolError> {
-  const reason = candidate.rejectReason ?? `${candidate.source} candidate was not acceptable`;
-  const projectRoot = candidate.projectRoot;
-
-  if (isDatabaseFailure(reason) && projectRoot) {
-    return CmosErrors.dbConnectionFailed(
-      path.join(projectRoot, 'cmos', 'db', 'cmos.sqlite'),
-      reason
-    );
-  }
-
-  if (reason === 'no CMOS database at projectRoot' && projectRoot) {
-    // validateProject intentionally records one reason for both absence classes. Re-observe the
-    // filesystem without the detector cache so the public error does not guess which one occurred.
-    try {
-      const detection = await CmosDetector.getInstance().detect(projectRoot, {
-        forceRefresh: true,
-      });
-      return detection.hasCmosDirectory
-        ? CmosErrors.dbNotFound(
-            path.join(detection.cmosDirectory, 'db', 'cmos.sqlite'),
-            projectRoot
-          )
-        : CmosErrors.cmosNotDetected(projectRoot);
-    } catch (detectionError) {
-      const detail =
-        detectionError instanceof Error ? detectionError.message : String(detectionError);
-      return CmosErrors.senderUnresolvable(
-        senderEvidenceMessage(
-          error,
-          `${reason}; filesystem re-observation failed for '${projectRoot}': ${detail}`
-        ),
-        error.code
-      );
-    }
-  }
-
-  return CmosErrors.senderUnresolvable(senderEvidenceMessage(error, reason), error.code);
-}
-
-/**
- * Classify the resolver's recorded evidence without pre-resolving or repeating identity reads.
- * Only the ambiguous "no CMOS database" reason needs a forced detector observation to distinguish
- * a missing cmos/ directory from a present cmos/ directory whose SQLite file is absent.
- */
-export async function classifySenderResolutionError(
-  error: SenderResolutionError
-): Promise<CmosToolError> {
-  const explicit = error.candidates.find((candidate) => candidate.source === 'explicit');
-  if (explicit) {
-    // A caller-supplied root is the highest-trust evidence. Do not let a later registry ambiguity
-    // rewrite a concrete wrong-root diagnosis into a generic sender ambiguity.
-    return classifyConcreteSenderCandidate(error, explicit);
-  }
-
-  const mcpRoots = error.candidates.filter((candidate) => candidate.source === 'mcp-roots');
-  if (mcpRoots.length > 1) {
-    const evidence = mcpRoots
-      .map(
-        (candidate) =>
-          `${candidate.projectRoot ?? '<unknown>'}: ${candidate.rejectReason ?? 'not acceptable'}`
-      )
-      .join('; ');
-    return CmosErrors.senderUnresolvable(
-      senderEvidenceMessage(error, `multiple MCP roots were rejected (${evidence})`),
-      error.code
-    );
-  }
-  if (mcpRoots.length === 1) {
-    return classifyConcreteSenderCandidate(error, mcpRoots[0]);
-  }
-
-  const cwd = error.candidates.find((candidate) => candidate.source === 'cwd');
-  if (
-    cwd?.rejectReason &&
-    (isDatabaseFailure(cwd.rejectReason) ||
-      isIdentityFailure(cwd.rejectReason) ||
-      cwd.rejectReason.includes('cwd-vs-SERVER_INSTALL_ROOT guard'))
-  ) {
-    return classifyConcreteSenderCandidate(error, cwd);
-  }
-
-  const registry = error.candidates.find((candidate) => candidate.source === 'registry-singleton');
-  if (
-    registry?.rejectReason &&
-    ((registry.projectRoot &&
-      (registry.rejectReason === 'no CMOS database at projectRoot' ||
-        isDatabaseFailure(registry.rejectReason) ||
-        isIdentityFailure(registry.rejectReason))) ||
-      registry.rejectReason.includes('auto-pick only allowed when size === 1') ||
-      registry.rejectReason.startsWith('registry error:'))
-  ) {
-    return classifyConcreteSenderCandidate(error, registry);
-  }
-
-  if (cwd) return classifyConcreteSenderCandidate(error, cwd);
-  if (registry?.projectRoot) return classifyConcreteSenderCandidate(error, registry);
-
-  const trace = error.candidates
-    .map(
-      (candidate) =>
-        `${candidate.source}${candidate.projectRoot ? ` (${candidate.projectRoot})` : ''}: ${candidate.rejectReason ?? 'not acceptable'}`
-    )
-    .join('; ');
-  return CmosErrors.senderUnresolvable(
-    senderEvidenceMessage(error, trace || 'the resolver supplied no candidate trace'),
-    error.code
-  );
-}
+// s92-m01: `classifySenderResolutionError` moved to `tools/cmos/sender-refusal.ts` so the suggestion
+// oracle can drive it in-process; re-exported here for existing importers.
+export { classifySenderResolutionError };
 
 /** Attach request-local fallback-identity disclosures to both MCP answer channels. */
 function attachProjectIdentityDisclosures(
@@ -747,7 +779,9 @@ export async function executeMissionProtocolTool(
       const originalError = unwrapCapturedToolCallError(error);
       if (originalError instanceof SenderResolutionError) {
         return attachProjectIdentityDisclosures(
-          buildKnownToolErrorResult(await classifySenderResolutionError(originalError)),
+          buildKnownToolErrorResult(
+            await classifySenderResolutionError(originalError, refusalMode(actionMode))
+          ),
           projectIdentityDisclosuresForError(error)
         );
       }
@@ -792,15 +826,12 @@ export async function executeMissionProtocolTool(
     // Consolidated DB admin tool (Sprint 24)
     case 'cmos_db': {
       const params = args as CmosDbParams;
-      const projectRoot = (await resolveToolSenderContext(params.projectRoot)).projectRoot;
+      const ctx = await resolveToolSenderContext(params.projectRoot);
+      const projectRoot = ctx.projectRoot;
       const result = await cmosDb({ ...params, projectRoot });
       const formatted = formatDbForLLM(params.action, result);
 
-      return {
-        content: [{ type: 'text', text: formatted }],
-        structuredContent: { ...result },
-        isError: result.success === false,
-      };
+      return buildResolvedToolResult(result, formatted, stampOf(ctx));
     }
 
     // Consolidated mission CRUD tool (Sprint 24)
@@ -810,47 +841,43 @@ export async function executeMissionProtocolTool(
       // s79-m04/m05 — no per-handler fan-out. cmos_mission(status) with no
       // projectRoot resolves to the sender; "active missions across the portfolio"
       // is served by acrossProjects=true (the graph-backed queryAcrossStores),
-      // which must NOT require a resolvable LOCAL store — skip resolution for it.
-      const projectRoot = params.acrossProjects
-        ? undefined
-        : (await resolveToolSenderContext(params.projectRoot)).projectRoot;
+      // which must NOT require a resolvable LOCAL store.
+      // s92-m01: ONLY that portfolio read skips the local requirement (the local project is
+      // still used, when one resolves, to label rows local or foreign). Every other action
+      // resolves normally, so the flag can never redirect a write: add/update with
+      // acrossProjects=true used to drop an explicit projectRoot and write the cwd project.
+      const portfolioRead = params.acrossProjects === true && params.action === 'status';
+      const ctx = portfolioRead
+        ? await resolveOptionalSenderContext(params.projectRoot)
+        : await resolveToolSenderContext(params.projectRoot);
+      const projectRoot = ctx?.projectRoot;
       const result = await cmosMission({ ...params, projectRoot });
       const formatted = formatMissionForLLM(params.action, result);
 
-      return {
-        content: [{ type: 'text', text: formatted }],
-        structuredContent: { ...result },
-        isError: result.success === false,
-      };
+      return buildResolvedToolResult(result, formatted, portfolioRead ? NO_PROJECT : stampOf(ctx));
     }
 
     // Consolidated mission transition tool (Sprint 24)
     case 'cmos_mission_transition': {
       const params = args as CmosMissionTransitionParams;
-      const projectRoot = (await resolveToolSenderContext(params.projectRoot)).projectRoot;
+      const ctx = await resolveToolSenderContext(params.projectRoot);
+      const projectRoot = ctx.projectRoot;
       const result = await cmosMissionTransition({ ...params, projectRoot });
       const formatted = formatMissionTransitionForLLM(params.action, result);
 
-      return {
-        content: [{ type: 'text', text: formatted }],
-        structuredContent: { ...result },
-        isError: result.success === false,
-      };
+      return buildResolvedToolResult(result, formatted, stampOf(ctx));
     }
 
     // Consolidated context tool (Sprint 24)
     case 'cmos_context': {
       const params = args as CmosContextParams;
 
-      const projectRoot = (await resolveToolSenderContext(params.projectRoot)).projectRoot;
+      const ctx = await resolveToolSenderContext(params.projectRoot);
+      const projectRoot = ctx.projectRoot;
       const result = await cmosContext({ ...params, projectRoot });
       const formatted = formatContextForLLM(params.action, result, params.contextType);
 
-      return {
-        content: [{ type: 'text', text: formatted }],
-        structuredContent: { ...result },
-        isError: result.success === false,
-      };
+      return buildResolvedToolResult(result, formatted, stampOf(ctx));
     }
 
     // Consolidated session tool (Sprint 24)
@@ -859,15 +886,12 @@ export async function executeMissionProtocolTool(
 
       // s79-m04 — cmos_session(list) with no projectRoot pins to the sender (no
       // §5.4 named portfolio query; documented deviation from the master-plan wording).
-      const projectRoot = (await resolveToolSenderContext(params.projectRoot)).projectRoot;
+      const ctx = await resolveToolSenderContext(params.projectRoot);
+      const projectRoot = ctx.projectRoot;
       const result = await cmosSession({ ...params, projectRoot });
       const formatted = formatSessionForLLM(params.action, result);
 
-      return {
-        content: [{ type: 'text', text: formatted }],
-        structuredContent: { ...result },
-        isError: result.success === false,
-      };
+      return buildResolvedToolResult(result, formatted, stampOf(ctx));
     }
 
     // Consolidated decisions tool (Sprint 24)
@@ -880,17 +904,17 @@ export async function executeMissionProtocolTool(
       // (and the registry-singleton fallback only accepts a 1-project registry, never a
       // real multi-project portfolio). Skip resolution for that path; cmosDecisionsList
       // ignores projectRoot on the acrossProjects branch anyway.
-      const projectRoot = params.acrossProjects
-        ? undefined
-        : (await resolveToolSenderContext(params.projectRoot)).projectRoot;
+      // s92-m01: only list is the portfolio read. record/update/search with acrossProjects=true
+      // used to skip resolution too, drop an explicit projectRoot and write the cwd project.
+      const portfolioRead = params.acrossProjects === true && params.action === 'list';
+      const ctx = portfolioRead
+        ? await resolveOptionalSenderContext(params.projectRoot)
+        : await resolveToolSenderContext(params.projectRoot);
+      const projectRoot = ctx?.projectRoot;
       const result = await cmosDecisions({ ...params, projectRoot });
       const formatted = formatDecisionsForLLM(params.action, result);
 
-      return {
-        content: [{ type: 'text', text: formatted }],
-        structuredContent: { ...result },
-        isError: result.success === false,
-      };
+      return buildResolvedToolResult(result, formatted, portfolioRead ? NO_PROJECT : stampOf(ctx));
     }
 
     // Consolidated learnings tool (Sprint 38)
@@ -898,109 +922,116 @@ export async function executeMissionProtocolTool(
       const params = args as CmosLearningsParams;
       // s79-m05: acrossProjects (list) is a graph-backed portfolio query — skip
       // local-root resolution (mirrors cmos_decisions / cmos_mission).
-      const projectRoot = params.acrossProjects
-        ? undefined
-        : (await resolveToolSenderContext(params.projectRoot)).projectRoot;
+      // s92-m01: only list is the portfolio read; every other action resolves normally.
+      const portfolioRead = params.acrossProjects === true && params.action === 'list';
+      const ctx = portfolioRead
+        ? await resolveOptionalSenderContext(params.projectRoot)
+        : await resolveToolSenderContext(params.projectRoot);
+      const projectRoot = ctx?.projectRoot;
       const result = await cmosLearnings({ ...params, projectRoot });
       const formatted = formatLearningsForLLM(params.action, result);
 
-      return {
-        content: [{ type: 'text', text: formatted }],
-        structuredContent: { ...result },
-        isError: result.success === false,
-      };
+      return buildResolvedToolResult(result, formatted, portfolioRead ? NO_PROJECT : stampOf(ctx));
     }
 
     // Consolidated feedback tool (Sprint 56 m03)
     case 'cmos_feedback': {
       const params = args as CmosFeedbackParams;
-      const projectRoot = (await resolveToolSenderContext(params.projectRoot)).projectRoot;
+      const ctx = await resolveToolSenderContext(params.projectRoot);
+      const projectRoot = ctx.projectRoot;
       const result = await cmosFeedback({ ...params, projectRoot });
       const formatted = formatFeedbackForLLM(params.action, result);
 
-      return {
-        content: [{ type: 'text', text: formatted }],
-        structuredContent: { ...result },
-        isError: result.success === false,
-      };
+      return buildResolvedToolResult(result, formatted, stampOf(ctx));
     }
 
     // Credential lifecycle (Sprint 57 m03)
     case 'cmos_auth': {
       const params = args as CmosAuthParams;
-      const projectRoot = (await resolveToolSenderContext(params.projectRoot)).projectRoot;
+      // s92-m01: login, list and logout are USER-level — they need a dashboard credential, not a
+      // project. Once the registry-singleton auto-pick was removed they would otherwise refuse from
+      // any non-CMOS folder, so they use the caller's project when one resolves and run
+      // project-free when none does. revoke takes the same route: with a keyId it needs no
+      // project, and without one its handler refuses "revoke requires either keyId or
+      // projectRoot". rotate and reissue act on a project's key and still require one. An
+      // explicit projectRoot is final on every route.
+      const userLevel =
+        params.action === 'login_init' ||
+        params.action === 'login_complete' ||
+        params.action === 'login' ||
+        params.action === 'list' ||
+        params.action === 'logout' ||
+        params.action === 'revoke';
+      const ctx = userLevel
+        ? await resolveOptionalSenderContext(params.projectRoot)
+        : await resolveToolSenderContext(params.projectRoot);
+      const projectRoot = ctx?.projectRoot;
       const result = await cmosAuth({ ...params, projectRoot });
       const formatted = formatAuthForLLM(params.action, result);
 
-      return {
-        content: [{ type: 'text', text: formatted }],
-        structuredContent: { ...result },
-        isError: result.success === false,
-      };
+      return buildResolvedToolResult(result, formatted, stampOf(ctx));
     }
 
     // At-a-glance status payload (Sprint 62 m06)
     case 'cmos_status': {
       const params = args as CmosStatusParams;
-      const projectRoot = (await resolveToolSenderContext(params.projectRoot)).projectRoot;
+      const ctx = await resolveToolSenderContext(params.projectRoot);
+      const projectRoot = ctx.projectRoot;
       const result = await cmosStatus({ ...params, projectRoot });
       const formatted = formatStatusForLLM(result);
 
-      return {
-        content: [{ type: 'text', text: formatted }],
-        structuredContent: { ...result },
-        isError: result.success === false,
-      };
+      return buildResolvedToolResult(result, formatted, stampOf(ctx));
     }
 
     // Sprint tools
     case 'cmos_sprint': {
       const params = args as CmosSprintParams;
 
-      const projectRoot = (await resolveToolSenderContext(params.projectRoot)).projectRoot;
+      const ctx = await resolveToolSenderContext(params.projectRoot);
+      const projectRoot = ctx.projectRoot;
       const result = await cmosSprint({ ...params, projectRoot });
       const formatted = formatSprintForLLM(params.action, result);
 
-      return {
-        content: [{ type: 'text', text: formatted }],
-        structuredContent: { ...result },
-        isError: result.success === false,
-      };
+      return buildResolvedToolResult(result, formatted, stampOf(ctx));
     }
 
     case 'cmos_agent_onboard': {
       const params = args as CmosAgentOnboardParams;
       const advertisedRoots = await getClientProjectRoots();
-      const callerProvidedProjectRoot = typeof params.projectRoot === 'string';
-      const projectRoot = (await resolveToolSenderContext(params.projectRoot)).projectRoot;
+      const ctx = await resolveToolSenderContext(params.projectRoot);
+      const projectRoot = ctx.projectRoot;
       const result = await cmosAgentOnboard({
         ...params,
         projectRoot,
         advertisedRoots,
-        callerProvidedProjectRoot,
+        callerProvidedProjectRoot: callerNamedProject(params.projectRoot, ctx.source),
       });
       const formatted = formatAgentOnboardForLLM(result);
 
-      return {
-        content: [{ type: 'text', text: formatted }],
-        structuredContent: { ...result },
-        isError: result.success === false,
-      };
+      return buildResolvedToolResult(result, formatted, stampOf(ctx));
     }
 
     // Bundled session-opener digest (Sprint 64 m03).
     // Project-scoped by design — does NOT walk the project registry.
     case 'cmos_review': {
       const params = args as CmosReviewParams;
-      const projectRoot = (await resolveToolSenderContext(params.projectRoot)).projectRoot;
-      const result = await cmosReview({ ...params, projectRoot });
+      const advertisedRoots = await getClientProjectRoots();
+      const ctx = await resolveToolSenderContext(params.projectRoot);
+      const projectRoot = ctx.projectRoot;
+      // s92-m01: the digest carries projectRoot/resolvedBy inside its own 4KB budget.
+      // s92-m04: the roots and "the caller named the project" reach the nested onboard, so a
+      // project the client or operator named is not reported as ambiguous (the whoami nudge).
+      const result = await cmosReview(
+        { ...params, projectRoot },
+        {
+          resolvedBy: ctx.source,
+          advertisedRoots,
+          callerProvidedProjectRoot: callerNamedProject(params.projectRoot, ctx.source),
+        }
+      );
       const formatted = formatReviewForLLM(result);
 
-      return {
-        content: [{ type: 'text', text: formatted }],
-        structuredContent: { ...result },
-        isError: result.success === false,
-      };
+      return buildResolvedToolResult(result, formatted, stampOf(ctx));
     }
 
     // Consolidated message tool (Sprint 28)
@@ -1015,11 +1046,8 @@ export async function executeMissionProtocolTool(
         });
         const formatted = formatMessageForLLM(params.action, result);
 
-        return {
-          content: [{ type: 'text', text: formatted }],
-          structuredContent: { ...result },
-          isError: result.success === false,
-        };
+        // whoami reports resolution itself; its stamp is the relaxed (local) resolution it found.
+        return buildResolvedToolResult(result, formatted, whoamiStamp(result));
       }
 
       // Sprint 53 m02: `send` must resolve through the audited boundary with
@@ -1028,7 +1056,8 @@ export async function executeMissionProtocolTool(
       // and was the structural source of the Stage1→OODS P0. Non-send actions
       // (list/respond/directory) hit the dashboard directly and don't need a
       // local project identity, so they skip resolution.
-      let projectRoot: string | undefined = params.projectRoot;
+      let projectRoot: string | undefined;
+      let stamp: ResolutionStamp = NO_PROJECT;
       if (params.action === 'send') {
         const ctx = await resolveSenderContext({
           explicitProjectRoot: params.projectRoot,
@@ -1036,7 +1065,15 @@ export async function executeMissionProtocolTool(
           requireSenderIdentity: true,
         });
         projectRoot = ctx.projectRoot;
-      } else if (params.action === 'list' && !projectRoot) {
+        stamp = stampOf(ctx);
+      } else if (params.projectRoot !== undefined) {
+        // s92-m01: an explicit projectRoot is final on every action. The dashboard-only actions
+        // used to pass it through unchecked (and a non-CMOS folder would have been reported as
+        // the project the call used).
+        const ctx = await resolveToolSenderContext(params.projectRoot);
+        projectRoot = ctx.projectRoot;
+        stamp = stampOf(ctx);
+      } else if (params.action === 'list') {
         // s80-m05: best-effort project-pin for LIST only — resolve the sender RELAXED so
         // a project-scoped credential (when one exists) scopes the dashboard query and
         // trims the payload. A read must NEVER fail closed, so an unresolvable sender
@@ -1051,6 +1088,7 @@ export async function executeMissionProtocolTool(
             requireSenderIdentity: false,
           });
           projectRoot = ctx.projectRoot;
+          stamp = stampOf(ctx);
         } catch {
           // fail-open — user-scoped auth returns the operator's full inbox
         }
@@ -1058,35 +1096,43 @@ export async function executeMissionProtocolTool(
       const result = await cmosMessage({ ...params, projectRoot, advertisedRoots });
       const formatted = formatMessageForLLM(params.action, result);
 
-      return {
-        content: [{ type: 'text', text: formatted }],
-        structuredContent: { ...result },
-        isError: result.success === false,
-      };
+      return buildResolvedToolResult(result, formatted, stamp);
     }
 
     // Consolidated project tool (Sprint 24)
     case 'cmos_project': {
       const params = args as CmosProjectParams;
-      // init/register take a literal user-supplied path (destination for a new
-      // workspace, or path to register). Routing through resolveToolSenderContext
-      // would fall back to the caller's own project when the path has no CMOS DB,
-      // which for init clobbers the caller's metadata with a fresh seed. The
-      // action handlers validate the path themselves and reject empty/missing input.
-      const isLiteralPathAction = params.action === 'init' || params.action === 'register';
-      const projectRoot = isLiteralPathAction
-        ? params.projectRoot
-        : (await resolveToolSenderContext(params.projectRoot)).projectRoot;
+      // init/register/unregister take a literal user-supplied path (destination for a new
+      // workspace, a path to register, a path to forget). Routing through resolveToolSenderContext
+      // would substitute the caller's own project: before s92-m01 an unregister of a deleted
+      // project fell through to the cwd project and unregistered THAT. The action handlers
+      // validate the path themselves and reject empty/missing input.
+      const isLiteralPathAction =
+        params.action === 'init' || params.action === 'register' || params.action === 'unregister';
+      // list/validate/prune/sweep read or tidy the registry itself and never open a project store,
+      // so they do not need — and must not refuse for lack of — a resolvable local project.
+      const isRegistryAction =
+        params.action === 'list' ||
+        params.action === 'validate' ||
+        params.action === 'prune' ||
+        params.action === 'sweep';
+      let stamp: ResolutionStamp = NO_PROJECT;
+      let projectRoot: string | undefined = params.projectRoot;
+      if (isLiteralPathAction) {
+        if (typeof projectRoot === 'string' && projectRoot.trim() !== '') {
+          stamp = { projectRoot: path.resolve(projectRoot), resolvedBy: 'explicit' };
+        }
+      } else if (!isRegistryAction) {
+        const ctx = await resolveToolSenderContext(params.projectRoot);
+        projectRoot = ctx.projectRoot;
+        stamp = stampOf(ctx);
+      }
       const result = await cmosProject({ ...params, projectRoot });
       const formatted = formatProjectForLLM(params.action, result, {
         validate: params.validate,
       });
 
-      return {
-        content: [{ type: 'text', text: formatted }],
-        structuredContent: { ...result },
-        isError: result.success === false,
-      };
+      return buildResolvedToolResult(result, formatted, stamp);
     }
 
     default:
@@ -1209,6 +1255,9 @@ export function runStartupBundledEnvCheck(
 let startupBundledEnvCheckRunner: typeof runStartupBundledEnvCheck = runStartupBundledEnvCheck;
 
 async function runStartupAttributionSelfTest(): Promise<StartupAttributionSelfTestResult> {
+  // s92-m01: the cwd-vs-install-root guard is retired (fork 1), so this self-test no longer warns
+  // when the install root resolves: a cwd equal to the install root resolves by cwd when it holds a
+  // store, which is the intended route for work in this repository.
   try {
     const resolved = await resolveSenderContext({
       requireSenderIdentity: true,
@@ -1217,27 +1266,15 @@ async function runStartupAttributionSelfTest(): Promise<StartupAttributionSelfTe
       projectRoot: resolved.projectRoot,
       source: resolved.source,
       errorCode: null,
-      warning:
-        resolved.projectRoot === SERVER_INSTALL_ROOT
-          ? 'SERVER_INSTALL_ROOT resolved as the sender. Remediation: run the server from the client project or rely on advertised MCP roots.'
-          : null,
+      warning: null,
     };
   } catch (error) {
     if (error instanceof SenderResolutionError) {
-      const installRootGuardCandidate = error.candidates.find(
-        (candidate) =>
-          candidate.source === 'cwd' &&
-          candidate.projectRoot === SERVER_INSTALL_ROOT &&
-          candidate.rejectReason?.includes('cwd-vs-SERVER_INSTALL_ROOT guard')
-      );
-
       return {
         projectRoot: null,
         source: null,
         errorCode: error.code,
-        warning: installRootGuardCandidate
-          ? 'SERVER_INSTALL_ROOT would have been the implicit sender. Remediation: run the server from the client project or rely on advertised MCP roots.'
-          : null,
+        warning: null,
       };
     }
 
@@ -1256,30 +1293,30 @@ async function runStartupAttributionSelfTest(): Promise<StartupAttributionSelfTe
  */
 async function initializeServer(): Promise<MissionProtocolContext> {
   try {
-    console.error(`[INFO] Initializing MCP server...`);
+    debugLog(`[INFO] Initializing MCP server...`);
     const context = await contextBuilder();
-    console.error(`[INFO] CMOS bundled seed schema version: ${CMOS_SCHEMA_VERSION}`);
-    console.error(`[INFO] Default intelligence model: ${context.defaultModel}`);
+    debugLog(`[INFO] CMOS bundled seed schema version: ${CMOS_SCHEMA_VERSION}`);
+    debugLog(`[INFO] Default intelligence model: ${context.defaultModel}`);
 
     // Sprint 53 m02 / m04: startup diagnostic for attribution. `SERVER_INSTALL_ROOT`
     // is the one path that must never be the *implicit* sender for another project;
     // operators see it here so they can verify before debugging misrouted sends.
     const envProjectRoot = process.env[CMOS_PROJECT_ROOT_ENV];
-    console.error(`[INFO] Server install root: ${SERVER_INSTALL_ROOT}`);
-    console.error(
+    debugLog(`[INFO] Server install root: ${SERVER_INSTALL_ROOT}`);
+    debugLog(
       `[INFO] Sender attribution diagnostics: Server install root: ${SERVER_INSTALL_ROOT}. ` +
         `${CMOS_PROJECT_ROOT_ENV} env: ${envProjectRoot ?? 'unset'}. Roots support: probed on first call.`
     );
     if (envProjectRoot) {
       console.error(
-        `[WARN] ${CMOS_PROJECT_ROOT_ENV}=${envProjectRoot} is set. Sprint 53 removed this from the ` +
-          `tool-dispatch resolution chain — it is retained only for .env bootstrap. If you relied on ` +
+        `[WARN] ${CMOS_PROJECT_ROOT_ENV}=${envProjectRoot} is set. It does not select a project for ` +
+          `tool calls; the server reads it only to find its own .env. If you relied on ` +
           `this env to pin attribution, pass projectRoot explicitly or ensure your MCP client advertises ` +
           `roots. Every outbound send will fail-closed rather than silently attribute to the server's ` +
           `own project.`
       );
     } else {
-      console.error(`[INFO] ${CMOS_PROJECT_ROOT_ENV} env: unset (expected post-Sprint-53).`);
+      debugLog(`[INFO] ${CMOS_PROJECT_ROOT_ENV} env: unset (it does not select a project).`);
     }
     const registryPrune = await startupRegistryPruneRunner();
     if (registryPrune.error) {
@@ -1287,22 +1324,48 @@ async function initializeServer(): Promise<MissionProtocolContext> {
         `[WARN] Registry prune skipped: ${registryPrune.error} — continuing startup with unpruned registry.`
       );
     } else if (registryPrune.pruned > 0) {
-      console.error(
+      debugLog(
         `[INFO] pruned ${registryPrune.pruned} stale entries from project registry (${registryPrune.remaining} remaining)`
       );
     } else {
-      console.error(
+      debugLog(
         `[INFO] Project registry healthy: ${registryPrune.remaining ?? 0} entries, no stale entries pruned`
       );
     }
 
+    // s92-m01: say which defaults a contextless call can use, and which it cannot.
+    const serverProjectRoot = getServerProjectRoot();
+    if (serverProjectRoot) {
+      const configured = findEnclosingStore(serverProjectRoot);
+      if (configured?.hasDatabase && configured.root === serverProjectRoot) {
+        debugLog(
+          `[INFO] ${PROJECT_ROOT_ARG}: ${serverProjectRoot} (used for calls with no project context)`
+        );
+      } else {
+        console.error(
+          `[WARN] ${PROJECT_ROOT_ARG}: ${serverProjectRoot} holds no CMOS database; calls with no project context will be refused until it does.`
+        );
+      }
+    }
+    try {
+      const status = (await ProjectGraphRegistry.create()).getDefaultStatus();
+      const notice = unappliedDefaultNotice(status);
+      if (notice && status.entry) {
+        // Stays visible (s92-m07): an upgrader must re-confirm a pre-3.2.0 default, and this line,
+        // whoami and cmos_review are where they learn it.
+        console.error(`[INFO] ${notice}: ${reconfirmDefaultCall(status.entry)}`);
+      }
+    } catch {
+      // Best-effort: the registry prune above already reported an unreadable registry.
+    }
+
     const attributionSelfTest = await startupAttributionSelfTestRunner();
     if (attributionSelfTest.projectRoot && attributionSelfTest.source) {
-      console.error(
+      debugLog(
         `[INFO] Sender attribution self-test: ${attributionSelfTest.source} -> ${attributionSelfTest.projectRoot}`
       );
     } else {
-      console.error(
+      debugLog(
         `[INFO] Sender attribution self-test: unresolved (${attributionSelfTest.errorCode ?? 'unknown'})`
       );
     }
@@ -1319,7 +1382,7 @@ async function initializeServer(): Promise<MissionProtocolContext> {
         ...(recoveryRoot ? { projectRoot: recoveryRoot } : {}),
       });
       if (recovery.status === 'recovered') {
-        console.error(`[INFO] Project key recovery: ${recovery.message}`);
+        debugLog(`[INFO] Project key recovery: ${recovery.message}`);
       } else if (recovery.status === 'error') {
         console.error(`[WARN] Project key recovery: ${recovery.message}`);
       } else if (
@@ -1337,7 +1400,7 @@ async function initializeServer(): Promise<MissionProtocolContext> {
       ) {
         console.error(`[WARN] Project key recovery: ${recovery.status} — ${recovery.message}`);
       } else {
-        console.error(`[INFO] Project key recovery: ${recovery.status} — ${recovery.message}`);
+        debugLog(`[INFO] Project key recovery: ${recovery.status} — ${recovery.message}`);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'unknown error';
@@ -1369,8 +1432,9 @@ async function initializeServer(): Promise<MissionProtocolContext> {
         console.error(
           `[WARN] cmos-mcp: ${CMOS_PROJECT_ROOT_ENV}=${process.env[CMOS_PROJECT_ROOT_ENV]} is pinned ` +
             `while ${topology.registryProjectCount} projects are registered. A single global MCP entry ` +
-            `with this env pins .env bootstrap + fallback attribution to one repo that every sibling ` +
-            `session shares. Prefer a project-local server, or pass projectRoot explicitly per call. ` +
+            `with this env pins .env bootstrap (and any dashboard key that .env holds) to one repo ` +
+            `that every sibling session shares. Prefer a project-local server, or pass projectRoot ` +
+            `explicitly per call. ` +
             `See SECURITY.md "Sanctioned deployment shape".`
         );
       }
@@ -1407,11 +1471,11 @@ async function initializeServer(): Promise<MissionProtocolContext> {
     // Initialize server health tracking (build staleness detection)
     initServerHealth();
     const serverHealth = getServerHealth();
-    console.error(
+    debugLog(
       `[INFO] Server health: pid=${serverHealth.pid} build=${serverHealth.startupBuild?.buildHash.slice(0, 12) ?? 'none'}…`
     );
 
-    console.error(`[INFO] Server components initialized successfully`);
+    debugLog(`[INFO] Server components initialized successfully`);
 
     return context;
   } catch (error) {
@@ -1427,6 +1491,30 @@ async function initializeServer(): Promise<MissionProtocolContext> {
       }
     );
     throw missionError;
+  }
+}
+
+/**
+ * s92-m07: the second startup line. It names the project a call with no projectRoot and no MCP
+ * roots would use, through the same resolution such a call runs. A client's roots arrive only after
+ * initialize, so they can still name another project.
+ */
+async function describeStartupProject(): Promise<string> {
+  try {
+    const ctx = await resolveSenderContext({ requireSenderIdentity: false });
+    const how =
+      ctx.source === 'cwd'
+        ? 'the working directory'
+        : (RESOLVED_BY_LABELS[ctx.source] ?? ctx.source);
+    return `project: ${ctx.projectRoot} (from ${how})`;
+  } catch (error) {
+    if (error instanceof SenderResolutionError) {
+      return (
+        'project: none at startup; each call names one with projectRoot, ' +
+        "the client's MCP roots, or a working directory inside a project"
+      );
+    }
+    return `project: not resolved at startup (${error instanceof Error ? error.message : 'unknown error'})`;
   }
 }
 
@@ -1449,12 +1537,19 @@ async function main(): Promise<void> {
           `  cmos-mcp              Run the MCP server over stdio (default).\n` +
           `  cmos-mcp --version    Print the version and exit.\n` +
           `  cmos-mcp --help       Print this help and exit.\n` +
-          `  cmos-mcp --whoami     Print sender-attribution diagnostics and exit.\n\n` +
+          `  cmos-mcp --whoami     Print sender-attribution diagnostics and exit.\n` +
+          `  cmos-mcp ${PROJECT_ROOT_ARG} <dir>\n` +
+          `                        Use <dir> for calls that carry no project context (no projectRoot,\n` +
+          `                        no MCP roots, and a working directory of /, $HOME or the install\n` +
+          `                        root) — the Claude Desktop recipe. Set it per server config.\n\n` +
           `The server speaks the Model Context Protocol on stdio; launch it from an MCP\n` +
           `host (Claude Code, Claude Desktop, Cursor, VS Code), not directly.\n`
       );
       process.exit(0);
     }
+
+    // s92-m01: record --project-root before anything resolves (whoami included).
+    setServerProjectRoot(parseProjectRootArg(process.argv));
 
     if (process.argv.includes('--whoami')) {
       const exitCode = await whoamiCliRunner();
@@ -1476,14 +1571,25 @@ async function main(): Promise<void> {
     // Connect server to transport
     await server.connect(transport);
 
-    console.error(`[INFO] ${SERVER_CONFIG.name} MCP server running on stdio`);
-    console.error(`[INFO] Server: ${SERVER_CONFIG.name} v${SERVER_CONFIG.version}`);
+    // s92-m03: when the client goes away, close this process's implicit sessions. Best effort, and
+    // through the session handler, so nothing is uploaded on the way out; whatever is left open is
+    // closed by the next reconcile once this process is gone.
+    process.stdin.once('end', () => {
+      void closeOwnImplicitSessions().catch(() => undefined);
+    });
+
+    debugLog(`[INFO] ${SERVER_CONFIG.name} MCP server running on stdio`);
+    debugLog(`[INFO] Server: ${SERVER_CONFIG.name} v${SERVER_CONFIG.version}`);
     const totalTools = getToolDefinitions().length;
-    console.error(`[INFO] ${totalTools} tools registered`);
+    debugLog(`[INFO] ${totalTools} tools registered`);
     if (context.cmosDetected) {
-      console.error(`[INFO] CMOS detected, ${CMOS_TOOL_DEFINITIONS.length} CMOS tools enabled`);
-      console.error(`[INFO] CMOS database: ${context.cmosDatabasePath}`);
+      debugLog(`[INFO] CMOS detected, ${CMOS_TOOL_DEFINITIONS.length} CMOS tools enabled`);
+      debugLog(`[INFO] CMOS database: ${context.cmosDatabasePath}`);
     }
+
+    // s92-m07: the two lines a normal start writes. Everything above is behind CMOS_DEBUG=1.
+    console.error(`[cmos-mcp] v${SERVER_CONFIG.version} ready on stdio (${totalTools} tools)`);
+    console.error(`[cmos-mcp] ${await startupProjectDescriber()}`);
   } catch (error) {
     const missionError = ErrorHandler.handle(
       error,
@@ -1526,6 +1632,12 @@ export const __test__ = {
   resetWhoamiCliRunner: () => {
     whoamiCliRunner = runWhoamiCli;
   },
+  setStartupProjectDescriber: (describer: () => Promise<string>) => {
+    startupProjectDescriber = describer;
+  },
+  resetStartupProjectDescriber: () => {
+    startupProjectDescriber = describeStartupProject;
+  },
   setStartupAttributionSelfTestRunner: (runner: typeof runStartupAttributionSelfTest) => {
     startupAttributionSelfTestRunner = runner;
   },
@@ -1563,6 +1675,7 @@ export const __test__ = {
 // Handle graceful shutdown
 process.on('SIGINT', async () => {
   console.error(`[INFO] Received SIGINT, shutting down gracefully...`);
+  await closeOwnImplicitSessions().catch(() => undefined);
   try {
     await server.close();
   } catch (error) {
@@ -1586,6 +1699,7 @@ process.on('SIGINT', async () => {
 
 process.on('SIGTERM', async () => {
   console.error(`[INFO] Received SIGTERM, shutting down gracefully...`);
+  await closeOwnImplicitSessions().catch(() => undefined);
   try {
     await server.close();
   } catch (error) {

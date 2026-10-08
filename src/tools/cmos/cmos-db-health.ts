@@ -9,6 +9,10 @@
  */
 
 import { z } from 'zod';
+import {
+  semanticSearchStatus,
+  type SemanticSearchStatus,
+} from '../../intelligence/embedding-pipeline';
 import { CmosDatabaseClient, withClient } from './client';
 import type { CmosToolResult, DbHealthResult } from './types';
 import { createSuccess } from './errors';
@@ -32,6 +36,12 @@ export interface CmosDbHealthResult extends DbHealthResult {
 
   /** Whether WAL mode is enabled */
   walModeEnabled: boolean;
+
+  /**
+   * s92-m07: whether semantic (vector) search can take part in retrieval in this process. The
+   * embedding package is an optional peer dependency; without it, search is keyword-only.
+   */
+  semanticSearch: SemanticSearchStatus;
 }
 
 /**
@@ -109,6 +119,7 @@ export async function cmosDbHealth(
         lastContextUpdate,
         fileSizeBytes,
         walModeEnabled,
+        semanticSearch: semanticSearchStatus(),
       };
 
       return createSuccess(result);
@@ -260,6 +271,7 @@ export function formatHealthForLLM(result: CmosToolResult<CmosDbHealthResult>): 
     `**Database**: ${health.path}`,
     `**SQLite Version**: ${health.version}`,
     `**WAL Mode**: ${health.walModeEnabled ? 'Enabled ✓' : 'Disabled'}`,
+    `**Semantic search**: ${health.semanticSearch.enabled ? 'on' : 'off'} — ${health.semanticSearch.detail}`,
   ];
 
   if (health.fileSizeBytes !== null) {

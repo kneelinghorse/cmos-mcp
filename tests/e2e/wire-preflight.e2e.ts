@@ -260,17 +260,22 @@ function normalizeWireString(value: string, environment: WireEnvironment): strin
   for (const [fixturePath, token] of fixturePaths) {
     normalized = normalized.split(fixturePath).join(token);
   }
-  return normalized
-    .replace(
-      /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi,
-      '<UUID>'
-    )
-    .replace(/\b[0-9A-HJKMNP-TV-Z]{26}\b/g, '<ULID>')
-    .replace(/\bsnapshot-\d{8}T\d{9}Z-[0-9a-f]+\b/gi, '<SNAPSHOT_ID>')
-    .replace(/\bpid=\d+\b/g, 'pid=<PID>')
-    .replace(/\bmem=\d+(?:\.\d+)?MB\b/g, 'mem=<MEMORY_MB>')
-    .replace(/\buptime=\d+(?:\.\d+)?s\b/g, 'uptime=<UPTIME>')
-    .replace(/\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\b/g, '<TIMESTAMP>');
+  return (
+    normalized
+      .replace(
+        /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi,
+        '<UUID>'
+      )
+      .replace(/\b[0-9A-HJKMNP-TV-Z]{26}\b/g, '<ULID>')
+      .replace(/\bsnapshot-\d{8}T\d{9}Z-[0-9a-f]+\b/gi, '<SNAPSHOT_ID>')
+      // s92-m01: the review digest carries its projectRoot, so its byte count follows the fixture
+      // path's length — different for the omitted-root and null-root fixtures by construction.
+      .replace(/\bDigest size: \d+ bytes\b/g, 'Digest size: <DIGEST_BYTES> bytes')
+      .replace(/\bpid=\d+\b/g, 'pid=<PID>')
+      .replace(/\bmem=\d+(?:\.\d+)?MB\b/g, 'mem=<MEMORY_MB>')
+      .replace(/\buptime=\d+(?:\.\d+)?s\b/g, 'uptime=<UPTIME>')
+      .replace(/\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\b/g, '<TIMESTAMP>')
+  );
 }
 
 function normalizeWireValue(value: unknown, environment: WireEnvironment): unknown {
@@ -284,6 +289,7 @@ function normalizeWireValue(value: unknown, environment: WireEnvironment): unkno
         if (key === 'pid') return [key, '<PID>'];
         if (key === 'memoryUsageMb') return [key, '<MEMORY_MB>'];
         if (key === 'uptimeSeconds') return [key, '<UPTIME_SECONDS>'];
+        if (key === 'digestSizeBytes') return [key, '<DIGEST_BYTES>'];
         return [key, normalizeWireValue(item, environment)];
       })
     );
@@ -315,15 +321,15 @@ async function sweepProjectRootSemantics(
 
 function expectHermeticDeviceFlowRequests(
   dashboard: DashboardDouble,
-  expectedTokenRequests = 1
+  expectedTokenRequests = 1,
+  expectedCodeRequests = 2
 ): void {
   const requests = [...dashboard.requests];
-  expect(requests).toHaveLength(2 + expectedTokenRequests);
+  expect(requests).toHaveLength(expectedCodeRequests + expectedTokenRequests);
   expect(requests.every((request) => request.matchedScenario)).toBe(true);
   expect(requests.every((request) => request.authorization === '')).toBe(true);
   expect(requests.map(({ method, url }) => `${method} ${url}`).sort()).toEqual([
-    'POST /api/auth/device/code',
-    'POST /api/auth/device/code',
+    ...Array.from({ length: expectedCodeRequests }, () => 'POST /api/auth/device/code'),
     ...Array.from({ length: expectedTokenRequests }, () => 'POST /api/auth/device/token'),
   ]);
 }
@@ -555,9 +561,11 @@ describe('s90-m04 wire preflight and first-run classification over built stdio',
       }
     }
 
-    // The literal first-run calls above fail at project resolution and therefore cannot prove
-    // the auth handler itself is hermetic. Re-drive exactly the two network-bearing no-argument
-    // actions on an initialized scratch root whose only dashboard URL is the loopback double.
+    // s92-m01: user-level auth actions (login_init, login, login_complete, list, logout) run
+    // project-free instead of refusing for lack of a project, so the literal first-run pass above
+    // now reaches the device-flow endpoints itself (login_init: 1 code request; login: 1 code + 1
+    // token). Re-drive the same two network-bearing no-argument actions on an initialized scratch
+    // root too, so the hermetic claim covers both a project-free and a project-bound handler.
     for (const pair of pairs.filter((candidate) =>
       AUTH_LOOPBACK_PAIR_KEYS.has(pairKey(candidate))
     )) {
@@ -584,7 +592,8 @@ describe('s90-m04 wire preflight and first-run classification over built stdio',
     expect(excluded).toEqual([]);
     expect(driven.size).toBe(pairs.length - excluded.length);
     expect([...loopbackDriven].sort()).toEqual([...AUTH_LOOPBACK_PAIR_KEYS].sort());
-    expectHermeticDeviceFlowRequests(dashboardDouble, 2);
+    // Two passes of login_init + login (2 code + 1 token each), plus login_complete with a code.
+    expectHermeticDeviceFlowRequests(dashboardDouble, 3, 4);
     expect(failures).toEqual([]);
     expect(codeByPair.get('cmos_review\0<actionless>')).toBe('CMOS_NOT_DETECTED');
     expect(loginCompleteResult.structuredContent?.error?.code).toBe('MISSING_PARAMETER');

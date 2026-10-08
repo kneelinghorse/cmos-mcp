@@ -3,6 +3,7 @@
 // last_embedded_hash, embeds on change, and upserts into <type>_vec. Architecture per cmos/planning/adr/s66-vector-retrieval.md.
 
 import * as crypto from 'crypto';
+import { debugLog } from '../debug-log';
 import type { CmosDatabaseClient } from '../tools/cmos/client';
 import { checkWrite } from '../tools/cmos/write-guard';
 import { applyOfflineTransformersEnv, type TransformersEnv } from './transformers-offline-env';
@@ -27,7 +28,15 @@ export interface RecordEmbeddingTarget {
   inputText: string;
 }
 
-export type RecordEmbeddingAction = 'embedded' | 'skipped-no-change' | 'failed';
+/**
+ * `skipped-unavailable` (s92-m07): no embedder in this process. The optional package is not
+ * installed, or it failed to load (reported once, at load). `failed`: this write's attempt failed.
+ */
+export type RecordEmbeddingAction =
+  | 'embedded'
+  | 'skipped-no-change'
+  | 'skipped-unavailable'
+  | 'failed';
 
 export interface RecordEmbeddingResult {
   action: RecordEmbeddingAction;
@@ -45,6 +54,110 @@ export interface RecordEmbeddingResult {
 
 export const EMBEDDING_MODEL = 'Xenova/all-MiniLM-L6-v2';
 export const EMBEDDING_DIM = 384;
+
+/**
+ * s92-m07: the embedding stack is an OPTIONAL peer dependency. On 2,132 natural citation labels,
+ * keyword-only recall@10 (0.637) beat equal-weight hybrid (0.592) once the keyword arm read every
+ * query keyword, and the stack was about 81% of a 306 MB install. Absent, writes and searches run
+ * keyword-only and print nothing; `cmos_db(action="health")` says which state this process is in.
+ */
+export const TRANSFORMERS_PACKAGE = '@xenova/transformers';
+
+// ─── Optional-peer state (s92-m07) ───────────────────────────────────────────
+
+type EmbedderAvailability =
+  | { state: 'unknown' }
+  | { state: 'loaded' }
+  | { state: 'not-installed' }
+  | { state: 'failed'; reason: string };
+
+let availability: EmbedderAvailability = { state: 'unknown' };
+let transformersLoader: (() => Promise<unknown>) | null = null;
+let transformersResolver: (() => boolean) | null = null;
+
+/** Test hook: stand in for `import('@xenova/transformers')`. Pass null to restore it. */
+export function setTransformersLoaderForTesting(loader: (() => Promise<unknown>) | null): void {
+  transformersLoader = loader;
+}
+
+/** Test hook: stand in for "is the package installed?". Pass null to restore it. */
+export function setTransformersResolverForTesting(resolver: (() => boolean) | null): void {
+  transformersResolver = resolver;
+}
+
+function transformersInstalled(): boolean {
+  if (transformersResolver) return transformersResolver();
+  try {
+    require.resolve(TRANSFORMERS_PACKAGE);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * True when the import failed because the optional package itself is absent. Node quotes the
+ * missing name in both forms ("Cannot find module '…'" from require, "Cannot find package '…'" from
+ * import). A package that is present but missing one of ITS dependencies names that dependency
+ * instead, so it counts as a failed load, which is worth a warning.
+ */
+function isPackageAbsent(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code;
+  const message = error instanceof Error ? error.message : '';
+  return (
+    (code === 'MODULE_NOT_FOUND' || code === 'ERR_MODULE_NOT_FOUND') &&
+    message.includes(`'${TRANSFORMERS_PACKAGE}'`)
+  );
+}
+
+/** What `cmos_db(action="health")` reports about semantic (vector) search in this process. */
+export interface SemanticSearchStatus {
+  /** True when the vector term can take part: the package is installed and has not failed. */
+  enabled: boolean;
+  state: 'loaded' | 'installed' | 'not-installed' | 'failed';
+  detail: string;
+}
+
+/** The current semantic-search state. Never loads the package or the model. */
+export function semanticSearchStatus(): SemanticSearchStatus {
+  const notInstalled: SemanticSearchStatus = {
+    enabled: false,
+    state: 'not-installed',
+    detail:
+      `the optional package ${TRANSFORMERS_PACKAGE} is not installed, so search is keyword-only. ` +
+      'Install it next to cmos-mcp to add a vector term.',
+  };
+  switch (availability.state) {
+    case 'loaded':
+      return { enabled: true, state: 'loaded', detail: `${EMBEDDING_MODEL} is loaded` };
+    case 'not-installed':
+      return notInstalled;
+    case 'failed':
+      return {
+        enabled: false,
+        state: 'failed',
+        detail: `${TRANSFORMERS_PACKAGE} is installed but failed to load in this process (${availability.reason})`,
+      };
+    case 'unknown':
+      return transformersInstalled()
+        ? {
+            enabled: true,
+            state: 'installed',
+            detail:
+              `${TRANSFORMERS_PACKAGE} is installed; ${EMBEDDING_MODEL} loads on first use and is ` +
+              'downloaded once, unless CMOS_OFFLINE_EMBEDDINGS=1',
+          }
+        : notInstalled;
+  }
+}
+
+/** True when the real loader has run in this process and left no embedder behind. */
+export function isEmbedderUnavailable(): boolean {
+  return (
+    testEmbedder === null &&
+    (availability.state === 'not-installed' || availability.state === 'failed')
+  );
+}
 
 // ─── Embedder singleton (with test-injection hook) ───────────────────────────
 
@@ -80,12 +193,23 @@ export async function getEmbedder(): Promise<Embedder> {
       embedderLoadAttempts += 1;
       try {
         cachedEmbedder = await loadXenovaEmbedder();
+        availability = { state: 'loaded' };
       } catch (error) {
         const message = error instanceof Error ? error.message : 'unknown error';
-        console.error(
-          `[WARN] embedding-pipeline: embedder load failed — vector arm disabled (BM25-only), ` +
-            `not retrying this process — ${message}`
-        );
+        if (isPackageAbsent(error)) {
+          // s92-m07: a supported configuration, not a failure. Named once, and only under CMOS_DEBUG.
+          availability = { state: 'not-installed' };
+          debugLog(
+            `[DEBUG] embedding-pipeline: ${TRANSFORMERS_PACKAGE} is not installed — semantic ` +
+              'search off, keyword search only'
+          );
+        } else {
+          availability = { state: 'failed', reason: message };
+          console.error(
+            `[WARN] embedding-pipeline: embedder load failed — vector arm disabled (BM25-only), ` +
+              `not retrying this process — ${message}`
+          );
+        }
         cachedEmbedder = makeUnavailableEmbedder(message);
       } finally {
         embedderLoadPromise = null;
@@ -108,8 +232,11 @@ function makeUnavailableEmbedder(reason: string): Embedder {
 }
 
 async function loadXenovaEmbedder(): Promise<Embedder> {
-  // @xenova/transformers is ESM-only — dynamic import works from CJS context.
-  const transformers = (await import('@xenova/transformers')) as unknown as {
+  // @xenova/transformers is ESM-only — dynamic import works from CJS context. s92-m07: it is an
+  // optional peer dependency, so this import failing with "not found" is an expected state.
+  const transformers = (await (transformersLoader
+    ? transformersLoader()
+    : import('@xenova/transformers'))) as unknown as {
     pipeline: (task: string, model: string) => Promise<XenovaFeatureExtractor>;
     env: TransformersEnv;
   };
@@ -214,6 +341,8 @@ export async function recordEmbedding(
     }
 
     const embed = await getEmbedder();
+    // s92-m07: no embedder in this process is a state, reported once at load, not per write.
+    if (isEmbedderUnavailable()) return { action: 'skipped-unavailable' };
     const vec = await embed(target.inputText);
     const blob = packEmbedding(vec);
 
@@ -337,6 +466,7 @@ export function __resetEmbedderCacheForTesting(): void {
   testEmbedder = null;
   embedderLoadPromise = null;
   embedderLoadAttempts = 0;
+  availability = { state: 'unknown' };
 }
 
 /** Test-observable count of real embedder load attempts — the negative-cache proof

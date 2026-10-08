@@ -548,9 +548,14 @@ export interface CmosMissionPortfolioResult {
  * withClient and reads getProjectId; returns null on ANY failure so the render fences
  * every row rather than mis-labeling a foreign row as local. Never throws.
  */
-async function resolveAmbientLocalProjectId(): Promise<string | null> {
+async function resolveAmbientLocalProjectId(projectRoot?: string): Promise<string | null> {
   try {
-    const res = await withClient((client) => createSuccess(getProjectId(client)), {});
+    // s92-m01: the dispatcher resolves the caller's project (explicit root, MCP roots, cwd) and
+    // passes it here; only a direct caller with no root falls back to the cwd-based resolver.
+    const res = await withClient(
+      (client) => createSuccess(getProjectId(client)),
+      projectRoot ? { projectRoot } : {}
+    );
     return res.success ? (res.data ?? null) : null;
   } catch {
     return null;
@@ -565,7 +570,7 @@ async function resolveAmbientLocalProjectId(): Promise<string | null> {
  * `registry` seam is for deterministic tests (not exposed on the tool schema).
  */
 export async function missionStatusAcrossProjects(
-  opts: { limit?: number } = {},
+  opts: { limit?: number; projectRoot?: string } = {},
   // s86-m03 — internal, NON-schema seam, moved out of parameter 0 onto the cmos-review.ts:295
   // precedent (the same move applied to cmosLearningsListAcrossProjects in this mission): an
   // injectable ProjectGraphRegistry for deterministic tests of the cross-store fan-out. NOT
@@ -595,7 +600,7 @@ export async function missionStatusAcrossProjects(
     acrossProjects: true,
     errors: fanout.errors,
     crossStoreMetadata: fanout.metadata,
-    localProjectId: await resolveAmbientLocalProjectId(),
+    localProjectId: await resolveAmbientLocalProjectId(opts.projectRoot),
   });
 }
 

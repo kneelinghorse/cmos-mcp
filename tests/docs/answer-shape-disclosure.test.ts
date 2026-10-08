@@ -103,11 +103,44 @@ const EXPECTED_TOTALS = {
   // the new SprintNextStepLease; the close receipt gains lapsedDroppedIds. All additive.
   // s91-m07: sprint-tracking.ts joins the root; CmosReviewResult.sprint gains `resolvedBy`
   // (additive, same row count — the sprint row's declared shape widens).
-  files: 126,
-  roots: 138,
-  declarations: 274,
-  compositions: 274,
-  rows: 1524,
+  // s92-m01: sender-refusal.ts joins the analyzed tool root (it declares no answer type), and the
+  // new `ResolvedBy` type adds one declaration/composition. Nine rows, all additive optional or new
+  // fields: CmosReviewResult projectRoot/resolvedBy/registryDefault, MessageWhoamiResult
+  // registryDefault/serverProjectRoot, ProjectListItem.defaultApplied, ProjectRegisterResult
+  // defaultApplied/ephemeral, ValidationSummary.ephemeral. ProjectValidationItem.status widens with
+  // 'ephemeral' and SenderResolutionSource replaces 'registry-singleton' with 'server-project-root'
+  // and 'registry-default' — both disclosed in the CHANGELOG.
+  // s92-m02: sprint-end-date-repair.ts joins the analyzed root with three declarations
+  // (SprintEndDateRepair, RepairedSprintEndDate, UnanchoredSprint). Eighteen rows, all additive:
+  // CmosSprintCompleteResult plannedEndDate/endDateRepair, SprintNextStepLease minAgeDays/
+  // heldByMinAge/idleWarnDays/idle, SprintPendingNextStep.ageDays, SprintUpdateResult
+  // endDateStamped/plannedEndDate, and the repair types' own rows. LeaseState widens with 'idle'.
+  // s92-m05: one additive row, SprintLifecycleTriggers.archived (the close archives only when
+  // called with archive: true).
+  // s92-m03: session-owner.ts and implicit-session-lifecycle.ts join the closure with two
+  // declarations (CloseReason, ClosedSessionReceipt). Thirteen rows, all additive: the receipt's
+  // eight, plus implicitSession/closedSessions on capture and record, and closedSessions on start.
+  // s92-m08: two show actions (cmos-decisions-show.ts, cmos-learnings-show.ts) join as roots, and
+  // previews add ContextSearchHit plus truncated/fullLength on search hits, learnings hits and
+  // relevant decisions, and status on RankedResult. All additive.
+  // s92-m04: six rows, all additive: RecentDecisionSummary id/truncated/fullLength,
+  // SuggestedAction.scope, MissionCompleteResult.missionDecisionCount and
+  // CmosReviewResult.recentLearnings (its recentDecisions element gains `id` inside the same row).
+  // The supersession and implicit-reaffirm fields stay declared, deprecated and never populated.
+  // s92-m07: ContextSearchResult.options widens with `excludedStatuses` (the statuses a search left
+  // out when the caller named none: ['superseded']), in the same row. CmosDbHealthResult gains
+  // `semanticSearch`, typed by the new SemanticSearchStatus (enabled/state/detail): one declaration
+  // and composition, four rows, all additive.
+  // s92-m09: cmos_db gains prune_snapshots. cmos-db-prune-snapshots.ts (a root) and
+  // context-snapshot-prune.ts join the closure; CmosDbPruneSnapshotsResult,
+  // PruneSnapshotsContextReport and PreserveReasons add three declarations; CmosDbResult's union
+  // widens with the new result. Thirty-two rows, all new: the result also reports bytesReclaimed
+  // (counted row by row) and sprintCloses, and PreserveReasons counts sprintCloseState.
+  files: 136,
+  roots: 141,
+  declarations: 287,
+  compositions: 287,
+  rows: 1640,
 } as const;
 const EXPLICIT_OPAQUE_LEDGER = [
   'CmosToolError.providedValue = ANY',

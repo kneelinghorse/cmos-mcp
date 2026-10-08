@@ -7,13 +7,23 @@ import { createError, createSuccess, CmosErrors, CMOS_ERROR_CODES } from './erro
 import { sanitizeContentField, type SanitizedField } from '../../intelligence/content-sanitizer';
 import { ensureMissionIdColumn } from './cmos-mission-complete';
 import { resolveOpenSprintIdForWrite } from './current-sprint';
-import { ensureAuthorNamespaceColumns, ensureFirehoseEventColumns } from './schema-migrations';
+import {
+  ensureAuthorNamespaceColumns,
+  ensureFirehoseEventColumns,
+  ensureImplicitSessionColumns,
+} from './schema-migrations';
 import { findExistingDecisionId, insertDecisionRow, followDecisionInsert } from './decision-write';
 import { applyLearningReaffirm, sanitizeLearningIds } from './learning-reaffirm';
 import type { SupersessionCandidate } from './supersession-detection';
 import { appendWarnings, appendWriteFailures, attachWarnings } from './format-warnings';
 import { checkWrite, type WriteFailure } from './write-guard';
 import type { CmosToolResult } from './types';
+import { resolveCallerSession } from './session-owner';
+import {
+  closedSessionLines,
+  reconcileStoreOnce,
+  type ClosedSessionReceipt,
+} from './implicit-session-lifecycle';
 
 /**
  * s91-m04 — policy 3 (decisions keep the ADR lifecycle), made writable. A decision is born
@@ -27,9 +37,10 @@ import type { CmosToolResult } from './types';
  * else `resolveOpenSprintIdForWrite` — which is `null` when no sprint is open (s85-m03), and that
  * null is disclosed on the answer rather than replaced by a guess.
  *
- * AUTHOR: the most recent active session when one exists, else NULL. The dedup key is
- * (text, author_session_id) with NULL matching NULL, so a lost-and-retried `record` returns the
- * row it already wrote instead of writing a second one.
+ * AUTHOR (s92-m03): the caller's session. The project's open explicit session, else this
+ * process's own implicit session, opened if it has none, so every recorded row is attributed to the
+ * process that wrote it. The dedup key is (text, author_session_id), so a lost-and-retried `record`
+ * from the same process returns the row it already wrote instead of writing a second one.
  */
 
 export interface CmosDecisionsRecordParams {
@@ -58,10 +69,16 @@ export interface CmosDecisionsRecordResult {
   missionId?: string;
   authorSessionId: string | null;
   superseded: SupersededEcho[];
+  /** @deprecated s92-m04: no longer populated. The automatic supersession offer was retired (69 of 9,035 historical offers were true); a correction names what it replaces with cmos_decisions(action="record", supersedes=[...]). Kept declared so 3.2.0 removes no field. */
   supersessionCandidates?: SupersessionCandidate[];
+  /** @deprecated s92-m04: no longer populated. The automatic supersession offer was retired (69 of 9,035 historical offers were true); a correction names what it replaces with cmos_decisions(action="record", supersedes=[...]). Kept declared so 3.2.0 removes no field. */
   supersessionMessage?: string;
   explicitlyReaffirmedLearningIds?: number[];
   missingCitedLearningIds?: number[];
+  /** s92-m03: present when the author is this process's implicit session; `opened` by this call. */
+  implicitSession?: { opened: boolean };
+  /** s92-m03: stale implicit sessions closed after this call opened one. */
+  closedSessions?: ClosedSessionReceipt[];
   writeFailures: WriteFailure[];
   message: string;
 }
@@ -93,8 +110,11 @@ export async function cmosDecisionsRecord(
   const warnings: string[] = [];
   const writeSink = { failures: [] as WriteFailure[] };
 
+  // s92-m03: the store this call wrote to, for its once-per-store reconcile after the connection.
+  let storePath: string | null = null;
   const result = await withClientAsync(
     async (client) => {
+      storePath = client.path;
       // Sprint resolution, in the order the module docblock publishes.
       let sprintId: string | null;
       if (missionId) {
@@ -147,12 +167,14 @@ export async function cmosDecisionsRecord(
         targets.set(id, target.data.status);
       }
 
-      const activeSession = client.getOne<{ id: string }>(
-        `SELECT id FROM sessions WHERE status = 'active' ORDER BY started_at DESC LIMIT 1`,
-        []
-      );
-      const authorSessionId =
-        activeSession.success && activeSession.data ? activeSession.data.id : null;
+      // s92-m03: the caller's session, never another process's implicit session.
+      warnings.push(...(ensureImplicitSessionColumns(client).warnings ?? []));
+      const caller = resolveCallerSession(client, { open: true });
+      if (!caller.ok) {
+        return createError<CmosDecisionsRecordResult>(caller.error);
+      }
+      warnings.push(...caller.warnings);
+      const authorSessionId = caller.session?.sessionId ?? null;
 
       // Migrations that toggle foreign_keys are no-ops inside a transaction: run them first.
       warnings.push(...(ensureFirehoseEventColumns(client).warnings ?? []));
@@ -230,26 +252,17 @@ export async function cmosDecisionsRecord(
             : `Decision #${decisionId} was already recorded with this text`,
       };
       if (missionId) answer.missionId = missionId;
+      if (caller.session?.implicit) answer.implicitSession = { opened: caller.session.opened };
 
       if (existingId === undefined) {
-        const followUp = await followDecisionInsert(
-          client,
-          content,
-          decisionId,
-          sprintId,
-          warnings
-        );
-        const offered = followUp.supersessionCandidates?.filter((c) => !targets.has(c.id));
-        if (offered && offered.length > 0) {
-          answer.supersessionCandidates = offered;
-          answer.supersessionMessage = followUp.supersessionMessage;
-        }
+        // s92-m04: embedding only; the automatic supersession offer is retired.
+        await followDecisionInsert(client, content, decisionId, warnings);
       }
 
       if (cited.cleaned.length > 0) {
         const reaffirm = await applyLearningReaffirm(
           client,
-          { explicitIds: cited.cleaned, newContent: content, reaffirmedAt: now },
+          { explicitIds: cited.cleaned, reaffirmedAt: now },
           warnings
         );
         writeSink.failures.push(...reaffirm.writeFailures);
@@ -265,6 +278,15 @@ export async function cmosDecisionsRecord(
     },
     { projectRoot: params.projectRoot }
   );
+
+  // s92-m03: on this process's first write to the store, close orphaned or idle implicit sessions,
+  // outside the record's own connection, even if the record itself then failed.
+  const reconciled = await reconcileStoreOnce(storePath);
+  warnings.push(...reconciled.warnings);
+  if (reconciled.receipts.length > 0) {
+    if (result.success && result.data) result.data.closedSessions = reconciled.receipts;
+    else warnings.push(...closedSessionLines(reconciled.receipts));
+  }
   // Every exit after a migration carries its warnings, including the refusals.
   return attachWarnings(result, warnings);
 }
@@ -300,10 +322,9 @@ export function formatDecisionsRecordForLLM(
       lines.push(`  - #${s.id}: ${s.previousStatus} → ${s.newStatus}`);
     }
   }
-  if (d.supersessionCandidates && d.supersessionCandidates.length > 0) {
-    lines.push(
-      `**Possible supersession candidates**: ${d.supersessionCandidates.map((c) => `#${c.id}`).join(', ')}`
-    );
+  if (d.closedSessions && d.closedSessions.length > 0) {
+    lines.push('**Closed stale sessions**:');
+    for (const line of closedSessionLines(d.closedSessions)) lines.push(`  ${line}`);
   }
   appendWriteFailures(lines, d.writeFailures);
   appendWarnings(lines, result);

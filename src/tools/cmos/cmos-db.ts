@@ -2,7 +2,8 @@
  * cmos_db Tool
  *
  * Consolidated database admin tool with action parameter support.
- * Actions: health, snapshot, restore.
+ * Actions: health, snapshot, restore, backfill, reconcile, purge, identify_orphans, pull, clone,
+ * prune_snapshots.
  * Routes to existing DB handlers without rewriting business logic.
  *
  * @module tools/cmos/cmos-db
@@ -54,6 +55,12 @@ import {
   formatSyncBootstrapForLLM,
   type SyncBootstrapResult,
 } from './sync-bootstrap';
+import {
+  cmosDbPruneSnapshots,
+  formatPruneSnapshotsForLLM,
+  type CmosDbPruneSnapshotsParams,
+  type CmosDbPruneSnapshotsResult,
+} from './cmos-db-prune-snapshots';
 
 export const CMOS_DB_ACTIONS = [
   'health',
@@ -65,6 +72,7 @@ export const CMOS_DB_ACTIONS = [
   'identify_orphans',
   'pull',
   'clone',
+  'prune_snapshots',
 ] as const;
 
 export type CmosDbAction = (typeof CMOS_DB_ACTIONS)[number];
@@ -80,6 +88,15 @@ export const CMOS_DB_ACTION_PARAMS: ActionParamMap<CmosDbAction, CmosDbParams> =
   identify_orphans: ['action', 'projectRoot'],
   pull: ['action', 'slug', 'limit', 'maxPages', 'projectRoot'],
   clone: ['action', 'slug', 'projectRoot'],
+  prune_snapshots: [
+    'action',
+    'confirm',
+    'keepIds',
+    'keepSince',
+    'keepSources',
+    'keepLast',
+    'projectRoot',
+  ],
 };
 
 export type CmosDbResult =
@@ -91,14 +108,15 @@ export type CmosDbResult =
   | PurgeResult
   | PgOrphanReport
   | SyncPullResult
-  | SyncBootstrapResult;
+  | SyncBootstrapResult
+  | CmosDbPruneSnapshotsResult;
 
 export const cmosDbSchema = z
   .object({
     action: z
       .enum(CMOS_DB_ACTIONS)
       .describe(
-        'Database action: health | snapshot | restore | backfill | reconcile | purge | identify_orphans | pull | clone'
+        'Database action: health | snapshot | restore | backfill | reconcile | purge | identify_orphans | pull | clone | prune_snapshots'
       ),
     // pull/clone params (Sprint 71 m02 PULL consumer + m03 clone-from-/state)
     slug: z
@@ -121,7 +139,14 @@ export const cmosDbSchema = z
       .describe('Safety bound on the pull pagination loop (default 1000)'),
     // snapshot params
     listOnly: z.boolean().optional().describe('List snapshots instead of creating one'),
-    maxSnapshots: z.number().int().positive().optional().describe('Max snapshots to list'),
+    maxSnapshots: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe(
+        'snapshot: how many database snapshots to keep (default CMOS_MAX_SNAPSHOTS or 50); taking one deletes the oldest beyond it, automatic ones included'
+      ),
     // restore params
     snapshotId: z
       .string()
@@ -130,7 +155,32 @@ export const cmosDbSchema = z
     confirm: z
       .boolean()
       .optional()
-      .describe('Confirmation flag for restore/purge actions (required for restore)'),
+      .describe(
+        'Confirmation flag for restore/purge/prune_snapshots actions (required for restore; prune_snapshots is a dry run without it)'
+      ),
+    // prune_snapshots params (s92-m09)
+    keepIds: z
+      .array(z.number().int().positive())
+      .optional()
+      .describe('prune_snapshots: context snapshot ids to keep, whatever else applies'),
+    keepSince: z
+      .string()
+      .optional()
+      .describe('prune_snapshots: keep every snapshot created at or after this date'),
+    keepSources: z
+      .array(z.string())
+      .optional()
+      .describe(
+        'prune_snapshots: keep every snapshot whose source matches one of these patterns (* = anything, case-insensitive)'
+      ),
+    keepLast: z
+      .number()
+      .int()
+      .min(0)
+      .optional()
+      .describe(
+        'prune_snapshots: snapshots still holding content kept per context, newest first (default 30)'
+      ),
     // backfill params
     force: z
       .boolean()
@@ -157,7 +207,8 @@ export const cmosDbToolDefinition = {
   name: 'cmos_db',
   description:
     'Consolidated database admin tool with action parameter support. ' +
-    'Actions: health, snapshot, restore, backfill, reconcile, purge, identify_orphans, pull, clone. ' +
+    'Actions: health, snapshot, restore, backfill, reconcile, purge, identify_orphans, pull, clone, prune_snapshots. ' +
+    'prune_snapshots reclaims the content of automatic context-snapshot copies: a dry run unless confirm=true, which takes a database snapshot first and empties content without deleting any row; referenced snapshots, sprint milestones and snapshots someone named are always kept. ' +
     'Routes to the existing DB handlers without changing DB business logic.',
   inputSchema: {
     type: 'object',
@@ -166,12 +217,42 @@ export const cmosDbToolDefinition = {
         type: 'string',
         enum: [...CMOS_DB_ACTIONS],
         description:
-          'Database action: health | snapshot | restore | backfill | reconcile | purge | identify_orphans | pull | clone',
+          'Database action: health | snapshot | restore | backfill | reconcile | purge | identify_orphans | pull | clone | prune_snapshots',
       },
       listOnly: { type: 'boolean', description: 'List snapshots instead of creating one' },
-      maxSnapshots: { type: 'integer', minimum: 1, description: 'Max snapshots to list' },
+      maxSnapshots: {
+        type: 'integer',
+        minimum: 1,
+        description:
+          'snapshot: how many database snapshots to keep (default CMOS_MAX_SNAPSHOTS or 50); taking one deletes the oldest beyond it, automatic ones included',
+      },
       snapshotId: { type: 'string', description: 'Snapshot ID for restore action' },
-      confirm: { type: 'boolean', description: 'Confirmation flag for restore/purge actions' },
+      confirm: {
+        type: 'boolean',
+        description:
+          'Confirmation flag for restore/purge/prune_snapshots actions (prune_snapshots is a dry run without it)',
+      },
+      keepIds: {
+        type: 'array',
+        items: { type: 'integer', minimum: 1 },
+        description: 'prune_snapshots: context snapshot ids to keep, whatever else applies',
+      },
+      keepSince: {
+        type: 'string',
+        description: 'prune_snapshots: keep every snapshot created at or after this date',
+      },
+      keepSources: {
+        type: 'array',
+        items: { type: 'string' },
+        description:
+          'prune_snapshots: keep every snapshot whose source matches one of these patterns (* = anything, case-insensitive)',
+      },
+      keepLast: {
+        type: 'integer',
+        minimum: 0,
+        description:
+          'prune_snapshots: snapshots still holding content kept per context, newest first (default 30)',
+      },
       force: { type: 'boolean', description: 'Force full backfill, ignoring cursor' },
       dryRun: { type: 'boolean', description: 'Preview backfill without pushing' },
       expectedSlug: {
@@ -278,6 +359,15 @@ export async function cmosDb(params: CmosDbParams): Promise<CmosToolResult<CmosD
         slug: params.slug,
         projectRoot: params.projectRoot,
       });
+    case 'prune_snapshots':
+      return cmosDbPruneSnapshots({
+        confirm: params.confirm,
+        keepIds: params.keepIds,
+        keepSince: params.keepSince,
+        keepSources: params.keepSources,
+        keepLast: params.keepLast,
+        projectRoot: params.projectRoot,
+      } satisfies CmosDbPruneSnapshotsParams);
   }
 }
 
@@ -326,6 +416,8 @@ export function formatDbForLLM(
       return formatSyncPullForLLM(result as CmosToolResult<SyncPullResult>);
     case 'clone':
       return formatSyncBootstrapForLLM(result as CmosToolResult<SyncBootstrapResult>);
+    case 'prune_snapshots':
+      return formatPruneSnapshotsForLLM(result as CmosToolResult<CmosDbPruneSnapshotsResult>);
     default: {
       if (!result.success) return '❌ Failed to execute cmos_db';
       const lines = ['✓ Database action completed'];

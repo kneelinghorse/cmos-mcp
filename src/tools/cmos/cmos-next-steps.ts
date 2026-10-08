@@ -22,6 +22,7 @@ import { countWrite, type WriteFailure } from './write-guard';
 import {
   CLOSES_SURVIVED_SQL,
   LEASED_STATUS_SQL,
+  LEASE_AGE_DAYS_SQL,
   LEASE_COUNTING_RULE,
   LEASE_LAPSE_AT,
   LEASE_WARN_AT,
@@ -200,10 +201,14 @@ function listNextSteps(
   }
 
   const query = `SELECT n.id, n.content, n.status, n.session_id, n.sprint_id, n.mission_id,
-            n.created_at, n.resolved_at, n.carried_to_sprint, ${CLOSES_SURVIVED_SQL} AS closes_survived
+            n.created_at, n.resolved_at, n.carried_to_sprint, ${CLOSES_SURVIVED_SQL} AS closes_survived,
+            ${LEASE_AGE_DAYS_SQL} AS age_days
      FROM next_steps n WHERE ${conditions.join(' AND ')} ORDER BY n.created_at ASC`;
 
-  const result = client.getMany<NextStepRow & { closes_survived: number }>(query, queryParams);
+  const result = client.getMany<NextStepRow & { closes_survived: number; age_days: number | null }>(
+    query,
+    queryParams
+  );
 
   if (!result.success || !result.data) {
     return createError<NextStepsResult>({
@@ -223,7 +228,10 @@ function listNextSteps(
     resolvedAt: row.resolved_at,
     carriedToSprint: row.carried_to_sprint,
     ...(row.status === 'pending' || row.status === 'carried'
-      ? { closesSurvived: row.closes_survived, lease: leaseState(row.closes_survived) }
+      ? {
+          closesSurvived: row.closes_survived,
+          lease: leaseState(row.closes_survived, row.age_days),
+        }
       : {}),
   }));
 

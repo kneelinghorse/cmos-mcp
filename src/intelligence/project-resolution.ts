@@ -22,6 +22,11 @@ import { isReadOnlyAgentSession } from '../tools/cmos/read-only-agent-guard';
 import { currentToolCallActionMode } from '../tools/cmos/tool-call-context';
 import { CmosDetector } from './cmos-detector';
 import { ProjectGraphRegistry } from './project-graph-registry';
+import {
+  findEnclosingStore,
+  getServerProjectRoot,
+  isContextlessDirectory,
+} from './resolution-policy';
 
 /**
  * Authoritative registration half of the resolve/register split.
@@ -46,7 +51,7 @@ export interface ProjectResolutionResult {
   projectRoot: string;
 
   /** How the project root was resolved */
-  source: 'explicit' | 'env' | 'auto-discover' | 'registry' | 'cwd';
+  source: 'explicit' | 'env' | 'auto-discover' | 'registry' | 'cwd' | 'server-project-root';
 
   /** Whether a new project was auto-registered */
   autoRegistered?: boolean;
@@ -71,10 +76,12 @@ export class ProjectResolutionError extends Error {
 /**
  * Resolve project root with a 4-step priority chain.
  *
- * Priority:
+ * Priority (s92-m01 — the same rules as `resolveSenderContext`, minus MCP roots, which only the
+ * dispatcher can see):
  * 1. Explicit parameter
- * 2. Auto-discover from cwd (detect cmos/db/cmos.sqlite)
- * 3. Registry fallback (graph default project)
+ * 2. cwd walk-up — the nearest enclosing directory holding a CMOS store (`cmos/db/`)
+ * 3. Defaults, only when the cwd is contextless (`/`, `$HOME`, the install root): the server's
+ *    `--project-root`, then a registry default an operator confirmed with `setAsDefault`
  * 4. Error with actionable guidance
  *
  * @deprecated Use `resolveSenderContext` from `src/intelligence/sender-context.ts`
@@ -111,17 +118,22 @@ export async function resolveProjectRootEnhanced(
   // rationale in the function docblock. The env var is still read at
   // `src/index.ts:17` for .env bootstrap but is never consulted here.
 
-  // Step 3: Auto-discover from cwd
+  // Step 3: Auto-discover from cwd — s92-m01: the nearest enclosing store (`cmos/db/`), not just
+  // cwd itself. A store whose database file is gone still ends the walk; the caller's client
+  // detection then refuses with DB_NOT_FOUND for that root rather than this resolver routing
+  // elsewhere.
   const cwd = process.cwd();
   const detector = CmosDetector.getInstance();
-  const detection = await detector.detect(cwd);
+  const enclosing = findEnclosingStore(cwd);
 
-  if (detection.hasCmosDirectory && detection.hasDatabase) {
+  if (enclosing) {
+    const storeRoot = enclosing.root;
     const result: ProjectResolutionResult = {
-      projectRoot: cwd,
+      projectRoot: storeRoot,
       source: 'auto-discover',
-      message: `Auto-discovered CMOS project at: ${cwd}`,
+      message: `Auto-discovered CMOS project at: ${storeRoot}`,
     };
+    if (!enclosing.hasDatabase) return result;
 
     // Auto-register if enabled AND this is not a read/review call. s88-m08: discovery may add/touch
     // a store that ALREADY records an identity, but it must never mint one. Identity minting
@@ -132,13 +144,13 @@ export async function resolveProjectRootEnhanced(
     if (registrationAllowed) {
       try {
         const graph = await ProjectGraphRegistry.create();
-        const existingId = graph.getByStorePath(cwd);
+        const existingId = graph.getByStorePath(storeRoot);
         if (!existingId) {
-          const registered = graph.touchOrRegisterFromStore(cwd);
+          const registered = graph.touchOrRegisterFromStore(storeRoot);
           if (registered) {
             result.autoRegistered = true;
             if (!silent) {
-              console.error(`[CMOS] Auto-registered project: ${cwd}`);
+              console.error(`[CMOS] Auto-registered project: ${storeRoot}`);
             }
           }
         } else {
@@ -152,39 +164,54 @@ export async function resolveProjectRootEnhanced(
     return result;
   }
 
-  // Step 3: Registry fallback (the graph's default project)
-  try {
-    const graph = await ProjectGraphRegistry.create();
-    const defaultProject = graph.getDefault();
-
-    if (defaultProject) {
-      // Verify the default project still has CMOS
-      const defaultDetection = await detector.detect(defaultProject.store_path, {
-        forceRefresh: true,
-      });
-      if (defaultDetection.hasCmosDirectory && defaultDetection.hasDatabase) {
-        // Read/review calls may open/ensure the graph schema to resolve the default, but never
-        // touch or register a project row. A write/direct caller may refresh last_seen_at.
-        if (registrationAllowed) graph.touch(defaultProject.project_id);
-        return {
-          projectRoot: defaultProject.store_path,
-          source: 'registry',
-          message: `Using default project from registry: ${defaultProject.name ?? defaultProject.store_path}`,
-        };
-      }
+  // Step 3: Defaults — s92-m01: ONLY for a contextless cwd. A store-less working folder is a real
+  // folder that is not a CMOS project; defaulting it to another project is the defect m01 removes.
+  if (isContextlessDirectory(cwd)) {
+    const serverProjectRoot = getServerProjectRoot();
+    if (serverProjectRoot) {
+      return {
+        projectRoot: serverProjectRoot,
+        source: 'server-project-root',
+        message: `Using --project-root from this server's config: ${serverProjectRoot}`,
+      };
     }
-  } catch {
-    // Ignore registry errors
+    try {
+      const graph = await ProjectGraphRegistry.create();
+      const { entry: defaultProject, applied } = graph.getDefaultStatus();
+
+      if (defaultProject && applied) {
+        // Verify the default project still has CMOS
+        const defaultDetection = await detector.detect(defaultProject.store_path, {
+          forceRefresh: true,
+        });
+        if (defaultDetection.hasCmosDirectory && defaultDetection.hasDatabase) {
+          // Read/review calls may open/ensure the graph schema to resolve the default, but never
+          // touch or register a project row. A write/direct caller may refresh last_seen_at.
+          if (registrationAllowed) graph.touch(defaultProject.project_id);
+          return {
+            projectRoot: defaultProject.store_path,
+            source: 'registry',
+            message: `Using default project from registry: ${defaultProject.name ?? defaultProject.store_path}`,
+          };
+        }
+      }
+    } catch {
+      // Ignore registry errors
+    }
   }
 
-  // Step 4: Error with actionable guidance
+  // Step 4: Error with actionable guidance. A default only ever applies to a contextless cwd, so
+  // only that case is offered one; from a real working folder the remedies are init or a path.
+  const defaultOptions = isContextlessDirectory(cwd)
+    ? `
+  4. Start the server with --project-root <dir> in its MCP config, or confirm a default: cmos_project(action="register", projectRoot="<path>", setAsDefault=true)`
+    : '';
   throw new ProjectResolutionError(
-    'No CMOS project found. Could not resolve project root.',
+    `No CMOS project in '${cwd}'. Could not resolve project root.`,
     `Options:
   1. Create a project here: cmos_project(action="init", projectRoot=${JSON.stringify(cwd)})
   2. Run from a directory containing cmos/db/cmos.sqlite
-  3. Provide projectRoot parameter explicitly
-  4. Register an existing project: cmos_project(action="register", projectRoot="<path>", setAsDefault=true)`
+  3. Provide projectRoot parameter explicitly${defaultOptions}`
   );
 }
 

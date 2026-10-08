@@ -234,11 +234,14 @@ function findStaleSessions(client: CmosDatabaseClient, staleHours: number): Stal
   const projExpr = tableHasColumn(client, 'sessions', 'project_id')
     ? 'project_id'
     : 'NULL AS project_id';
+  // s92-m03: explicit sessions only. An implicit session lives as long as its process does, and
+  // reconcile closes it once that process is gone or it idles past 12 h.
+  const explicitOnly = tableHasColumn(client, 'sessions', 'implicit') ? 'AND implicit = 0' : '';
   const result = client.getMany<SessionRow>(
     `SELECT id, type, title, started_at, ${projExpr},
             CAST((julianday('now') - julianday(started_at)) * 24 AS REAL) AS hours_active
      FROM sessions
-     WHERE status = 'active'
+     WHERE status = 'active' ${explicitOnly}
        AND started_at < datetime('now', '-' || ? || ' hours')
      ORDER BY started_at`,
     [staleHours]

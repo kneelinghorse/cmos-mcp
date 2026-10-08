@@ -23,6 +23,8 @@ interface RecordReceipt {
   decisionId: number;
   materialization: 'materialized' | 'existing';
   sprintId: string | null;
+  authorSessionId: string | null;
+  implicitSession?: { opened: boolean };
   superseded: Array<{ id: number; previousStatus: string; newStatus: string }>;
 }
 
@@ -127,12 +129,16 @@ describe('cmos_decisions(action="record") — s91-m04', () => {
     expect(result.success).toBe(true);
     const receipt = result.data as unknown as RecordReceipt;
     expect(receipt.sprintId).toBe('sprint-a');
+    // s92-m03: with no session open, the row is attributed to this process's implicit session,
+    // opened for it (3.1.0 stored NULL).
+    expect(receipt.implicitSession).toEqual({ opened: true });
     expect(row(project.dbPath, receipt.decisionId)).toMatchObject({
       mission_id: 'ma-1',
       sprint_id: 'sprint-a',
-      author_session_id: null,
+      author_session_id: receipt.authorSessionId,
       event_type: 'decision_captured',
     });
+    expect(receipt.authorSessionId).toMatch(/^PS-\d{4}-\d{2}-\d{2}-\d{3}$/);
   });
 
   it('stamps the active session when one exists, so the row stays attributable', async () => {

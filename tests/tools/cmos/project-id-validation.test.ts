@@ -342,7 +342,8 @@ describe('Project ID Validation', () => {
 
         expect(result.success).toBe(false);
         expect(result.error?.code).toBe(CMOS_ERROR_CODES.CMOS_NOT_DETECTED);
-        expect(result.error?.message).toContain('No CMOS project found');
+        // s92-m01: the refusal names the folder the call came from.
+        expect(result.error?.message).toContain(`No CMOS project in '${emptyWorkspace}'`);
       } finally {
         process.cwd = originalCwd;
         ProjectGraphRegistry.resetInstance();

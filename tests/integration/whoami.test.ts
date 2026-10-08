@@ -8,6 +8,7 @@ import path from 'path';
 
 import { formatMessageForLLM, getWhoamiDiagnostics } from '../../src/tools/cmos/cmos-message';
 import { CmosDetector } from '../../src/intelligence/cmos-detector';
+import { ProjectGraphRegistry } from '../../src/intelligence/project-graph-registry';
 import { createSeededCmosProject, type SeededCmosProject } from '../helpers/seedCmosDb';
 
 async function makeTempDir(prefix: string): Promise<string> {
@@ -41,10 +42,34 @@ describe('whoami diagnostics', () => {
     ]);
   });
 
-  it('returns a full candidate trace showing rejected explicit root and accepted MCP root', async () => {
+  it('shows an explicit non-CMOS root as final: rejected, with no other project consulted', async () => {
+    // s92-m01: an explicit projectRoot is never swapped for an MCP root or the cwd project.
     const result = await getWhoamiDiagnostics({
       explicitProjectRoot: invalidRoot,
       mcpRoots: [stage1Project.projectRoot],
+      cwdOverride: '/tmp/no-cmos-here',
+      serverInstallRootOverride: '/mock/server-install',
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.data?.resolved.projectRoot).toBeNull();
+    expect(result.data?.candidates).toEqual([
+      expect.objectContaining({
+        source: 'explicit',
+        accepted: false,
+        rejectReason: expect.stringMatching(/no CMOS database/i),
+      }),
+    ]);
+
+    const formatted = formatMessageForLLM('whoami', result);
+    expect(formatted).toContain('Candidate trace:');
+    expect(formatted).toContain('✗ explicit');
+    expect(formatted).not.toContain('mcp-roots');
+  });
+
+  it('returns a full candidate trace showing a skipped store-less MCP root and the accepted one', async () => {
+    const result = await getWhoamiDiagnostics({
+      mcpRoots: [invalidRoot, stage1Project.projectRoot],
       cwdOverride: '/tmp/no-cmos-here',
       serverInstallRootOverride: '/mock/server-install',
     });
@@ -58,25 +83,59 @@ describe('whoami diagnostics', () => {
         cmosAddress: 'cmos://derek/stage1',
       },
     });
-    expect(result.data?.candidates).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          source: 'explicit',
-          accepted: false,
-          rejectReason: expect.stringMatching(/no CMOS database/i),
-        }),
-        expect.objectContaining({
-          source: 'mcp-roots',
-          accepted: true,
-          projectRoot: path.resolve(stage1Project.projectRoot),
-        }),
-      ])
-    );
+    expect(result.data?.candidates).toEqual([
+      expect.objectContaining({
+        source: 'mcp-roots',
+        accepted: false,
+        projectRoot: path.resolve(invalidRoot),
+        rejectReason: expect.stringMatching(/no CMOS database/i),
+      }),
+      expect.objectContaining({
+        source: 'mcp-roots',
+        accepted: true,
+        projectRoot: path.resolve(stage1Project.projectRoot),
+      }),
+    ]);
 
     const formatted = formatMessageForLLM('whoami', result);
-    expect(formatted).toContain('Candidate trace:');
-    expect(formatted).toContain('✗ explicit');
+    expect(formatted).toContain('✗ mcp-roots');
     expect(formatted).toContain('✓ mcp-roots');
+  });
+
+  it('s92-m01: shows the registry default, says it is not applied, and names the re-confirm call', async () => {
+    const configDir = await makeTempDir('whoami-default-cfg-');
+    const savedConfigDir = process.env.CMOS_CONFIG_DIR;
+    process.env.CMOS_CONFIG_DIR = configDir;
+    ProjectGraphRegistry.resetInstance();
+    try {
+      const registry = await ProjectGraphRegistry.create({ configDir });
+      const entry = registry.registerStore(stage1Project.projectRoot);
+      registry.setDefault(entry.project_id); // the pre-3.2.0 way: never confirmed
+
+      const result = await getWhoamiDiagnostics({
+        mcpRoots: [stage1Project.projectRoot],
+        cwdOverride: '/tmp/no-cmos-here',
+        serverInstallRootOverride: '/mock/server-install',
+      });
+
+      expect(result.data?.registryDefault).toMatchObject({
+        projectId: 'stage1',
+        storePath: path.resolve(stage1Project.projectRoot),
+        applied: false,
+      });
+      expect(result.data?.serverProjectRoot).toBeNull();
+      expect(result.warnings).toContainEqual(
+        `registry default: Stage1 — not applied; re-run setAsDefault to enable: cmos_project(action="register", projectRoot=${JSON.stringify(path.resolve(stage1Project.projectRoot))}, setAsDefault=true)`
+      );
+      expect(formatMessageForLLM('whoami', result)).toContain(
+        'Registry default: Stage1 (not applied)'
+      );
+    } finally {
+      ProjectGraphRegistry.resetInstance();
+      if (savedConfigDir === undefined) delete process.env.CMOS_CONFIG_DIR;
+      else process.env.CMOS_CONFIG_DIR = savedConfigDir;
+      await fs.rm(configDir, { recursive: true, force: true });
+    }
   });
 
   /**

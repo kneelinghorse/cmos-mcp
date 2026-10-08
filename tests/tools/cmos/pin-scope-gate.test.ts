@@ -60,6 +60,11 @@ const ALLOWLIST = new Set<string>([
   // pinned store, it reconciles that store's identity with its one graph row or rolls both
   // back. It never reads/fans out across portfolio stores.
   'cmos-db-restore.ts',
+  // s92-m01: whoami diagnoses RESOLUTION, and resolution's last step is the registry default.
+  // It reads that one registry_meta key (plus its row) to say whether a contextless call could
+  // use it — "registry default: X — not applied". It opens no other project's store and never
+  // fans out.
+  'cmos-message.ts',
 ]);
 
 // Matches an import from the cross-store fan-out modules OR the project-graph registry —

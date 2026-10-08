@@ -172,17 +172,20 @@ describe('cmosContextSearch', () => {
     // s82-m04 (FORK-E5): default recency is now the tuned DEFAULT_RECENCY_WEIGHT (0.2), not 0.5.
     expect(result.data?.options.recencyWeight).toBe(0.2);
     expect(result.data?.options.types).toEqual(['decision']);
-    expect(result.data?.options.statusFilter).toEqual(['active']);
+    // s92-m07 (R1): no include list by default; only superseded rows are left out.
+    expect(result.data?.options.statusFilter).toEqual([]);
+    expect(result.data?.options.excludedStatuses).toEqual(['superseded']);
   });
 
-  it('filters out non-active decisions by default', async () => {
+  it('filters out superseded decisions by default and keeps archived ones (s92-m07)', async () => {
     insertDecision(dbPath, 'FTS5 context search active decision', { status: 'active' });
+    insertDecision(dbPath, 'FTS5 context search archived decision', { status: 'archived' });
     insertDecision(dbPath, 'FTS5 context search superseded decision', { status: 'superseded' });
 
     const result = await cmosContextSearch({ query: 'FTS5 context search', projectRoot: tempDir });
     expect(result.success).toBe(true);
-    expect(result.data?.count).toBe(1);
-    expect(result.data?.results[0].text).toContain('active decision');
+    expect(result.data?.count).toBe(2);
+    expect(result.data?.results.map((r) => r.status).sort()).toEqual(['active', 'archived']);
   });
 
   it('ranks more recent decisions higher with recencyWeight=1', async () => {
@@ -284,6 +287,7 @@ describe('formatContextSearchForLLM', () => {
           recencyWeight: 0.5,
           types: ['decision' as const],
           statusFilter: ['active'],
+          excludedStatuses: [],
         },
         backend: 'fts5',
         localProjectId: 'local-proj',
@@ -314,6 +318,10 @@ describe('formatContextSearchForLLM', () => {
             category: 'architectural',
             evidence: null,
             createdAt: new Date().toISOString(),
+            // s92-m08: hits carry status and say whether text is a cut preview.
+            status: 'active',
+            truncated: false,
+            fullLength: 29,
           },
         ],
         count: 1,
@@ -322,6 +330,7 @@ describe('formatContextSearchForLLM', () => {
           recencyWeight: 0.5,
           types: ['decision' as const],
           statusFilter: ['active'],
+          excludedStatuses: [],
         },
         backend: 'fts5',
         localProjectId: 'local-proj',

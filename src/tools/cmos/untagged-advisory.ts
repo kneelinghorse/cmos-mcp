@@ -70,7 +70,7 @@ export function buildUntaggedDecisionAdvisory(client: CmosDatabaseClient): strin
   return (
     `${result.data.count} active decision(s) have no sprint tag and are aged on wall-clock time ` +
     `because they carry no sprint tag (one sprint per 14 days since creation). Decisions ` +
-    `captured while no sprint was open are untagged by design (s85-m03). Review them directly ` +
+    `captured while no sprint was open are untagged by design. Review them directly ` +
     `with cmos_decisions(action="list").`
   );
 }

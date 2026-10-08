@@ -52,9 +52,9 @@ export const READ_ONLY_TOOLS: ReadonlySet<string> = new Set(['cmos_review', 'cmo
 export const READ_ONLY_ACTIONS: Readonly<Record<string, readonly string[]>> = {
   cmos_context: ['view', 'history', 'search'],
   cmos_db: ['health'],
-  cmos_decisions: ['list', 'search'],
+  cmos_decisions: ['list', 'search', 'show'],
   cmos_feedback: ['list'],
-  cmos_learnings: ['list', 'search'],
+  cmos_learnings: ['list', 'search', 'show'],
   cmos_mission: ['list', 'show', 'status'],
   cmos_mission_transition: [],
   cmos_project: ['list'],

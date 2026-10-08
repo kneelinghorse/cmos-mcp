@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
-// ABOUTME: s91-m05 — a decision capture's receipt stays small when the capture and its candidates
-// ABOUTME: are large: the rendered answer is bounded, and each structured candidate is a preview.
+// ABOUTME: s91-m05 — a decision capture's receipt stays small when the capture and its neighbours
+// ABOUTME: are large. s92-m04: it no longer offers supersession candidates at all.
 
 /**
  * MEASURED BEFORE THE FIX (plan §s91-m05): content up to 9,137 bytes was echoed in full on the
  * rendered `**Content**:` line, and each structured supersession candidate carried the full text of
  * a 3.5-8.4 KB decision — 25-30 KB per capture. This drives the real router and formatter.
+ *
+ * s92-m04 retired the automatic offer, so the three large same-sprint rows below (which it used to
+ * offer) now prove the receipt names none of them.
  */
 
 import { afterEach, describe, expect, it } from '@jest/globals';
@@ -27,7 +30,7 @@ function padTo(prefix: string, bytes: number): string {
 }
 
 describe('s91-m05 capture receipt size', () => {
-  it('renders under 2 KB and keeps each structured candidate under 600 bytes', async () => {
+  it('renders under 2 KB and offers no supersession candidate', async () => {
     const project = await createSeededCmosProject({}, 'cmos-s91-m05-receipt-');
     projects.push(project);
     const db = new Database(project.dbPath);
@@ -75,16 +78,15 @@ describe('s91-m05 capture receipt size', () => {
     expect(result.success).toBe(true);
 
     const data = result.data as {
-      supersessionCandidates?: Array<{ id: number; preview: string; decisionText: string }>;
+      supersessionCandidates?: unknown[];
+      supersessionMessage?: string;
     };
-    // Non-vacuity: the three large same-sprint rows ARE offered, so their bound is exercised.
-    expect(data.supersessionCandidates).toHaveLength(3);
-    for (const candidate of data.supersessionCandidates!) {
-      expect(Buffer.byteLength(JSON.stringify(candidate))).toBeLessThan(600);
-    }
+    expect(data.supersessionCandidates).toBeUndefined();
+    expect(data.supersessionMessage).toBeUndefined();
 
     const rendered = formatSessionForLLM('capture', result as never);
     expect(Buffer.byteLength(rendered)).toBeLessThan(2_048);
     expect(rendered).toContain('(9000 characters stored)');
+    expect(rendered).not.toMatch(/supersed/i);
   });
 });

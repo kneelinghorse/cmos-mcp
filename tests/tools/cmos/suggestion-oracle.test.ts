@@ -116,6 +116,7 @@ import { cmosMessage } from '../../../src/tools/cmos/cmos-message';
 import { cmosAgentOnboard } from '../../../src/tools/cmos/cmos-agent-onboard';
 import { cmosStatus } from '../../../src/tools/cmos/cmos-status';
 import { cmosReview } from '../../../src/tools/cmos/cmos-review';
+import { processOwnerKey } from '../../../src/tools/cmos/session-owner';
 
 import {
   buildSuggestionMirror,
@@ -155,11 +156,12 @@ const PRIVATE = requiresPrivateEvidence({
 // ───────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * `authored === RATIFIED_AUTHORED_BASE + sum(SITES_BY_MISSION)`.
+ * `authored === RATIFIED_AUTHORED_BASE + sum(SITES_BY_MISSION) - sum(SITES_REMOVED_BY_MISSION)`.
  *
  * The base is Arc F item 1's ratified denominator (decision #1080, re-derived by this mission).
  * s90-m05 adds exactly the carry-target refusal below. The ratified base remains fixed; each later
- * mission enumerates its authored sites here rather than moving that base.
+ * mission enumerates the authored sites it adds, and since s92-m03 the ones it retires, rather than
+ * moving that base.
  */
 const RATIFIED_AUTHORED_BASE = 181;
 const SITES_BY_MISSION = {
@@ -174,8 +176,34 @@ const SITES_BY_MISSION = {
     'src/tools/cmos/cmos-decisions-record.ts:142',
     'src/tools/cmos/cmos-decisions-record.ts:168',
   ],
+  // s92-m01: the no-project refusal (one site, three situations), driven below in the first-run
+  // instrument through the mirrored resolver and refusal classifier.
+  's92-m01': ['src/tools/cmos/errors.ts:511'],
+  // s92-m03: completing another live process's implicit session is refused; driven in axis 3.
+  's92-m03': ['src/tools/cmos/errors.ts:526'],
+  // s92-m08: show names a decision or learning id the project does not hold; driven in axis 2.
+  's92-m08': ['src/tools/cmos/errors.ts:537'],
+  // s92-m09: an explicit snapshot named like one of CMOS's automatic copies is refused
+  // (INVALID_PARAMETER; driven in axis 6). prune_snapshots refuses to apply while a reference or
+  // sprint-close source is unreadable (DB_QUERY_FAILED) and when the database snapshot fails
+  // (SNAPSHOT_CREATION_FAILED); both are FAULT and driven in tests/tools/cmos/snapshot-diet.test.ts.
+  's92-m09': [
+    'src/tools/cmos/cmos-context-snapshot.ts:148',
+    'src/tools/cmos/cmos-db-prune-snapshots.ts:445',
+    'src/tools/cmos/cmos-db-prune-snapshots.ts:468',
+  ],
 } as const satisfies Readonly<Record<string, readonly string[]>>;
 const RATIFIED_SITE_ADDS = Object.values(SITES_BY_MISSION).flat();
+
+/**
+ * Authored sites a mission retired, named as they stood at the commit before it (file:line there).
+ * s92-m03: a capture with no session open no longer refuses with SESSION_NOT_ACTIVE; it lands in
+ * the caller's implicit session.
+ */
+const SITES_REMOVED_BY_MISSION = {
+  's92-m03': ['src/tools/cmos/cmos-session-capture.ts:424'],
+} as const satisfies Readonly<Record<string, readonly string[]>>;
+const RATIFIED_SITE_REMOVALS = Object.values(SITES_REMOVED_BY_MISSION).flat();
 
 const VALIDATION_CODES = new Set([
   'INVALID_PARAMETER',
@@ -671,6 +699,15 @@ const MATRIX: MatrixCase[] = [
         tool: 'cmos_mission',
         params: { action: 'show', missionId: 'S89M08-ABSENT', projectRoot: ctx.projectRoot },
       },
+      // s92-m08: expanding a preview by an id this project does not hold.
+      {
+        tool: 'cmos_decisions',
+        params: { action: 'show', decisionId: 999_999_999, projectRoot: ctx.projectRoot },
+      },
+      {
+        tool: 'cmos_learnings',
+        params: { action: 'show', learningId: 999_999_999, projectRoot: ctx.projectRoot },
+      },
       {
         tool: 'cmos_mission',
         params: {
@@ -948,7 +985,12 @@ const MATRIX: MatrixCase[] = [
           | { id: string }
           | undefined;
         if (!row) throw new Error('frozen source has no sessions row to activate');
-        db.prepare(`UPDATE sessions SET status = 'active' WHERE id = ?`).run(row.id);
+        // s92-m03: started NOW. A start closes an explicit blocker idle past 12 h, so only a live
+        // blocker still reaches the SESSION_ALREADY_ACTIVE refusal.
+        db.prepare(`UPDATE sessions SET status = 'active', started_at = ? WHERE id = ?`).run(
+          new Date().toISOString(),
+          row.id
+        );
       });
     },
     calls: (ctx) => [
@@ -998,6 +1040,67 @@ const MATRIX: MatrixCase[] = [
         },
       },
     ],
+  },
+  {
+    axis: '3 session-lifecycle',
+    name: "the named session is another live process's implicit session",
+    reachable:
+      'ordinary since 3.2.0: two server processes share a store, and one passes the id of the ' +
+      "other's implicit session to cmos_session(complete)",
+    setup: (ctx) => {
+      withDb(ctx.dbPath, (db) => {
+        const columns = (
+          db.prepare(`PRAGMA table_info('sessions')`).all() as Array<{ name: string }>
+        ).map((c) => c.name);
+        if (!columns.includes('implicit')) {
+          db.exec(`ALTER TABLE sessions ADD COLUMN implicit INTEGER NOT NULL DEFAULT 0`);
+        }
+        if (!columns.includes('owner_key')) {
+          db.exec(`ALTER TABLE sessions ADD COLUMN owner_key TEXT`);
+        }
+        const row = db.prepare(`SELECT id FROM sessions ORDER BY started_at DESC LIMIT 1`).get() as
+          | { id: string }
+          | undefined;
+        if (!row) throw new Error('frozen source has no sessions row to hand to another process');
+        // A live owner (this pid) with a different start time is another process, and current.
+        db.prepare(
+          `UPDATE sessions SET status = 'active', implicit = 1, owner_key = ?, started_at = ?
+            WHERE id = ?`
+        ).run(processOwnerKey(process.pid, 1), new Date().toISOString(), row.id);
+      });
+    },
+    calls: (ctx) => {
+      const id = withDb(
+        ctx.dbPath,
+        (db) =>
+          (
+            db.prepare(`SELECT id FROM sessions ORDER BY started_at DESC LIMIT 1`).get() as {
+              id: string;
+            }
+          ).id
+      );
+      return [
+        {
+          tool: 'cmos_session',
+          params: {
+            action: 'complete',
+            sessionId: id,
+            summary: 's92-m03 axis-3 probe',
+            projectRoot: ctx.projectRoot,
+          },
+        },
+        {
+          tool: 'cmos_session',
+          params: {
+            action: 'capture',
+            sessionId: id,
+            category: 'decision',
+            content: 's92-m03 axis-3 probe: a write into another process’s implicit session',
+            projectRoot: ctx.projectRoot,
+          },
+        },
+      ];
+    },
   },
   {
     axis: '3 session-lifecycle',
@@ -1191,6 +1294,17 @@ const MATRIX: MatrixCase[] = [
       {
         tool: 'cmos_context',
         params: { action: 'update', contextType: 'master_context', projectRoot: ctx.projectRoot },
+      },
+      // s92-m09: a snapshot source CMOS reserves for its own automatic copies; a prune would read
+      // the snapshot as one of them, so it is refused.
+      {
+        tool: 'cmos_context',
+        params: {
+          action: 'snapshot',
+          contextType: 'master_context',
+          source: 'Context update: a name the server reserves',
+          projectRoot: ctx.projectRoot,
+        },
       },
       {
         tool: 'cmos_context',
@@ -1584,7 +1698,7 @@ const HTTP_EXTERNAL_SITES = new Set([
   'src/tools/cmos/cmos-auth.ts:1183',
   'src/tools/cmos/cmos-auth.ts:1192',
   'src/tools/cmos/cmos-auth.ts:1200',
-  'src/tools/cmos/cmos-message.ts:1027',
+  'src/tools/cmos/cmos-message.ts:1067',
   'src/tools/cmos/errors.ts:422',
   'src/tools/cmos/errors.ts:438',
   'src/tools/cmos/errors.ts:457',
@@ -1622,7 +1736,9 @@ describe('s89-m08 CENSUS — the universe re-derives at build time, never from a
     );
     expect(CENSUS).toHaveLength(authored);
     // fold 4 — the RULE, not the number. A mission that adds an authored site enumerates it.
-    expect(authored).toBe(RATIFIED_AUTHORED_BASE + RATIFIED_SITE_ADDS.length);
+    expect(authored).toBe(
+      RATIFIED_AUTHORED_BASE + RATIFIED_SITE_ADDS.length - RATIFIED_SITE_REMOVALS.length
+    );
     expect(SITES_BY_MISSION['s90-m07']).toEqual([]);
   });
 
@@ -1688,8 +1804,20 @@ describe('s89-m08 CENSUS — the universe re-derives at build time, never from a
       ts.forEachChild(node, visit);
     };
     visit(senderSource);
-    expect(constructions).toHaveLength(1);
-    expect(constructions[0]?.arguments).toHaveLength(2);
+    // s92-m01: the resolver now refuses at three points (a selected store that fails its bar, a
+    // real working folder with no store, a contextless call with no default) and passes each one's
+    // outcome as a fourth argument. The premise is unchanged and still proven here: NO
+    // construction supplies the code argument, so every error carries the SENDER_UNRESOLVABLE
+    // default that `errors.ts:378` is bucketed by.
+    expect(constructions.length).toBeGreaterThan(0);
+    for (const construction of constructions) {
+      const codeArgument = construction.arguments?.[2];
+      expect(
+        codeArgument === undefined ||
+          (ts.isIdentifier(codeArgument) && codeArgument.text === 'undefined')
+      ).toBe(true);
+    }
+    expect(senderSource.text).toContain("code = 'SENDER_UNRESOLVABLE'");
     expect(fs.readFileSync(path.join(SRC_ROOT, 'tools', 'cmos', 'errors.ts'), 'utf8')).toContain(
       'code: string = CMOS_ERROR_CODES.SENDER_UNRESOLVABLE'
     );
@@ -2289,6 +2417,79 @@ async function runPortableCase(options: {
   await replayPortableExternalRemedies(state, call);
 }
 
+/**
+ * s92-m01 — the no-project refusal (`CmosErrors.noProjectForCall`) is produced at the DISPATCH
+ * boundary, which the router matrix does not drive: dispatch resolves the project, and on refusal
+ * classifies the resolver's evidence. Reach it the same way — the mirrored `resolveSenderContext`
+ * followed by the mirrored `classifySenderResolutionError` — so the site is fired by shipped code
+ * on a real filesystem state, not by calling the constructor directly.
+ */
+async function runMirroredResolutionCase(options: {
+  name: string;
+  expectedCode: string;
+  mode: 'read' | 'write';
+  resolveOptions: (state: ExternalCaseState) => Record<string, unknown>;
+}): Promise<void> {
+  const state = seedPortableState(options.name, { seedProject: false });
+  resetMirroredExternalState();
+  // Same isolation proof as runPortableCase: the mirrored store must resolve to this case's file.
+  const resolvedCredentialsPath = mirroredCredentialStorePath();
+  externalCredentialResolutions.set(state.credentialsPath, resolvedCredentialsPath);
+  if (resolvedCredentialsPath !== state.credentialsPath) {
+    throw new Error(
+      `mirrored CredentialStore resolved ${resolvedCredentialsPath}; expected isolated ${state.credentialsPath}`
+    );
+  }
+  sink.reset();
+  /* eslint-disable @typescript-eslint/no-var-requires */
+  const senderModule = require(`${mirror.root}/intelligence/sender-context.js`) as {
+    resolveSenderContext(opts: Record<string, unknown>): Promise<unknown>;
+    SenderResolutionError: new (...args: never[]) => Error;
+  };
+  const refusalModule = require(`${mirror.root}/tools/cmos/sender-refusal.js`) as {
+    classifySenderResolutionError(
+      error: Error,
+      mode: 'read' | 'write'
+    ): Promise<{ code?: string; suggestion?: string }>;
+  };
+  /* eslint-enable @typescript-eslint/no-var-requires */
+  let call: DrivenCall;
+  try {
+    await senderModule.resolveSenderContext(options.resolveOptions(state));
+    call = {
+      caseName: options.name,
+      axis: 'first-run',
+      tool: 'dispatch-resolution',
+      action: undefined,
+      outcome: 'SUCCEEDS',
+      sites: [],
+    };
+  } catch (error) {
+    if (!(error instanceof senderModule.SenderResolutionError)) throw error;
+    const refusal = await refusalModule.classifySenderResolutionError(error, options.mode);
+    call = {
+      caseName: options.name,
+      axis: 'first-run',
+      tool: 'dispatch-resolution',
+      action: undefined,
+      outcome: 'REFUSES',
+      code: refusal.code,
+      suggestion: refusal.suggestion,
+      sites: attribute(refusal.suggestion),
+    };
+  }
+  const fired = [...sink.fired].sort();
+  for (const site of fired) externalFiredSites.add(site);
+  portableEvidence.push({
+    ...call,
+    family: 'first-run',
+    expectedCode: options.expectedCode,
+    expectsHttp: false,
+    fired,
+    requests: [],
+  });
+}
+
 interface DirectDashboardUrlRead {
   site: string;
   canonical: boolean;
@@ -2823,6 +3024,33 @@ describe('s90-m07 PORTABLE EXTERNAL + FIRST-RUN LEDGER — loopback, never live 
         fs.mkdirSync(path.join(projectRoot, 'cmos', 'db'), { recursive: true }),
       tool: 'cmos_db',
       params: ({ projectRoot }) => ({ action: 'health', projectRoot }),
+    });
+
+    // s92-m01 — the no-project refusal, in each situation the dispatcher can reach it from.
+    for (const mode of ['read', 'write'] as const) {
+      await runMirroredResolutionCase({
+        name: `${mode} from a working folder that is not a CMOS project`,
+        expectedCode: 'CMOS_NOT_DETECTED',
+        mode,
+        resolveOptions: ({ projectRoot }) => ({
+          cwdOverride: projectRoot,
+          mcpRoots: [],
+          requireSenderIdentity: false,
+          serverProjectRootOverride: null,
+        }),
+      });
+    }
+    await runMirroredResolutionCase({
+      name: 'contextless call with no default configured',
+      expectedCode: 'CMOS_NOT_DETECTED',
+      mode: 'read',
+      resolveOptions: ({ projectRoot }) => ({
+        cwdOverride: projectRoot,
+        homeDirOverride: projectRoot,
+        mcpRoots: [],
+        requireSenderIdentity: false,
+        serverProjectRootOverride: null,
+      }),
     });
   });
 
@@ -3570,7 +3798,7 @@ const RESIDUAL_REASONS: Readonly<Record<string, string>> = {
   // ── CONSTRUCTION-MASKED PRECONDITIONS inside a VALIDATION/STATE-coded site ───────────────────
   // Driveable by CODE, but dispatcher and collab gates mask the triggers from every supported
   // construction the portable m07 instrument can establish. Four former entries moved to E.
-  'src/tools/cmos/cmos-message.ts:1004':
+  'src/tools/cmos/cmos-message.ts:1044':
     'A defensive branch whose own message says the dispatcher should have caught the condition via ' +
     'resolveSenderContext. Reaching it means reaching a state the dispatcher forbids.',
   'src/tools/cmos/sync-mutable-push.ts:111':
@@ -3580,11 +3808,13 @@ const RESIDUAL_REASONS: Readonly<Record<string, string>> = {
   'src/tools/cmos/sync-mutable-push.ts:155':
     'Same collab-store gate as :111, one branch later on slug resolution.',
   // ── MASKED BY AN EARLIER REFUSAL ON EVERY PATH THIS MATRIX CAN DRIVE ─────────────────────────
-  'src/tools/cmos/cmos-sprint-complete.ts:608':
+  // s92-m02, s92-m05 and s92-m03 moved these two down (planned-end-date receipt fields; the
+  // archive param; a comment on implicit sessions); same branches.
+  'src/tools/cmos/cmos-sprint-complete.ts:656':
     'MEASURED: masked. With master_context deleted and the sprint made closable, closeout refuses at ' +
-    'the shared errors.ts contextNotFound BEFORE reaching this sprint-local branch, so :608 is ' +
+    'the shared errors.ts contextNotFound BEFORE reaching this sprint-local branch, so :656 is ' +
     'unreachable while that earlier guard stands.',
-  'src/tools/cmos/cmos-sprint-complete.ts:619': 'Same masking as :608, for project_context.',
+  'src/tools/cmos/cmos-sprint-complete.ts:667': 'Same masking as :656, for project_context.',
 };
 
 const FAULT_SHAPED_DRIVEABLE_RESIDUALS = new Set([

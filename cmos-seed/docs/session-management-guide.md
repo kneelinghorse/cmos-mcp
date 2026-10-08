@@ -17,6 +17,8 @@ Sessions capture planning, onboarding, research, and review activities that fall
 
 All types share the same lifecycle: **start → capture → complete**.
 
+Starting is optional. A capture with no session open lands in an implicit session the server opens for its process. The server closes that session when the process ends, or after 12 idle hours. Start a session explicitly when you want the work titled, typed, or tagged to a sprint.
+
 ---
 
 ## Basic Workflow
@@ -159,4 +161,4 @@ cmos_context(action="view", contextType="master_context")
 
 ---
 
-**Last Updated**: 2026-08-28
+**Last Updated**: 2026-10-07

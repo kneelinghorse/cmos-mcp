@@ -10,7 +10,13 @@ import {
   isSprintCompleteSource,
   DEFAULT_SNAPSHOT_PRUNE_KEEP,
   type SnapshotRow,
+  type SnapshotReferences,
 } from '../../../src/tools/cmos/context-snapshot-prune';
+
+/** s92-m09: references arrive as two sets (decision FKs, context archive references). */
+function refs(decisions: number[] = [], contexts: number[] = []): SnapshotReferences {
+  return { decisions: new Set(decisions), contexts: new Set(contexts) };
+}
 
 // ─── PURE selection logic ────────────────────────────────────────────────────
 
@@ -32,7 +38,7 @@ describe('selectSnapshotsToPrune (pure)', () => {
       row({ id: 2, createdAt: '2026-01-02T00:00:00Z' }),
       row({ id: 3, createdAt: '2026-01-03T00:00:00Z' }),
     ];
-    const sel = selectSnapshotsToPrune(rows, new Set(), { keepPerContext: 1, days: 0, nowMs: 0 });
+    const sel = selectSnapshotsToPrune(rows, refs(), { keepPerContext: 1, days: 0, nowMs: 0 });
     // Newest (id 3) preserved; 1 & 2 prunable.
     expect(sel.preserveIds).toContain(3);
     expect(sel.prunableIds.sort()).toEqual([1, 2]);
@@ -46,7 +52,7 @@ describe('selectSnapshotsToPrune (pure)', () => {
       row({ id: 3, createdAt: '2026-01-03T00:00:00Z' }), // FK-referenced
       row({ id: 4, createdAt: '2026-01-04T00:00:00Z' }), // newest
     ];
-    const sel = selectSnapshotsToPrune(rows, new Set([3]), {
+    const sel = selectSnapshotsToPrune(rows, refs([3]), {
       keepPerContext: 1,
       days: 0,
       nowMs: 0,
@@ -67,11 +73,11 @@ describe('selectSnapshotsToPrune (pure)', () => {
       row({ id: 2, createdAt: '2026-01-28T00:00:00Z' }), // 4d old, NOT newest → within-days only
       row({ id: 3, createdAt: '2026-01-30T00:00:00Z' }), // 2d old, newest → lastN
     ];
-    const withDays = selectSnapshotsToPrune(rows, new Set(), { keepPerContext: 1, days: 7, nowMs });
+    const withDays = selectSnapshotsToPrune(rows, refs(), { keepPerContext: 1, days: 7, nowMs });
     // id 2 (4d, not newest) preserved SOLELY by within-days; id 1 (31d) prunable.
     expect(withDays.prunableIds).toEqual([1]);
     expect(withDays.preserveReasons.withinDays).toBe(1);
-    const noDays = selectSnapshotsToPrune(rows, new Set(), { keepPerContext: 1, days: 0, nowMs });
+    const noDays = selectSnapshotsToPrune(rows, refs(), { keepPerContext: 1, days: 0, nowMs });
     // Without days, only newest (id 3) preserved by keep=1 → id 1 AND id 2 prunable.
     expect(noDays.prunableIds.sort()).toEqual([1, 2]);
   });
@@ -82,7 +88,7 @@ describe('selectSnapshotsToPrune (pure)', () => {
       row({ id: 2, contentLength: 0 }),
       row({ id: 3, createdAt: '2026-01-03T00:00:00Z' }),
     ];
-    const sel = selectSnapshotsToPrune(rows, new Set(), { keepPerContext: 1, days: 0, nowMs: 0 });
+    const sel = selectSnapshotsToPrune(rows, refs(), { keepPerContext: 1, days: 0, nowMs: 0 });
     // id 3 newest (preserved); 1 already-pruned, 2 empty → neither prunable.
     expect(sel.prunableIds).toEqual([]);
     expect(sel.bytesReclaimable).toBe(0);
@@ -120,8 +126,8 @@ function seedStore(): string {
     INSERT INTO metadata (key, value) VALUES ('project_id', 'local-proj'), ('project_name', 'Local');
     CREATE TABLE contexts (id TEXT PRIMARY KEY, source_path TEXT NOT NULL, content TEXT NOT NULL, updated_at TEXT);
     INSERT INTO contexts (id, source_path, content, updated_at) VALUES
-      ('master_context', 'ctx', 'MASTER_BODY', '2026-01-01'),
-      ('project_context', 'ctx', 'PROJECT_BODY', '2026-01-01');
+      ('master_context', 'ctx', '{"body":"MASTER_BODY"}', '2026-01-01'),
+      ('project_context', 'ctx', '{"body":"PROJECT_BODY"}', '2026-01-01');
     CREATE TABLE context_snapshots (
       id INTEGER PRIMARY KEY AUTOINCREMENT, context_id TEXT NOT NULL, session_id TEXT, source TEXT,
       content_hash TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL, ${GENESIS_COLS},
@@ -260,15 +266,16 @@ describe('prune-context-snapshots (real store)', () => {
       CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
       INSERT INTO metadata (key, value) VALUES ('project_id', 'p');
       CREATE TABLE contexts (id TEXT PRIMARY KEY, source_path TEXT NOT NULL, content TEXT NOT NULL, updated_at TEXT);
-      INSERT INTO contexts (id, source_path, content, updated_at) VALUES ('master_context', 'c', 'B', '2026-01-01');
+      INSERT INTO contexts (id, source_path, content, updated_at) VALUES ('master_context', 'c', '{}', '2026-01-01');
       CREATE TABLE context_snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT, context_id TEXT NOT NULL,
         session_id TEXT, source TEXT, content_hash TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL);
     `);
     const ins = db.prepare(
       `INSERT INTO context_snapshots (id, context_id, source, content_hash, content, created_at) VALUES (?,?,?,?,?,?)`
     );
-    ins.run(1, 'master_context', 's', 'h1', 'OLD', '2026-01-01T00:00:00Z');
-    ins.run(2, 'master_context', 's', 'h2', 'NEW', '2026-01-02T00:00:00Z');
+    // s92-m09: automatic close copies; an unrecognised source counts as someone's named snapshot.
+    ins.run(1, 'master_context', 'session_complete:A', 'h1', 'OLD', '2026-01-01T00:00:00Z');
+    ins.run(2, 'master_context', 'session_complete:B', 'h2', 'NEW', '2026-01-02T00:00:00Z');
     db.close();
 
     await runPrune(dir, ['--apply', '--keep=1']);

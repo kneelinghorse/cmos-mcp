@@ -264,6 +264,10 @@ describe('cmos_session_start', () => {
 
     it('should associate sprint_id when provided', async () => {
       testDb.db.exec(`UPDATE sessions SET status = 'completed' WHERE status = 'active'`);
+      // s92-m03 (#589): an explicit sprintId must name an existing sprint (any status).
+      testDb.db.exec(
+        `INSERT INTO sprints (id, title, status) VALUES ('sprint-13', 'Sprint 13', 'Planned')`
+      );
 
       const result = await cmosSessionStart({
         type: 'planning',
@@ -278,6 +282,21 @@ describe('cmos_session_start', () => {
         .prepare('SELECT sprint_id FROM sessions WHERE id = ?')
         .get(result.data?.sessionId) as { sprint_id: string };
       expect(row.sprint_id).toBe('sprint-13');
+    });
+
+    it('s92-m03: refuses a sprintId that names no sprint, by name', async () => {
+      testDb.db.exec(`UPDATE sessions SET status = 'completed' WHERE status = 'active'`);
+
+      const result = await cmosSessionStart({
+        type: 'planning',
+        title: 'Sprint Planning',
+        sprintId: 'sprint-99',
+        projectRoot: testDb.tempDir,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(CMOS_ERROR_CODES.SPRINT_NOT_FOUND);
+      expect(result.error?.message).toContain('sprint-99');
     });
 
     it('should use default agent when not provided', async () => {
@@ -403,7 +422,11 @@ describe('cmos_session_start', () => {
 
   describe('error cases', () => {
     it('should return SESSION_ALREADY_ACTIVE when session is active', async () => {
-      // There's already an active session in test data
+      // There's already an active session in test data. s92-m03: made current, because a start
+      // closes an explicit blocker idle past 12 h; a live one still refuses.
+      testDb.db
+        .prepare(`UPDATE sessions SET started_at = ? WHERE status = 'active'`)
+        .run(new Date().toISOString());
       const result = await cmosSessionStart({
         type: 'planning',
         title: 'Another Session',
@@ -474,6 +497,10 @@ describe('cmos_session_start', () => {
     });
 
     it('should format error with suggestion', async () => {
+      // s92-m03: a current blocker, so the start still refuses (an idle one would be closed).
+      testDb.db
+        .prepare(`UPDATE sessions SET started_at = ? WHERE status = 'active'`)
+        .run(new Date().toISOString());
       const result = await cmosSessionStart({
         type: 'planning',
         title: 'Test',
@@ -632,7 +659,7 @@ describe('cmos_session_capture', () => {
   });
 
   describe('error cases', () => {
-    it('should return SESSION_NOT_ACTIVE when no active session', async () => {
+    it('s92-m03: with no session open, lands in an implicit session instead of refusing', async () => {
       testDb.db.exec(`UPDATE sessions SET status = 'completed' WHERE status = 'active'`);
 
       const result = await cmosSessionCapture({
@@ -641,8 +668,13 @@ describe('cmos_session_capture', () => {
         projectRoot: testDb.tempDir,
       });
 
-      expect(result.success).toBe(false);
-      expect(result.error?.code).toBe(CMOS_ERROR_CODES.SESSION_NOT_ACTIVE);
+      // 3.1.0 refused this with SESSION_NOT_ACTIVE; the refusal is what s92-m03 removes.
+      expect(result.success).toBe(true);
+      expect(result.data?.implicitSession).toEqual({ opened: true });
+      const row = testDb.db
+        .prepare('SELECT status, implicit FROM sessions WHERE id = ?')
+        .get(result.data?.sessionId) as { status: string; implicit: number };
+      expect(row).toEqual({ status: 'active', implicit: 1 });
     });
 
     it('should return SESSION_NOT_FOUND for invalid sessionId', async () => {
@@ -1212,6 +1244,10 @@ describe('session tools integration', () => {
   });
 
   it('should complete full session lifecycle: start -> capture -> complete -> list', async () => {
+    // s92-m03 (#589): the sprint named on start must exist.
+    testDb.db.exec(
+      `INSERT INTO sprints (id, title, status) VALUES ('sprint-13', 'Sprint 13', 'Planned')`
+    );
     // Start session
     const startResult = await cmosSessionStart({
       type: 'planning',

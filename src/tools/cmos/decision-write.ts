@@ -4,7 +4,6 @@
 
 import type { CmosDatabaseClient } from './client';
 import { genesisColumns, getProjectId } from './genesis-columns';
-import { detectSupersessionCandidates, type SupersessionCandidate } from './supersession-detection';
 import { recordEmbedding, decisionEmbeddingInput } from '../../intelligence/embedding-pipeline';
 import { checkWrite, type WriteSink } from './write-guard';
 
@@ -116,25 +115,20 @@ export function insertDecisionRow(
   return { kind: 'materialized', decisionId };
 }
 
-export interface DecisionFollowUp {
-  readonly supersessionCandidates?: SupersessionCandidate[];
-  readonly supersessionMessage?: string;
-}
-
-/** After a committed INSERT: offer same-sprint supersession candidates and record the embedding. */
+/**
+ * After a committed INSERT: record the decision's embedding.
+ *
+ * s92-m04 retired the automatic supersession offer that used to run here. Replayed over every
+ * historical capture, 69 of 9,035 offers were true, and 28-61% of real supersessions cross sprints,
+ * where a same-sprint detector cannot see them (retrieval study §5, R4). A correction names what it
+ * replaces at write time: cmos_decisions(action="record", supersedes=[...]).
+ */
 export async function followDecisionInsert(
   client: CmosDatabaseClient,
   content: string,
   decisionId: number | undefined,
-  sprintId: string | null,
   warnings: string[]
-): Promise<DecisionFollowUp> {
-  // s91-m05: candidates are scoped to the new row's own sprint.
-  const suggestion = await detectSupersessionCandidates(client, content, {
-    sprintId,
-    excludeDecisionId: decisionId,
-  });
-
+): Promise<void> {
   // Sprint 66 m03 — write-path embedding hook
   if (decisionId !== undefined) {
     const embedResult = await recordEmbedding(client, {
@@ -144,11 +138,4 @@ export async function followDecisionInsert(
     });
     warnings.push(...(embedResult.warnings ?? []));
   }
-
-  return suggestion.candidates.length > 0
-    ? {
-        supersessionCandidates: suggestion.candidates,
-        supersessionMessage: suggestion.message ?? undefined,
-      }
-    : {};
 }

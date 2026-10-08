@@ -484,7 +484,7 @@ export const CmosErrors = {
       message:
         'This feature requires a dashboard account. Sign up at https://cmos.aquex.ai/register to enable sync, messaging, and cross-project features.',
       suggestion:
-        'Set CMOS_DASHBOARD_URL=https://cmos.aquex.ai (or your dashboard host) and run cmos_auth(action="login") to bootstrap credentials. Local-only CMOS works without this.',
+        'Sign in with cmos_auth(action="login_init"), then login_complete; the dashboard URL defaults to https://cmos.aquex.ai. Local-only CMOS works without this.',
     };
   },
 
@@ -497,4 +497,99 @@ export const CmosErrors = {
         'Visit https://cmos.aquex.ai/register to view tier options and upgrade. Local-only CMOS features remain unaffected.',
     };
   },
+
+  /**
+   * s92-m01 — the refusal for a call that names no usable CMOS project. Resolution never routes
+   * such a call to another project, so the answer has to say where the caller is and how to name
+   * a project: create one here, pass one explicitly, or (only for a server with no project context)
+   * configure a default. One site, three situations — see {@link NoProjectForCallDetails}.
+   */
+  noProjectForCall(details: NoProjectForCallDetails): CmosToolError {
+    return {
+      code: CMOS_ERROR_CODES.CMOS_NOT_DETECTED,
+      message: noProjectMessage(details),
+      suggestion: noProjectSuggestion(details),
+    };
+  },
+
+  /**
+   * s92-m03 — a capture or complete named another running process's implicit session. That process
+   * is still writing to it; it closes when that process ends, or after 12 idle hours.
+   */
+  sessionOwnedByAnotherProcess(sessionId: string): CmosToolError {
+    return {
+      code: CMOS_ERROR_CODES.INVALID_PARAMETER,
+      message: `Session '${sessionId}' is the implicit session of another running process; this call did not change it.`,
+      field: 'sessionId',
+      providedValue: sessionId,
+      suggestion:
+        'Leave sessionId out to use your own session. That session closes by itself when its process ends, or after 12 idle hours.',
+    };
+  },
+
+  /** s92-m08 — show named a decision or learning id that this project does not hold. */
+  recordNotFound(kind: 'decision' | 'learning', id: number): CmosToolError {
+    return {
+      code: CMOS_ERROR_CODES.INVALID_PARAMETER,
+      message: `No ${kind} #${id} in this project.`,
+      field: kind === 'decision' ? 'decisionId' : 'learningId',
+      providedValue: id,
+      suggestion: `Search or list the ${kind}s to find its id; an id from another project is not valid here.`,
+    };
+  },
 };
+
+/**
+ * s92-m01 — the three situations in which a call names no usable CMOS project.
+ * - `not-a-project`: the caller is in a real working folder (`dir`) that is not a CMOS project.
+ * - `inside-project`: an explicit projectRoot (`dir`) is not a project root but lies inside the
+ *   project at `enclosingStore` — creating a project there would nest one inside another.
+ * - `contextless`: the server's working directory (`dir`) carries no project context and no
+ *   default applies; `unappliedDefault` names a pre-3.2.0 default that exists but is not applied.
+ */
+export interface NoProjectForCallDetails {
+  readonly situation: 'not-a-project' | 'inside-project' | 'contextless';
+  readonly dir: string;
+  readonly mode: 'read' | 'write';
+  readonly enclosingStore?: string;
+  readonly unappliedDefault?: { readonly name: string; readonly storePath: string } | null;
+}
+
+function noProjectMessage(details: NoProjectForCallDetails): string {
+  switch (details.situation) {
+    case 'inside-project':
+      return `'${details.dir}' is not a CMOS project root: it is inside the CMOS project at '${details.enclosingStore}'.`;
+    case 'contextless': {
+      const base =
+        `No CMOS project for this call: the server's working directory '${details.dir}' carries ` +
+        'no project context, no projectRoot was passed, and no default applies.';
+      return details.unappliedDefault
+        ? `${base} The registry default '${details.unappliedDefault.name}' was set before 3.2.0 and is not applied until it is re-confirmed.`
+        : base;
+    }
+    case 'not-a-project':
+      return `No CMOS project in '${details.dir}'. ${
+        details.mode === 'write' ? 'Nothing was written.' : 'There is nothing to read here.'
+      }`;
+  }
+}
+
+function noProjectSuggestion(details: NoProjectForCallDetails): string {
+  const init = `cmos_project(action="init", projectRoot=${JSON.stringify(details.dir)})`;
+  switch (details.situation) {
+    case 'inside-project':
+      return `Pass projectRoot=${JSON.stringify(details.enclosingStore)}.`;
+    case 'contextless': {
+      const base =
+        'Pass projectRoot set to a CMOS project, or add "--project-root", "<project dir>" to this ' +
+        "server's args in its MCP config.";
+      return details.unappliedDefault
+        ? `${base} To apply the registry default, re-confirm it: cmos_project(action="register", projectRoot=${JSON.stringify(details.unappliedDefault.storePath)}, setAsDefault=true).`
+        : `${base} A machine-wide default is the other option: register a project with setAsDefault set to true.`;
+    }
+    case 'not-a-project':
+      return details.mode === 'write'
+        ? `To keep a record for this folder, create a project: ${init}. To write to an existing project instead, pass its path as projectRoot.`
+        : `Pass projectRoot set to an existing CMOS project to read it, or create one here with ${init}.`;
+  }
+}

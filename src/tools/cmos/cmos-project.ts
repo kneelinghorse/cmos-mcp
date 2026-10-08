@@ -142,7 +142,12 @@ export const cmosProjectSchema = z
       .describe('Initial missions for init action'),
     // register params
     name: z.string().optional().describe('Display name for register action'),
-    setAsDefault: z.boolean().optional().describe('Set as default project for register action'),
+    setAsDefault: z
+      .boolean()
+      .optional()
+      .describe(
+        'register: make this the default for calls with no project context (no projectRoot, no MCP roots, cwd of /, $HOME or the install root)'
+      ),
     // validate params
     prune: z
       .boolean()
@@ -247,7 +252,11 @@ export const cmosProjectToolDefinition = {
         },
       },
       name: { type: 'string', description: 'Display name for register action' },
-      setAsDefault: { type: 'boolean', description: 'Set as default project for register action' },
+      setAsDefault: {
+        type: 'boolean',
+        description:
+          'register: make this the default for calls with no project context (no projectRoot, no MCP roots, cwd of /, $HOME or the install root)',
+      },
       prune: {
         type: 'boolean',
         description:

@@ -101,8 +101,14 @@ function queryOpenMissions(dbPath: string, statusFilter?: string[]): MissionRow[
 function queryActiveSessions(dbPath: string): SessionRow[] {
   const db = new Database(dbPath, { readonly: true });
   try {
+    // s92-m03: explicit sessions only; an implicit session is a process's bookkeeping, not open
+    // work. The column is checked first because this read never migrates another project's store.
+    const columns = db.prepare(`PRAGMA table_info('sessions')`).all() as Array<{ name: string }>;
+    const explicitOnly = columns.some((c) => c.name === 'implicit') ? 'AND implicit = 0' : '';
     const rows = db
-      .prepare(`SELECT id, title, status, sprint_id FROM sessions WHERE status = 'active'`)
+      .prepare(
+        `SELECT id, title, status, sprint_id FROM sessions WHERE status = 'active' ${explicitOnly}`
+      )
       .all() as SessionRow[];
     return rows;
   } finally {

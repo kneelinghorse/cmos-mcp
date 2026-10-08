@@ -231,7 +231,7 @@ describe('cmos_session_capture', () => {
             decision_text: string;
             sprint_id: string | null;
             project_domain: string | null;
-            session_id: string | null;
+            author_session_id: string | null;
           }
         | undefined;
       db.close();
@@ -240,7 +240,8 @@ describe('cmos_session_capture', () => {
       expect(decision?.decision_text).toBe('Use TypeScript for all new tools');
       expect(decision?.sprint_id).toBe('sprint-14');
       expect(decision?.project_domain).toBe('cmos-mcp');
-      expect(decision?.session_id).toBe(activeSessionId);
+      // The shipped schema names the session of origin author_session_id (formerly session_id).
+      expect(decision?.author_session_id).toBe(activeSessionId);
     });
 
     it('should auto-tag with sprint_id from session', async () => {
@@ -295,15 +296,15 @@ describe('cmos_session_capture', () => {
 
       const db = new Database(dbPath);
       const decision = db
-        .prepare('SELECT session_id FROM strategic_decisions WHERE decision_text = ?')
+        .prepare('SELECT author_session_id FROM strategic_decisions WHERE decision_text = ?')
         .get('Test decision with session ref') as
         | {
-            session_id: string | null;
+            author_session_id: string | null;
           }
         | undefined;
       db.close();
 
-      expect(decision?.session_id).toBe(activeSessionId);
+      expect(decision?.author_session_id).toBe(activeSessionId);
     });
 
     it('should be idempotent - no duplicate decisions on retry', async () => {
@@ -383,108 +384,27 @@ describe('cmos_session_capture', () => {
     });
   });
 
-  describe('source_chunk_ids provenance', () => {
-    it('should store source_chunk_ids with decision', async () => {
-      const chunkIds = ['chunk-uuid-1', 'chunk-uuid-2'];
+  describe('source_chunk_ids', () => {
+    // s92-m10: the 3.1.0 copy this file used to test stored sourceChunkIds; the shipped capture has
+    // no such input (provenance travels in `evidence`), so a caller-supplied list is not stored.
+    it('the shipped capture never writes source_chunk_ids, even when a caller passes them', async () => {
       const result = await cmosSessionCaptureWithDb(dbPath, {
         category: 'decision',
-        content: 'Decision with provenance',
-        sourceChunkIds: chunkIds,
+        content: 'Decision with chunk ids the tool does not take',
+        sourceChunkIds: ['chunk-uuid-1'],
       });
-
-      expect(result.success).toBe(true);
-      expect(result.data?.sourceChunkIds).toEqual(chunkIds);
-
-      // Verify source_chunk_ids was stored in database
-      const db = new Database(dbPath);
-      const decision = db
-        .prepare('SELECT source_chunk_ids FROM strategic_decisions WHERE decision_text = ?')
-        .get('Decision with provenance') as
-        | {
-            source_chunk_ids: string | null;
-          }
-        | undefined;
-      db.close();
-
-      expect(decision).toBeDefined();
-      expect(decision?.source_chunk_ids).toBeDefined();
-      const storedChunkIds = JSON.parse(decision!.source_chunk_ids!);
-      expect(storedChunkIds).toEqual(chunkIds);
-    });
-
-    it('should store null for decision without source_chunk_ids', async () => {
-      const result = await cmosSessionCaptureWithDb(dbPath, {
-        category: 'decision',
-        content: 'Decision without provenance',
-      });
-
       expect(result.success).toBe(true);
       expect(result.data?.sourceChunkIds).toBeUndefined();
 
-      // Verify source_chunk_ids is null in database
       const db = new Database(dbPath);
       const decision = db
         .prepare('SELECT source_chunk_ids FROM strategic_decisions WHERE decision_text = ?')
-        .get('Decision without provenance') as
-        | {
-            source_chunk_ids: string | null;
-          }
+        .get('Decision with chunk ids the tool does not take') as
+        | { source_chunk_ids: string | null }
         | undefined;
       db.close();
-
       expect(decision).toBeDefined();
       expect(decision?.source_chunk_ids).toBeNull();
-    });
-
-    it('should handle empty source_chunk_ids array', async () => {
-      const result = await cmosSessionCaptureWithDb(dbPath, {
-        category: 'decision',
-        content: 'Decision with empty array',
-        sourceChunkIds: [],
-      });
-
-      expect(result.success).toBe(true);
-      expect(result.data?.sourceChunkIds).toBeUndefined();
-
-      // Verify source_chunk_ids is null when empty array
-      const db = new Database(dbPath);
-      const decision = db
-        .prepare('SELECT source_chunk_ids FROM strategic_decisions WHERE decision_text = ?')
-        .get('Decision with empty array') as
-        | {
-            source_chunk_ids: string | null;
-          }
-        | undefined;
-      db.close();
-
-      expect(decision?.source_chunk_ids).toBeNull();
-    });
-
-    it('should accept valid TraceLab UUID format', async () => {
-      const chunkIds = [
-        'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
-        'b2c3d4e5-f6a7-8901-bcde-f12345678901',
-      ];
-      const result = await cmosSessionCaptureWithDb(dbPath, {
-        category: 'decision',
-        content: 'Decision with UUIDs',
-        sourceChunkIds: chunkIds,
-      });
-
-      expect(result.success).toBe(true);
-
-      const db = new Database(dbPath);
-      const decision = db
-        .prepare('SELECT source_chunk_ids FROM strategic_decisions WHERE decision_text = ?')
-        .get('Decision with UUIDs') as
-        | {
-            source_chunk_ids: string | null;
-          }
-        | undefined;
-      db.close();
-
-      const storedIds = JSON.parse(decision!.source_chunk_ids!);
-      expect(storedIds).toEqual(chunkIds);
     });
   });
 
@@ -558,40 +478,29 @@ describe('cmos_session_capture', () => {
       expect(decision?.evidence).toBeNull();
     });
 
-    it('should store evidence alongside mission and source_chunk_ids', async () => {
+    it('should store evidence alongside the mission', async () => {
       const evidence = [{ type: 'chunk', id: 'chunk-xyz-789' }];
-      const chunkIds = ['provenance-uuid-1'];
       const result = await cmosSessionCaptureWithDb(dbPath, {
         category: 'decision',
         content: 'Decision with all provenance fields',
         missionId: 's14-m01',
-        sourceChunkIds: chunkIds,
         evidence,
       });
 
       expect(result.success).toBe(true);
       expect(result.data?.evidenceStored).toEqual(evidence);
-      expect(result.data?.sourceChunkIds).toEqual(chunkIds);
       expect(result.data?.missionId).toBe('s14-m01');
 
-      // Verify all fields stored in database
       const db = new Database(dbPath);
       const decision = db
-        .prepare(
-          'SELECT evidence, source_chunk_ids, mission_id FROM strategic_decisions WHERE decision_text = ?'
-        )
+        .prepare('SELECT evidence, mission_id FROM strategic_decisions WHERE decision_text = ?')
         .get('Decision with all provenance fields') as
-        | {
-            evidence: string | null;
-            source_chunk_ids: string | null;
-            mission_id: string | null;
-          }
+        | { evidence: string | null; mission_id: string | null }
         | undefined;
       db.close();
 
       expect(decision).toBeDefined();
       expect(JSON.parse(decision!.evidence!)).toEqual(evidence);
-      expect(JSON.parse(decision!.source_chunk_ids!)).toEqual(chunkIds);
       expect(decision!.mission_id).toBe('s14-m01');
     });
 
@@ -773,19 +682,22 @@ describe('cmos_session_capture', () => {
   });
 
   describe('error handling', () => {
-    it('should return error when no active session', async () => {
+    it('s92-m03: with no session open, the shipped handler lands the capture in an implicit session', async () => {
       // Close all sessions
       const db = new Database(dbPath);
       db.exec("UPDATE sessions SET status = 'completed'");
       db.close();
 
-      const result = await cmosSessionCaptureWithDb(dbPath, {
+      // The SHIPPED handler, not this file's cmosSessionCaptureWithDb, which copies 3.1.0 logic
+      // and would still refuse.
+      const result = await cmosSessionCapture({
         category: 'decision',
         content: 'Test decision',
+        projectRoot: tempDir,
       });
 
-      expect(result.success).toBe(false);
-      expect(result.error?.code).toBe(CMOS_ERROR_CODES.SESSION_NOT_ACTIVE);
+      expect(result.success).toBe(true);
+      expect(result.data?.implicitSession).toEqual({ opened: true });
     });
 
     it('should return error for empty content', async () => {
@@ -871,7 +783,10 @@ describe('cmos_session_capture', () => {
 });
 
 /**
- * Helper to run cmosSessionCapture with explicit database path.
+ * s92-m10: every case runs the SHIPPED handler. This helper used to hold a private copy of the
+ * 3.1.0 capture handler, so these cases tested code that no longer shipped (an implicit session,
+ * for one, never appeared). It now resolves the fixture's project root from its database path and
+ * calls cmosSessionCapture.
  */
 async function cmosSessionCaptureWithDb(
   dbPath: string,
@@ -885,248 +800,9 @@ async function cmosSessionCaptureWithDb(
     missionId?: string;
     evidence?: Array<{ type: string; id: string }>;
   }
-): Promise<{
-  success: boolean;
-  data?: CmosSessionCaptureResult;
-  error?: { code: string; message: string };
-}> {
-  const { withClient } = await import('../../../src/tools/cmos/client');
-  const { createSuccess, createError, CMOS_ERROR_CODES } =
-    await import('../../../src/tools/cmos/errors');
-
-  return withClient(
-    (client) => {
-      const category = params.category;
-      const content = params.content.trim();
-      const captureContext = params.context?.trim() ?? null;
-      const agent = params.agent ?? 'assistant';
-      const missionId = params.missionId?.trim() || undefined;
-
-      if (!content) {
-        return createError<CmosSessionCaptureResult>({
-          code: CMOS_ERROR_CODES.MISSING_PARAMETER,
-          message: 'Content is required',
-        });
-      }
-
-      // Find the session
-      let sessionId = params.sessionId;
-      if (!sessionId) {
-        const activeResult = client.getOne<{ id: string }>(
-          'SELECT id FROM sessions WHERE status = ?',
-          ['active']
-        );
-        if (!activeResult.success || !activeResult.data) {
-          return createError<CmosSessionCaptureResult>({
-            code: CMOS_ERROR_CODES.SESSION_NOT_ACTIVE,
-            message: 'No active session found',
-          });
-        }
-        sessionId = activeResult.data.id;
-      }
-
-      // Get session
-      const sessionResult = client.getOne<{ id: string; status: string; captures: string }>(
-        'SELECT id, status, captures FROM sessions WHERE id = ?',
-        [sessionId]
-      );
-
-      if (!sessionResult.success || !sessionResult.data) {
-        return createError<CmosSessionCaptureResult>({
-          code: CMOS_ERROR_CODES.SESSION_NOT_FOUND,
-          message: `Session not found: ${sessionId}`,
-        });
-      }
-
-      if (sessionResult.data.status !== 'active') {
-        return createError<CmosSessionCaptureResult>({
-          code: CMOS_ERROR_CODES.SESSION_NOT_ACTIVE,
-          message: `Session is not active: ${sessionId}`,
-        });
-      }
-
-      // Parse captures
-      let captures: Array<{
-        timestamp: string;
-        category: string;
-        content: string;
-        context?: string;
-        missionId?: string;
-      }> = [];
-      try {
-        captures = JSON.parse(sessionResult.data.captures || '[]');
-      } catch {
-        captures = [];
-      }
-
-      // Add new capture
-      const now = new Date().toISOString();
-      const newCapture: {
-        timestamp: string;
-        category: string;
-        content: string;
-        context?: string;
-        missionId?: string;
-      } = {
-        timestamp: now,
-        category,
-        content,
-      };
-      if (captureContext) {
-        newCapture.context = captureContext;
-      }
-      if (missionId) {
-        newCapture.missionId = missionId;
-      }
-      captures.push(newCapture);
-
-      // Update session
-      client.execute('UPDATE sessions SET captures = ? WHERE id = ?', [
-        JSON.stringify(captures),
-        sessionId,
-      ]);
-
-      // Auto-extraction for decisions
-      let decisionExtractionCount: number | undefined;
-      let decisionAlreadyExtracted: boolean | undefined;
-
-      if (category === 'decision') {
-        // Get sprint_id: prefer mission's sprint_id, then session's
-        let sprintId: string | null = null;
-        if (missionId) {
-          const missionResult = client.getOne<{ sprint_id: string | null }>(
-            'SELECT sprint_id FROM missions WHERE id = ?',
-            [missionId]
-          );
-          sprintId = missionResult.success ? (missionResult.data?.sprint_id ?? null) : null;
-        }
-        if (!sprintId) {
-          const sessionSprintResult = client.getOne<{ sprint_id: string | null }>(
-            'SELECT sprint_id FROM sessions WHERE id = ?',
-            [sessionId]
-          );
-          sprintId = sessionSprintResult.success
-            ? (sessionSprintResult.data?.sprint_id ?? null)
-            : null;
-        }
-
-        // Get project_domain from metadata
-        const domainResult = client.getOne<{ value: string }>(
-          "SELECT value FROM metadata WHERE key = 'project_domain'",
-          []
-        );
-        const projectDomain = domainResult.success ? (domainResult.data?.value ?? null) : null;
-
-        // Check for duplicate
-        const existingResult = client.getOne<{ id: number }>(
-          'SELECT id FROM strategic_decisions WHERE decision_text = ? AND session_id = ?',
-          [content, sessionId]
-        );
-
-        if (existingResult.success && existingResult.data) {
-          decisionAlreadyExtracted = true;
-          decisionExtractionCount = 0;
-        } else {
-          const sourceChunkIdsJson = params.sourceChunkIds?.length
-            ? JSON.stringify(params.sourceChunkIds)
-            : null;
-          const evidenceJson = params.evidence?.length ? JSON.stringify(params.evidence) : null;
-
-          const columns = [
-            'decision_text',
-            'created_at',
-            'sprint_id',
-            'project_domain',
-            'session_id',
-          ];
-          const insertParams: (string | null)[] = [
-            content,
-            now,
-            sprintId,
-            projectDomain,
-            sessionId,
-          ];
-
-          if (missionId) {
-            columns.push('mission_id');
-            insertParams.push(missionId);
-          }
-          columns.push('source_chunk_ids');
-          insertParams.push(sourceChunkIdsJson);
-          if (evidenceJson) {
-            columns.push('evidence');
-            insertParams.push(evidenceJson);
-          }
-
-          const insertColumns = columns.join(', ');
-          const insertPlaceholders = columns.map(() => '?').join(', ');
-
-          const insertResult = client.execute(
-            `INSERT INTO strategic_decisions (${insertColumns}) VALUES (${insertPlaceholders})`,
-            insertParams
-          );
-
-          if (insertResult.success) {
-            decisionExtractionCount = 1;
-            decisionAlreadyExtracted = false;
-          } else {
-            decisionExtractionCount = 0;
-            decisionAlreadyExtracted = false;
-          }
-        }
-      }
-
-      const result: CmosSessionCaptureResult = {
-        sessionId,
-        category,
-        content,
-        timestamp: now,
-        captureCount: captures.length,
-        message: `Captured ${category} in session '${sessionId}' (${captures.length} total captures)`,
-        structuredMaterialization:
-          category === 'decision'
-            ? {
-                target: 'strategic_decisions',
-                timing: 'immediate',
-                outcome: decisionAlreadyExtracted
-                  ? 'existing'
-                  : decisionExtractionCount === 1
-                    ? 'materialized'
-                    : 'failed',
-              }
-            : category === 'context'
-              ? {
-                  target: 'master_context.context_notes',
-                  timing: 'session-close',
-                  outcome: 'deferred',
-                }
-              : category === 'next-step'
-                ? { target: 'next_steps', timing: 'session-close', outcome: 'deferred' }
-                : {
-                    target: category === 'learning' ? 'learnings' : 'constraints',
-                    timing: 'immediate',
-                    outcome: 'failed',
-                  },
-        writeFailures: [],
-      };
-
-      if (missionId) {
-        result.missionId = missionId;
-      }
-
-      if (decisionExtractionCount !== undefined) {
-        result.decisionExtractionCount = decisionExtractionCount;
-        result.decisionAlreadyExtracted = decisionAlreadyExtracted;
-        if (params.sourceChunkIds?.length) {
-          result.sourceChunkIds = params.sourceChunkIds;
-        }
-        if (params.evidence?.length) {
-          result.evidenceStored = params.evidence;
-        }
-      }
-
-      return createSuccess<CmosSessionCaptureResult>(result);
-    },
-    { dbPath }
-  );
+): ReturnType<typeof cmosSessionCapture> {
+  return cmosSessionCapture({
+    ...params,
+    projectRoot: path.resolve(path.dirname(dbPath), '..', '..'),
+  } as Parameters<typeof cmosSessionCapture>[0]);
 }

@@ -108,7 +108,7 @@ describe('cmos_project_init', () => {
 
       expect(result.success).toBe(true);
       expect(fs.existsSync(path.join(tempDir, 'cmos', 'templates'))).toBe(true);
-      expect(fs.existsSync(path.join(tempDir, 'cmos', 'templates', 'agents.md'))).toBe(true);
+      expect(fs.readdirSync(path.join(tempDir, 'cmos', 'templates'))).toContain('AGENTS.md');
       expect(
         fs.existsSync(path.join(tempDir, 'cmos', 'templates', 'PROJECT-README-template.md'))
       ).toBe(true);

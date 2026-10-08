@@ -320,9 +320,10 @@ describe('E2E Lifecycle Integration', () => {
       expect(sprintResult.data?.currentStatus).toBe('Completed');
       expect(sprintResult.data?.lifecycle).toBeDefined();
 
-      // Verify lifecycle triggers
+      // Verify lifecycle triggers. s92-m05 (decision #1160): a default close archives nothing.
       const lifecycle = sprintResult.data!.lifecycle;
-      expect(lifecycle.decisionsArchived).toBeGreaterThanOrEqual(3);
+      expect(lifecycle.archived).toBe(false);
+      expect(lifecycle.decisionsArchived).toBe(0);
       expect(lifecycle.dbSnapshotId).toBeDefined();
 
       // Step 8: Verify context snapshot was created
@@ -331,20 +332,20 @@ describe('E2E Lifecycle Integration', () => {
       };
       expect(snapshots.count).toBeGreaterThanOrEqual(1);
 
-      // Step 9: Verify decisions were archived
+      // Step 9: Verify the sprint's decisions are still active after the close
       const activeDecisions = db
         .prepare(
           `SELECT COUNT(*) as count FROM strategic_decisions WHERE sprint_id = 'sprint-e2e' AND status = 'active'`
         )
         .get() as { count: number };
-      expect(activeDecisions.count).toBe(0);
+      expect(activeDecisions.count).toBe(3);
 
       const archivedDecisions = db
         .prepare(
           `SELECT COUNT(*) as count FROM strategic_decisions WHERE sprint_id = 'sprint-e2e' AND status = 'archived'`
         )
         .get() as { count: number };
-      expect(archivedDecisions.count).toBe(3);
+      expect(archivedDecisions.count).toBe(0);
     });
   });
 

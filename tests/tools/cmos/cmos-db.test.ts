@@ -96,8 +96,9 @@ describe('cmos_db', () => {
   });
 
   describe('CMOS_DB_ACTIONS', () => {
-    it('contains 9 actions', () => {
-      expect(CMOS_DB_ACTIONS).toHaveLength(9);
+    // s92-m09: prune_snapshots, a dry run unless confirm=true.
+    it('contains 10 actions', () => {
+      expect(CMOS_DB_ACTIONS).toHaveLength(10);
       expect([...CMOS_DB_ACTIONS]).toEqual([
         'health',
         'snapshot',
@@ -108,6 +109,7 @@ describe('cmos_db', () => {
         'identify_orphans',
         'pull',
         'clone',
+        'prune_snapshots',
       ]);
     });
   });

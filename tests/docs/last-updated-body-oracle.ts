@@ -100,26 +100,123 @@ function renamedPathsInHistory(repoRoot: string, historyPath: string): string[] 
   return [...paths].sort();
 }
 
-function assertNoMergeRenameComposition(repoRoot: string, rel: string, historyPath: string): void {
-  const historyPaths = renamedPathsInHistory(repoRoot, historyPath);
-  if (historyPaths.length === 1) return;
-
-  const mergeHashes = git(repoRoot, [
+/** Merges that touched any path the file had across its renames, with their commit dates. */
+function mergesAcrossRenames(
+  repoRoot: string,
+  historyPath: string
+): { readonly paths: string[]; readonly merges: Array<{ hash: string; date: string }> } {
+  const paths = renamedPathsInHistory(repoRoot, historyPath);
+  if (paths.length === 1) return { paths, merges: [] };
+  const merges = git(repoRoot, [
     'log',
     '--full-history',
     '--merges',
-    '--format=%H',
+    `--format=%H${HEADER_SEPARATOR}%cs`,
     '--',
-    ...historyPaths,
+    ...paths,
   ])
     .trim()
     .split('\n')
-    .filter(Boolean);
-  if (mergeHashes.length === 0) return;
+    .filter(Boolean)
+    .map((line) => {
+      const [hash, date] = line.split(HEADER_SEPARATOR);
+      return { hash, date };
+    });
+  return { paths, merges };
+}
 
+/** The file's body at `rev`, under whichever of its historical paths exists there; null if none. */
+function bodyAt(repoRoot: string, rev: string, paths: readonly string[]): string | null {
+  for (const candidate of paths) {
+    try {
+      return normalizeBody(git(repoRoot, ['show', `${rev}:${candidate}`]));
+    } catch {
+      // not at this path in this commit
+    }
+  }
+  return null;
+}
+
+/** Dates of commits in `range` that changed the file's body under any of its historical paths. */
+function bodyChangeDatesIn(repoRoot: string, range: string, paths: readonly string[]): string[] {
+  const log = git(repoRoot, [
+    'log',
+    range,
+    '--find-renames',
+    '--format=%x1e%H%x1f%P%x1f%cs',
+    '--patch',
+    '-m',
+    '--unified=0',
+    '--no-color',
+    '--no-ext-diff',
+    '--',
+    ...paths,
+  ]);
+  return log
+    .split(COMMIT_SEPARATOR)
+    .slice(1)
+    .flatMap((record) => {
+      const headerEnd = record.indexOf('\n');
+      if (headerEnd < 0) return [];
+      const date = record.slice(0, headerEnd).trim().split(HEADER_SEPARATOR)[2];
+      return date && patchChangesBody(record.slice(headerEnd + 1)) ? [date] : [];
+    });
+}
+
+/**
+ * Whether a merge dated after the latest body change found could hide a later one. It cannot when
+ * its own version of the file equals one parent's (it introduced no body of its own), and when no
+ * commit on any parent's side since their merge base changed the body after `latest`. That is the
+ * release-merge shape: a branch renamed and edited the file, the other side never touched it.
+ */
+export function mergeCanHideLaterChange(
+  repoRoot: string,
+  merge: { hash: string; date: string },
+  paths: readonly string[],
+  latest: string
+): boolean {
+  const parents = git(repoRoot, ['rev-list', '--parents', '-n', '1', merge.hash])
+    .trim()
+    .split(' ')
+    .slice(1);
+  if (parents.length < 2) return true;
+  const own = bodyAt(repoRoot, merge.hash, paths);
+  if (!parents.some((parent) => bodyAt(repoRoot, parent, paths) === own)) return true;
+  let base: string;
+  try {
+    base = git(repoRoot, ['merge-base', '--octopus', ...parents]).trim();
+  } catch {
+    return true;
+  }
+  return parents.some((parent) =>
+    bodyChangeDatesIn(repoRoot, `${base}..${parent}`, paths).some((date) => date > latest)
+  );
+}
+
+/**
+ * `git log --follow` can lose a renamed file's history at a merge, so a merge across renames is a
+ * place a body change may hide. A merge can only hide changes made on the branches it joined, which
+ * this oracle (it already reads commit dates as time) dates no later than the merge itself. So the
+ * walk stands when every such merge is dated no later than the latest body change it found, or,
+ * for a later merge, when that merge provably hides nothing (mergeCanHideLaterChange); otherwise
+ * the oracle refuses rather than guess (s92-m06 renamed the seed template; its release merge into
+ * main is later than the rename).
+ */
+function assertMergesCannotHideLaterChange(
+  repoRoot: string,
+  rel: string,
+  across: ReturnType<typeof mergesAcrossRenames>,
+  latest: string | undefined
+): void {
+  const blocking = across.merges.filter(
+    (merge) =>
+      latest === undefined ||
+      (merge.date > latest && mergeCanHideLaterChange(repoRoot, merge, across.paths, latest))
+  );
+  if (blocking.length === 0) return;
   throw new Error(
     `${rel}: git --follow cannot prove merge history across renamed paths ` +
-      `[${historyPaths.join(', ')}] (merges: ${[...new Set(mergeHashes)].join(', ')})`
+      `[${across.paths.join(', ')}] (merges: ${[...new Set(blocking.map((m) => m.hash))].join(', ')})`
   );
 }
 
@@ -214,7 +311,7 @@ export function latestNonStampBodyChangeDate(
       ];
     });
 
-  assertNoMergeRenameComposition(repoRoot, rel, historyPath);
+  const across = mergesAcrossRenames(repoRoot, historyPath);
 
   const commits = new Map<
     string,
@@ -239,6 +336,7 @@ export function latestNonStampBodyChangeDate(
     .sort();
 
   const latest = bodyChangeDates[bodyChangeDates.length - 1];
+  assertMergesCannotHideLaterChange(repoRoot, rel, across, latest);
   if (!latest) {
     throw new Error(`${rel} has no non-stamp body change in git history`);
   }

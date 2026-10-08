@@ -10,7 +10,7 @@
 import { z } from 'zod';
 import * as crypto from 'crypto';
 import { withClientAsync, type CmosDatabaseClient } from './client';
-import { genesisColumns, getProjectId } from './genesis-columns';
+import { genesisColumns, getProjectId, tableHasColumn } from './genesis-columns';
 import type { CmosToolResult, Session, Context } from './types';
 import { createError, createSuccess, CmosErrors, CMOS_ERROR_CODES } from './errors';
 import {
@@ -27,11 +27,11 @@ import {
   type ContextRetentionPolicy,
 } from './context-retention';
 import {
+  ensureContentPrunedColumn,
   ensureNextStepsTable,
   ensureConstraintsTable,
   ensureAuthorNamespaceColumns,
   computeContentHash,
-  snapshotDedupPrunedFilter,
 } from './schema-migrations';
 import { applyLearningReaffirm, sanitizeLearningIds } from './learning-reaffirm';
 import { ensureMissionIdColumn } from './cmos-mission-complete';
@@ -39,6 +39,14 @@ import { recordEmbedding, decisionEmbeddingInput } from '../../intelligence/embe
 import { appendWarnings, appendWriteFailures, attachWarnings } from './format-warnings';
 import { checkWrite, type WriteFailure } from './write-guard';
 import { isOpenStatus } from './terminal-status';
+import { resolveOpenSprintIdForWrite } from './current-sprint';
+import { ensureImplicitSessionColumns } from './schema-migrations';
+import { heldByAnotherProcess, resolveCallerSession } from './session-owner';
+import {
+  findReusableSnapshot,
+  ONLY_COPY_SOURCE_SUFFIX,
+  snapshotStorage,
+} from './snapshot-content-policy';
 
 /**
  * Result of session complete operation.
@@ -121,11 +129,7 @@ export interface CmosSessionCompleteResult {
    */
   explicitlyReaffirmedLearningIds?: number[];
 
-  /**
-   * Learning IDs whose `last_reviewed_at` was bumped because at least one
-   * decision text in `decisions[]` overlapped them by IMPLICIT_REAFFIRM_KEYWORD_FLOOR
-   * keywords. Sprint 61 m01.
-   */
+  /** @deprecated s92-m04: no longer populated. Implicit reaffirm by content overlap was retired (it hit a cited learning on 20 of 3,973 bumps); cite learnings explicitly with citesLearningIds. Kept declared so 3.2.0 removes no field. */
   implicitlyReaffirmedLearningIds?: number[];
 
   /**
@@ -353,23 +357,20 @@ export async function cmosSessionComplete(
 
       // Find the session to complete
       let sessionId = params.sessionId;
+      warnings.push(...(ensureImplicitSessionColumns(client).warnings ?? []));
+      // s92-m09: the content tombstone column, so this close's persist copies can be content-less.
+      warnings.push(...(ensureContentPrunedColumn(client).warnings ?? []));
 
       if (!sessionId) {
-        // Find the active session
-        const activeResult = client.getOne<Session>('SELECT id FROM sessions WHERE status = ?', [
-          'active',
-        ]);
-
-        if (!activeResult.success) {
-          return createError<CmosSessionCompleteResult>(
-            activeResult.error ?? {
-              code: 'DB_QUERY_FAILED',
-              message: 'Failed to find active session',
-            }
-          );
+        // s92-m03: the caller's session. The project's explicit session if one is open, else this
+        // process's own implicit session. Never another process's implicit session.
+        const caller = resolveCallerSession(client, { open: false });
+        if (!caller.ok) {
+          return createError<CmosSessionCompleteResult>(caller.error);
         }
+        warnings.push(...caller.warnings);
 
-        if (!activeResult.data) {
+        if (!caller.session) {
           return createError<CmosSessionCompleteResult>({
             code: CMOS_ERROR_CODES.SESSION_NOT_ACTIVE,
             message: 'No active session found',
@@ -378,12 +379,14 @@ export async function cmosSessionComplete(
           });
         }
 
-        sessionId = activeResult.data.id;
+        sessionId = caller.session.sessionId;
       }
 
       // Get the session and verify it's active
-      const sessionResult = client.getOne<Session>(
-        'SELECT id, type, title, sprint_id, status, captures, started_at FROM sessions WHERE id = ?',
+      const sessionResult = client.getOne<
+        Session & { implicit: number | null; owner_key: string | null }
+      >(
+        'SELECT id, type, title, sprint_id, status, captures, started_at, implicit, owner_key FROM sessions WHERE id = ?',
         [sessionId]
       );
 
@@ -407,6 +410,22 @@ export async function cmosSessionComplete(
           currentState: session.status,
         });
       }
+
+      // s92-m03: another running process's implicit session is not this caller's to close. It
+      // may be closed once its owner is gone from this host or it has idled past the bound,
+      // which is exactly when reconcile closes it.
+      const isImplicit = session.implicit === 1;
+      if (heldByAnotherProcess(client, session, 'complete')) {
+        return createError<CmosSessionCompleteResult>(
+          CmosErrors.sessionOwnedByAnotherProcess(sessionId)
+        );
+      }
+
+      // s92-m03: an implicit session carries no sprint (a process outlives sprints), so the rows
+      // its close materializes resolve their sprint NOW, as any untagged write does, instead of a
+      // sprint fixed when the session opened.
+      const closeSprintId: string | null =
+        session.sprint_id ?? (isImplicit ? resolveOpenSprintIdForWrite(client) : null);
 
       // Parse captures and count by category
       let captures: Array<{ category: string; content?: string; missionId?: string }> = [];
@@ -532,7 +551,7 @@ export async function cmosSessionComplete(
             [
               trimmed,
               sessionId,
-              session.sprint_id ?? null,
+              (capture as { sprintId?: string }).sprintId ?? closeSprintId,
               captureMissionId,
               now,
               hash,
@@ -576,15 +595,7 @@ export async function cmosSessionComplete(
           const insertResult = client.execute(
             `INSERT INTO next_steps (content, status, session_id, sprint_id, mission_id, created_at, content_hash, ${g.columns.join(', ')})
              VALUES (?, 'pending', ?, ?, ?, ?, ?, ${g.placeholders})`,
-            [
-              trimmed,
-              sessionId,
-              session.sprint_id ?? null,
-              callMissionId ?? null,
-              now,
-              hash,
-              ...g.values,
-            ]
+            [trimmed, sessionId, closeSprintId, callMissionId ?? null, now, hash, ...g.values]
           );
           if (checkWrite(insertResult, writeSink, 'next_steps extraction insert'))
             nextStepsExtracted++;
@@ -626,7 +637,15 @@ export async function cmosSessionComplete(
           const insertResult = client.execute(
             `INSERT INTO constraints (content, status, session_id, sprint_id, created_at, expires_at, content_hash, ${g.columns.join(', ')})
              VALUES (?, 'active', ?, ?, ?, ?, ?, ${g.placeholders})`,
-            [trimmed, sessionId, session.sprint_id ?? null, now, expiresAt, hash, ...g.values]
+            [
+              trimmed,
+              sessionId,
+              (capture as { sprintId?: string }).sprintId ?? closeSprintId,
+              now,
+              expiresAt,
+              hash,
+              ...g.values,
+            ]
           );
           if (checkWrite(insertResult, writeSink, 'constraints extraction insert'))
             constraintsExtracted++;
@@ -709,7 +728,7 @@ export async function cmosSessionComplete(
             [
               decisionText,
               now,
-              session.sprint_id ?? null,
+              closeSprintId,
               projectDomain,
               sessionId,
               callMissionId ?? null,
@@ -735,45 +754,22 @@ export async function cmosSessionComplete(
       }
 
       // ============================================================
-      // Sprint 61 m01 — auto-reaffirm cited learnings.
-      // Explicit IDs from `citesLearningIds[]` always bump. Implicit overlap
-      // runs once per decision text; matches are merged before applying so
-      // each learning is touched at most once per session-complete call.
+      // Sprint 61 m01 — reaffirm the learnings this call cites. Since s92-m04 only the explicit
+      // `citesLearningIds[]` bump; the decisions' text no longer reaffirms by overlap.
       // ============================================================
       const explicitlyReaffirmedSet = new Set<number>();
-      const implicitlyReaffirmedSet = new Set<number>();
       const missingCitedSet = new Set<number>();
-      if (citesLearningIds.length > 0 || decisionSources.length > 0) {
-        for (let i = 0; i < Math.max(decisionSources.length, 1); i++) {
-          const decisionText = decisionSources[i] ?? '';
-          // Apply explicit IDs only on the first pass; later passes use [] so
-          // we don't repeatedly bump the same explicit set.
-          const explicitForThisPass = i === 0 ? citesLearningIds : [];
-          const reaffirm = await applyLearningReaffirm(
-            client,
-            {
-              explicitIds: explicitForThisPass,
-              newContent: decisionText,
-              reaffirmedAt: now,
-            },
-            warnings
-          );
-          // s86-m02b: see the note in cmos-session-capture.ts — an errored lookup makes these
-          // lists incomplete, and the answer must say so rather than imply a clean pass.
-          writeSink.failures.push(...reaffirm.writeFailures);
-          for (const id of reaffirm.explicitlyReaffirmedIds) {
-            explicitlyReaffirmedSet.add(id);
-          }
-          for (const id of reaffirm.implicitlyReaffirmedIds) {
-            // An ID already explicitly bumped this call should not also count as implicit.
-            if (!explicitlyReaffirmedSet.has(id)) {
-              implicitlyReaffirmedSet.add(id);
-            }
-          }
-          for (const id of reaffirm.missingIds) {
-            missingCitedSet.add(id);
-          }
-        }
+      if (citesLearningIds.length > 0) {
+        const reaffirm = await applyLearningReaffirm(
+          client,
+          { explicitIds: citesLearningIds, reaffirmedAt: now },
+          warnings
+        );
+        // s86-m02b: see the note in cmos-session-capture.ts — an errored lookup makes these
+        // lists incomplete, and the answer must say so rather than imply a clean pass.
+        writeSink.failures.push(...reaffirm.writeFailures);
+        for (const id of reaffirm.explicitlyReaffirmedIds) explicitlyReaffirmedSet.add(id);
+        for (const id of reaffirm.missingIds) missingCitedSet.add(id);
       }
 
       // ============================================================
@@ -855,10 +851,6 @@ export async function cmosSessionComplete(
         explicitlyReaffirmedSet.size > 0
           ? Array.from(explicitlyReaffirmedSet).sort((a, b) => a - b)
           : undefined;
-      const implicitlyReaffirmedLearningIds =
-        implicitlyReaffirmedSet.size > 0
-          ? Array.from(implicitlyReaffirmedSet).sort((a, b) => a - b)
-          : undefined;
       const missingCitedLearningIds =
         missingCitedSet.size > 0 ? Array.from(missingCitedSet).sort((a, b) => a - b) : undefined;
 
@@ -881,7 +873,6 @@ export async function cmosSessionComplete(
           writeFailures: writeSink.failures,
           ...(feedbackId !== undefined ? { feedbackId } : {}),
           ...(explicitlyReaffirmedLearningIds ? { explicitlyReaffirmedLearningIds } : {}),
-          ...(implicitlyReaffirmedLearningIds ? { implicitlyReaffirmedLearningIds } : {}),
           ...(missingCitedLearningIds ? { missingCitedLearningIds } : {}),
         },
         warnings,
@@ -1028,9 +1019,25 @@ function aggregateSessionIntoContexts(
     nextSteps,
   } = params;
 
-  // Load both contexts
-  const projectContext = loadContext(client, 'project_context');
-  const masterContext = loadContext(client, 'master_context');
+  // Load both contexts. s92-m09: a context that could not be read, or is not valid JSON, is left
+  // exactly as it is. Building on an empty stand-in and persisting it would overwrite the stored
+  // context, and since close copies no longer store content there would be no copy to recover from.
+  const projectLoad = loadContext(client, 'project_context');
+  const masterLoad = loadContext(client, 'master_context');
+  for (const [contextId, load] of [
+    ['project_context', projectLoad],
+    ['master_context', masterLoad],
+  ] as const) {
+    if (!load.readable) {
+      sink.failures.push({
+        op: `contexts.read(${contextId})`,
+        code: 'CONTEXT_UNREADABLE',
+        message: `${contextId} ${load.problem}, so this close did not condense or overwrite it`,
+      });
+    }
+  }
+  const projectContext = projectLoad.content;
+  const masterContext = masterLoad.content;
   const retentionPolicy = getContextRetentionPolicy();
 
   // Step 1: Apply captures to master_context
@@ -1066,42 +1073,47 @@ function aggregateSessionIntoContexts(
     recordNextSteps(projectContext, masterContext, sessionId, nextSteps);
   }
 
-  // Step 5: Condense detail for completed sprints
-  const projectCondensation = condenseContextForRetention(
-    client,
-    'project_context',
-    projectContext,
-    {
-      source: `session_complete:${sessionId}`,
-      policy: retentionPolicy,
-    }
-  );
-  const masterCondensation = condenseContextForRetention(client, 'master_context', masterContext, {
-    source: `session_complete:${sessionId}`,
-    policy: retentionPolicy,
-  });
+  // Step 5: Condense detail for completed sprints (only a context that was read; see above)
+  const notCondensed = { archivedSprintIds: [] as string[], archiveSnapshotId: null };
+  const projectCondensation = projectLoad.readable
+    ? condenseContextForRetention(client, 'project_context', projectContext, {
+        source: `session_complete:${sessionId}`,
+        policy: retentionPolicy,
+      })
+    : notCondensed;
+  const masterCondensation = masterLoad.readable
+    ? condenseContextForRetention(client, 'master_context', masterContext, {
+        source: `session_complete:${sessionId}`,
+        policy: retentionPolicy,
+      })
+    : notCondensed;
 
   // Step 6: Update context health after condensation
   updateContextHealth(projectContext, completedAt, retentionPolicy);
   updateContextHealth(masterContext, completedAt, retentionPolicy);
 
-  // Step 7: Persist both contexts with snapshots
-  const projectPersist = persistContext(
-    client,
-    'project_context',
-    projectContext,
-    sessionId,
-    `session_complete:${sessionId}`,
-    sink
-  );
-  const masterPersist = persistContext(
-    client,
-    'master_context',
-    masterContext,
-    sessionId,
-    `session_complete:${sessionId}`,
-    sink
-  );
+  // Step 7: Persist both contexts with snapshots (only a context that was read; see above)
+  const notPersisted = { snapshotId: null, contextWritten: false };
+  const projectPersist = projectLoad.readable
+    ? persistContext(
+        client,
+        'project_context',
+        projectContext,
+        sessionId,
+        `session_complete:${sessionId}`,
+        sink
+      )
+    : notPersisted;
+  const masterPersist = masterLoad.readable
+    ? persistContext(
+        client,
+        'master_context',
+        masterContext,
+        sessionId,
+        `session_complete:${sessionId}`,
+        sink
+      )
+    : notPersisted;
 
   return {
     // s86-m02b: this was a hardcoded `true`. It now reports whether the CONTEXT ROWS were
@@ -1123,19 +1135,32 @@ function aggregateSessionIntoContexts(
 /**
  * Load and parse a context from the database.
  */
-function loadContext(client: CmosDatabaseClient, contextId: string): Record<string, unknown> {
+function loadContext(
+  client: CmosDatabaseClient,
+  contextId: string
+): { content: Record<string, unknown>; readable: boolean; problem?: string } {
   const result = client.getOne<Context>('SELECT id, content FROM contexts WHERE id = ?', [
     contextId,
   ]);
 
-  if (result.success && result.data?.content) {
-    try {
-      return JSON.parse(result.data.content);
-    } catch {
-      return {};
-    }
+  if (!result.success) {
+    return {
+      content: {},
+      readable: false,
+      problem: `could not be read (${result.error?.message ?? 'unknown error'})`,
+    };
   }
-  return {};
+  // No row yet, or an empty one: this close creates it.
+  if (!result.data?.content) return { content: {}, readable: true };
+  try {
+    const parsed: unknown = JSON.parse(result.data.content);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return { content: parsed as Record<string, unknown>, readable: true };
+    }
+    return { content: {}, readable: false, problem: 'is not a JSON object' };
+  } catch {
+    return { content: {}, readable: false, problem: 'is not valid JSON' };
+  }
 }
 
 /**
@@ -1389,34 +1414,54 @@ function persistContext(
   // answer honest by DESTROYING data the old code preserved, which is a worse trade. The write
   // failure is already recorded above; the snapshot still gets its chance.
 
-  // Create snapshot with dedup
+  // Create snapshot with dedup. s92-m09: when the context write failed this snapshot is the only
+  // copy of the aggregated content, so it may only reuse a row no prune reclaims, and a new row is
+  // marked as the only copy.
   const contentHash = crypto.createHash('sha256').update(contentStr).digest('hex').substring(0, 16);
-  const existingSnapshot = client.getOne<{ id: number }>(
-    // s84-m04: exclude a content-tombstoned row so identical content re-persists fresh.
-    `SELECT id FROM context_snapshots WHERE context_id = ? AND content_hash = ?${snapshotDedupPrunedFilter(client)}`,
-    [contextId, contentHash]
-  );
+  const existingSnapshot = findReusableSnapshot(client, {
+    contextId,
+    contentHash,
+    kind: 'close-persist',
+    liveCopyWritten: contextWritten,
+  });
+  const source = contextWritten ? snapshotSource : `${snapshotSource}${ONLY_COPY_SOURCE_SUFFIX}`;
 
   // The snapshot dedup is the BENIGN direction of the same read defect (noted in fork f10 and
   // deliberately left alone): a failed dedup falls through to INSERT, producing a duplicate
   // snapshot rather than losing one. Disclosed, not "fixed".
-  if (!existingSnapshot.success) {
+  if (!existingSnapshot.ok) {
     sink.failures.push({
       op: `context_snapshots.dedup(${contextId})`,
-      code: existingSnapshot.error?.code ?? 'DB_ERROR',
-      message: `snapshot de-duplication check failed; a duplicate snapshot may have been written: ${
-        existingSnapshot.error?.message ?? 'unknown'
-      }`,
+      code: existingSnapshot.code,
+      message: `snapshot de-duplication check failed; a duplicate snapshot may have been written: ${existingSnapshot.message}`,
     });
-  } else if (existingSnapshot.data) {
-    return { snapshotId: existingSnapshot.data.id, contextWritten };
+  } else if (existingSnapshot.row) {
+    return { snapshotId: existingSnapshot.row.id, contextWritten };
   }
 
   const g = genesisColumns(client, 'context_snapshots', getProjectId(client));
+  // s92-m09: a close's persist copy stores no content when the context row it copies was written
+  // (snapshot-content-policy.ts). When that write failed, this snapshot is the one durable copy of
+  // the aggregated content (the note above), so it keeps it. A content-less copy stamps
+  // content_pruned_at, so it is never a dedup hit.
+  const storage = snapshotStorage('close-persist', contentStr, {
+    contentHash,
+    liveCopyWritten: contextWritten,
+    canStamp: tableHasColumn(client, 'context_snapshots', 'content_pruned_at'),
+  });
   const insertResult = client.execute(
-    `INSERT INTO context_snapshots (context_id, session_id, source, content_hash, content, created_at, ${g.columns.join(', ')})
-     VALUES (?, ?, ?, ?, ?, ?, ${g.placeholders})`,
-    [contextId, sessionId, snapshotSource, contentHash, contentStr, now, ...g.values]
+    `INSERT INTO context_snapshots (context_id, session_id, source, content_hash, content, created_at, ${[...storage.columns, ...g.columns].join(', ')})
+     VALUES (?, ?, ?, ?, ?, ?, ${[...storage.columns.map(() => '?'), g.placeholders].join(', ')})`,
+    [
+      contextId,
+      sessionId,
+      source,
+      storage.contentHash,
+      storage.content,
+      now,
+      ...storage.values,
+      ...g.values,
+    ]
   );
 
   if (!checkWrite(insertResult, sink, `context_snapshots.insert(${contextId})`)) {

@@ -28,6 +28,9 @@ export interface ProjectListItem {
   /** Whether this is the default project */
   isDefault: boolean;
 
+  /** s92-m01 — whether resolution may use this default (false for an unconfirmed pre-3.2.0 one) */
+  defaultApplied: boolean;
+
   /** Whether the CMOS database exists on disk */
   dbExists: boolean;
 
@@ -99,12 +102,14 @@ export async function cmosProjectList(
     // s79-m03 — the project-graph registry is the sole discovery read source.
     const graph = await ProjectGraphRegistry.create();
     const rows = graph.list();
-    const defaultId = graph.getDefault()?.project_id;
+    const defaultStatus = graph.getDefaultStatus();
+    const defaultId = defaultStatus.entry?.project_id;
 
     const items: ProjectListItem[] = rows.map((row) => ({
       projectRoot: row.store_path,
       name: row.name ?? row.store_path,
       isDefault: row.project_id === defaultId,
+      defaultApplied: row.project_id === defaultId && defaultStatus.applied,
       dbExists: fs.existsSync(path.join(row.store_path, 'cmos', 'db', 'cmos.sqlite')),
       registeredAt: new Date(row.registered_at).toISOString(),
       lastAccessedAt: new Date(row.last_seen_at).toISOString(),
@@ -165,7 +170,11 @@ export function formatProjectListForLLM(result: CmosToolResult<ProjectListResult
     lines.push('');
 
     for (const project of data.projects) {
-      const defaultMarker = project.isDefault ? ' (default)' : '';
+      const defaultMarker = project.isDefault
+        ? project.defaultApplied
+          ? ' (default)'
+          : ' (default, not applied — re-register with setAsDefault=true)'
+        : '';
       const missingMarker = project.dbExists ? '' : ' [MISSING]';
       lines.push(`   ${project.name}${defaultMarker}${missingMarker}`);
       lines.push(`   └─ ${project.projectRoot}`);

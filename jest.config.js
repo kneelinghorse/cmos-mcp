@@ -51,7 +51,12 @@ module.exports = {
   // Sprint 70 m01: strip real dashboard creds (leaked from .env via env-loader)
   // before each test so fire-and-forget checkpoint syncs never hit the live
   // dashboard or log after teardown. See tests/jest-setup-after-env.ts.
-  setupFilesAfterEnv: ['<rootDir>/tests/jest-setup-after-env.ts'],
+  // s92-m10 (feedback #44): no test may open a connection to a non-loopback host unless it opts
+  // in; tests/jest-setup-network-deny.ts fails the test that tries.
+  setupFilesAfterEnv: [
+    '<rootDir>/tests/jest-setup-after-env.ts',
+    '<rootDir>/tests/jest-setup-network-deny.ts',
+  ],
   collectCoverage: true,
   coverageDirectory: 'coverage',
   coverageReporters: ['text', 'lcov', 'html'],

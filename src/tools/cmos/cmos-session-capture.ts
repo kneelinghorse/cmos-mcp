@@ -16,6 +16,7 @@ import { ensureMissionIdColumn } from './cmos-mission-complete';
 import { genesisColumns, getProjectId } from './genesis-columns';
 import { resolveOpenSprintIdForWrite } from './current-sprint';
 import {
+  ensureImplicitSessionColumns,
   ensureLearningsTable,
   ensureSessionMissionsTable,
   ensureConstraintsTable,
@@ -28,6 +29,12 @@ import { applyLearningReaffirm, sanitizeLearningIds } from './learning-reaffirm'
 import { recordEmbedding, learningEmbeddingInput } from '../../intelligence/embedding-pipeline';
 import { appendWarnings, appendWriteFailures, attachWarnings } from './format-warnings';
 import { checkWrite, type WriteFailure } from './write-guard';
+import { heldByAnotherProcess, resolveCallerSession } from './session-owner';
+import {
+  closedSessionLines,
+  reconcileStoreOnce,
+  type ClosedSessionReceipt,
+} from './implicit-session-lifecycle';
 
 /**
  * Valid capture categories matching the Python session_runtime.
@@ -141,10 +148,10 @@ export interface CmosSessionCaptureResult {
    */
   constraintExtracted?: boolean;
 
-  /** Supersession candidates detected for this decision */
+  /** @deprecated s92-m04: no longer populated. The automatic supersession offer was retired (69 of 9,035 historical offers were true); a correction names what it replaces with cmos_decisions(action="record", supersedes=[...]). Kept declared so 3.2.0 removes no field. */
   supersessionCandidates?: SupersessionCandidate[];
 
-  /** Human-readable supersession suggestion */
+  /** @deprecated s92-m04: no longer populated. The automatic supersession offer was retired (69 of 9,035 historical offers were true); a correction names what it replaces with cmos_decisions(action="record", supersedes=[...]). Kept declared so 3.2.0 removes no field. */
   supersessionMessage?: string;
 
   /**
@@ -153,11 +160,7 @@ export interface CmosSessionCaptureResult {
    */
   explicitlyReaffirmedLearningIds?: number[];
 
-  /**
-   * Learning IDs whose `last_reviewed_at` was bumped because the new capture's
-   * content overlapped them by at least IMPLICIT_REAFFIRM_KEYWORD_FLOOR keywords.
-   * Sprint 61 m01.
-   */
+  /** @deprecated s92-m04: no longer populated. Implicit reaffirm by content overlap was retired (it hit a cited learning on 20 of 3,973 bumps); cite learnings explicitly with citesLearningIds. Kept declared so 3.2.0 removes no field. */
   implicitlyReaffirmedLearningIds?: number[];
 
   /**
@@ -165,17 +168,32 @@ export interface CmosSessionCaptureResult {
    * resolve to existing rows. Sprint 61 m01.
    */
   missingCitedLearningIds?: number[];
+
+  /**
+   * s92-m03: present when the capture landed in this process's IMPLICIT session, because it
+   * named no session and no explicit session was open. `opened` is true when this capture
+   * opened it.
+   */
+  implicitSession?: { opened: boolean };
+
+  /**
+   * s92-m03: sessions closed after this capture opened an implicit session: implicit sessions
+   * whose process is gone, or any idle past 12 h. Absent when nothing was closed.
+   */
+  closedSessions?: ClosedSessionReceipt[];
 }
 
 /**
  * Input parameters schema for cmos_session_capture tool.
  */
 export const cmosSessionCaptureSchema = z.object({
-  /** Session ID to capture to (optional - uses active session if not provided) */
+  /** Session ID to capture to (optional - uses the caller's session if not provided) */
   sessionId: z
     .string()
     .optional()
-    .describe('Session ID to add capture to (uses active session if not provided)'),
+    .describe(
+      "Session ID to add capture to. Omit it to use the open explicit session, or else this process's implicit session (opened if needed)"
+    ),
 
   /** Capture category */
   category: z
@@ -245,6 +263,14 @@ export const cmosSessionCaptureSchema = z.object({
       'Whether this learning is exempt from staleness archival. Applies only to learning captures.'
     ),
 
+  /** s92-m03 (#589): an explicit existing sprint for the rows this capture writes. */
+  sprintId: z
+    .string()
+    .optional()
+    .describe(
+      "Optional existing sprint ID (any status) for the rows this capture writes; a sprint that does not exist is refused by name. A missionId's sprint wins."
+    ),
+
   /** Optional project root */
   projectRoot: z
     .string()
@@ -260,13 +286,14 @@ export type CmosSessionCaptureParams = z.infer<typeof cmosSessionCaptureSchema>;
 export const cmosSessionCaptureToolDefinition = {
   name: 'cmos_session_capture',
   description:
-    'Capture an insight during an active session. Categories: decision (choices made), learning (what was learned), constraint (limitations discovered), context (background info), next-step (action items). Captures are aggregated into master context when the session completes.',
+    "Capture an insight. Categories: decision (choices made), learning (what was learned), constraint (limitations discovered), context (background info), next-step (action items). No session is required: without one, the capture lands in this process's implicit session. Captures are aggregated into master context when the session completes.",
   inputSchema: {
     type: 'object',
     properties: {
       sessionId: {
         type: 'string',
-        description: 'Session ID to add capture to (uses active session if not provided)',
+        description:
+          "Session ID to add capture to. Omit it to use the open explicit session, or else this process's implicit session (opened if needed)",
       },
       category: {
         type: 'string',
@@ -327,6 +354,11 @@ export const cmosSessionCaptureToolDefinition = {
         type: 'boolean',
         description:
           'Whether this learning is exempt from staleness archival. Applies only to learning captures.',
+      },
+      sprintId: {
+        type: 'string',
+        description:
+          "Optional existing sprint ID (any status) for the rows this capture writes; a sprint that does not exist is refused by name. A missionId's sprint wins.",
       },
       projectRoot: {
         type: 'string',
@@ -390,8 +422,11 @@ export async function cmosSessionCapture(
   const agent = params.agent ?? 'assistant';
 
   const warnings: string[] = [];
+  // s92-m03: the store this call wrote to, for its once-per-store reconcile after the connection.
+  let storePath: string | null = null;
   const result = await withClientAsync(
     async (client) => {
+      storePath = client.path;
       // s86-m02b — SINK HOISTING. `warnings` was declared ~400 lines below, AFTER the decision
       // INSERT, the learning arm and the constraint arm. Wiring their failures into it required
       // moving the declaration here; the alternative — a second array — is explicitly forbidden.
@@ -399,39 +434,50 @@ export async function cmosSessionCapture(
       // not be buried beside "you forgot missionId".
       const writeSink = { failures: [] as WriteFailure[] };
 
-      // Find the session to capture to
-      let sessionId = params.sessionId;
-
-      if (!sessionId) {
-        // Find the active session
-        const activeResult = client.getOne<Session>('SELECT id FROM sessions WHERE status = ?', [
-          'active',
+      // s92-m03 (#589): an explicit sprint must exist. Checked first, so a refused capture opens
+      // no session.
+      const explicitSprintId = params.sprintId?.trim() || null;
+      if (explicitSprintId) {
+        const sprint = client.getOne<{ id: string }>('SELECT id FROM sprints WHERE id = ?', [
+          explicitSprintId,
         ]);
-
-        if (!activeResult.success) {
+        if (!sprint.success) {
           return createError<CmosSessionCaptureResult>(
-            activeResult.error ?? {
-              code: 'DB_QUERY_FAILED',
-              message: 'Failed to find active session',
-            }
+            sprint.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to look up the sprint' }
           );
         }
-
-        if (!activeResult.data) {
-          return createError<CmosSessionCaptureResult>({
-            code: CMOS_ERROR_CODES.SESSION_NOT_ACTIVE,
-            message: 'No active session found',
-            suggestion:
-              'Start a session first with cmos_session(action="start"), or provide a sessionId',
-          });
+        if (!sprint.data) {
+          return createError<CmosSessionCaptureResult>(CmosErrors.sprintNotFound(explicitSprintId));
         }
+      }
 
-        sessionId = activeResult.data.id;
+      // Find the session to capture to
+      let sessionId = params.sessionId;
+      let implicitSession: { opened: boolean } | undefined;
+      warnings.push(...(ensureImplicitSessionColumns(client).warnings ?? []));
+
+      if (!sessionId) {
+        // s92-m03: the caller's session. The project's explicit session if one is open, else
+        // this process's own implicit session, opened now if it has none. A capture no longer
+        // fails for lack of a session.
+        const caller = resolveCallerSession(client, { open: true, agent });
+        if (!caller.ok || !caller.session) {
+          return createError<CmosSessionCaptureResult>(
+            caller.ok
+              ? { code: CMOS_ERROR_CODES.DB_QUERY_FAILED, message: 'Failed to open a session' }
+              : caller.error
+          );
+        }
+        warnings.push(...caller.warnings);
+        sessionId = caller.session.sessionId;
+        if (caller.session.implicit) implicitSession = { opened: caller.session.opened };
       }
 
       // Get the session and verify it's active
-      const sessionResult = client.getOne<Session>(
-        'SELECT id, status, captures, sprint_id FROM sessions WHERE id = ?',
+      const sessionResult = client.getOne<
+        Session & { implicit: number | null; owner_key: string | null }
+      >(
+        'SELECT id, status, captures, sprint_id, started_at, implicit, owner_key FROM sessions WHERE id = ?',
         [sessionId]
       );
 
@@ -449,6 +495,14 @@ export async function cmosSessionCapture(
 
       if (session.status !== 'active') {
         return createError<CmosSessionCaptureResult>(CmosErrors.sessionNotActive(sessionId));
+      }
+
+      // s92-m03: a named session that another running process is writing to is not this
+      // caller's to write into; it would be attributed to that process.
+      if (heldByAnotherProcess(client, session, 'write')) {
+        return createError<CmosSessionCaptureResult>(
+          CmosErrors.sessionOwnedByAnotherProcess(sessionId)
+        );
       }
 
       // Parse existing captures
@@ -474,6 +528,7 @@ export async function cmosSessionCapture(
         context?: string;
         missionId?: string;
         expiresAt?: string;
+        sprintId?: string;
       } = {
         timestamp: now,
         category,
@@ -492,6 +547,21 @@ export async function cmosSessionCapture(
       // permanently undefined. A test exercising only capture would report the bug fixed.
       if (params.expiresAt) {
         newCapture.expiresAt = params.expiresAt;
+      }
+      // s92-m03: a deferred category (next-step, constraint, context) materializes at session
+      // close. Its sprint is decided now, by the rule the immediate rows follow: the mission's
+      // sprint, else the explicit sprintId. With neither, the close decides.
+      let deferredSprintId: string | null = null;
+      if (missionId) {
+        const mission = client.getOne<{ sprint_id: string | null }>(
+          'SELECT sprint_id FROM missions WHERE id = ?',
+          [missionId]
+        );
+        deferredSprintId = mission.success ? (mission.data?.sprint_id ?? null) : null;
+      }
+      deferredSprintId = deferredSprintId ?? explicitSprintId;
+      if (deferredSprintId) {
+        newCapture.sprintId = deferredSprintId;
       }
       captures.push(newCapture);
 
@@ -562,6 +632,9 @@ export async function cmosSessionCapture(
       if (missionId) {
         resultData.missionId = missionId;
       }
+      if (implicitSession) {
+        resultData.implicitSession = implicitSession;
+      }
 
       if (category === 'decision') {
         // Ensure mission_id column exists for decision association
@@ -579,7 +652,8 @@ export async function cmosSessionCapture(
           sprintId = missionResult.success ? (missionResult.data?.sprint_id ?? null) : null;
         }
         if (!sprintId) {
-          sprintId = session.sprint_id ?? inferSprintIdForDecisionCapture(client);
+          sprintId =
+            explicitSprintId ?? session.sprint_id ?? inferSprintIdForDecisionCapture(client);
         }
 
         // s69-m04 — settle the author_* rename (session_id → author_session_id)
@@ -624,17 +698,8 @@ export async function cmosSessionCapture(
             }
             resultData.structuredMaterialization.outcome = 'materialized';
 
-            const followUp = await followDecisionInsert(
-              client,
-              content,
-              written.decisionId,
-              sprintId,
-              warnings
-            );
-            if (followUp.supersessionCandidates) {
-              resultData.supersessionCandidates = followUp.supersessionCandidates;
-              resultData.supersessionMessage = followUp.supersessionMessage;
-            }
+            // s92-m04: embedding only; the automatic supersession offer is retired.
+            await followDecisionInsert(client, content, written.decisionId, warnings);
           } else if (written.kind === 'failed') {
             // s86-m02b — THE FLAGSHIP FIX. This arm has existed since Sprint 20 and set
             // count=0 + alreadyExtracted=false, which the formatter rendered as
@@ -662,7 +727,8 @@ export async function cmosSessionCapture(
           sprintId = missionResult.success ? (missionResult.data?.sprint_id ?? null) : null;
         }
         if (!sprintId) {
-          sprintId = session.sprint_id ?? inferSprintIdForDecisionCapture(client);
+          sprintId =
+            explicitSprintId ?? session.sprint_id ?? inferSprintIdForDecisionCapture(client);
         }
 
         // s69-m04 — settle the author_* rename before the dedup SELECT/INSERT.
@@ -762,7 +828,8 @@ export async function cmosSessionCapture(
           sprintId = missionResult.success ? (missionResult.data?.sprint_id ?? null) : null;
         }
         if (!sprintId) {
-          sprintId = session.sprint_id ?? inferSprintIdForDecisionCapture(client);
+          sprintId =
+            explicitSprintId ?? session.sprint_id ?? inferSprintIdForDecisionCapture(client);
         }
 
         // Dedup via content hash
@@ -803,21 +870,12 @@ export async function cmosSessionCapture(
         }
       }
 
-      // Sprint 61 m01 — auto-reaffirm cited learnings.
-      // Explicit IDs from `citesLearningIds[]` always bump. Implicit overlap fires
-      // only for decision/learning captures (other categories are unrelated to the
-      // institutional-rule corpus). For learning captures, exclude the freshly
-      // inserted row from implicit matches so a learning can't reaffirm itself.
+      // Sprint 61 m01 — reaffirm the learnings a decision or learning capture cites. Since
+      // s92-m04 only the explicit `citesLearningIds[]` bump; content overlap no longer does.
       if (category === 'decision' || category === 'learning') {
         const reaffirm = await applyLearningReaffirm(
           client,
-          {
-            explicitIds: citesLearningIds,
-            newContent: content,
-            reaffirmedAt: now,
-            excludeIds:
-              newlyInsertedLearningId !== undefined ? [newlyInsertedLearningId] : undefined,
-          },
+          { explicitIds: citesLearningIds, reaffirmedAt: now },
           warnings
         );
         // s86-m02b: a failed existence lookup classifies NOTHING, so the reaffirmed/missing
@@ -826,9 +884,6 @@ export async function cmosSessionCapture(
         writeSink.failures.push(...reaffirm.writeFailures);
         if (reaffirm.explicitlyReaffirmedIds.length > 0) {
           resultData.explicitlyReaffirmedLearningIds = reaffirm.explicitlyReaffirmedIds;
-        }
-        if (reaffirm.implicitlyReaffirmedIds.length > 0) {
-          resultData.implicitlyReaffirmedLearningIds = reaffirm.implicitlyReaffirmedIds;
         }
         if (reaffirm.missingIds.length > 0) {
           resultData.missingCitedLearningIds = reaffirm.missingIds;
@@ -875,6 +930,15 @@ export async function cmosSessionCapture(
     },
     { projectRoot: params.projectRoot }
   );
+
+  // s92-m03: on this process's first write to the store, close orphaned or idle implicit sessions,
+  // outside the capture's own connection, even if the capture itself then failed.
+  const reconciled = await reconcileStoreOnce(storePath);
+  warnings.push(...reconciled.warnings);
+  if (reconciled.receipts.length > 0) {
+    if (result.success && result.data) result.data.closedSessions = reconciled.receipts;
+    else warnings.push(...closedSessionLines(reconciled.receipts));
+  }
   return attachWarnings(result, warnings);
 }
 
@@ -970,7 +1034,9 @@ export function formatSessionCaptureForLLM(
   const lines = [
     `${categoryIcon[data.category]} **${data.category.charAt(0).toUpperCase() + data.category.slice(1)} Captured**`,
     '',
-    `**Session**: ${data.sessionId}`,
+    data.implicitSession
+      ? `**Session**: ${data.sessionId} (implicit${data.implicitSession.opened ? ', opened for this process' : ''})`
+      : `**Session**: ${data.sessionId}`,
     // s91-m05: the caller already holds what it sent; a 9 KB decision was echoed in full.
     data.content.length > CONTENT_ECHO_CHARS
       ? `**Content**: ${data.content.slice(0, CONTENT_ECHO_CHARS)}… (${data.content.length} characters stored)`
@@ -1015,18 +1081,18 @@ export function formatSessionCaptureForLLM(
     }
   }
 
-  if (data.supersessionMessage) {
-    lines.push('');
-    lines.push('⚠️ **Supersession Suggestion**');
-    lines.push(data.supersessionMessage);
-  }
-
   if (data.evidenceStored?.length) {
     lines.push(`**Evidence**: ${data.evidenceStored.map((e) => `${e.type}:${e.id}`).join(', ')}`);
   }
 
   if (data.sourceChunkIds?.length) {
     lines.push(`**Source Chunks**: ${data.sourceChunkIds.join(', ')}`);
+  }
+
+  if (data.closedSessions && data.closedSessions.length > 0) {
+    lines.push('');
+    lines.push('**Closed stale sessions**:');
+    for (const line of closedSessionLines(data.closedSessions)) lines.push(`  ${line}`);
   }
 
   appendWriteFailures(lines, data.writeFailures);

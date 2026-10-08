@@ -48,6 +48,16 @@ export interface SprintUpdateResult {
 
   /** Human-readable message */
   message: string;
+
+  /**
+   * s92-m02 — present when this update moved the sprint INTO Completed without an explicit
+   * endDate: the actual close time it stamped as end_date. Closing by status update is a real
+   * close, and the next-step lease counts closes by end_date.
+   */
+  endDateStamped?: string;
+
+  /** s92-m02 — with endDateStamped: the end_date the sprint carried before (null when none). */
+  plannedEndDate?: string | null;
 }
 
 /**
@@ -186,8 +196,11 @@ export async function cmosSprintUpdate(
 
   return withClientValidated(
     (client) => {
-      // Check if sprint exists
-      const sprintResult = client.getOne<Sprint>('SELECT id FROM sprints WHERE id = ?', [sprintId]);
+      // Check if sprint exists (s92-m02: also read status/end_date to detect a close)
+      const sprintResult = client.getOne<Sprint>(
+        'SELECT id, status, end_date FROM sprints WHERE id = ?',
+        [sprintId]
+      );
 
       if (!sprintResult.success) {
         return createError<SprintUpdateResult>(
@@ -199,14 +212,38 @@ export async function cmosSprintUpdate(
         return createError<SprintUpdateResult>(CmosErrors.sprintNotFound(sprintId));
       }
 
+      // s92-m02 — moving a sprint INTO Completed is a close. Stamp the actual close time as
+      // end_date unless the caller set endDate in the same update; a planned end date left in
+      // place would be counted by the next-step lease as a close every later carry survived.
+      const closing =
+        fields.status?.trim() === 'Completed' && sprintResult.data.status !== 'Completed';
+      const explicitEndDate = fields.endDate?.trim();
+      const endDateStamped =
+        closing && (explicitEndDate === undefined || explicitEndDate === '')
+          ? new Date().toISOString()
+          : undefined;
+      const futureEndDateWarning =
+        closing &&
+        explicitEndDate &&
+        !Number.isNaN(Date.parse(explicitEndDate)) &&
+        Date.parse(explicitEndDate) > Date.now()
+          ? `endDate '${explicitEndDate}' is in the future: the next-step lease does not count this close until that date. Omit endDate to stamp the actual close time.`
+          : undefined;
+
       // The primary write: build + run the dynamic UPDATE from the provided fields.
       const applyUpdate = (): CmosToolResult<void> => {
         const setClauses: string[] = [];
         const queryParams: (string | null)[] = [];
+        if (endDateStamped !== undefined) {
+          setClauses.push('end_date = ?');
+          queryParams.push(endDateStamped);
+        }
 
         for (const key of fieldKeys) {
           const dbColumn = SPRINT_UPDATE_COLUMNS[key];
           if (!dbColumn) continue;
+          // An empty endDate on a close is "not provided": the stamped close time stands.
+          if (key === 'endDate' && endDateStamped !== undefined) continue;
 
           const value = fields[key as keyof SprintUpdateFields];
           if (value === undefined) continue;
@@ -244,8 +281,20 @@ export async function cmosSprintUpdate(
       };
 
       const message = `Sprint '${sprintId}' updated successfully (${fieldKeys.length} field${fieldKeys.length === 1 ? '' : 's'})`;
-      const success = (warnings?: string[]): CmosToolResult<SprintUpdateResult> =>
-        createSuccess({ sprintId, updatedFields: fieldKeys, message }, warnings);
+      const success = (warnings?: string[]): CmosToolResult<SprintUpdateResult> => {
+        const all = [...(warnings ?? []), ...(futureEndDateWarning ? [futureEndDateWarning] : [])];
+        return createSuccess(
+          {
+            sprintId,
+            updatedFields: fieldKeys,
+            message,
+            ...(endDateStamped !== undefined
+              ? { endDateStamped, plannedEndDate: sprintResult.data!.end_date ?? null }
+              : {}),
+          },
+          all.length > 0 ? all : undefined
+        );
+      };
 
       // Single-current-sprint invariant (s77-m01): only when this update puts the
       // sprint INTO the OPEN set do we demote the other open sprints (atomically).
@@ -315,6 +364,12 @@ export function formatSprintUpdateForLLM(result: CmosToolResult<SprintUpdateResu
     '',
     `Updated fields: ${data.updatedFields.join(', ')}`,
   ];
+  if (data.endDateStamped) {
+    lines.push(
+      `Closed: end_date stamped with the actual close time ${data.endDateStamped}` +
+        (data.plannedEndDate ? ` (the planned end date was ${data.plannedEndDate})` : '')
+    );
+  }
 
   // Sprint 72 m02 (#790): render folded-in collab-sync warnings so a superseded
   // sprint_status push surfaces its restore hint to the operator.

@@ -5,7 +5,7 @@
  * cmos_agent_onboard Tool
  *
  * MCP tool for agent onboarding/context initialization.
- * Returns an aggregated payload optimized for agent context windows (<4KB).
+ * Returns an aggregated payload bounded at ONBOARD_SIZE_BOUND_CHARS (s92-m04; it once claimed <4KB).
  * Combines data from contexts, missions, sessions, and decisions.
  *
  * @module tools/cmos/cmos-agent-onboard
@@ -24,7 +24,14 @@ import type { CmosToolResult, Mission, Session, SanitizedFieldReport } from './t
 import { createError, createSuccess } from './errors';
 import { findWrongTypedStringParam } from './param-type-guard';
 import { recordAgentFeedback } from './agent-feedback';
-import { DashboardClient, type DashboardMessage } from './dashboard-client';
+import {
+  CMOS_DASHBOARD_API_KEY_ENV,
+  CMOS_DASHBOARD_PASSWORD_ENV,
+  CMOS_DASHBOARD_USER_ENV,
+  DashboardClient,
+  type DashboardMessage,
+} from './dashboard-client';
+import { CredentialStore } from '../../intelligence/credential-store';
 import { attributionSource } from './cmos-message';
 import {
   foreignDescriptor,
@@ -64,10 +71,12 @@ import {
   type ServerHealthStatus,
 } from '../../server-health';
 import { computeAuthState, type AuthState } from '../../auth/auth-state';
+import { dashboardExplicitlyConfigured } from '../../auth/project-key-capture';
 import { getStaleConstraintCount as getStaleConstraintCountFromConstraints } from './cmos-constraints';
 import { loadTierConfig, type TierConfig } from './tier-config';
 import { appendWarnings } from './format-warnings';
-import { leaseState, readLeaseAges, type LeaseAge } from './next-step-lease';
+import { LEASE_IDLE_WARN_DAYS, leaseState, readLeaseAges, type LeaseAge } from './next-step-lease';
+import { previewText } from './text-preview';
 
 /**
  * Project identity from master context.
@@ -133,8 +142,18 @@ export interface PendingMissionSummary {
  * Recent decision summary.
  */
 export interface RecentDecisionSummary {
-  /** Decision text */
+  /** s92-m04: the decision's id, so the preview below can be read in full with show. */
+  id: number;
+
+  /**
+   * s92-m04: a preview of the decision text, at most 300 characters. Ten full texts were half
+   * of a 36 KB payload on this repository's store.
+   */
   decision: string;
+
+  /** s92-m04: whether `decision` was cut, and the full text's length. */
+  truncated: boolean;
+  fullLength: number;
 
   /** Domain (e.g., 'ai-studio', 'general') */
   domain: string | null;
@@ -158,21 +177,35 @@ export interface LastSessionData {
   /** Session title */
   title: string;
 
-  /** Session summary */
+  /** Session summary. s92-m04: a preview of at most LAST_SESSION_SUMMARY_MAX_CHARS; the full
+   *  summary is on cmos_session(action="list"). */
   summary: string | null;
 
   /** When the session completed */
   completedAt: string;
 
-  /** Decisions captured in the session (managed + build tiers) */
+  /** Decisions captured in the session (managed + build tiers). s92-m04: the newest
+   *  LAST_SESSION_CAPTURES_MAX, as 300-character previews. */
   decisions?: string[];
 
-  /** Next-steps captured in the session (managed + build tiers) */
+  /** Next-steps captured in the session (managed + build tiers). s92-m04: the newest
+   *  LAST_SESSION_CAPTURES_MAX, as 300-character previews. */
   nextSteps?: string[];
 
   /** Open items from the next_steps table, status=pending (general + build tiers) */
   openItems?: string[];
 }
+
+/**
+ * s92-m04: onboard's bound, in characters of the JSON-serialized payload. Every field that grows
+ * with a project's history is capped (previews, and counts), so the payload stays under this
+ * however long the history is; tests/tools/cmos/honest-opener.test.ts pins it on a fixture whose
+ * every capped field is long. Before this, a 90-sprint store measured 36,142 bytes against a
+ * documented "<4KB"; after it, the same store measures about 21,000.
+ */
+export const ONBOARD_SIZE_BOUND_CHARS = 28_000;
+const LAST_SESSION_SUMMARY_MAX_CHARS = 1_000;
+const LAST_SESSION_CAPTURES_MAX = 5;
 
 /**
  * Sprint context for onboarding.
@@ -206,11 +239,17 @@ export interface SuggestedAction {
 
   /** Priority (1 = highest) */
   priority: number;
+
+  /**
+   * s92-m04: 'onboard' marks an action that only makes sense inside this payload (it points at a
+   * field such as tierSelectionPrompt). cmos_review never forwards such an action.
+   */
+  scope?: 'onboard';
 }
 
 /**
  * Result of agent onboard operation.
- * Optimized for agent context window consumption (<4KB).
+ * Bounded at ONBOARD_SIZE_BOUND_CHARS: history-scaled fields are previews or capped lists (s92-m04).
  */
 export interface CmosAgentOnboardResult {
   /** Project identity from master_context */
@@ -492,7 +531,8 @@ interface InternalCmosAgentOnboardParams extends CmosAgentOnboardParams {
 export const cmosAgentOnboardToolDefinition = {
   name: 'cmos_agent_onboard',
   description:
-    'Get aggregated onboarding payload for agent cold-start. Returns project identity, active session, pending missions, recent decisions, and suggested actions. Optimized for context windows (<4KB). ' +
+    'Get aggregated onboarding payload for agent cold-start. Returns project identity, active session, pending missions, recent decisions, and suggested actions. ' +
+    'Every field that grows with history is a 300-character preview or a capped list, so the payload stays under 28 KB however long the history (about 21 KB on a 90-sprint store); expand a decision with cmos_decisions(action="show"). For the 4 KB opener, use cmos_review. ' +
     UNTRUSTED_CONTENT_CONTRACT,
   inputSchema: {
     type: 'object',
@@ -921,7 +961,11 @@ function getLastSession(client: CmosDatabaseClient, tier: string): LastSessionDa
   const base: LastSessionData = {
     id: session.id,
     title: session.title,
-    summary: session.summary,
+    // A summary that fits keeps its line breaks; only a longer one becomes a (flattened) preview.
+    summary:
+      session.summary === null || session.summary.length <= LAST_SESSION_SUMMARY_MAX_CHARS
+        ? session.summary
+        : previewText(session.summary, LAST_SESSION_SUMMARY_MAX_CHARS).preview,
     completedAt: session.completed_at,
   };
 
@@ -935,12 +979,15 @@ function getLastSession(client: CmosDatabaseClient, tier: string): LastSessionDa
         content?: string;
       }>;
       if (Array.isArray(captures)) {
+        // s92-m04: the newest few, as previews. A long session held dozens of full texts here.
         decisions = captures
           .filter((c) => c.category === 'decision' && typeof c.content === 'string')
-          .map((c) => c.content as string);
+          .slice(-LAST_SESSION_CAPTURES_MAX)
+          .map((c) => previewText(c.content as string).preview);
         nextSteps = captures
           .filter((c) => c.category === 'next-step' && typeof c.content === 'string')
-          .map((c) => c.content as string);
+          .slice(-LAST_SESSION_CAPTURES_MAX)
+          .map((c) => previewText(c.content as string).preview);
       }
     } catch {
       // ignore parse errors
@@ -960,7 +1007,8 @@ function getLastSession(client: CmosDatabaseClient, tier: string): LastSessionDa
       []
     );
     if (openItemsResult.success && openItemsResult.data) {
-      openItems.push(...openItemsResult.data.map((r) => r.content));
+      // s92-m04: previews; a long next-step is read in full from the next-steps list.
+      openItems.push(...openItemsResult.data.map((r) => previewText(r.content).preview));
     }
   }
 
@@ -1029,10 +1077,13 @@ function getActiveSession(client: CmosDatabaseClient): ActiveSessionSummary | nu
   const projExpr = tableHasColumn(client, 'sessions', 'project_id')
     ? 'project_id'
     : 'NULL AS project_id';
+  // s92-m03: the project's explicit session. Implicit sessions belong to processes and are not
+  // the "active session" an agent is told to continue or close.
+  const explicitOnly = tableHasColumn(client, 'sessions', 'implicit') ? 'AND implicit = 0' : '';
   const result = client.getOne<Session & { project_id?: string | null }>(
     `SELECT id, type, title, started_at, captures, ${projExpr}
        FROM sessions
-      WHERE status = 'active'
+      WHERE status = 'active' ${explicitOnly}
       ORDER BY started_at DESC
       LIMIT 1`,
     []
@@ -1159,8 +1210,8 @@ function getRecentDecisions(client: CmosDatabaseClient): RecentDecisionSummary[]
   const projCols = client.getMany<{ name: string }>("PRAGMA table_info('strategic_decisions')", []);
   const projExpr =
     projCols.success && projCols.data?.some((c) => c.name === 'project_id') ? 'project_id' : 'NULL';
-  const result = client.getMany<StrategicDecisionRow>(
-    `SELECT decision_text, project_domain, created_at, ${projExpr} AS project_id
+  const result = client.getMany<StrategicDecisionRow & { id: number }>(
+    `SELECT id, decision_text, project_domain, created_at, ${projExpr} AS project_id
        FROM strategic_decisions
       ORDER BY created_at DESC
       LIMIT 10`,
@@ -1171,12 +1222,18 @@ function getRecentDecisions(client: CmosDatabaseClient): RecentDecisionSummary[]
     return [];
   }
 
-  return result.data.map((d: StrategicDecisionRow) => ({
-    decision: d.decision_text,
-    domain: d.project_domain,
-    createdAt: d.created_at,
-    projectId: d.project_id,
-  }));
+  return result.data.map((d) => {
+    const preview = previewText(d.decision_text);
+    return {
+      id: d.id,
+      decision: preview.preview,
+      truncated: preview.truncated,
+      fullLength: preview.fullLength,
+      domain: d.project_domain,
+      createdAt: d.created_at,
+      projectId: d.project_id,
+    };
+  });
 }
 
 /**
@@ -1238,7 +1295,8 @@ function getNextSteps(client: CmosDatabaseClient): string[] {
       }
 
       seen.add(dedupeKey);
-      nextSteps.push(step);
+      // s92-m04: a preview, like every other history-scaled text in this payload.
+      nextSteps.push(previewText(step).preview);
 
       if (nextSteps.length >= 5) {
         break;
@@ -1446,6 +1504,9 @@ async function fetchMessagingContext(
   // resolver's env fallback, so citing it here would read it wider than it reaches.
   const clientResult = await DashboardClient.fromEnvForProject(projectRoot);
   if (!clientResult.success || !clientResult.data) {
+    // s92-m04: a user who never set the dashboard up has no messages to be unknown. This warning
+    // passes cmos_review's credential filter, so it was a dashboard nag on a local-only opener.
+    if (!(await dashboardInUse(projectRoot))) return null;
     // s87-m05 — WARN rather than returning a silent null. "The dashboard is not configured" and
     // "the dashboard could not be reached" are different facts, and a digest that shows neither
     // messaging block nor explanation is indistinguishable from a project with no messages.
@@ -1829,7 +1890,9 @@ async function detectSenderAttributionAmbiguity(
     reasons.push(`${CMOS_PROJECT_ROOT_ENV} is set`);
   }
 
-  if (advertisedRoots.length === 0) {
+  // s92-m04: a project the caller NAMED (an explicit projectRoot, or one the dispatcher resolved
+  // from the client's roots or the server's --project-root) is not ambiguous for want of roots.
+  if (advertisedRoots.length === 0 && !params.callerProvidedProjectRoot) {
     reasons.push('no MCP roots advertised');
   }
 
@@ -1852,6 +1915,37 @@ async function detectSenderAttributionAmbiguity(
     ambiguous: reasons.length > 0,
     reasons,
   };
+}
+
+/**
+ * s92-m04: whether the user opted into the dashboard. A credential already implies it (authTier
+ * is then not 'none'); otherwise only an explicitly set CMOS_DASHBOARD_URL does. The baked default
+ * URL is not a choice the user made.
+ */
+function dashboardOptedIn(): boolean {
+  return dashboardExplicitlyConfigured();
+}
+
+/**
+ * s92-m04: whether the dashboard is part of this user's setup at all: they opted in, or some
+ * credential exists (a stored key, or a legacy env credential, even a partial one). An unreadable
+ * credential store counts as in use, so a real failure is still reported.
+ */
+async function dashboardInUse(projectRoot: string): Promise<boolean> {
+  if (dashboardOptedIn()) return true;
+  const envCredential = [
+    CMOS_DASHBOARD_API_KEY_ENV,
+    CMOS_DASHBOARD_USER_ENV,
+    CMOS_DASHBOARD_PASSWORD_ENV,
+  ].some((name) => (process.env[name] ?? '').trim().length > 0);
+  if (envCredential) return true;
+  try {
+    const store = await CredentialStore.create();
+    if (Object.keys(await store.listUserScopedKeys()).length > 0) return true;
+    return (await store.getProjectKey(projectRoot)) !== undefined;
+  } catch {
+    return true;
+  }
 }
 
 /**
@@ -1894,6 +1988,8 @@ function generateSuggestedActions(state: {
       action: 'Fresh project detected — no active missions. Begin first-session setup.',
       command: 'Follow the tierSelectionPrompt in this payload to start the opening conversation.',
       priority: 0,
+      // s92-m04: the tierSelectionPrompt exists only in this payload.
+      scope: 'onboard',
     });
   }
 
@@ -1938,11 +2034,13 @@ function generateSuggestedActions(state: {
           'cmos_auth(action="reissue", projectRoot="<current project root>") (after registration completes)',
         priority: 2,
       });
-    } else if (state.authState.authTier === 'none') {
+    } else if (state.authState.authTier === 'none' && dashboardOptedIn()) {
       // Sprint 58 m02 — replaces the Sprint 57 m04 "identitySource === none"
       // branch with a cmos_auth(action="login") command (now that m01 ships
       // the reachable entrypoint). Same trigger condition because authTier
       // is 'none' iff no user-scoped keys AND no legacy env vars.
+      // s92-m04: and only after the user opted into the dashboard. A local-only user has nothing
+      // to log in to, and the nag was the second of three misleading opener actions.
       actions.push({
         action: 'No dashboard credentials configured — run login before any send/init.',
         command: 'cmos_auth(action="login")',
@@ -1990,8 +2088,17 @@ function generateSuggestedActions(state: {
 
   // s91-m06 — the lease squawks where agents look, not only at the close. `lapsing` rows are
   // dropped by the NEXT close unless carried; `warning` rows by the one after.
-  const lapsing = state.leaseAges.filter((row) => leaseState(row.closesSurvived) === 'lapsing');
-  const warned = state.leaseAges.filter((row) => leaseState(row.closesSurvived) === 'warning');
+  const lapsing = state.leaseAges.filter(
+    (row) => leaseState(row.closesSurvived, row.ageDays) === 'lapsing'
+  );
+  const warned = state.leaseAges.filter(
+    (row) => leaseState(row.closesSurvived, row.ageDays) === 'warning'
+  );
+  // s92-m02 (operator Q4): a row that has survived no close for 6+ weeks — the case a project with
+  // no sprint cadence never reaches by close count — is warned, never dropped by the calendar.
+  const idle = state.leaseAges.filter(
+    (row) => leaseState(row.closesSurvived, row.ageDays) === 'idle'
+  );
   if (lapsing.length > 0 || warned.length > 0) {
     const ids = (rows: LeaseAge[]): string =>
       rows.length <= 8
@@ -2013,6 +2120,17 @@ function generateSuggestedActions(state: {
       // Priority 1 while rows are lapsing: the next sprint close — often the very action this list
       // also suggests — writes `dropped` to them.
       priority: lapsing.length > 0 ? 1 : 3,
+    });
+  }
+  if (idle.length > 0) {
+    const shown = idle.slice(0, 8).map((row) => `#${row.id}`);
+    actions.push({
+      action:
+        `${idle.length} next-step(s) idle for ${LEASE_IDLE_WARN_DAYS}+ days with no sprint close: ` +
+        `${shown.join(', ')}${idle.length > 8 ? `, +${idle.length - 8} more` : ''}`,
+      command:
+        'cmos_context(action="next_steps", nextStepAction="carry"|"complete"|"drop", nextStepIds=[...])',
+      priority: 3,
     });
   }
 
@@ -2140,25 +2258,12 @@ function generateSuggestedActions(state: {
     });
   }
 
-  // s91-m06 (feedback #40) — work in flight with no session: captures made now carry no session,
-  // and nothing else on the digest says so.
-  const inFlight = state.pendingMissions.find((m) => m.status === 'In Progress');
-  if (inFlight && !state.activeSession && !skippedTools.has('cmos_session')) {
-    actions.push({
-      action: `Mission ${inFlight.id} is In Progress with no active session`,
-      command: 'cmos_session(action="start", type="custom", title="...")',
-      priority: 3,
-    });
-  }
+  // s91-m06 (feedback #40) warned "Mission X is In Progress with no active session" because
+  // captures made then carried no session. s92-m03 retired it: a capture with no session open now
+  // lands in the calling process's implicit session, so the premise no longer holds.
 
-  // If no active session, suggest starting one
-  if (!state.activeSession) {
-    actions.push({
-      action: 'Start a planning or review session',
-      command: 'cmos_session(action="start", type="planning", title="Session title")',
-      priority: 6,
-    });
-  }
+  // s92-m04 retired "Start a planning or review session" (priority 6): since s92-m03 a session is
+  // optional, and a capture with none open lands in the process's implicit session.
 
   // If there's an active session, remind to complete it. s84-m03: a foreign (pull-merged)
   // active session's title is untrusted DATA — drop it (id-only) rather than embed it

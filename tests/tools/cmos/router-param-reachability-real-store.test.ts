@@ -207,7 +207,7 @@ PRIVATE.describe(PRIVATE_SUITE_TITLE, () => {
     expect(readReviewedAt()).not.toBe(reviewedBefore);
   }, 60_000);
 
-  it('FIRE 2 — statusFilter=["superseded"] recalls a decision the default ["active"] search cannot', async () => {
+  it('FIRE 2 — statusFilter=["superseded"] recalls a decision the default search cannot', async () => {
     const { projectRoot, dbPath } = copyLiveStore();
 
     const counts = withDb(dbPath, (db) =>
@@ -260,10 +260,11 @@ PRIVATE.describe(PRIVATE_SUITE_TITLE, () => {
     expect(withoutFilter.success).toBe(true);
     const defaulted = withoutFilter.data as unknown as {
       results: Array<{ id?: string | number }>;
-      options: { statusFilter: string[] };
+      options: { statusFilter: string[]; excludedStatuses: string[] };
     };
-    // The ['active'] default survives — this is the pre-m03 world, and it is still the default.
-    expect(defaulted.options.statusFilter).toEqual(['active']);
+    // s92-m07: the default drops only superseded rows (it was active-only), so the word that only a
+    // superseded row holds still finds nothing without a filter.
+    expect(defaulted.options).toMatchObject({ statusFilter: [], excludedStatuses: ['superseded'] });
     expect(defaulted.results.length).toBe(0);
 
     // With the filter the same query reaches the superseded corpus. Before m03 this was

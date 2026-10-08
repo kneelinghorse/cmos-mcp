@@ -1,35 +1,31 @@
 // ABOUTME: resolveSenderContext — the single audited boundary that answers
-// ABOUTME: "which local project is calling this tool?" for Sprint 53 attribution rebuild.
+// ABOUTME: "which local project is this tool call about?" (Sprint 53; s92-m01 resolution safety).
 
 /**
- * Sender Context Resolution (Sprint 53 m01)
+ * Sender Context Resolution (Sprint 53 m01; rewritten s92-m01)
  *
- * Every Sprint 32 / Sprint 52 / Sprint 53 recurrence of cross-project mis-attribution
- * traces back to two root causes:
+ * Every recurrence of cross-project mis-attribution has had the same shape: when the caller's
+ * project was unclear, the server picked one anyway. Sprint 53 removed the `CMOS_PROJECT_ROOT`
+ * fallback; s92-m01 removes the rest — the registry-singleton auto-pick (the clean-room run wrote
+ * a decision and a session from an uninitialised folder B into the only registered project A,
+ * learning #387) and the fall-through from a rejected explicit root to the cwd project.
  *
- *   (a) the MCP server had two competing resolvers (`resolveCmosProjectRoot` and
- *       `resolveProjectRootEnhanced`) that disagreed about priority order, and
- *   (b) one of them silently fell back to the `CMOS_PROJECT_ROOT` env var when no
- *       caller-provided root was present, causing every downstream project to be
- *       attributed as cmos-mcp's own project.
+ * THE RULE: never act on a project the caller did not name. The chain SELECTS one store by
+ * detection, in priority order, and the selected store is final — when it fails the acceptance
+ * bar, the call is refused; it never falls through to a different project.
  *
- * This module replaces both resolvers with one priority chain and a fail-closed
- * contract: when the server cannot authoritatively identify the caller, we throw
- * `SenderResolutionError` with a full candidate trace rather than guessing.
- *
- * Priority (highest → lowest):
- *   1. Explicit `explicitProjectRoot` parameter
- *   2. MCP client roots advertised via `roots/list`
- *   3. Auto-discovery from cwd (with cwd-vs-SERVER_INSTALL_ROOT guard)
- *   4. Registry singleton — only when exactly ONE project is registered
- *   5. Throw `SenderResolutionError`
+ *   1. Explicit `explicitProjectRoot` — always final. A folder with no CMOS store is refused.
+ *   2. MCP client roots — the first advertised root inside a CMOS store (walked up like the cwd).
+ *   3. cwd walk-up — the nearest enclosing directory holding a CMOS store, `cmos/db/` (see
+ *      `findEnclosingStore`), including when the cwd is the server's own install root.
+ *   4. Defaults, for a CONTEXTLESS call only (no explicit root, no MCP roots, no store on the
+ *      walk-up, and a cwd of `/`, `$HOME` or the install root): the server's `--project-root`,
+ *      then a registry default an operator CONFIRMED with `setAsDefault`. A default written before
+ *      3.2.0 is never applied until re-confirmed.
+ *   5. Otherwise throw `SenderResolutionError` with the full candidate trace.
  *
  * The `CMOS_PROJECT_ROOT` env var is NOT consulted here — it is retained only as a
- * bootstrap hint at `src/index.ts:17` so the server can locate its own `.env`. See
- * sprint-53-attribution-rebuild.md for the full rationale.
- *
- * No caller-wiring happens in this module — m01 ships the pure resolver + tests.
- * The dispatcher refactor at `src/index.ts` is m02.
+ * bootstrap hint at `src/index.ts` so the server can locate its own `.env`.
  *
  * @module intelligence/sender-context
  */
@@ -41,22 +37,37 @@ import type { CmosDatabaseClient } from '../tools/cmos/client';
 import { withClientAsync } from '../tools/cmos/client';
 import { CmosDetector } from './cmos-detector';
 import { ProjectGraphRegistry } from './project-graph-registry';
+import {
+  SERVER_INSTALL_ROOT,
+  findEnclosingStore,
+  getServerProjectRoot,
+  isContextlessDirectory,
+} from './resolution-policy';
 
 /**
- * The directory where the compiled server binary lives. Computed at module-import time
- * via `path.resolve(__dirname, '../..')` — i.e. one level above `dist/intelligence`.
- *
- * Exported so the cwd-vs-server-install guard can be tested with overrides and so
- * callers can emit a startup diagnostic (Sprint 53 m04). Consumers should NEVER
- * pin tool attribution to this path — it is the one thing we are explicitly trying
- * to prevent becoming an implicit sender.
+ * The directory where the compiled server binary lives (one level above `dist/intelligence`).
+ * Defined in `resolution-policy.ts` and re-exported here for existing importers. Since s92-m01 it
+ * is no longer a guard: a cwd equal to it resolves by cwd when it holds a store (this repository
+ * resolves to itself), and counts as contextless when it does not (an npm install directory).
  */
-export const SERVER_INSTALL_ROOT = path.resolve(__dirname, '..', '..');
+export { SERVER_INSTALL_ROOT };
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Candidate source labels, ordered highest-to-lowest priority. */
-export type SenderResolutionSource = 'explicit' | 'mcp-roots' | 'cwd' | 'registry-singleton';
+export type SenderResolutionSource =
+  | 'explicit'
+  | 'mcp-roots'
+  | 'cwd'
+  | 'server-project-root'
+  | 'registry-default';
+
+/**
+ * How a project was chosen for a tool call, as reported on every success payload (s92-m01).
+ * `none` means the call touched no single project store (a portfolio, registry or
+ * dashboard-only action).
+ */
+export type ResolvedBy = SenderResolutionSource | 'none';
 
 /**
  * One step in the priority chain. Every attempted source is recorded, whether
@@ -118,26 +129,67 @@ export interface ResolveSenderContextOptions {
   readonly cwdOverride?: string;
   readonly registryOverride?: ProjectGraphRegistry;
   readonly serverInstallRootOverride?: string;
+  /** Test seam for `$HOME` (the walk-up ceiling and the contextless test). */
+  readonly homeDirOverride?: string;
+  /**
+   * Test seam for the server's `--project-root`. `null` means "started without one"; omitted
+   * reads the value `src/index.ts` recorded at startup.
+   */
+  readonly serverProjectRootOverride?: string | null;
+}
+
+/**
+ * Why resolution refused (s92-m01), so the dispatcher can name the right remedy:
+ * - `selected-store-rejected`: a store was selected (explicit root, MCP root, cwd walk-up or a
+ *   default) and failed the acceptance bar — no CMOS database, unreadable, or no valid sender
+ *   identity. The call names that store and never falls through to another.
+ * - `no-project-here`: the caller is in a real working folder that is not a CMOS project.
+ * - `contextless-no-default`: the server has no project context and no default applies.
+ */
+export type SenderResolutionOutcome =
+  | 'selected-store-rejected'
+  | 'no-project-here'
+  | 'contextless-no-default';
+
+/** A registry default that exists but is not applied (written before 3.2.0, never confirmed). */
+export interface UnappliedRegistryDefault {
+  readonly projectId: string;
+  readonly name: string;
+  readonly storePath: string;
 }
 
 /**
  * Thrown when no candidate in the priority chain produced a project that satisfied
  * the caller's acceptance bar. Carries the full candidate trace for operator
- * debugging — exposed via `cmos_message(action='whoami')` in m03.
+ * debugging — exposed via `cmos_message(action='whoami')`.
  */
 export class SenderResolutionError extends Error {
   readonly code: string;
   readonly candidates: ReadonlyArray<ResolutionCandidate>;
+  /** s92-m01: why resolution refused; drives the refusal's remedy. */
+  readonly outcome: SenderResolutionOutcome;
+  /** s92-m01: the folder the refusal names — the caller's working folder or the selected store. */
+  readonly workingDir: string | null;
+  /** s92-m01: a registry default that exists but was not applied, when one is relevant. */
+  readonly unappliedDefault: UnappliedRegistryDefault | null;
 
   constructor(
     message: string,
     candidates: ReadonlyArray<ResolutionCandidate>,
-    code = 'SENDER_UNRESOLVABLE'
+    code = 'SENDER_UNRESOLVABLE',
+    details: {
+      outcome?: SenderResolutionOutcome;
+      workingDir?: string | null;
+      unappliedDefault?: UnappliedRegistryDefault | null;
+    } = {}
   ) {
     super(message);
     this.name = 'SenderResolutionError';
     this.code = code;
     this.candidates = candidates;
+    this.outcome = details.outcome ?? 'selected-store-rejected';
+    this.workingDir = details.workingDir ?? null;
+    this.unappliedDefault = details.unappliedDefault ?? null;
   }
 }
 
@@ -262,7 +314,8 @@ export async function resolveSenderContext(
 ): Promise<SenderContext> {
   const candidates: ResolutionCandidate[] = [];
   const requireSenderIdentity = opts.requireSenderIdentity ?? true;
-  const serverInstallRoot = path.resolve(opts.serverInstallRootOverride ?? SERVER_INSTALL_ROOT);
+  const installRoot = path.resolve(opts.serverInstallRootOverride ?? SERVER_INSTALL_ROOT);
+  const homeDir = opts.homeDirOverride;
 
   const isAcceptable = (v: ValidateProjectResult): boolean =>
     requireSenderIdentity ? v.hasValidSenderIdentity : v.hasDatabase;
@@ -283,90 +336,113 @@ export async function resolveSenderContext(
     };
   };
 
-  // ─── Step 1: explicit ───────────────────────────────────────────────────
-  if (opts.explicitProjectRoot) {
-    const root = path.resolve(opts.explicitProjectRoot);
-    const validation = await validateProject(root);
-    if (isAcceptable(validation)) {
-      return accept('explicit', root, validation);
-    }
+  /**
+   * The selected store is final: accept it, or refuse naming it. Never fall through — a rejected
+   * selection that continued down the chain is how `projectRoot=/B` from cwd A used to write A.
+   */
+  const settle = async (
+    source: SenderResolutionSource,
+    projectRoot: string
+  ): Promise<SenderContext> => {
+    const validation = await validateProject(projectRoot);
+    if (isAcceptable(validation)) return accept(source, projectRoot, validation);
     candidates.push({
-      source: 'explicit',
-      projectRoot: root,
+      source,
+      projectRoot,
       accepted: false,
-      rejectReason: validation.rejectReason ?? 'explicit projectRoot not acceptable',
+      rejectReason: validation.rejectReason ?? `${source} project not acceptable`,
     });
+    throw new SenderResolutionError(
+      `The ${describeSource(source)} '${projectRoot}' was selected for this call and cannot be ` +
+        `used: ${validation.rejectReason ?? 'not acceptable'}. Resolution does not fall back to ` +
+        'another project.',
+      candidates,
+      undefined,
+      { outcome: 'selected-store-rejected', workingDir: projectRoot }
+    );
+  };
+
+  // ─── Step 1: explicit — always final ───────────────────────────────────
+  if (opts.explicitProjectRoot) {
+    return settle('explicit', path.resolve(opts.explicitProjectRoot));
   }
 
-  // ─── Step 2: MCP client roots ───────────────────────────────────────────
-  for (const root of opts.mcpRoots ?? []) {
-    const resolved = path.resolve(root);
-    const validation = await validateProject(resolved);
-    if (isAcceptable(validation)) {
-      return accept('mcp-roots', resolved, validation);
-    }
+  // ─── Step 2: MCP client roots — the first root inside a store ──────────
+  // Each advertised root is walked up exactly like the cwd (a workspace opened on a subfolder of
+  // a project is that project), and a store whose database is gone is still selected and refused
+  // by name rather than skipped.
+  const mcpRoots = (opts.mcpRoots ?? []).map((root) => path.resolve(root));
+  for (const root of mcpRoots) {
+    const enclosing = findEnclosingStore(root, { homeDir });
+    if (enclosing) return settle('mcp-roots', enclosing.root);
     candidates.push({
       source: 'mcp-roots',
-      projectRoot: resolved,
+      projectRoot: root,
       accepted: false,
-      rejectReason: validation.rejectReason ?? 'mcp root not acceptable',
+      rejectReason: 'no CMOS database at projectRoot',
     });
   }
 
-  // ─── Step 3: cwd (with cwd-vs-SERVER_INSTALL_ROOT guard) ────────────────
+  // ─── Step 3: cwd walk-up — the nearest enclosing store ─────────────────
   const cwd = path.resolve(opts.cwdOverride ?? process.cwd());
-  const guardEngaged =
-    cwd === serverInstallRoot && requireSenderIdentity && !opts.explicitProjectRoot;
-  if (guardEngaged) {
-    candidates.push({
-      source: 'cwd',
-      projectRoot: cwd,
-      accepted: false,
-      rejectReason:
-        'cwd-vs-SERVER_INSTALL_ROOT guard: cmos-mcp must never be implicit sender for another project',
-    });
-  } else {
-    const validation = await validateProject(cwd);
-    if (isAcceptable(validation)) {
-      return accept('cwd', cwd, validation);
-    }
-    candidates.push({
-      source: 'cwd',
-      projectRoot: cwd,
-      accepted: false,
-      rejectReason: validation.rejectReason ?? 'cwd not acceptable',
-    });
+  const enclosing = findEnclosingStore(cwd, { homeDir });
+  if (enclosing) return settle('cwd', enclosing.root);
+  candidates.push({
+    source: 'cwd',
+    projectRoot: cwd,
+    accepted: false,
+    rejectReason: 'no CMOS database at projectRoot',
+  });
+
+  // ─── Step 4: defaults — contextless calls only ─────────────────────────
+  const contextless =
+    mcpRoots.length === 0 && isContextlessDirectory(cwd, { homeDir, installRoot });
+  if (!contextless) {
+    // A real working folder that is not a CMOS project. Name the folder the client advertised
+    // when it advertised one; otherwise the server's cwd.
+    throw new SenderResolutionError(
+      `No CMOS project in '${mcpRoots[0] ?? cwd}'. No projectRoot was passed and no enclosing ` +
+        'folder holds cmos/db/cmos.sqlite.',
+      candidates,
+      undefined,
+      { outcome: 'no-project-here', workingDir: mcpRoots[0] ?? cwd }
+    );
   }
 
-  // ─── Step 4: registry singleton (s79-m03: graph is the discovery source) ──
+  const serverProjectRoot =
+    opts.serverProjectRootOverride === undefined
+      ? getServerProjectRoot()
+      : (opts.serverProjectRootOverride ?? undefined);
+  if (serverProjectRoot) {
+    return settle('server-project-root', path.resolve(serverProjectRoot));
+  }
+
+  let unappliedDefault: UnappliedRegistryDefault | null = null;
   try {
     const registry = opts.registryOverride ?? (await ProjectGraphRegistry.create());
-    const projects = registry.list();
-    if (projects.length === 1) {
-      const root = path.resolve(projects[0].store_path);
-      const validation = await validateProject(root);
-      if (isAcceptable(validation)) {
-        return accept('registry-singleton', root, validation);
-      }
-      candidates.push({
-        source: 'registry-singleton',
-        projectRoot: root,
-        accepted: false,
-        rejectReason: validation.rejectReason ?? 'registry-singleton not acceptable',
-      });
-    } else {
-      candidates.push({
-        source: 'registry-singleton',
-        accepted: false,
-        rejectReason:
-          projects.length === 0
-            ? 'registry is empty'
-            : `registry has ${projects.length} projects; auto-pick only allowed when size === 1`,
-      });
+    const status = registry.getDefaultStatus();
+    if (status.entry && status.applied) {
+      return settle('registry-default', path.resolve(status.entry.store_path));
     }
-  } catch (err) {
+    if (status.entry) {
+      unappliedDefault = {
+        projectId: status.entry.project_id,
+        name: status.entry.name,
+        storePath: status.entry.store_path,
+      };
+    }
     candidates.push({
-      source: 'registry-singleton',
+      source: 'registry-default',
+      projectRoot: status.entry?.store_path,
+      accepted: false,
+      rejectReason: status.entry
+        ? `registry default '${status.entry.name}' is not applied: it was set before 3.2.0 and never re-confirmed with setAsDefault`
+        : 'no registry default is set',
+    });
+  } catch (err) {
+    if (err instanceof SenderResolutionError) throw err;
+    candidates.push({
+      source: 'registry-default',
       accepted: false,
       rejectReason: `registry error: ${err instanceof Error ? err.message : 'unknown'}`,
     });
@@ -374,8 +450,26 @@ export async function resolveSenderContext(
 
   // ─── Step 5: fail closed ────────────────────────────────────────────────
   throw new SenderResolutionError(
-    'Could not authoritatively resolve sender context. No candidate produced a project ' +
-      'with a valid dashboard identity. See SenderResolutionError.candidates for the full trace.',
-    candidates
+    `No CMOS project for this call: the server's working directory '${cwd}' carries no project ` +
+      'context, no projectRoot was passed, and no default applies.',
+    candidates,
+    undefined,
+    { outcome: 'contextless-no-default', workingDir: cwd, unappliedDefault }
   );
+}
+
+/** Human wording for a candidate source, used in refusals. */
+export function describeSource(source: SenderResolutionSource): string {
+  switch (source) {
+    case 'explicit':
+      return 'projectRoot you passed';
+    case 'mcp-roots':
+      return 'MCP root';
+    case 'cwd':
+      return 'project enclosing the working directory';
+    case 'server-project-root':
+      return "--project-root in this server's config";
+    case 'registry-default':
+      return 'registry default project';
+  }
 }

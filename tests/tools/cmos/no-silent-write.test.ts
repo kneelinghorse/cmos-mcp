@@ -754,9 +754,13 @@ describe('no-silent-write: every execute(), raw(), and transaction() result is i
     expect(violations.length === 0 ? '' : message).toBe('');
   });
 
-  it('derives the transaction-verb exemption from the SQL and selects exactly the 3 known ROLLBACKs', () => {
+  // s92-m09: 3 -> 4. cmos-db-prune-snapshots.ts unwinds every failure inside its transaction (a
+  // failed re-read, tombstone UPDATE or COMMIT) through one bare ROLLBACK, the exempt shape
+  // exactly: the original failure is already in the answer, and inspecting the ROLLBACK would only
+  // risk masking it.
+  it('derives the transaction-verb exemption from the SQL and selects exactly the 4 known ROLLBACKs', () => {
     const exempt = sites.filter((site) => site.bucket === 'exempt-transaction-verb');
-    expect({ count: exempt.length, sites: render(exempt) }).toMatchObject({ count: 3 });
+    expect({ count: exempt.length, sites: render(exempt) }).toMatchObject({ count: 4 });
     expect(exempt.every((site) => site.detail.startsWith('transaction verb: ROLLBACK'))).toBe(true);
   });
 });

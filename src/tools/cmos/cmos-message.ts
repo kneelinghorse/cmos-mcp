@@ -47,6 +47,12 @@ import {
   type SenderResolutionSource,
 } from '../../intelligence/sender-context';
 import { appendWarnings } from './format-warnings';
+import {
+  ProjectGraphRegistry,
+  reconfirmDefaultCall,
+  unappliedDefaultNotice,
+} from '../../intelligence/project-graph-registry';
+import { getServerProjectRoot } from '../../intelligence/resolution-policy';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -285,9 +291,27 @@ export interface MessageWhoamiResult {
   candidates: ResolutionCandidate[];
   serverInstall: {
     root: string;
+    /**
+     * Whether the server's install root is the project this call resolved to. s92-m01 retired the
+     * cwd-vs-install-root guard: a cwd equal to the install root resolves by cwd when it holds a
+     * store (this repository resolves to itself), so this is now a fact about the resolution, not
+     * a fallback risk.
+     */
     wouldHaveBeenUsed: boolean;
     envCmosProjectRoot: string | null;
   };
+  /** s92-m01 — the `--project-root` this server was started with, if any. */
+  serverProjectRoot?: string | null;
+  /**
+   * s92-m01 — the registry default, if one is set. `applied` is false for a default written
+   * before 3.2.0 and never re-confirmed with setAsDefault; resolution never uses it.
+   */
+  registryDefault?: {
+    projectId: string;
+    name: string;
+    storePath: string;
+    applied: boolean;
+  } | null;
   wouldAttributeAs: {
     senderProjectId: string | null;
     senderAddress: string | null;
@@ -360,7 +384,7 @@ export const cmosMessageSchema = z
       .int()
       .nonnegative()
       .optional()
-      .describe('s84-m02: pagination offset for list (SQL-side, dashboard m05). Omit for page 0.'),
+      .describe('Pagination offset for list. Omit for page 0.'),
     // respond params
     messageId: z
       .string()
@@ -402,7 +426,7 @@ export const cmosMessageToolDefinition = {
     'directory (discover addressable projects), whoami (diagnose sender attribution). ' +
     'Send auto-detects senderProjectId, normalizes addresses (spaces→hyphens, lowercase), ' +
     'and validates target against the project directory before sending. ' +
-    'Requires CMOS_DASHBOARD_URL, CMOS_DASHBOARD_USER, and CMOS_DASHBOARD_PASSWORD environment variables. ' +
+    'Needs a dashboard sign-in: run cmos_auth(action="login_init"), then login_complete. ' +
     UNTRUSTED_CONTENT_CONTRACT,
   inputSchema: {
     type: 'object',
@@ -464,7 +488,7 @@ export const cmosMessageToolDefinition = {
       offset: {
         type: 'integer',
         minimum: 0,
-        description: 'Pagination offset for list (SQL-side, dashboard m05). Omit for page 0.',
+        description: 'Pagination offset for list. Omit for page 0.',
       },
       messageId: {
         type: 'string',
@@ -576,8 +600,6 @@ function resolvedFromContext(context: SenderContext | undefined): MessageWhoamiR
 function buildWhoamiWarnings(
   strictError: SenderResolutionError | undefined,
   resolvedContext: SenderContext | undefined,
-  cwd: string,
-  serverInstallRoot: string,
   envCmosProjectRoot: string | null,
   mcpRoots?: readonly string[]
 ): string[] {
@@ -585,13 +607,7 @@ function buildWhoamiWarnings(
 
   if (envCmosProjectRoot) {
     warnings.push(
-      `${CMOS_PROJECT_ROOT_ENV} is set to ${envCmosProjectRoot}. Sprint 53 removed it from tool-call resolution; it now exists only for .env bootstrap.`
-    );
-  }
-
-  if (cwd === serverInstallRoot) {
-    warnings.push(
-      'cwd equals server install root; this path must never be the implicit sender for another project.'
+      `${CMOS_PROJECT_ROOT_ENV} is set to ${envCmosProjectRoot}. It does not select a project for tool calls; the server reads it only to find its own .env.`
     );
   }
 
@@ -626,16 +642,8 @@ export interface MessageWhoamiOptions {
 export async function getWhoamiDiagnostics(
   options: MessageWhoamiOptions = {}
 ): Promise<CmosToolResult<MessageWhoamiResult>> {
-  const cwd = path.resolve(options.cwdOverride ?? process.cwd());
   const serverInstallRoot = path.resolve(options.serverInstallRootOverride ?? SERVER_INSTALL_ROOT);
   const envCmosProjectRoot = normalizeOptionalEnvPath(process.env[CMOS_PROJECT_ROOT_ENV]);
-  const serverInstall = {
-    root: serverInstallRoot,
-    wouldHaveBeenUsed:
-      cwd === serverInstallRoot ||
-      (envCmosProjectRoot !== null && path.resolve(envCmosProjectRoot) === serverInstallRoot),
-    envCmosProjectRoot,
-  };
 
   let strictContext: SenderContext | undefined;
   let strictError: SenderResolutionError | undefined;
@@ -695,10 +703,41 @@ export async function getWhoamiDiagnostics(
     authState = undefined;
   }
 
+  const serverInstall = {
+    root: serverInstallRoot,
+    wouldHaveBeenUsed:
+      resolvedContext !== undefined &&
+      path.resolve(resolvedContext.projectRoot) === serverInstallRoot,
+    envCmosProjectRoot,
+  };
+
+  // s92-m01: show the registry default and whether resolution may use it. Best-effort — a
+  // registry hiccup never fails whoami.
+  let registryDefault: MessageWhoamiResult['registryDefault'] = null;
+  let defaultNotice: string | null = null;
+  try {
+    const status = (await ProjectGraphRegistry.create()).getDefaultStatus();
+    if (status.entry) {
+      registryDefault = {
+        projectId: status.entry.project_id,
+        name: status.entry.name,
+        storePath: status.entry.store_path,
+        applied: status.applied,
+      };
+    }
+    const notice = unappliedDefaultNotice(status);
+    defaultNotice =
+      notice && status.entry ? `${notice}: ${reconfirmDefaultCall(status.entry)}` : null;
+  } catch {
+    registryDefault = null;
+  }
+
   const data: MessageWhoamiResult = {
     resolved: resolvedFromContext(resolvedContext),
     candidates: [...candidates],
     serverInstall,
+    serverProjectRoot: getServerProjectRoot() ?? null,
+    registryDefault,
     wouldAttributeAs: {
       senderProjectId: strictContext?.dashboardProjectId ?? null,
       senderAddress: strictContext?.cmosAddress ?? null,
@@ -712,13 +751,14 @@ export async function getWhoamiDiagnostics(
     // inside `if (!strictContext)` above, so on every successful resolution it was `undefined`
     // while `resolvedContext` held the answer.
     resolvedContext,
-    cwd,
-    serverInstallRoot,
     envCmosProjectRoot,
     options.mcpRoots
   );
   if (authState?.warning) {
     warnings.push(authState.warning);
+  }
+  if (defaultNotice) {
+    warnings.push(defaultNotice);
   }
 
   if (strictContext) {
@@ -1726,9 +1766,15 @@ function formatWhoamiForLLM(result: CmosToolResult<MessageWhoamiResult>): string
   }
   lines.push(`  Server install root: ${d?.serverInstall.root ?? SERVER_INSTALL_ROOT}`);
   lines.push(
-    `  Legacy server-install fallback risk: ${d?.serverInstall.wouldHaveBeenUsed ? 'yes' : 'no'}`
+    `  Install root is the resolved project: ${d?.serverInstall.wouldHaveBeenUsed ? 'yes' : 'no'}`
   );
   lines.push(`  ${CMOS_PROJECT_ROOT_ENV}: ${d?.serverInstall.envCmosProjectRoot ?? 'unset'}`);
+  lines.push(`  --project-root: ${d?.serverProjectRoot ?? 'not set'}`);
+  if (d?.registryDefault) {
+    lines.push(
+      `  Registry default: ${d.registryDefault.name} (${d.registryDefault.applied ? 'applied to contextless calls' : 'not applied'})`
+    );
+  }
 
   appendWarnings(lines, result);
 

@@ -14,6 +14,7 @@ import { ensureLearningsTable } from './schema-migrations';
 import { getProjectId } from './genesis-columns';
 import { frameForeignText } from '../../intelligence/provenance-frame';
 import { appendWarnings, attachWarnings } from './format-warnings';
+import { PREVIEW_MAX_CHARS, previewText } from './text-preview';
 
 /**
  * Learning search result.
@@ -22,8 +23,15 @@ export interface LearningSearchResult {
   /** Learning ID */
   id: number;
 
-  /** Learning content text */
+  /**
+   * s92-m08: a preview of the learning, at most 300 characters (retrieval R5). Matching read the
+   * full text; read it in full with cmos_learnings(action="show", learningId).
+   */
   content: string;
+
+  /** s92-m08: whether content was cut, and the full text's length. */
+  truncated: boolean;
+  fullLength: number;
 
   /** Category (technical, process, agent-behavior, tooling) */
   category: string | null;
@@ -207,7 +215,9 @@ export async function cmosLearningsSearch(
       const totalMatches = matched.length;
       const results: LearningSearchResult[] = matched.slice(0, limit).map(({ row, relevance }) => ({
         id: row.id,
-        content: row.content,
+        ...(({ preview, truncated, fullLength }) => ({ content: preview, truncated, fullLength }))(
+          previewText(row.content)
+        ),
         category: row.category,
         status: row.status,
         sprintId: row.sprint_id,
@@ -287,13 +297,22 @@ export function formatLearningsSearchForLLM(
     const isForeign =
       r.projectId != null && (localProjectId == null || r.projectId !== localProjectId);
     if (isForeign) {
-      lines.push(`•${meta} [proj:${r.projectId}]`);
+      lines.push(`• #${r.id}${meta} [proj:${r.projectId}]`);
       lines.push(frameForeignText(r.content, `proj:${r.projectId}`));
     } else {
-      lines.push(`• ${r.content}${meta}`);
+      lines.push(`• #${r.id} ${r.content}${meta}`);
     }
     lines.push(`  Created: ${r.createdAt} | Relevance: ${r.relevance}`);
     lines.push('');
+  }
+
+  // s92-m08: previews are cut at PREVIEW_MAX_CHARS; say once how to read one in full.
+  const cut = data.results.find((r) => r.truncated);
+  if (cut) {
+    lines.push(
+      `Previews are cut at ${PREVIEW_MAX_CHARS} characters. Read one in full with ` +
+        `cmos_learnings(action="show", learningId=${cut.id}).`
+    );
   }
 
   appendWarnings(lines, result);

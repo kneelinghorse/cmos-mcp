@@ -28,6 +28,19 @@ export interface ProjectRegisterResult {
   /** Whether this project is now the default */
   isDefault: boolean;
 
+  /**
+   * s92-m01 — whether resolution may use this default. False for a default written before 3.2.0
+   * and never re-confirmed; true once `setAsDefault: true` confirms it.
+   */
+  defaultApplied: boolean;
+
+  /**
+   * s92-m01 — whether the path lies under an ephemeral location (the OS temp dir, /tmp,
+   * /private/tmp, or CMOS_EPHEMERAL_PATHS). `cmos_project(action="validate", prune=true)`
+   * archives such rows even while the store exists.
+   */
+  ephemeral: boolean;
+
   /** Whether project was already registered (updated) */
   wasAlreadyRegistered: boolean;
 
@@ -134,20 +147,32 @@ export async function cmosProjectRegister(
     });
 
     const metadataRepaired = !hadId && readStoreIdentity(resolvedPath) !== null;
-    const isDefault = graph.getDefault()?.project_id === entry.project_id;
+    const defaultStatus = graph.getDefaultStatus();
+    const isDefault = defaultStatus.entry?.project_id === entry.project_id;
+    const ephemeral = graph.isEphemeral(resolvedPath);
     const baseMessage = wasAlreadyRegistered
       ? `Updated project registration: ${entry.name}`
       : `Registered project: ${entry.name}`;
+    const warnings = ephemeral
+      ? [
+          `${resolvedPath} is in an ephemeral location; cmos_project(action="validate", prune=true) archives it even while the store exists.`,
+        ]
+      : undefined;
 
-    return createSuccess({
-      projectRoot: resolvedPath,
-      name: entry.name,
-      isDefault,
-      wasAlreadyRegistered,
-      registeredAt: new Date(entry.registered_at).toISOString(),
-      metadataRepaired,
-      message: baseMessage + (metadataRepaired ? ' (project metadata auto-populated)' : ''),
-    });
+    return createSuccess(
+      {
+        projectRoot: resolvedPath,
+        name: entry.name,
+        isDefault,
+        defaultApplied: isDefault && defaultStatus.applied,
+        ephemeral,
+        wasAlreadyRegistered,
+        registeredAt: new Date(entry.registered_at).toISOString(),
+        metadataRepaired,
+        message: baseMessage + (metadataRepaired ? ' (project metadata auto-populated)' : ''),
+      },
+      warnings
+    );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return createError({
@@ -187,8 +212,15 @@ export function formatProjectRegisterForLLM(result: CmosToolResult<ProjectRegist
     '',
     `   Path: ${data.projectRoot}`,
     `   Name: ${data.name}`,
-    `   Default: ${data.isDefault ? 'Yes' : 'No'}`,
+    `   Default: ${
+      data.isDefault
+        ? data.defaultApplied
+          ? 'Yes'
+          : 'Yes, not applied (set before 3.2.0; re-run with setAsDefault=true to apply it)'
+        : 'No'
+    }`,
   ];
+  if (data.ephemeral) lines.push('   Ephemeral: Yes (archived by validate with prune=true)');
 
   appendWarnings(lines, result);
 

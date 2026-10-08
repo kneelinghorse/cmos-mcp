@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test, jest } from '@jest/globals';
+import { afterEach, beforeAll, beforeEach, describe, expect, test, jest } from '@jest/globals';
 import { promises as fs } from 'fs';
 import os from 'os';
 import path from 'path';
@@ -120,6 +120,26 @@ async function loadIndexModule() {
   };
 }
 
+/**
+ * s92-m10 — the first import of src/index compiles its whole module graph through ts-jest. Charged
+ * to the first test, that took 70 s under a full-suite run (about 0.4 s alone) and blew the test's
+ * timeout. Pay it here, under its own timeout, so every test is timed for what it does. The import
+ * registers SIGINT/SIGTERM handlers; remove them so no test sees this module's listeners.
+ */
+beforeAll(async () => {
+  const before = {
+    SIGINT: process.listeners('SIGINT'),
+    SIGTERM: process.listeners('SIGTERM'),
+  };
+  await import('../src/index');
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    for (const listener of process.listeners(signal)) {
+      if (!before[signal].includes(listener)) process.removeListener(signal, listener);
+    }
+  }
+  jest.resetModules();
+}, 180_000);
+
 beforeEach(() => {
   jest.clearAllMocks();
 });
@@ -144,10 +164,23 @@ const createMockContext = () =>
     tokenCounter: {} as any,
   }) as any;
 
+/** Set CMOS_DEBUG for one test (undefined unsets it) and return the restore step. */
+function withDebugEnv(value: string | undefined): () => void {
+  const saved = process.env.CMOS_DEBUG;
+  if (value === undefined) delete process.env.CMOS_DEBUG;
+  else process.env.CMOS_DEBUG = value;
+  return () => {
+    if (saved === undefined) delete process.env.CMOS_DEBUG;
+    else process.env.CMOS_DEBUG = saved;
+  };
+}
+
 describe('Mission Protocol entry lifecycle', () => {
   test('initializeServer logs initialization details and returns context', async () => {
     const moduleData = await loadIndexModule();
     const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    // s92-m07: these diagnostics are behind CMOS_DEBUG=1 (a normal start writes two lines).
+    const restoreDebug = withDebugEnv('1');
 
     const context = createMockContext();
     moduleData.indexModule.__test__.setContextBuilder(async () => context);
@@ -177,12 +210,15 @@ describe('Mission Protocol entry lifecycle', () => {
       moduleData.indexModule.__test__.resetStartupAttributionSelfTestRunner();
       moduleData.indexModule.__test__.resetContextBuilder();
       consoleSpy.mockRestore();
+      restoreDebug();
     }
   });
 
   test('initializeServer logs "pruned N stale entries" when startup prune finds drift', async () => {
     const moduleData = await loadIndexModule();
     const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    // s92-m07: these diagnostics are behind CMOS_DEBUG=1 (a normal start writes two lines).
+    const restoreDebug = withDebugEnv('1');
 
     const context = createMockContext();
     moduleData.indexModule.__test__.setContextBuilder(async () => context);
@@ -212,12 +248,15 @@ describe('Mission Protocol entry lifecycle', () => {
       moduleData.indexModule.__test__.resetStartupRegistryPruneRunner();
       moduleData.indexModule.__test__.resetContextBuilder();
       consoleSpy.mockRestore();
+      restoreDebug();
     }
   });
 
   test('initializeServer logs healthy state when startup prune finds nothing to remove', async () => {
     const moduleData = await loadIndexModule();
     const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    // s92-m07: these diagnostics are behind CMOS_DEBUG=1 (a normal start writes two lines).
+    const restoreDebug = withDebugEnv('1');
 
     const context = createMockContext();
     moduleData.indexModule.__test__.setContextBuilder(async () => context);
@@ -246,6 +285,7 @@ describe('Mission Protocol entry lifecycle', () => {
       moduleData.indexModule.__test__.resetStartupRegistryPruneRunner();
       moduleData.indexModule.__test__.resetContextBuilder();
       consoleSpy.mockRestore();
+      restoreDebug();
     }
   });
 
@@ -352,13 +392,17 @@ describe('Mission Protocol entry lifecycle', () => {
     try {
       await moduleData.indexModule.__test__.initializeServer();
 
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Sender attribution self-test: unresolved (SENDER_UNRESOLVABLE)')
-      );
+      // s92-m07: a warning stays visible without CMOS_DEBUG; the [INFO] self-test line does not.
       expect(consoleSpy).toHaveBeenCalledWith(
         expect.stringContaining('[P0] Sender attribution self-test warning')
       );
       expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('SERVER_INSTALL_ROOT'));
+      expect(consoleSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining('Sender attribution self-test: unresolved (SENDER_UNRESOLVABLE)')
+      );
+      expect(consoleSpy.mock.calls.filter((call) => String(call[0]).startsWith('[INFO]'))).toEqual(
+        []
+      );
     } finally {
       moduleData.cleanup();
       moduleData.indexModule.__test__.resetStartupAttributionSelfTestRunner();
@@ -851,7 +895,10 @@ describe('Mission Protocol entry lifecycle', () => {
     }
   });
 
-  test('main connects server and logs startup details', async () => {
+  test.each([
+    ['without CMOS_DEBUG: exactly the two startup lines', undefined],
+    ['with CMOS_DEBUG=1: the diagnostics come back', '1'],
+  ])('main connects the server and logs its startup (%s)', async (_label, debug) => {
     const moduleData = await loadIndexModule();
     const { indexModule, mockServer, transportCtor } = moduleData;
     const context = createMockContext();
@@ -862,6 +909,16 @@ describe('Mission Protocol entry lifecycle', () => {
       errorCode: null,
       warning: null,
     }));
+    // Never resolve the real working directory (the repository's own store) from a test.
+    indexModule.__test__.setStartupProjectDescriber(
+      async () => 'project: /tmp/current-project (from the working directory)'
+    );
+    const restoreDebug = withDebugEnv(debug);
+    // s92-m10: these two lines describe a healthy start. A checkout with no dist/ build (the CI
+    // quality job runs the suite before building) adds the real missing-manifest WARN, which
+    // tests/server-health.test.ts covers; it is not this test's subject.
+    const serverHealth = await import('../src/server-health');
+    jest.spyOn(serverHealth, 'initServerHealth').mockImplementation(() => {});
 
     const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
 
@@ -871,14 +928,27 @@ describe('Mission Protocol entry lifecycle', () => {
       expect(mockServer.setRequestHandler).toHaveBeenCalled();
       expect(mockServer.connect).toHaveBeenCalled();
       expect(transportCtor).toHaveBeenCalled();
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining('cmos-mcp MCP server running on stdio')
-      );
+      const lines = consoleSpy.mock.calls.map((call) => String(call[0]));
+      const startup = [
+        expect.stringMatching(/^\[cmos-mcp\] v\d+\.\d+\.\d+ ready on stdio \(\d+ tools\)$/),
+        '[cmos-mcp] project: /tmp/current-project (from the working directory)',
+      ];
+      if (debug) {
+        expect(lines).toEqual(expect.arrayContaining(startup));
+        expect(lines).toContainEqual(
+          expect.stringContaining('cmos-mcp MCP server running on stdio')
+        );
+        expect(lines.length).toBeGreaterThan(10);
+      } else {
+        expect(lines).toEqual(startup);
+      }
     } finally {
       moduleData.cleanup();
       indexModule.__test__.resetStartupAttributionSelfTestRunner();
+      indexModule.__test__.resetStartupProjectDescriber();
       indexModule.__test__.resetContextBuilder();
       consoleSpy.mockRestore();
+      restoreDebug();
     }
   });
 

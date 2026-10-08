@@ -14,7 +14,7 @@ cmos-seed/
 ├── db/
 │   └── schema.sql      # Full CMOS SQLite schema
 ├── foundational-docs/  # Planning documents registered in project identity
-├── templates/           # Project README and agents.md templates
+├── templates/           # Project README and AGENTS.md templates
 ├── tiers/
 │   ├── build.md        # Build tier behavioral guide
 │   ├── general.md      # General tier behavioral guide
@@ -99,23 +99,23 @@ cmos_mission_transition(action="complete", missionId="s01-m01", notes="What was 
 
 ### Available MCP Tools
 
-| Tool                      | Actions                                                                              |
-| ------------------------- | ------------------------------------------------------------------------------------ |
-| `cmos_review`             | _(no action — the session-opener digest)_                                            |
-| `cmos_agent_onboard`      | _(no action — cold-start project state)_                                             |
-| `cmos_project`            | init, register, list, unregister, validate, prune, update, sweep                     |
-| `cmos_status`             | _(no action — identity and dashboard diagnostics)_                                   |
-| `cmos_db`                 | health, snapshot, restore, backfill, reconcile, purge, pull, clone, identify_orphans |
-| `cmos_mission`            | list, show, status, add, update, move, depends, undepends                            |
-| `cmos_mission_transition` | start, complete, block, unblock, drop, defer                                         |
-| `cmos_sprint`             | list, show, add, update, complete, retro, carry_forward, analytics                   |
-| `cmos_session`            | list, start, capture, complete, search                                               |
-| `cmos_context`            | view, update, condense, snapshot, history, next_steps, constraints, search           |
-| `cmos_decisions`          | list, search, update, review, batch_update, record                                   |
-| `cmos_learnings`          | list, search, update, reaffirm                                                       |
-| `cmos_feedback`           | list, triage, resolve, archive                                                       |
-| `cmos_auth`               | login_init, login_complete, login, logout, rotate, revoke, list, reissue             |
-| `cmos_message`            | send, list, get, respond, ack, directory, whoami                                     |
+| Tool                      | Actions                                                                                               |
+| ------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `cmos_review`             | _(no action — the session-opener digest)_                                                             |
+| `cmos_agent_onboard`      | _(no action — cold-start project state)_                                                              |
+| `cmos_project`            | init, register, list, unregister, validate, prune, update, sweep                                      |
+| `cmos_status`             | _(no action — identity and dashboard diagnostics)_                                                    |
+| `cmos_db`                 | health, snapshot, restore, backfill, reconcile, purge, pull, clone, identify_orphans, prune_snapshots |
+| `cmos_mission`            | list, show, status, add, update, move, depends, undepends                                             |
+| `cmos_mission_transition` | start, complete, block, unblock, drop, defer                                                          |
+| `cmos_sprint`             | list, show, add, update, complete, retro, carry_forward, analytics                                    |
+| `cmos_session`            | list, start, capture, complete, search                                                                |
+| `cmos_context`            | view, update, condense, snapshot, history, next_steps, constraints, search                            |
+| `cmos_decisions`          | list, search, show, update, review, batch_update, record                                              |
+| `cmos_learnings`          | list, search, show, update, reaffirm                                                                  |
+| `cmos_feedback`           | list, triage, resolve, archive                                                                        |
+| `cmos_auth`               | login_init, login_complete, login, logout, rotate, revoke, list, reissue                              |
+| `cmos_message`            | send, list, get, respond, ack, directory, whoami                                                      |
 
 ---
 
@@ -165,4 +165,4 @@ See `docs/` for complete documentation:
 ---
 
 **Schema Version**: 2.1
-**Last Updated**: 2026-09-18
+**Last Updated**: 2026-10-07

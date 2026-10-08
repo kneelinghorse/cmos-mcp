@@ -230,22 +230,57 @@ describe('sender-context', () => {
       expect(ctx.cmosAddress).toBe('cmos://derek/explicit');
     });
 
-    it('step 1 falls through when explicit root is invalid', async () => {
-      const invalidRoot = await trackTmp('sctx-invalid-explicit-');
-      const cwdRoot = await trackTmp('sctx-cwd-valid-');
-      seedCmosDb(cwdRoot, { dashboardProjectId: VALID_UUID, cmosAddress: 'cmos://derek/cwd' });
+    it('step 1: an explicit root naming a non-CMOS folder is final — never the cwd project', async () => {
+      // s92-m01: projectRoot=/B called from cwd A used to fall through and write A.
+      const folderB = await trackTmp('sctx-explicit-non-cmos-');
+      const projectA = await trackTmp('sctx-cwd-project-a-');
+      seedCmosDb(projectA, { dashboardProjectId: VALID_UUID, cmosAddress: 'cmos://derek/a' });
 
       const registry = await isolatedRegistry();
-      const ctx = await resolveSenderContext({
-        explicitProjectRoot: invalidRoot,
-        cwdOverride: cwdRoot,
-        registryOverride: registry,
-        serverInstallRootOverride: '/some/other/install',
+      let caught: SenderResolutionError | null = null;
+      try {
+        await resolveSenderContext({
+          explicitProjectRoot: folderB,
+          cwdOverride: projectA,
+          registryOverride: registry,
+          serverInstallRootOverride: '/some/other/install',
+          requireSenderIdentity: false,
+        });
+      } catch (err) {
+        caught = err as SenderResolutionError;
+      }
+      expect(caught).toBeInstanceOf(SenderResolutionError);
+      expect(caught!.outcome).toBe('selected-store-rejected');
+      expect(caught!.workingDir).toBe(path.resolve(folderB));
+      // The cwd project was never even considered.
+      expect(caught!.candidates.map((c) => c.source)).toEqual(['explicit']);
+    });
+
+    it('step 1: an explicit store without a sender identity is refused, not swapped for cwd', async () => {
+      const explicitNoIdentity = await trackTmp('sctx-explicit-no-identity-');
+      seedCmosDb(explicitNoIdentity, { cmosAddress: 'cmos://derek/b' });
+      const cwdValid = await trackTmp('sctx-explicit-cwd-valid-');
+      seedCmosDb(cwdValid, { dashboardProjectId: VALID_UUID, cmosAddress: 'cmos://derek/a' });
+
+      const registry = await isolatedRegistry();
+      await expect(
+        resolveSenderContext({
+          explicitProjectRoot: explicitNoIdentity,
+          cwdOverride: cwdValid,
+          registryOverride: registry,
+          serverInstallRootOverride: '/some/other/install',
+          requireSenderIdentity: true,
+        })
+      ).rejects.toMatchObject({
+        outcome: 'selected-store-rejected',
+        candidates: [
+          expect.objectContaining({
+            source: 'explicit',
+            accepted: false,
+            rejectReason: expect.stringMatching(/dashboard_project_id/),
+          }),
+        ],
       });
-      expect(ctx.source).toBe('cwd');
-      const explicitCandidate = ctx.candidates.find((c) => c.source === 'explicit');
-      expect(explicitCandidate?.accepted).toBe(false);
-      expect(explicitCandidate?.rejectReason).toBeDefined();
     });
 
     it('step 2: mcp-roots chosen when explicit absent', async () => {
@@ -271,6 +306,45 @@ describe('sender-context', () => {
       );
     });
 
+    it('step 2: the first MCP root holding a store is final, even when a later one is valid', async () => {
+      const rootNoIdentity = await trackTmp('sctx-p2-first-store-');
+      seedCmosDb(rootNoIdentity, { cmosAddress: 'cmos://derek/first' });
+      const rootValid = await trackTmp('sctx-p2-later-valid-');
+      seedCmosDb(rootValid, { dashboardProjectId: VALID_UUID, cmosAddress: 'cmos://derek/later' });
+
+      const registry = await isolatedRegistry();
+      await expect(
+        resolveSenderContext({
+          mcpRoots: [rootNoIdentity, rootValid],
+          cwdOverride: '/tmp/does-not-have-cmos',
+          registryOverride: registry,
+          serverInstallRootOverride: '/some/other/install',
+          requireSenderIdentity: true,
+        })
+      ).rejects.toMatchObject({
+        outcome: 'selected-store-rejected',
+        workingDir: path.resolve(rootNoIdentity),
+      });
+    });
+
+    it('step 2: an MCP root opened on a subfolder of a project resolves to that project', async () => {
+      const project = await trackTmp('sctx-p2-root-walkup-');
+      seedCmosDb(project, { dashboardProjectId: VALID_UUID, cmosAddress: 'cmos://derek/rootwalk' });
+      const subfolder = path.join(project, 'packages', 'web');
+      fsSync.mkdirSync(subfolder, { recursive: true });
+
+      const registry = await isolatedRegistry();
+      const ctx = await resolveSenderContext({
+        mcpRoots: [subfolder],
+        cwdOverride: '/',
+        registryOverride: registry,
+        serverInstallRootOverride: '/some/other/install',
+        requireSenderIdentity: false,
+      });
+      expect(ctx.source).toBe('mcp-roots');
+      expect(ctx.projectRoot).toBe(path.resolve(project));
+    });
+
     it('step 3: cwd used when explicit + mcp-roots empty/invalid', async () => {
       const cwdRoot = await trackTmp('sctx-p3-cwd-');
       seedCmosDb(cwdRoot, { dashboardProjectId: VALID_UUID, cmosAddress: 'cmos://derek/cwd3' });
@@ -285,65 +359,82 @@ describe('sender-context', () => {
       expect(ctx.projectRoot).toBe(path.resolve(cwdRoot));
     });
 
-    it('step 4: registry singleton used when above all fall through', async () => {
-      const registered = await trackTmp('sctx-p4-registry-');
-      seedCmosDb(registered, {
-        dashboardProjectId: VALID_UUID,
-        cmosAddress: 'cmos://derek/singleton',
-      });
+    it('step 3: a cwd inside a project resolves to that project by walking up', async () => {
+      const project = await trackTmp('sctx-p3-walkup-');
+      seedCmosDb(project, { dashboardProjectId: VALID_UUID, cmosAddress: 'cmos://derek/walk' });
+      const nested = path.join(project, 'packages', 'web', 'src');
+      fsSync.mkdirSync(nested, { recursive: true });
 
       const registry = await isolatedRegistry();
-      registry.registerStore(registered);
-
-      const cwdEmpty = await trackTmp('sctx-p4-empty-cwd-');
       const ctx = await resolveSenderContext({
-        cwdOverride: cwdEmpty,
+        cwdOverride: nested,
         registryOverride: registry,
         serverInstallRootOverride: '/some/other/install',
       });
-      expect(ctx.source).toBe('registry-singleton');
-      expect(ctx.projectRoot).toBe(path.resolve(registered));
-      expect(ctx.cmosAddress).toBe('cmos://derek/singleton');
+      expect(ctx.source).toBe('cwd');
+      expect(ctx.projectRoot).toBe(path.resolve(project));
     });
 
-    it('step 4: refuses registry auto-pick when size > 1', async () => {
-      const rootA = await trackTmp('sctx-reg-a-');
-      const rootB = await trackTmp('sctx-reg-b-');
-      seedCmosDb(rootA, {
-        dashboardProjectId: VALID_UUID,
-        cmosAddress: 'cmos://derek/a',
-        slug: 'a',
-      });
-      seedCmosDb(rootB, {
-        dashboardProjectId: OTHER_UUID,
-        cmosAddress: 'cmos://derek/b',
-        slug: 'b',
-      });
+    it('step 3: the walk-up stops below $HOME, so a store there cannot capture a subfolder', async () => {
+      const fakeHome = await trackTmp('sctx-home-');
+      seedCmosDb(fakeHome, { dashboardProjectId: VALID_UUID, cmosAddress: 'cmos://derek/home' });
+      const workFolder = path.join(fakeHome, 'work', 'new-thing');
+      fsSync.mkdirSync(workFolder, { recursive: true });
 
       const registry = await isolatedRegistry();
-      registry.registerStore(rootA);
-      registry.registerStore(rootB);
-
-      const cwdEmpty = await trackTmp('sctx-reg-multi-cwd-');
       await expect(
         resolveSenderContext({
-          cwdOverride: cwdEmpty,
+          cwdOverride: workFolder,
+          homeDirOverride: fakeHome,
           registryOverride: registry,
           serverInstallRootOverride: '/some/other/install',
+          requireSenderIdentity: false,
         })
-      ).rejects.toBeInstanceOf(SenderResolutionError);
+      ).rejects.toMatchObject({ outcome: 'no-project-here', workingDir: workFolder });
+
+      // …while a cwd OF $HOME still resolves to a store initialised there.
+      const atHome = await resolveSenderContext({
+        cwdOverride: fakeHome,
+        homeDirOverride: fakeHome,
+        registryOverride: registry,
+        serverInstallRootOverride: '/some/other/install',
+        requireSenderIdentity: false,
+      });
+      expect(atHome.projectRoot).toBe(path.resolve(fakeHome));
     });
 
-    it('step 5: throws SenderResolutionError with full candidate trace', async () => {
+    it('never auto-picks the sole registered project (the clean-room singleton scenario)', async () => {
+      // learning #387: with exactly one registered project A, a call from uninitialised folder B
+      // used to resolve to A by the registry-singleton step and write there.
+      const projectA = await trackTmp('sctx-singleton-a-');
+      seedCmosDb(projectA, { dashboardProjectId: VALID_UUID, cmosAddress: 'cmos://derek/a' });
+      const registry = await isolatedRegistry();
+      registry.registerStore(projectA);
+
+      const folderB = await trackTmp('sctx-singleton-folder-b-');
+      for (const requireSenderIdentity of [true, false]) {
+        await expect(
+          resolveSenderContext({
+            cwdOverride: folderB,
+            registryOverride: registry,
+            serverInstallRootOverride: '/some/other/install',
+            requireSenderIdentity,
+          })
+        ).rejects.toMatchObject({
+          outcome: 'no-project-here',
+          workingDir: path.resolve(folderB),
+        });
+      }
+    });
+
+    it('refuses with a trace when roots and cwd hold no store and the cwd is a real folder', async () => {
       const cwdEmpty = await trackTmp('sctx-fail-cwd-');
-      const explicitBad = await trackTmp('sctx-fail-explicit-');
       const rootBad = await trackTmp('sctx-fail-root-');
       const registry = await isolatedRegistry();
 
       let caught: SenderResolutionError | null = null;
       try {
         await resolveSenderContext({
-          explicitProjectRoot: explicitBad,
           mcpRoots: [rootBad],
           cwdOverride: cwdEmpty,
           registryOverride: registry,
@@ -352,13 +443,11 @@ describe('sender-context', () => {
       } catch (err) {
         caught = err as SenderResolutionError;
       }
-      expect(caught).not.toBeNull();
       expect(caught).toBeInstanceOf(SenderResolutionError);
-      expect(caught!.code).toBe('SENDER_UNRESOLVABLE');
-      const sources = caught!.candidates.map((c) => c.source);
-      expect(sources).toEqual(
-        expect.arrayContaining(['explicit', 'mcp-roots', 'cwd', 'registry-singleton'])
-      );
+      expect(caught!.outcome).toBe('no-project-here');
+      // The folder the client advertised is the one named, not the server's cwd.
+      expect(caught!.workingDir).toBe(path.resolve(rootBad));
+      expect(caught!.candidates.map((c) => c.source)).toEqual(['mcp-roots', 'cwd']);
       for (const c of caught!.candidates) {
         expect(c.accepted).toBe(false);
         expect(c.rejectReason).toBeTruthy();
@@ -366,10 +455,123 @@ describe('sender-context', () => {
     });
   });
 
-  // ─── cwd-vs-SERVER_INSTALL_ROOT guard ─────────────────────────────────────
+  // ─── contextless calls: the only ones a default may serve ────────────────
 
-  describe('cwd-vs-SERVER_INSTALL_ROOT guard', () => {
-    it('rejects cwd when cwd === SERVER_INSTALL_ROOT and requireSenderIdentity=true', async () => {
+  describe('contextless defaults', () => {
+    async function twoProjects(): Promise<{
+      registry: ProjectGraphRegistry;
+      a: string;
+      b: string;
+    }> {
+      const a = await trackTmp('sctx-default-a-');
+      seedCmosDb(a, { dashboardProjectId: VALID_UUID, cmosAddress: 'cmos://derek/a', slug: 'a' });
+      const b = await trackTmp('sctx-default-b-');
+      seedCmosDb(b, { dashboardProjectId: OTHER_UUID, cmosAddress: 'cmos://derek/b', slug: 'b' });
+      const registry = await isolatedRegistry();
+      registry.registerStore(a);
+      registry.registerStore(b);
+      return { registry, a, b };
+    }
+
+    it.each([
+      ['the filesystem root', (_home: string, _install: string) => '/'],
+      ['$HOME', (home: string) => home],
+      ['the server install root', (_home: string, install: string) => install],
+    ])('a cwd of %s with no roots uses --project-root', async (_label, pickCwd) => {
+      const { registry, b } = await twoProjects();
+      const fakeHome = await trackTmp('sctx-ctxless-home-');
+      const install = await trackTmp('sctx-ctxless-install-');
+      const ctx = await resolveSenderContext({
+        cwdOverride: pickCwd(fakeHome, install),
+        homeDirOverride: fakeHome,
+        serverInstallRootOverride: install,
+        serverProjectRootOverride: b,
+        registryOverride: registry,
+        requireSenderIdentity: false,
+      });
+      expect(ctx.source).toBe('server-project-root');
+      expect(ctx.projectRoot).toBe(path.resolve(b));
+    });
+
+    it('uses a registry default only after it was confirmed with setAsDefault', async () => {
+      const { registry, a } = await twoProjects();
+      const fakeHome = await trackTmp('sctx-confirm-home-');
+      const opts = {
+        cwdOverride: fakeHome,
+        homeDirOverride: fakeHome,
+        serverInstallRootOverride: '/some/other/install',
+        serverProjectRootOverride: null,
+        registryOverride: registry,
+        requireSenderIdentity: false,
+      };
+
+      // A default written the pre-3.2.0 way (no confirmation) is visible but not applied.
+      registry.setDefault(registry.getByStorePath(a)!);
+      await expect(resolveSenderContext(opts)).rejects.toMatchObject({
+        outcome: 'contextless-no-default',
+        unappliedDefault: expect.objectContaining({ storePath: path.resolve(a) }),
+      });
+
+      registry.registerStore(a, { setAsDefault: true });
+      const ctx = await resolveSenderContext(opts);
+      expect(ctx.source).toBe('registry-default');
+      expect(ctx.projectRoot).toBe(path.resolve(a));
+    });
+
+    it('never uses a default — confirmed or --project-root — from a real working folder', async () => {
+      const { registry, a, b } = await twoProjects();
+      registry.registerStore(a, { setAsDefault: true });
+      const folder = await trackTmp('sctx-real-folder-');
+      await expect(
+        resolveSenderContext({
+          cwdOverride: folder,
+          serverInstallRootOverride: '/some/other/install',
+          serverProjectRootOverride: b,
+          registryOverride: registry,
+          requireSenderIdentity: false,
+        })
+      ).rejects.toMatchObject({ outcome: 'no-project-here', workingDir: path.resolve(folder) });
+    });
+
+    it('is not contextless once the client advertises roots', async () => {
+      const { registry, a } = await twoProjects();
+      registry.registerStore(a, { setAsDefault: true });
+      const advertised = await trackTmp('sctx-advertised-root-');
+      await expect(
+        resolveSenderContext({
+          mcpRoots: [advertised],
+          cwdOverride: '/',
+          serverInstallRootOverride: '/some/other/install',
+          serverProjectRootOverride: null,
+          registryOverride: registry,
+          requireSenderIdentity: false,
+        })
+      ).rejects.toMatchObject({ outcome: 'no-project-here', workingDir: path.resolve(advertised) });
+    });
+
+    it('refuses a --project-root that holds no CMOS store instead of moving on', async () => {
+      const { registry, a } = await twoProjects();
+      registry.registerStore(a, { setAsDefault: true });
+      const notAStore = await trackTmp('sctx-bad-project-root-');
+      await expect(
+        resolveSenderContext({
+          cwdOverride: '/',
+          serverInstallRootOverride: '/some/other/install',
+          serverProjectRootOverride: notAStore,
+          registryOverride: registry,
+          requireSenderIdentity: false,
+        })
+      ).rejects.toMatchObject({
+        outcome: 'selected-store-rejected',
+        workingDir: path.resolve(notAStore),
+      });
+    });
+  });
+
+  // ─── the server install root is no longer a guard (s92-m01 fork 1) ────────
+
+  describe('server install root', () => {
+    it('resolves by cwd when cwd is the install root and it holds a store, even for a send', async () => {
       const installRoot = await trackTmp('sctx-install-');
       seedCmosDb(installRoot, {
         dashboardProjectId: VALID_UUID,
@@ -377,57 +579,28 @@ describe('sender-context', () => {
       });
       const registry = await isolatedRegistry();
 
-      let caught: SenderResolutionError | null = null;
-      try {
-        await resolveSenderContext({
-          cwdOverride: installRoot,
-          serverInstallRootOverride: installRoot,
-          registryOverride: registry,
-          requireSenderIdentity: true,
-        });
-      } catch (err) {
-        caught = err as SenderResolutionError;
-      }
-      expect(caught).toBeInstanceOf(SenderResolutionError);
-      const cwdCandidate = caught!.candidates.find((c) => c.source === 'cwd');
-      expect(cwdCandidate?.accepted).toBe(false);
-      expect(cwdCandidate?.rejectReason).toMatch(/SERVER_INSTALL_ROOT/);
-    });
-
-    it('allows cwd === SERVER_INSTALL_ROOT when explicit root was passed (self-work case)', async () => {
-      const installRoot = await trackTmp('sctx-install-explicit-');
-      seedCmosDb(installRoot, {
-        dashboardProjectId: VALID_UUID,
-        cmosAddress: 'cmos://derek/cmos-mcp',
-      });
-      const registry = await isolatedRegistry();
-
-      const ctx = await resolveSenderContext({
-        explicitProjectRoot: installRoot,
-        cwdOverride: installRoot,
-        serverInstallRootOverride: installRoot,
-        registryOverride: registry,
-      });
-      expect(ctx.source).toBe('explicit');
-      expect(ctx.projectRoot).toBe(path.resolve(installRoot));
-    });
-
-    it('allows cwd === SERVER_INSTALL_ROOT when requireSenderIdentity=false', async () => {
-      const installRoot = await trackTmp('sctx-install-nonreq-');
-      seedCmosDb(installRoot, {
-        dashboardProjectId: VALID_UUID,
-        cmosAddress: 'cmos://derek/cmos-mcp',
-      });
-      const registry = await isolatedRegistry();
-
       const ctx = await resolveSenderContext({
         cwdOverride: installRoot,
         serverInstallRootOverride: installRoot,
         registryOverride: registry,
-        requireSenderIdentity: false,
+        requireSenderIdentity: true,
       });
       expect(ctx.source).toBe('cwd');
       expect(ctx.projectRoot).toBe(path.resolve(installRoot));
+    });
+
+    it('treats a store-less install root as contextless', async () => {
+      const installRoot = await trackTmp('sctx-install-empty-');
+      const registry = await isolatedRegistry();
+      await expect(
+        resolveSenderContext({
+          cwdOverride: installRoot,
+          serverInstallRootOverride: installRoot,
+          serverProjectRootOverride: null,
+          registryOverride: registry,
+          requireSenderIdentity: false,
+        })
+      ).rejects.toMatchObject({ outcome: 'contextless-no-default' });
     });
   });
 

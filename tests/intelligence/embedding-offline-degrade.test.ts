@@ -105,7 +105,9 @@ describe('offline graceful-degrade + negative caching (s78-m03)', () => {
     await expect(first('hello world')).rejects.toThrow(/unavailable/i);
   });
 
-  test('recordEmbedding degrades to action:"failed" without throwing', async () => {
+  // s92-m07: a load failure is reported once, at load; every later write reports
+  // 'skipped-unavailable' (no embedder in this process) instead of failing per write.
+  test('recordEmbedding degrades to action:"skipped-unavailable" without throwing', async () => {
     const client = await openClient();
     try {
       const result = await recordEmbedding(client, {
@@ -113,7 +115,7 @@ describe('offline graceful-degrade + negative caching (s78-m03)', () => {
         id: 1,
         inputText: 'Use SQLite as the single source of truth for retrieval',
       });
-      expect(result.action).toBe('failed');
+      expect(result.action).toBe('skipped-unavailable');
     } finally {
       client.close();
     }

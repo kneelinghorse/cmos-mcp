@@ -42,6 +42,7 @@ import path from 'path';
 import { ensureDir } from '../utils/fs';
 import { isReadOnlyAgentSession } from '../tools/cmos/read-only-agent-guard';
 import { currentToolCallActionMode } from '../tools/cmos/tool-call-context';
+import { defaultEphemeralRoots, isEphemeralStorePath } from './resolution-policy';
 
 /**
  * s86-m01 — write the one diagnostic this module emits (the registration-collision
@@ -118,6 +119,14 @@ const IDENTITY_BACKFILL_MARKER_KEY = 'identity_backfill_done';
  */
 const DEFAULT_PROJECT_META_KEY = 'default_project_id';
 
+/**
+ * s92-m01 — registry_meta key holding the `project_id` an operator CONFIRMED as the default with
+ * an explicit `setAsDefault`. A default is applied only while this key equals
+ * {@link DEFAULT_PROJECT_META_KEY}. Defaults written before 3.2.0 (a legacy JSON migration, an
+ * older sibling process) never set it, so they stay visible but are not honoured until re-set.
+ */
+const DEFAULT_CONFIRMED_META_KEY = 'default_project_confirmed';
+
 /** Legacy default path waiting for its store to receive a durable project_id. */
 const PENDING_LEGACY_DEFAULT_PATH_META_KEY = 'pending_legacy_default_store_path';
 
@@ -161,6 +170,20 @@ export interface ProjectGraphRegistryOptions {
   registryFilename?: string;
   /** Injectable clock for deterministic tests (default: Date.now). */
   now?: () => number;
+  /**
+   * s92-m01 — locations whose stores count as ephemeral (default: `defaultEphemeralRoots()`).
+   * Every Jest store lives under `os.tmpdir()`, so a test that needs a store to count as durable
+   * passes its own list here.
+   */
+  ephemeralRoots?: readonly string[];
+}
+
+/** s92-m01 — the default project, and whether it is applied. */
+export interface ProjectGraphDefaultStatus {
+  /** The registered default, or null when none is set (or its row is gone). */
+  readonly entry: ProjectGraphEntry | null;
+  /** True only when an operator confirmed this default with an explicit `setAsDefault`. */
+  readonly applied: boolean;
 }
 
 interface MetaRow {
@@ -178,6 +201,7 @@ export class ProjectGraphRegistry {
   private readonly configDir: string;
   private readonly registryPath: string;
   private readonly now: () => number;
+  private readonly ephemeralRoots: readonly string[] | undefined;
   private db: Database.Database | null = null;
 
   private constructor(options: ProjectGraphRegistryOptions = {}) {
@@ -188,6 +212,7 @@ export class ProjectGraphRegistry {
     const filename = options.registryFilename ?? 'project-graph.sqlite';
     this.registryPath = path.join(this.configDir, filename);
     this.now = options.now ?? Date.now;
+    this.ephemeralRoots = options.ephemeralRoots;
   }
 
   /** Singleton accessor. */
@@ -404,20 +429,46 @@ export class ProjectGraphRegistry {
   }
 
   /**
+   * s92-m01 — the default project plus whether it may be used. Resolution reads only an APPLIED
+   * default, and only for a contextless call; display surfaces show an unapplied one as
+   * "not applied" so the operator can see it and decide.
+   */
+  getDefaultStatus(): ProjectGraphDefaultStatus {
+    const entry = this.getDefault();
+    if (!entry) return { entry: null, applied: false };
+    return { entry, applied: this.readMeta(DEFAULT_CONFIRMED_META_KEY) === entry.project_id };
+  }
+
+  /**
    * Set the default project by `project_id`. Refuses (returns false) when the id
    * is not registered — mirrors `ProjectRegistry.setDefault`, which won't point
    * the default at an unknown project.
+   *
+   * s92-m01: `confirmed: true` marks the default as an operator's explicit choice, which is what
+   * makes resolution honour it. Every other writer (legacy migration, deferred legacy pointer)
+   * records a default that stays unapplied until confirmed.
    */
-  setDefault(projectId: string): boolean {
+  setDefault(projectId: string, options: { confirmed?: boolean } = {}): boolean {
     if (!this.get(projectId)) return false;
     this.writeMeta(DEFAULT_PROJECT_META_KEY, projectId);
+    if (options.confirmed) {
+      this.writeMeta(DEFAULT_CONFIRMED_META_KEY, projectId);
+    }
     return true;
   }
 
-  /** Clear the default project (removes the `registry_meta` key). */
+  /** Clear the default project (removes the `registry_meta` keys). */
   clearDefault(): void {
     const db = this.connection();
-    db.prepare('DELETE FROM registry_meta WHERE key = ?').run(DEFAULT_PROJECT_META_KEY);
+    db.prepare('DELETE FROM registry_meta WHERE key IN (?, ?)').run(
+      DEFAULT_PROJECT_META_KEY,
+      DEFAULT_CONFIRMED_META_KEY
+    );
+  }
+
+  /** s92-m01 — whether a store path lies under an ephemeral location (see resolution-policy). */
+  isEphemeral(storePath: string): boolean {
+    return isEphemeralStorePath(storePath, this.ephemeralRoots ?? defaultEphemeralRoots());
   }
 
   /**
@@ -478,6 +529,20 @@ export class ProjectGraphRegistry {
     for (const row of this.list()) {
       const dbPath = path.join(row.store_path, 'cmos', 'db', 'cmos.sqlite');
       if (!existsSync(dbPath) && this.archive(row.project_id)) pruned++;
+    }
+    return pruned;
+  }
+
+  /**
+   * s92-m01 — archive every ACTIVE row whose store lies under an ephemeral location, even while
+   * its file still exists (feedback #41: a scratch store stayed registered and fed the portfolio
+   * views). Archive, not delete, so a row registered there on purpose can be restored. Powers
+   * `cmos_project validate(prune=true)` only — the boot-time prune stays existence-based.
+   */
+  pruneEphemeralStores(): number {
+    let pruned = 0;
+    for (const row of this.list()) {
+      if (this.isEphemeral(row.store_path) && this.archive(row.project_id)) pruned++;
     }
     return pruned;
   }
@@ -572,7 +637,8 @@ export class ProjectGraphRegistry {
     const restoresLegacyDefault =
       pendingLegacyDefault !== null && isSameStorePath(pendingLegacyDefault, resolved);
     if (opts.setAsDefault || restoresLegacyDefault) {
-      this.setDefault(entry.project_id);
+      // s92-m01: only an explicit setAsDefault confirms; a restored legacy pointer stays unapplied.
+      this.setDefault(entry.project_id, { confirmed: opts.setAsDefault === true });
       // An explicit replacement default supersedes any deferred legacy pointer; registering the
       // deferred path consumes it. Either way it must not override a later operator choice.
       if (pendingLegacyDefault !== null) {
@@ -722,6 +788,21 @@ export class ProjectGraphRegistry {
       this.writeMeta(IDENTITY_BACKFILL_MARKER_KEY, String(this.now()));
     }
   }
+}
+
+/**
+ * s92-m01 — the one line the startup log, `whoami` and `cmos_review` show when a registry default
+ * exists but is not applied (written before 3.2.0 and never re-confirmed). Null when there is no
+ * default, or when it is applied.
+ */
+export function unappliedDefaultNotice(status: ProjectGraphDefaultStatus): string | null {
+  if (!status.entry || status.applied) return null;
+  return `registry default: ${status.entry.name} — not applied; re-run setAsDefault to enable`;
+}
+
+/** s92-m01 — the call that re-confirms (and so applies) a registry default. */
+export function reconfirmDefaultCall(entry: ProjectGraphEntry): string {
+  return `cmos_project(action="register", projectRoot=${JSON.stringify(entry.store_path)}, setAsDefault=true)`;
 }
 
 /** The shape the graph backfills need from the legacy `project-registry.json`. */

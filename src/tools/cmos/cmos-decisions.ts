@@ -49,10 +49,17 @@ import {
   type CmosDecisionsBatchUpdateParams,
   type CmosDecisionsBatchUpdateResult,
 } from './cmos-decisions-batch-update';
+import {
+  cmosDecisionsShow,
+  formatDecisionsShowForLLM,
+  type CmosDecisionsShowParams,
+  type CmosDecisionsShowResult,
+} from './cmos-decisions-show';
 
 export const CMOS_DECISIONS_ACTIONS = [
   'list',
   'search',
+  'show',
   'update',
   'review',
   'batch_update',
@@ -79,6 +86,8 @@ export const CMOS_DECISIONS_ACTION_PARAMS: ActionParamMap<
     'projectRoot',
   ],
   search: ['action', 'domain', 'sprintId', 'query', 'limit', 'projectRoot'],
+  // s92-m08: expand one decision by id; retrieval answers carry previews.
+  show: ['action', 'decisionId', 'projectRoot'],
   update: ['action', 'decisionId', 'supersededBy', 'status', 'projectRoot'],
   review: ['action', 'includeApproaching', 'projectRoot'],
   batch_update: ['action', 'status', 'decisionIds', 'projectRoot'],
@@ -101,7 +110,8 @@ export type CmosDecisionsResult =
   | CmosDecisionsUpdateResult
   | CmosDecisionsReviewResult
   | CmosDecisionsBatchUpdateResult
-  | CmosDecisionsRecordResult;
+  | CmosDecisionsRecordResult
+  | CmosDecisionsShowResult;
 
 export const cmosDecisionsSchema = z
   .object({
@@ -112,10 +122,7 @@ export const cmosDecisionsSchema = z
     // shared params
     domain: z.string().optional().describe('Filter by domain for list/search actions'),
     sprintId: z.string().optional().describe('Filter by sprint ID for list/search actions'),
-    missionId: z
-      .string()
-      .optional()
-      .describe('s85-m04: filter to rows stamped with this mission (#487 mission -> row trail)'),
+    missionId: z.string().optional().describe('Only rows recorded for this mission'),
     // list params
     since: z.string().optional().describe('ISO date lower bound for list action'),
     until: z.string().optional().describe('ISO date upper bound for list action'),
@@ -135,7 +142,12 @@ export const cmosDecisionsSchema = z
       .optional()
       .describe('Maximum results for search action'),
     // update params
-    decisionId: z.number().int().positive().optional().describe('Decision ID for update action'),
+    decisionId: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe('Decision ID for show/update actions'),
     supersededBy: z
       .number()
       .int()
@@ -187,7 +199,9 @@ export const cmosDecisionsToolDefinition = {
   name: 'cmos_decisions',
   description:
     'Consolidated decisions tool with action parameter support. ' +
-    'Actions: list, search, update, review, batch_update, record. ' +
+    'Actions: list, search, show, update, review, batch_update, record. ' +
+    'Use show to read one decision in full by id: search results and mission start carry ' +
+    '300-character previews. ' +
     'Use review to triage stale decisions with scores and suggested actions. ' +
     'Use batch_update to archive/supersede multiple decisions at once. ' +
     'Use record to write a decision without a session. Decision text is never amended in ' +
@@ -212,7 +226,7 @@ export const cmosDecisionsToolDefinition = {
       missionId: {
         type: 'string',
         description:
-          'Filter to rows stamped with this mission (#487 mission -> row trail); for record, the mission to stamp (its sprint is used)',
+          'Only rows recorded for this mission; for record, the mission to record it for (its sprint is used)',
       },
       content: { type: 'string', description: 'Decision text for record action (required)' },
       supersedes: {
@@ -263,7 +277,7 @@ export const cmosDecisionsToolDefinition = {
       decisionId: {
         type: 'integer',
         minimum: 1,
-        description: 'Decision ID for update action',
+        description: 'Decision ID for show/update actions',
       },
       supersededBy: {
         type: 'integer',
@@ -343,6 +357,11 @@ export async function cmosDecisions(
         limit: params.limit,
         projectRoot: params.projectRoot,
       } satisfies CmosDecisionsSearchParams);
+    case 'show':
+      return cmosDecisionsShow({
+        decisionId: params.decisionId ?? 0,
+        projectRoot: params.projectRoot,
+      } satisfies CmosDecisionsShowParams);
     case 'update':
       return cmosDecisionsUpdate({
         decisionId: params.decisionId ?? 0,
@@ -406,6 +425,8 @@ export function formatDecisionsForLLM(
       return formatDecisionsListForLLM(result as CmosToolResult<CmosDecisionsListResult>);
     case 'search':
       return formatDecisionsSearchForLLM(result as CmosToolResult<CmosDecisionsSearchResult>);
+    case 'show':
+      return formatDecisionsShowForLLM(result as CmosToolResult<CmosDecisionsShowResult>);
     case 'update':
       return formatDecisionsUpdateForLLM(result as CmosToolResult<CmosDecisionsUpdateResult>);
     case 'review':

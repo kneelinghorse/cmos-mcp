@@ -10,6 +10,7 @@ import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import {
   PREFLIGHT_PARAMS,
   buildKnownToolErrorResult,
+  buildResolvedToolResult,
   classifySenderResolutionError,
   executeMissionProtocolTool,
 } from '../src/index';
@@ -247,6 +248,71 @@ describe('SenderResolutionError evidence classifier', () => {
     );
   });
 
+  // s92-m01: the resolver now says WHY it refused. These two outcomes carry no selected store —
+  // the caller named no project — so the refusal names where the caller is and how to name one.
+  it('answers a read in a non-CMOS working folder with the labelled no-project refusal', async () => {
+    const folder = await temporaryRoot('cmos-preflight-folder-b-');
+    const classified = await classifySenderResolutionError(
+      new SenderResolutionError('unresolved', [], 'CMOS_NOT_DETECTED', {
+        outcome: 'no-project-here',
+        workingDir: folder,
+      }),
+      'read'
+    );
+
+    expect(classified).toMatchObject({
+      code: 'CMOS_NOT_DETECTED',
+      message: `No CMOS project in '${folder}'. There is nothing to read here.`,
+    });
+    expect(classified.suggestion).toContain('Pass projectRoot');
+    expect(classified.suggestion).toContain(
+      `cmos_project(action="init", projectRoot=${JSON.stringify(folder)})`
+    );
+  });
+
+  it('refuses a write in a non-CMOS working folder with the init remedy first', async () => {
+    const folder = await temporaryRoot('cmos-preflight-folder-w-');
+    const classified = await classifySenderResolutionError(
+      new SenderResolutionError('unresolved', [], 'CMOS_NOT_DETECTED', {
+        outcome: 'no-project-here',
+        workingDir: folder,
+      }),
+      'write'
+    );
+
+    expect(classified.message).toBe(`No CMOS project in '${folder}'. Nothing was written.`);
+    expect(classified.suggestion).toMatch(
+      /^To keep a record for this folder, create a project: cmos_project\(action="init"/
+    );
+  });
+
+  it('names the --project-root and default remedies only for a contextless call', async () => {
+    const plain = await classifySenderResolutionError(
+      new SenderResolutionError('unresolved', [], 'CMOS_NOT_DETECTED', {
+        outcome: 'contextless-no-default',
+        workingDir: '/',
+      })
+    );
+    expect(plain.code).toBe('CMOS_NOT_DETECTED');
+    expect(plain.message).toContain(
+      "the server's working directory '/' carries no project context"
+    );
+    expect(plain.suggestion).toContain('"--project-root"');
+    expect(plain.suggestion).toContain('setAsDefault set to true');
+
+    const withUnapplied = await classifySenderResolutionError(
+      new SenderResolutionError('unresolved', [], 'CMOS_NOT_DETECTED', {
+        outcome: 'contextless-no-default',
+        workingDir: '/',
+        unappliedDefault: { projectId: 'forge', name: 'Forge', storePath: '/repos/forge' },
+      })
+    );
+    expect(withUnapplied.message).toContain("The registry default 'Forge' was set before 3.2.0");
+    expect(withUnapplied.suggestion).toContain(
+      'cmos_project(action="register", projectRoot="/repos/forge", setAsDefault=true)'
+    );
+  });
+
   it('distinguishes no CMOS directory from a CMOS directory missing its database', async () => {
     const emptyRoot = await temporaryRoot('cmos-preflight-empty-');
     const cmosRoot = await temporaryRoot('cmos-preflight-no-db-');
@@ -255,12 +321,11 @@ describe('SenderResolutionError evidence classifier', () => {
     const noCmos = await classifySenderResolutionError(
       new SenderResolutionError('unresolved', [
         {
-          source: 'cwd',
+          source: 'explicit',
           projectRoot: emptyRoot,
           accepted: false,
           rejectReason: 'no CMOS database at projectRoot',
         },
-        { source: 'registry-singleton', accepted: false, rejectReason: 'registry is empty' },
       ])
     );
     const noDatabase = await classifySenderResolutionError(
@@ -281,22 +346,20 @@ describe('SenderResolutionError evidence classifier', () => {
     });
   });
 
-  it('prefers a concrete registry missing-database failure over a generic empty cwd', async () => {
-    const cwdRoot = await temporaryRoot('cmos-preflight-registry-cwd-');
-    const registryRoot = await temporaryRoot('cmos-preflight-registry-no-db-');
-    await fs.mkdir(path.join(registryRoot, 'cmos', 'db'), { recursive: true });
+  it('names the enclosing project when an explicit root is a folder inside one', async () => {
+    // Creating a project at the explicit subfolder would nest one project inside another, so the
+    // refusal must not offer init there — it points at the enclosing project instead.
+    const project = await temporaryRoot('cmos-preflight-enclosing-');
+    await fs.mkdir(path.join(project, 'cmos', 'db'), { recursive: true });
+    await fs.writeFile(path.join(project, 'cmos', 'db', 'cmos.sqlite'), '');
+    const subfolder = path.join(project, 'src', 'feature');
+    await fs.mkdir(subfolder, { recursive: true });
 
     const classified = await classifySenderResolutionError(
       new SenderResolutionError('unresolved', [
         {
-          source: 'cwd',
-          projectRoot: cwdRoot,
-          accepted: false,
-          rejectReason: 'no CMOS database at projectRoot',
-        },
-        {
-          source: 'registry-singleton',
-          projectRoot: registryRoot,
+          source: 'explicit',
+          projectRoot: subfolder,
           accepted: false,
           rejectReason: 'no CMOS database at projectRoot',
         },
@@ -304,53 +367,37 @@ describe('SenderResolutionError evidence classifier', () => {
     );
 
     expect(classified).toMatchObject({
-      code: 'DB_NOT_FOUND',
-      message: `CMOS database not found at '${path.join(registryRoot, 'cmos', 'db', 'cmos.sqlite')}'`,
+      code: 'CMOS_NOT_DETECTED',
+      message: `'${subfolder}' is not a CMOS project root: it is inside the CMOS project at '${project}'.`,
+      suggestion: `Pass projectRoot=${JSON.stringify(project)}.`,
     });
+    expect(classified.suggestion).not.toContain('init');
   });
 
-  it.each([
-    {
-      label: 'database failure',
-      registryRoot: '/tmp/cmos-preflight-registry-db-fault',
-      rejectReason: 'DB read error: SQLITE_CANTOPEN',
-      code: 'DB_CONNECTION_FAILED',
-      fragment: 'SQLITE_CANTOPEN',
-    },
-    {
-      label: 'identity failure',
-      registryRoot: '/tmp/cmos-preflight-registry-no-identity',
-      rejectReason: 'dashboard_project_id missing or not a UUID',
-      code: 'SENDER_UNRESOLVABLE',
-      fragment: 'dashboard_project_id',
-    },
-  ])(
-    'prefers a concrete registry $label over a generic empty cwd',
-    async ({ registryRoot, rejectReason, code, fragment }) => {
-      const cwdRoot = await temporaryRoot('cmos-preflight-registry-mixed-cwd-');
-      const classified = await classifySenderResolutionError(
-        new SenderResolutionError('unresolved', [
-          {
-            source: 'cwd',
-            projectRoot: cwdRoot,
-            accepted: false,
-            rejectReason: 'no CMOS database at projectRoot',
-          },
-          {
-            source: 'registry-singleton',
-            projectRoot: registryRoot,
-            accepted: false,
-            rejectReason,
-          },
-        ])
-      );
+  it('classifies the LAST candidate — the selected store — not an earlier skipped root', async () => {
+    const skippedRoot = await temporaryRoot('cmos-preflight-skipped-root-');
+    const classified = await classifySenderResolutionError(
+      new SenderResolutionError('unresolved', [
+        {
+          source: 'mcp-roots',
+          projectRoot: skippedRoot,
+          accepted: false,
+          rejectReason: 'no CMOS database at projectRoot',
+        },
+        {
+          source: 'cwd',
+          projectRoot: '/tmp/cmos-preflight-selected-cwd',
+          accepted: false,
+          rejectReason: 'dashboard_project_id missing or not a UUID',
+        },
+      ])
+    );
 
-      expect(classified).toMatchObject({
-        code,
-        message: expect.stringContaining(fragment),
-      });
-    }
-  );
+    expect(classified).toMatchObject({
+      code: 'SENDER_UNRESOLVABLE',
+      message: expect.stringContaining('dashboard_project_id'),
+    });
+  });
 
   it('turns a failed missing-database re-observation into a known sender refusal', async () => {
     const root = await temporaryRoot('cmos-preflight-reobserve-fault-');
@@ -422,25 +469,15 @@ describe('SenderResolutionError evidence classifier', () => {
       fragment: 'project_identity.cmos_address',
     },
     {
-      label: 'server-install guard',
+      label: 'a refused registry default',
       candidate: {
-        source: 'cwd' as const,
-        projectRoot: '/tmp/cmos-preflight-install',
+        source: 'registry-default' as const,
+        projectRoot: '/tmp/cmos-preflight-default-no-identity',
         accepted: false,
-        rejectReason: 'cwd-vs-SERVER_INSTALL_ROOT guard: implicit sender rejected',
+        rejectReason: 'dashboard_project_id missing or not a UUID',
       },
       code: 'SENDER_UNRESOLVABLE',
-      fragment: 'SERVER_INSTALL_ROOT',
-    },
-    {
-      label: 'registry ambiguity',
-      candidate: {
-        source: 'registry-singleton' as const,
-        accepted: false,
-        rejectReason: 'registry has 2 projects; auto-pick only allowed when size === 1',
-      },
-      code: 'SENDER_UNRESOLVABLE',
-      fragment: 'registry has 2 projects',
+      fragment: 'dashboard_project_id',
     },
   ])('maps $label from recorded evidence', async ({ candidate, code, fragment }) => {
     const classified = await classifySenderResolutionError(
@@ -458,56 +495,11 @@ describe('SenderResolutionError evidence classifier', () => {
     }
   });
 
-  it('treats multiple rejected MCP roots as attribution ambiguity', async () => {
-    const classified = await classifySenderResolutionError(
-      new SenderResolutionError('unresolved', [
-        {
-          source: 'mcp-roots',
-          projectRoot: '/tmp/cmos-preflight-mcp-a',
-          accepted: false,
-          rejectReason: 'dashboard_project_id missing or not a UUID',
-        },
-        {
-          source: 'mcp-roots',
-          projectRoot: '/tmp/cmos-preflight-mcp-b',
-          accepted: false,
-          rejectReason: 'project_identity.cmos_address is empty or cmos://unknown/*',
-        },
-      ])
-    );
-
-    expect(classified).toMatchObject({
-      code: 'SENDER_UNRESOLVABLE',
-      message: expect.stringContaining('multiple MCP roots'),
-    });
-  });
-
-  it('uses an explicit missing store before a later registry ambiguity', async () => {
-    const explicitRoot = await temporaryRoot('cmos-preflight-explicit-priority-');
-    const classified = await classifySenderResolutionError(
-      new SenderResolutionError('unresolved', [
-        {
-          source: 'explicit',
-          projectRoot: explicitRoot,
-          accepted: false,
-          rejectReason: 'no CMOS database at projectRoot',
-        },
-        {
-          source: 'registry-singleton',
-          accepted: false,
-          rejectReason: 'registry has 4 projects; auto-pick only allowed when size === 1',
-        },
-      ])
-    );
-
-    expect(classified.code).toBe('CMOS_NOT_DETECTED');
-  });
-
   it('falls back to SENDER_UNRESOLVABLE when the trace has no recognized evidence', async () => {
     const classified = await classifySenderResolutionError(
       new SenderResolutionError('unresolved', [
         {
-          source: 'registry-singleton',
+          source: 'registry-default',
           accepted: false,
           rejectReason: 'an unfamiliar resolver condition',
         },
@@ -518,6 +510,93 @@ describe('SenderResolutionError evidence classifier', () => {
       code: 'SENDER_UNRESOLVABLE',
       message: expect.stringContaining('an unfamiliar resolver condition'),
       suggestion: expect.stringContaining('Pass projectRoot explicitly'),
+    });
+  });
+});
+
+describe('s92-m01 resolution stamp on every success', () => {
+  const textOf = (result: ReturnType<typeof buildResolvedToolResult>): string =>
+    result.content.map((part) => (part.type === 'text' ? part.text : '')).join('\n');
+
+  it('adds projectRoot and resolvedBy to an object payload, keeping a handler-set projectRoot', () => {
+    const stamped = buildResolvedToolResult({ success: true, data: { count: 3 } }, 'body', {
+      projectRoot: '/repos/a',
+      resolvedBy: 'cwd',
+    });
+    expect(stamped.structuredContent).toEqual({
+      success: true,
+      data: { count: 3, projectRoot: '/repos/a', resolvedBy: 'cwd' },
+    });
+
+    const kept = buildResolvedToolResult(
+      { success: true, data: { projectRoot: '/repos/new-project' } },
+      'body',
+      { projectRoot: '/repos/new-project', resolvedBy: 'explicit' }
+    );
+    expect((kept.structuredContent as { data: Record<string, unknown> }).data).toEqual({
+      projectRoot: '/repos/new-project',
+      resolvedBy: 'explicit',
+    });
+  });
+
+  it('stamps the top level when the payload is not an object', () => {
+    const stamped = buildResolvedToolResult({ success: true, data: [1, 2] }, 'body', {
+      projectRoot: null,
+      resolvedBy: 'none',
+    });
+    expect(stamped.structuredContent).toMatchObject({
+      data: [1, 2],
+      projectRoot: null,
+      resolvedBy: 'none',
+    });
+  });
+
+  it.each([
+    ['mcp-roots', "the client's MCP roots"],
+    ['server-project-root', "--project-root in this server's config"],
+    ['registry-default', 'the registry default project'],
+  ] as const)('renders one project line when resolved by %s', (resolvedBy, label) => {
+    const stamped = buildResolvedToolResult({ success: true, data: {} }, 'body', {
+      projectRoot: '/repos/a',
+      resolvedBy,
+    });
+    expect(textOf(stamped)).toBe(`Project: /repos/a (resolved by ${label})\n\nbody`);
+  });
+
+  it('renders the note instead of the label when the route needs saying out loud', () => {
+    const stamped = buildResolvedToolResult({ success: true, data: {} }, 'body', {
+      projectRoot: '/repos/a',
+      resolvedBy: 'cwd',
+      note: "resolved by the server's working directory — the client's MCP roots hold no CMOS project",
+    });
+    expect(textOf(stamped)).toBe(
+      "Project: /repos/a (resolved by the server's working directory — the client's MCP roots hold no CMOS project)\n\nbody"
+    );
+    // The data still says cwd: the note is for the reader, the field for the program.
+    expect(stamped.structuredContent).toMatchObject({ data: { resolvedBy: 'cwd' } });
+  });
+
+  it.each(['explicit', 'cwd', 'none'] as const)(
+    'renders no line when resolved by %s',
+    (resolvedBy) => {
+      const stamped = buildResolvedToolResult({ success: true, data: {} }, 'body', {
+        projectRoot: resolvedBy === 'none' ? null : '/repos/a',
+        resolvedBy,
+      });
+      expect(textOf(stamped)).toBe('body');
+    }
+  );
+
+  it('leaves a refusal untouched', () => {
+    const refusal = { success: false, error: { code: 'X', message: 'no' } };
+    const stamped = buildResolvedToolResult(refusal, 'refused', {
+      projectRoot: '/repos/a',
+      resolvedBy: 'mcp-roots',
+    });
+    expect(stamped).toEqual({
+      content: [{ type: 'text', text: 'refused' }],
+      structuredContent: refusal,
+      isError: true,
     });
   });
 });

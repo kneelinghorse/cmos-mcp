@@ -8,9 +8,8 @@
  */
 
 import { z } from 'zod';
-import { withClientValidated, type CmosDatabaseClient } from './client';
+import { withClientAsync, withClientValidated } from './client';
 import { resolveCurrentSprintId, resolveOpenSprintIdForWrite } from './current-sprint';
-import { genesisColumns, getProjectId } from './genesis-columns';
 import type { CmosToolResult, Session } from './types';
 import {
   createError,
@@ -26,13 +25,21 @@ import {
   refreshMasterContextFromRecentActivity,
   type ContextFreshness,
 } from './context-freshness';
-import { appendWarnings } from './format-warnings';
+import { appendWarnings, attachWarnings } from './format-warnings';
+import {
+  closeStaleSessionsBeforeStart,
+  closedSessionLines,
+  type ClosedSessionReceipt,
+} from './implicit-session-lifecycle';
+import { ensureImplicitSessionColumns } from './schema-migrations';
 import { summarizeSessionCaptures } from './session-capture-state';
-import { checkWrite } from './write-guard';
+import { insertNewSession } from './session-owner';
 
 // Re-export for convenience
 export { VALID_SESSION_TYPES };
 export type { SessionType };
+// s92-m03: the generator moved beside the one session INSERT it serves.
+export { generateSessionId } from './session-owner';
 
 /**
  * Result of session start operation.
@@ -79,6 +86,13 @@ export interface CmosSessionStartResult {
   /** Freshness of master_context after start handling */
   contextFreshness: ContextFreshness;
 
+  /**
+   * s92-m03: sessions this start closed first, each with the deterministic summary it was closed
+   * with: explicit sessions idle past 12 h (the blocker a forgotten start leaves) and orphaned
+   * implicit sessions. Absent when nothing was closed.
+   */
+  closedSessions?: ClosedSessionReceipt[];
+
   /** Message describing the result */
   message: string;
 }
@@ -107,7 +121,12 @@ export const cmosSessionStartSchema = z.object({
     .describe('Agent starting the session (default: "assistant")'),
 
   /** Optional sprint ID */
-  sprintId: z.string().optional().describe('Optional sprint ID to associate with this session'),
+  sprintId: z
+    .string()
+    .optional()
+    .describe(
+      'Optional existing sprint ID to tag this session with (any status); a sprint that does not exist is refused by name'
+    ),
 
   /** Optional auto-refresh behavior for master_context */
   autoRefreshMasterContext: z
@@ -132,7 +151,7 @@ export type CmosSessionStartParams = z.infer<typeof cmosSessionStartSchema>;
 export const cmosSessionStartToolDefinition = {
   name: 'cmos_session_start',
   description:
-    'Start a new session for planning, onboarding, review, or research work. Sessions capture insights and decisions outside of mission-oriented build work. Only one session can be active at a time.',
+    'Start a new session for planning, onboarding, review, or research work. Sessions are optional: a capture with no session open lands in an implicit session the server opens for its process. Only one explicit session can be active at a time; one idle for more than 12 hours is closed first, with a receipt.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -153,7 +172,8 @@ export const cmosSessionStartToolDefinition = {
       },
       sprintId: {
         type: 'string',
-        description: 'Optional sprint ID to associate with this session',
+        description:
+          'Optional existing sprint ID to tag this session with (any status); a sprint that does not exist is refused by name',
       },
       autoRefreshMasterContext: {
         type: 'boolean',
@@ -169,29 +189,6 @@ export const cmosSessionStartToolDefinition = {
     additionalProperties: false,
   },
 } as const;
-
-/**
- * Generate a session ID in the format PS-YYYY-MM-DD-NNN.
- */
-export function generateSessionId(existingIds: string[]): string {
-  const now = new Date();
-  const dateStr = now.toISOString().split('T')[0];
-  const prefix = `PS-${dateStr}-`;
-
-  // Find the highest counter for today
-  let maxCounter = 0;
-  for (const id of existingIds) {
-    if (id.startsWith(prefix)) {
-      const counterStr = id.slice(prefix.length);
-      const counter = parseInt(counterStr, 10);
-      if (!isNaN(counter) && counter > maxCounter) {
-        maxCounter = counter;
-      }
-    }
-  }
-
-  return `${prefix}${String(maxCounter + 1).padStart(3, '0')}`;
-}
 
 /**
  * Execute the cmos_session_start tool.
@@ -229,15 +226,48 @@ export async function cmosSessionStart(
   const title = params.title.trim();
   const agent = params.agent ?? 'assistant';
   const autoRefreshMasterContext = params.autoRefreshMasterContext ?? true;
+  const explicitSprintId = params.sprintId?.trim() || null;
 
-  return withClientValidated(
+  // s92-m03 (#589): an explicit sprintId names an existing sprint of any status (a Planned sprint
+  // for a planning session), and a missing one is refused by name before anything is closed.
+  if (explicitSprintId) {
+    const sprint = await withClientAsync(
+      async (client) => {
+        const found = client.getOne<{ id: string }>('SELECT id FROM sprints WHERE id = ?', [
+          explicitSprintId,
+        ]);
+        return found.success
+          ? createSuccess(Boolean(found.data))
+          : createError<boolean>(
+              found.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to look up the sprint' }
+            );
+      },
+      { projectRoot: params.projectRoot }
+    );
+    if (!sprint.success) return createError<CmosSessionStartResult>(sprint.error!);
+    if (!sprint.data) {
+      return createError<CmosSessionStartResult>(CmosErrors.sprintNotFound(explicitSprintId));
+    }
+  }
+
+  // s92-m03: close what would block or clutter this start, outside its own connection: explicit
+  // sessions idle past 12 h, and implicit sessions whose process is gone or idle past 12 h.
+  const stale = await closeStaleSessionsBeforeStart(params.projectRoot);
+
+  // One warning sink for every answer this start can give, refusals included.
+  const warnings: string[] = [...stale.warnings];
+  const result = await withClientValidated(
     (client) => {
-      const warnings: string[] = [];
+      warnings.push(...(ensureImplicitSessionColumns(client).warnings ?? []));
 
-      // Check for existing active session
+      // s92-m03: one active EXPLICIT session per project. Implicit sessions belong to processes
+      // and never block a start.
       const activeResult = client.getOne<
         Pick<Session, 'id' | 'type' | 'title' | 'started_at' | 'captures'>
-      >('SELECT id, type, title, started_at, captures FROM sessions WHERE status = ?', ['active']);
+      >(
+        'SELECT id, type, title, started_at, captures FROM sessions WHERE status = ? AND implicit = 0',
+        ['active']
+      );
 
       if (!activeResult.success) {
         return createError<CmosSessionStartResult>(
@@ -315,7 +345,7 @@ export async function cmosSessionStart(
       // wrong for a stamp that lives forever), so on an all-Completed store every new
       // session inherited a dead sprint. When nothing is open we now persist NULL and
       // surface the read-resolved sprint separately as advisorySprintId — see below.
-      let sprintId = params.sprintId ?? null;
+      let sprintId = explicitSprintId;
       let sprintAutoTagged = false;
       let advisorySprintId: string | null = null;
       if (!sprintId) {
@@ -340,71 +370,22 @@ export async function cmosSessionStart(
         }
       }
 
-      // Insert the new session, retrying on UNIQUE constraint collision (e.g. DB restore
-      // or concurrent write between SELECT and INSERT).
-      const todayPrefix = `PS-${new Date().toISOString().split('T')[0]}-`;
-      const MAX_ID_RETRIES = 3;
-      let sessionId = '';
-      // s86-m02b: this was `client.execute('SELECT 1')` as a type placeholder, immediately
-      // overwritten — a real DB round-trip whose result was discarded, and an instance of this
-      // mission's own class. A typed declaration says the same thing without the query.
-      let insertResult: ReturnType<CmosDatabaseClient['execute']> = { success: false };
-
-      for (let attempt = 0; attempt < MAX_ID_RETRIES; attempt++) {
-        const existingResult = client.getMany<{ id: string }>(
-          'SELECT id FROM sessions WHERE id LIKE ? ORDER BY id DESC',
-          [`${todayPrefix}%`]
-        );
-        const existingIds =
-          existingResult.success && existingResult.data ? existingResult.data.map((r) => r.id) : [];
-
-        sessionId = generateSessionId(existingIds);
-
-        const g = genesisColumns(client, 'sessions', getProjectId(client));
-        insertResult = client.execute(
-          `INSERT INTO sessions (id, type, title, sprint_id, started_at, agent, status, captures, next_steps, metadata, ${g.columns.join(', ')})
-           VALUES (?, ?, ?, ?, ?, ?, 'active', '[]', NULL, NULL, ${g.placeholders})`,
-          [sessionId, sessionType, title, sprintId, now, agent, ...g.values]
-        );
-
-        if (insertResult.success) break;
-
-        // Only retry on UNIQUE constraint violation on the session ID field
-        const isIdCollision =
-          insertResult.error?.code === CMOS_ERROR_CODES.INVALID_PARAMETER &&
-          insertResult.error?.field === 'id';
-        if (!isIdCollision) break;
-      }
-
-      if (!insertResult.success) {
-        return createError<CmosSessionStartResult>({
-          code: CMOS_ERROR_CODES.DB_QUERY_FAILED,
-          message: `Failed to create session: ${insertResult.error?.message ?? 'Unknown error'}`,
-          suggestion: 'Check database permissions and schema integrity',
-        });
-      }
-
-      // Insert session event
-      const rawEvent = JSON.stringify({
-        ts: now,
+      // s92-m03: the shared insert (id-collision retry, genesis stamping, start event) that the
+      // implicit open uses too, so there is one local session INSERT.
+      const inserted = insertNewSession(client, {
+        type: sessionType,
+        title,
+        sprintId,
         agent,
-        session: sessionId,
-        action: 'start',
-        status: 'active',
-        summary: title,
+        now,
+        implicit: false,
+        ownerKey: null,
       });
-
-      // s86-m02b: the session DID start, so a lost event row must not abort it — but it must not
-      // be silent either, or the answer reports provenance that was never written.
-      checkWrite(
-        client.execute(
-          `INSERT INTO session_events (ts, agent, mission, action, status, summary, next_hint, raw_event)
-           VALUES (?, ?, ?, 'start', 'active', ?, ?, ?)`,
-          [now, agent, sessionId, title, sprintId, rawEvent]
-        ),
-        warnings,
-        'Session start event logging'
-      );
+      if (!inserted.ok) {
+        return createError<CmosSessionStartResult>(inserted.error);
+      }
+      const sessionId = inserted.sessionId;
+      warnings.push(...inserted.warnings);
 
       return createSuccess<CmosSessionStartResult>(
         {
@@ -418,6 +399,7 @@ export async function cmosSessionStart(
           ...(advisorySprintId !== null ? { advisorySprintId } : {}),
           contextAutoRefresh: refreshSummary,
           contextFreshness: freshnessResult.freshness,
+          ...(stale.receipts.length > 0 ? { closedSessions: stale.receipts } : {}),
           message: sprintAutoTagged
             ? `Session '${sessionId}' started: ${title} (auto-tagged to ${sprintId})`
             : `Session '${sessionId}' started: ${title}`,
@@ -427,6 +409,7 @@ export async function cmosSessionStart(
     },
     { projectRoot: params.projectRoot }
   );
+  return attachWarnings(result, warnings);
 }
 
 /**
@@ -460,6 +443,8 @@ export function formatSessionStartForLLM(result: CmosToolResult<CmosSessionStart
       lines.push(`Suggestion: ${error.suggestion}`);
     }
 
+    // s92-m03: a refusal carries the start's warnings too (one sink, attached on every answer).
+    appendWarnings(lines, result);
     return lines.join('\n');
   }
 
@@ -500,6 +485,11 @@ export function formatSessionStartForLLM(result: CmosToolResult<CmosSessionStart
         : ''
     }`
   );
+
+  if (data.closedSessions && data.closedSessions.length > 0) {
+    lines.push('**Closed before start**:');
+    for (const line of closedSessionLines(data.closedSessions)) lines.push(`  ${line}`);
+  }
 
   appendWarnings(lines, result);
 

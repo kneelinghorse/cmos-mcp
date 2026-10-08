@@ -16,6 +16,7 @@ import * as os from 'os';
 import * as path from 'path';
 import {
   ProjectGraphRegistry,
+  unappliedDefaultNotice,
   readStoreIdentity,
   mintProjectId,
   PROJECT_GRAPH_SCHEMA_VERSION,
@@ -585,6 +586,36 @@ describe('ProjectGraphRegistry (Sprint 69 m05)', () => {
       expect(reg2.get('late-id')).toBeUndefined();
     });
 
+    it('s92-m01: applies a default only while its confirmation names the same project', async () => {
+      const a = makeStore('confirm-a', 'confirm-a-id');
+      const b = makeStore('confirm-b', 'confirm-b-id');
+      const reg = await ProjectGraphRegistry.create();
+      reg.registerStore(a);
+      reg.registerStore(b);
+
+      expect(reg.getDefaultStatus()).toEqual({ entry: null, applied: false });
+
+      reg.setDefault('confirm-a-id'); // unconfirmed
+      expect(reg.getDefaultStatus()).toMatchObject({ applied: false });
+      expect(unappliedDefaultNotice(reg.getDefaultStatus())).toBe(
+        'registry default: confirm-a — not applied; re-run setAsDefault to enable'
+      );
+
+      reg.registerStore(a, { setAsDefault: true });
+      expect(reg.getDefaultStatus()).toMatchObject({ applied: true });
+      expect(unappliedDefaultNotice(reg.getDefaultStatus())).toBeNull();
+
+      // An older sibling process re-pointing the default without confirming it does not
+      // inherit A's confirmation.
+      reg.setDefault('confirm-b-id');
+      expect(reg.getDefaultStatus()).toMatchObject({ applied: false });
+
+      reg.clearDefault();
+      expect(reg.getDefaultStatus()).toEqual({ entry: null, applied: false });
+      reg.setDefault('confirm-a-id');
+      expect(reg.getDefaultStatus().applied).toBe(false); // clearing removed the confirmation too
+    });
+
     it('defers an identity-less legacy default and promotes it when that path is registered', async () => {
       const idless = path.join(tmpDir, 'projects', 'legacy-default-noid');
       seedCmosDb(idless, { projectId: '', projectName: 'legacy-default-noid' });
@@ -596,11 +627,20 @@ describe('ProjectGraphRegistry (Sprint 69 m05)', () => {
       const registered = reg.registerStore(idless, { requireStoredIdentity: true });
       expect(reg.getDefault()?.project_id).toBe(registered.project_id);
       expect(reg.getDefault()?.store_path).toBe(path.resolve(idless));
+      // s92-m01: a promoted LEGACY default is a pre-3.2.0 default — visible, never applied
+      // until an operator re-confirms it with setAsDefault.
+      expect(reg.getDefaultStatus().applied).toBe(false);
 
       const originalCwd = process.cwd;
-      process.cwd = () => path.join(tmpDir, 'not-a-cmos-project');
+      process.cwd = () => '/'; // contextless: the only kind of call a default may serve
       CmosDetector.resetInstance();
       try {
+        await expect(
+          resolveProjectRootEnhanced(undefined, { autoRegister: false })
+        ).rejects.toThrow("No CMOS project in '/'");
+
+        reg.registerStore(idless, { setAsDefault: true });
+        expect(reg.getDefaultStatus().applied).toBe(true);
         const resolved = await resolveProjectRootEnhanced(undefined, { autoRegister: false });
         expect(resolved.source).toBe('registry');
         expect(resolved.projectRoot).toBe(path.resolve(idless));

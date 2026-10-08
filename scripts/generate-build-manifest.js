@@ -7,15 +7,20 @@
  * dist/.build-manifest.json with the hash + timestamp. Used by the server
  * health module to detect when running code is stale.
  *
- * Usage: node scripts/generate-build-manifest.js
- * Called automatically by `npm run build`.
+ * Usage: node scripts/generate-build-manifest.js [--dist <dir>]
+ * Called automatically by `npm run build`. `--dist` points it at another directory, so a test can
+ * run the real script without rewriting the real dist/.build-manifest.json (s92-m10).
  */
 
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const DIST_DIR = path.resolve(__dirname, '..', 'dist');
+const distFlag = process.argv.indexOf('--dist');
+const DIST_DIR =
+  distFlag !== -1 && process.argv[distFlag + 1]
+    ? path.resolve(process.argv[distFlag + 1])
+    : path.resolve(__dirname, '..', 'dist');
 const MANIFEST_PATH = path.join(DIST_DIR, '.build-manifest.json');
 
 /**

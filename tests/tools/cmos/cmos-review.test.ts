@@ -158,6 +158,51 @@ describe('cmos_review', () => {
     });
   });
 
+  // ─── s92-m01: the registry default notice and the in-budget resolution stamp ───────
+
+  describe('s92-m01 registry default and resolution stamp', () => {
+    function otherStore(): string {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-review-default-'));
+      fs.mkdirSync(path.join(root, 'cmos', 'db'), { recursive: true });
+      const db = new Database(path.join(root, 'cmos', 'db', 'cmos.sqlite'));
+      db.exec(`CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        INSERT INTO metadata (key, value) VALUES ('project_id', 'forge'), ('project_name', 'Forge');`);
+      db.close();
+      return root;
+    }
+
+    it('shows a pre-3.2.0 default as not applied, and drops the line once it is confirmed', async () => {
+      const forgeRoot = otherStore();
+      try {
+        const registry = await ProjectGraphRegistry.create({ configDir: reviewConfigDir });
+        const forge = registry.registerStore(forgeRoot);
+        registry.setDefault(forge.project_id); // unconfirmed, the pre-3.2.0 way
+
+        const unapplied = await cmosReview({ projectRoot: tempDir }, { registry });
+        expect(unapplied.data?.registryDefault).toBe(
+          'registry default: Forge — not applied; re-run setAsDefault to enable'
+        );
+        expect(formatReviewForLLM(unapplied)).toContain(
+          'registry default: Forge — not applied; re-run setAsDefault to enable'
+        );
+
+        registry.registerStore(forgeRoot, { setAsDefault: true });
+        const applied = await cmosReview({ projectRoot: tempDir }, { registry });
+        expect(applied.data?.registryDefault).toBeUndefined();
+      } finally {
+        fs.rmSync(forgeRoot, { recursive: true, force: true });
+      }
+    });
+
+    it('carries projectRoot and resolvedBy inside the digest budget when the dispatcher passes them', async () => {
+      const result = await cmosReview({ projectRoot: tempDir }, { resolvedBy: 'cwd' });
+      const digest = result.data as CmosReviewResult;
+      expect(digest.projectRoot).toBe(tempDir);
+      expect(digest.resolvedBy).toBe('cwd');
+      expect(digest.digestSizeBytes).toBe(Buffer.byteLength(JSON.stringify(digest), 'utf8'));
+    });
+  });
+
   // ─── Digest shape ───────────────────────────────────────────────────────
 
   describe('digest payload', () => {
@@ -361,9 +406,10 @@ describe('cmos_review', () => {
         expect(d).toHaveProperty('createdAt');
         // Compact form drops the heavy fields (domain/category/etc) but keeps the
         // small `projectId` provenance tag (s83-m06) so the renderer can fence a
-        // pull-merged FOREIGN decision as untrusted.
+        // pull-merged FOREIGN decision as untrusted. s92-m04 adds `id`, so a capped text can be
+        // read in full with cmos_decisions(action="show").
         const keys = Object.keys(d).sort();
-        expect(keys).toEqual(['createdAt', 'projectId', 'text']);
+        expect(keys).toEqual(['createdAt', 'id', 'projectId', 'text']);
       }
     });
   });

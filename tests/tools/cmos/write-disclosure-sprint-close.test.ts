@@ -183,6 +183,10 @@ function nextStepsColumns(dbPath: string): string[] {
   }
 }
 
+/**
+ * s92-m05: archival is opt-in since 3.2.0. These closes opt in so that (a)'s rollback still
+ * covers a close that archives — on a default close the decision would read `active` either way.
+ */
 async function closeSprint(
   projectRoot: string,
   summary: string
@@ -190,6 +194,7 @@ async function closeSprint(
   const result = await cmosSprintComplete({
     sprintId: CLOSING_SPRINT,
     summary,
+    archive: true,
     projectRoot,
   });
   return { result, text: formatSprintCompleteForLLM(result) };

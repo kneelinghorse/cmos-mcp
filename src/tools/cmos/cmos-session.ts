@@ -74,6 +74,7 @@ export const CMOS_SESSION_ACTION_PARAMS: ActionParamMap<CmosSessionAction, CmosS
     'evidence',
     'citesLearningIds',
     'evergreen',
+    'sprintId',
     'projectRoot',
   ],
   complete: [
@@ -129,7 +130,9 @@ export const cmosSessionSchema = z
     sprintId: z
       .string()
       .optional()
-      .describe('Sprint ID filter for list action, or the sprint to tag for start action'),
+      .describe(
+        'Sprint ID filter for list action; for start and capture actions, an existing sprint (any status) to tag. A sprint that does not exist is refused by name'
+      ),
     page: z.number().int().positive().optional().describe('Page number for list action'),
     pageSize: z.number().int().positive().max(100).optional().describe('Page size for list action'),
     // start params
@@ -143,7 +146,9 @@ export const cmosSessionSchema = z
     sessionId: z
       .string()
       .optional()
-      .describe('Session ID (auto-detected if omitted) for capture/complete actions'),
+      .describe(
+        "Session ID for capture/complete actions. Omit it to use the open explicit session, or else this process's implicit session"
+      ),
     category: z
       .enum(VALID_CAPTURE_CATEGORIES)
       .optional()
@@ -216,6 +221,8 @@ export const cmosSessionToolDefinition = {
   description:
     'Consolidated session tool with action parameter support. ' +
     'Actions: list, start, capture, complete, search. ' +
+    "Sessions are optional: a capture with no session open lands in this process's implicit " +
+    'session, opened as needed and closed when the process ends. ' +
     'Routes to the existing session handlers without changing session business logic.',
   inputSchema: {
     type: 'object',
@@ -255,7 +262,8 @@ export const cmosSessionToolDefinition = {
       },
       sprintId: {
         type: 'string',
-        description: 'Sprint ID filter for list action, or the sprint to tag for start action',
+        description:
+          'Sprint ID filter for list action; for start and capture actions, an existing sprint (any status) to tag. A sprint that does not exist is refused by name',
       },
       page: { type: 'integer', minimum: 1, description: 'Page number for list action' },
       pageSize: {
@@ -270,7 +278,11 @@ export const cmosSessionToolDefinition = {
         type: 'boolean',
         description: 'Auto-refresh master context on start',
       },
-      sessionId: { type: 'string', description: 'Session ID for capture/complete actions' },
+      sessionId: {
+        type: 'string',
+        description:
+          "Session ID for capture/complete actions. Omit it to use the open explicit session, or else this process's implicit session",
+      },
       category: {
         type: 'string',
         enum: [...VALID_CAPTURE_CATEGORIES],
@@ -401,6 +413,7 @@ export async function cmosSession(
         agent: params.agent,
         citesLearningIds: params.citesLearningIds,
         evergreen: params.evergreen,
+        sprintId: params.sprintId,
         projectRoot: params.projectRoot,
       } as CmosSessionCaptureParams);
     case 'complete': {

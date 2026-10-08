@@ -375,8 +375,14 @@ describe('ACTION_PARAMS vacuity floor (s86-m04)', () => {
       // s88-m04: 384 -> 385 entries when capture adds the learning-only `evergreen` parameter.
       // s91-m04: 80 -> 81 actions and 385 -> 394 entries when cmos_decisions adds `record` with
       // exactly nine applicable params.
-      expect(actionCount).toBe(81);
-      expect(entryCount).toBe(394);
+      // s92-m05: 394 -> 395 entries when sprint `complete` adds the opt-in `archive` parameter.
+      // s92-m03: 395 -> 396 entries when session `capture` accepts an explicit `sprintId`.
+      // s92-m08: 81 -> 83 actions and 396 -> 402 entries when cmos_decisions and cmos_learnings
+      // add `show`, each with exactly three params (action, the row id, projectRoot).
+      // s92-m09: 83 -> 84 actions and 402 -> 409 entries for cmos_db prune_snapshots (action,
+      // confirm, keepIds, keepSince, keepSources, keepLast, projectRoot).
+      expect(actionCount).toBe(84);
+      expect(entryCount).toBe(409);
 
       // Floors, so a walker that silently stops producing branches fails here rather than passing
       // every applicability case with nothing to check.

@@ -20,8 +20,8 @@
 import * as crypto from 'crypto';
 import type { CmosDatabaseClient } from './client';
 import { genesisColumns, getProjectId } from './genesis-columns';
-import { snapshotDedupPrunedFilter } from './schema-migrations';
 import { checkWrite } from './write-guard';
+import { findReusableSnapshot, snapshotStorage } from './snapshot-content-policy';
 
 // ---------------------------------------------------------------------------
 // Public constants
@@ -80,7 +80,7 @@ export const BLOB_MIGRATIONS: BlobMigration[] = [
   {
     version: 1,
     description:
-      'Remove five duplicated sections from master_context blob (Sprint 51). ' +
+      'Remove five duplicated sections from the master_context blob. ' +
       'completed_missions, completed_sprints, decisions_made, learnings, and recent_sessions ' +
       'are fully queryable from structured tables via HybridRetriever or direct SQL.',
     up: (blob) => {
@@ -166,27 +166,28 @@ function takePreMigrationSnapshot(
 ): void {
   const contentHash = crypto.createHash('sha256').update(rawContent).digest('hex').substring(0, 16);
 
-  // Skip if identical snapshot already exists. s84-m04: exclude a content-tombstoned row
-  // so identical content re-persists fresh instead of deduping onto the emptied row.
-  const existing = client.getOne<{ id: number }>(
-    `SELECT id FROM context_snapshots WHERE context_id = ? AND content_hash = ?${snapshotDedupPrunedFilter(client)}`,
-    [contextId, contentHash]
-  );
-  if (existing.success && existing.data) return;
+  // Skip if an identical snapshot already exists and is at least as protected as this recovery
+  // copy (s92-m09: never reuse an automatic copy a prune could empty). s84-m04's tombstone filter
+  // lives inside findReusableSnapshot.
+  const reusable = findReusableSnapshot(client, { contextId, contentHash, kind: 'pre-mutation' });
+  if (reusable.ok && reusable.row) return;
 
   const now = new Date().toISOString();
   const g = genesisColumns(client, 'context_snapshots', getProjectId(client));
+  // s92-m09: a recovery copy taken before the blob migrates; it always stores its content.
+  const storage = snapshotStorage('pre-mutation', rawContent, { contentHash });
   checkWrite(
     client.execute(
-      `INSERT INTO context_snapshots (context_id, session_id, source, content_hash, content, created_at, ${g.columns.join(', ')})
-     VALUES (?, ?, ?, ?, ?, ?, ${g.placeholders})`,
+      `INSERT INTO context_snapshots (context_id, session_id, source, content_hash, content, created_at, ${[...storage.columns, ...g.columns].join(', ')})
+     VALUES (?, ?, ?, ?, ?, ?, ${[...storage.columns.map(() => '?'), g.placeholders].join(', ')})`,
       [
         contextId,
         null,
         `pre-migration: blob-schema-v${migrationVersion}`,
-        contentHash,
-        rawContent,
+        storage.contentHash,
+        storage.content,
         now,
+        ...storage.values,
         ...g.values,
       ]
     ),

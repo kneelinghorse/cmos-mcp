@@ -57,6 +57,8 @@ const EXPECTED_PRODUCERS = [
   'ensureContentPrunedColumn',
   'ensureDecisionsFts5',
   'ensureFirehoseEventColumns',
+  // s92-m03: the implicit-session columns; every call runs at an answer boundary.
+  'ensureImplicitSessionColumns',
   'ensureLearningsTable',
   'ensureMissionTimestamps',
   'ensureNextStepsTable',
@@ -684,7 +686,8 @@ function verifyLearningReaffirmCarrier(
   if (!pushesIntoSink || !ts.isFunctionDeclaration(owner)) return false;
 
   const directCalls = callsToFunction(program, owner, checker);
-  if (directCalls.length !== 2) return false;
+  // s92-m04: one call. The second one was the implicit keyword-overlap reaffirm, now retired.
+  if (directCalls.length !== 1) return false;
   const apply = sourceFunctionByName(
     program,
     'tools/cmos/learning-reaffirm.ts',
@@ -792,7 +795,12 @@ describe('s88-m09 MigrationResult warning reachability census', () => {
     expect([...census.producerNames].sort()).toEqual([...EXPECTED_PRODUCERS].sort());
     // s91-m04: 48 -> 50 — cmos-decisions-record.ts runs ensureFirehoseEventColumns and
     // ensureAuthorNamespaceColumns before its transaction; both reach attachWarnings.
-    expect(census.sites.length).toBe(50);
+    // s92-m03: 50 -> 55 — ensureImplicitSessionColumns runs in session capture, complete and
+    // start, decisions record, and mission complete; all five reach attachWarnings.
+    // s92-m09: 55 -> 58 — ensureContentPrunedColumn runs in session complete and mission complete
+    // (their persist copies go content-less) and in cmos_db(prune_snapshots) before it applies;
+    // all three reach the handler's answer, refusals included.
+    expect(census.sites.length).toBe(58);
   });
 
   it('carries every reachable producer through its exact answer boundary', () => {
@@ -813,7 +821,10 @@ describe('s88-m09 MigrationResult warning reachability census', () => {
           `${siteKey(site)}:${site.line} broke its verified forwarding chain — ${expectedForwarders.get(siteKey(site))}`
       )
     ).toEqual([]);
-    expect(directlyBounded).toHaveLength(38); // s91-m04: +2 in cmos-decisions-record.ts
+    // s91-m04: +2 in cmos-decisions-record.ts; s92-m03: +5 (the implicit-session columns).
+    // s92-m09: +3 (the content tombstone column in session complete, mission complete and the
+    // snapshot prune).
+    expect(directlyBounded).toHaveLength(46);
     expect(forwarded.map(siteKey).sort()).toEqual([...expectedForwarders.keys()].sort());
   });
 
@@ -848,7 +859,7 @@ describe('s88-m09 MigrationResult warning reachability census', () => {
     );
 
     expect(actual.map((row) => row.key).sort()).toEqual([...expected.keys()].sort());
-    expect(consumed).toHaveLength(43);
+    expect(consumed).toHaveLength(51); // s92-m03: +5, s92-m09: +3, every one directly bounded
     expect(unconsumed).toHaveLength(STRUCTURAL_RESIDUALS.length);
   });
 });

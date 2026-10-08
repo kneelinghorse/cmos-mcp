@@ -300,6 +300,7 @@ describe('formatHealthForLLM', () => {
         lastContextUpdate: '2024-01-20T15:00:00Z',
         fileSizeBytes: 102400,
         walModeEnabled: true,
+        semanticSearch: { enabled: false, state: 'not-installed', detail: 'not installed' },
       },
     };
 
@@ -307,6 +308,7 @@ describe('formatHealthForLLM', () => {
 
     expect(formatted).toContain('CMOS Database Health Check');
     expect(formatted).toContain('/path/to/cmos.sqlite');
+    expect(formatted).toContain('**Semantic search**: off — not installed');
     expect(formatted).toContain('3.45.0');
     expect(formatted).toContain('Missions: 5');
     expect(formatted).toContain('Sessions: 3');
@@ -349,6 +351,7 @@ describe('formatHealthForLLM', () => {
         lastContextUpdate: null,
         fileSizeBytes: 4096,
         walModeEnabled: false,
+        semanticSearch: { enabled: false, state: 'not-installed', detail: 'not installed' },
       },
     };
 
@@ -374,6 +377,7 @@ describe('formatHealthForLLM', () => {
         lastContextUpdate: null,
         fileSizeBytes: null,
         walModeEnabled: false,
+        semanticSearch: { enabled: false, state: 'not-installed', detail: 'not installed' },
       },
     };
 

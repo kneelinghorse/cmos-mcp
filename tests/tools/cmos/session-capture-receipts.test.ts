@@ -195,6 +195,8 @@ describe('s88-m04 cmos_session(capture) public receipt contract', () => {
   });
 
   it('completes supersession through supported routers using only returned IDs', async () => {
+    // s92-m04: the receipt no longer OFFERS the old row (the automatic offer was retired); the
+    // agent that knows what it replaced names it. Both ids still come from capture receipts.
     const projectRoot = await makeActiveStore('supported supersession');
     const oldResult = await capture(projectRoot, {
       category: 'decision',
@@ -213,15 +215,9 @@ describe('s88-m04 cmos_session(capture) public receipt contract', () => {
     expect(newReceipt.decisionId).toEqual(expect.any(Number));
     if (typeof newReceipt.decisionId !== 'number') return;
 
-    const oldCandidate = newReceipt.supersessionCandidates?.find(
-      (candidate) => candidate.id === oldReceipt.decisionId
-    );
-    expect(oldCandidate).toBeDefined();
-    const canonicalCall =
-      `cmos_decisions(action="update", decisionId=${oldReceipt.decisionId}, ` +
-      `supersededBy=${newReceipt.decisionId})`;
-    expect(newReceipt.supersessionMessage).toContain(canonicalCall);
-    expect(formatSessionForLLM('capture', newResult)).toContain(canonicalCall);
+    expect(newReceipt.supersessionCandidates).toBeUndefined();
+    expect(newReceipt.supersessionMessage).toBeUndefined();
+    expect(formatSessionForLLM('capture', newResult)).not.toContain('supersededBy=');
 
     // No SQL lookup supplies either argument: both IDs came from capture receipts.
     const updated = await cmosDecisions({

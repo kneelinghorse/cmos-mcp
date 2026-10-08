@@ -12,7 +12,11 @@
 import * as crypto from 'crypto';
 import type { CmosDatabaseClient } from './client';
 import { genesisColumns, getProjectId } from './genesis-columns';
-import { snapshotDedupPrunedFilter } from './schema-migrations';
+import {
+  findReusableSnapshot,
+  RETENTION_ARCHIVE_SOURCE_PREFIX,
+  snapshotStorage,
+} from './snapshot-content-policy';
 
 const DEFAULT_SIZE_LIMIT_KB = 100;
 const DEFAULT_WARNING_THRESHOLD_PERCENT = 75;
@@ -200,11 +204,13 @@ export function condenseContextForRetention(
 
   let archiveSnapshotId: number | null = null;
   if (removedCounters.total > 0) {
+    // s92-m09: the prefix tells this recovery copy apart from a close's persist copy that shares
+    // its caller's source (a session close passes session_complete:<id> to both).
     archiveSnapshotId = createSnapshot(
       client,
       contextId,
       originalContent,
-      options?.source ?? `context_condense:${contextId}`
+      `${RETENTION_ARCHIVE_SOURCE_PREFIX}${options?.source ?? `context_condense:${contextId}`}`
     );
     appendArchivedSummaries(content, archivedSprintIds, removedCounters.bySprint, {
       snapshotId: archiveSnapshotId,
@@ -618,20 +624,20 @@ function createSnapshot(
   const contentHash = crypto.createHash('sha256').update(content).digest('hex').substring(0, 16);
   const now = new Date().toISOString();
 
-  const existing = client.getOne<{ id: number }>(
-    // s84-m04: exclude a content-tombstoned row so identical content re-persists fresh.
-    `SELECT id FROM context_snapshots WHERE context_id = ? AND content_hash = ?${snapshotDedupPrunedFilter(client)}`,
-    [contextId, contentHash]
-  );
-  if (existing.success && existing.data) {
-    return existing.data.id;
+  // s92-m09: the archive id is recorded in archived_sprint_summaries, so it must point at a row at
+  // least as protected as a recovery copy, never at an automatic copy a prune could empty.
+  const reusable = findReusableSnapshot(client, { contextId, contentHash, kind: 'pre-mutation' });
+  if (reusable.ok && reusable.row) {
+    return reusable.row.id;
   }
 
   const g = genesisColumns(client, 'context_snapshots', getProjectId(client));
+  // s92-m09: the retention archive is the recovery copy of what the trim removes; it keeps its content.
+  const storage = snapshotStorage('pre-mutation', content, { contentHash });
   const insertResult = client.execute(
-    `INSERT INTO context_snapshots (context_id, source, content_hash, content, created_at, ${g.columns.join(', ')})
-     VALUES (?, ?, ?, ?, ?, ${g.placeholders})`,
-    [contextId, source, contentHash, content, now, ...g.values]
+    `INSERT INTO context_snapshots (context_id, source, content_hash, content, created_at, ${[...storage.columns, ...g.columns].join(', ')})
+     VALUES (?, ?, ?, ?, ?, ${[...storage.columns.map(() => '?'), g.placeholders].join(', ')})`,
+    [contextId, source, storage.contentHash, storage.content, now, ...storage.values, ...g.values]
   );
 
   if (!insertResult.success) {

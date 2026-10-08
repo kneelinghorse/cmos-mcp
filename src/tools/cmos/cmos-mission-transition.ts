@@ -114,7 +114,7 @@ export const cmosMissionTransitionSchema = z
       .max(2000)
       .optional()
       .describe(
-        'Optional free-text UX feedback (Sprint 56 m03). Use on complete actions to flag rough edges or improvement ideas you hit while working the mission. Reviewed via cmos_feedback(action="list").'
+        'Optional free-text UX feedback. Use on complete actions to flag rough edges or improvement ideas you hit while working the mission. Reviewed via cmos_feedback(action="list").'
       ),
     projectRoot: z
       .string()
@@ -181,7 +181,7 @@ export const cmosMissionTransitionToolDefinition = {
         type: 'string',
         maxLength: 2000,
         description:
-          'Optional free-text UX feedback (Sprint 56 m03). Use on complete actions to flag rough edges or improvement ideas you hit while working the mission. Reviewed via cmos_feedback(action="list").',
+          'Optional free-text UX feedback. Use on complete actions to flag rough edges or improvement ideas you hit while working the mission. Reviewed via cmos_feedback(action="list").',
       },
       projectRoot: {
         type: 'string',

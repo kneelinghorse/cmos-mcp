@@ -587,6 +587,15 @@ export interface StartupCredentialCheckResult {
  * configured a dashboard (CMOS_DASHBOARD_URL set), an empty store IS actionable, so the
  * WARN stands.
  */
+/**
+ * s78-m06 / s92-m04 — whether the operator EXPLICITLY configured a dashboard: CMOS_DASHBOARD_URL
+ * is set. Deliberately not the effective URL, whose baked default would make every local-only
+ * install look opted in. The startup WARN and onboard's login nag both ask this one question.
+ */
+export function dashboardExplicitlyConfigured(dashboardUrl?: string): boolean {
+  return (dashboardUrl ?? process.env.CMOS_DASHBOARD_URL ?? '').trim().length > 0;
+}
+
 export async function runStartupCredentialCheck(
   options: {
     store?: CredentialStore;
@@ -596,8 +605,7 @@ export async function runStartupCredentialCheck(
 ): Promise<StartupCredentialCheckResult> {
   const store = options.store ?? (await CredentialStore.create());
   const writer = options.writer ?? ((line: string) => process.stderr.write(line));
-  const dashboardConfigured =
-    (options.dashboardUrl ?? process.env.CMOS_DASHBOARD_URL ?? '').trim().length > 0;
+  const dashboardConfigured = dashboardExplicitlyConfigured(options.dashboardUrl);
 
   const userKeys = await store.listUserScopedKeys();
   const count = Object.keys(userKeys).length;
