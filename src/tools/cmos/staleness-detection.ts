@@ -1,169 +1,124 @@
 /**
- * Staleness Detection
+ * Staleness, computed when read (s93-m11; operator Q10, decision #1182).
  *
- * Detects and flags decisions/learnings that are older than N sprints
- * and haven't been referenced. Surfaces stale counts for agent awareness.
+ * CMOS never changes a decision's or a learning's status on its own. A record's age is computed
+ * when it is read and shown beside its stored status with a suggestion to review it; it is never
+ * written back as status='stale'. A status changes only through an explicit act: supersede,
+ * archive, or an explicit status update, which stamps `last_reviewed_at`.
  *
- * Staleness is sprint-based: items linked to sprints older than the threshold
- * (default 20) relative to the current sprint are candidates. Items that are
- * referenced (via supersession chains or evidence links) are exempt.
+ * Until 3.3.0 the session opener ran a flagger here that wrote status='stale' on every call, on a
+ * clock that counted Planned sprints (so it ran ahead while the next sprints were seeded) and under
+ * the read-only review role too. {@link repairFlaggerStaleness} restores the rows that flagger
+ * could have written, at a process's first write (first-write-maintenance.ts).
  *
  * @module tools/cmos/staleness-detection
  */
 
 import type { CmosDatabaseClient } from './client';
-import { ensureReviewTimestamps, ensureLearningsTable } from './schema-migrations';
 import { sprintIdOrderSql } from './sprint-ordering';
-import { countWrite } from './write-guard';
+import { SPRINT_OPEN_STATUSES, statusInSql } from './terminal-status';
+import { previewText } from './text-preview';
+import { checkWrite } from './write-guard';
+import { storedTimeMs } from './stored-time';
 
 /** A sprint's length on the wall clock (~14 days), used where a row carries no sprint tag. */
 const MS_PER_SPRINT = 14 * 24 * 60 * 60 * 1000;
 
 /**
- * Default staleness threshold in sprints.
+ * Default review age in sprints.
  *
- * Sprint 61 m02 — raised from 10 → 20. Halves trigger frequency without losing
- * the abandonment signal: a learning that hasn't been touched OR cited across
- * 20 sprints is genuinely stale, not just dormant. The original 10-sprint
- * threshold was tripping the same institutional rules every sprint and
- * compounding the staleness pile faster than it could be triaged.
- *
- * Override at runtime via `CMOS_STALENESS_THRESHOLD_SPRINTS`. Tests should
- * import this constant rather than hard-coding 20 so future bumps don't
- * require test churn.
+ * Sprint 61 m02 raised it from 10 to 20. Override at runtime with
+ * `CMOS_STALENESS_THRESHOLD_SPRINTS`. Tests import this constant rather than hard-coding 20.
  */
 export const DEFAULT_STALENESS_THRESHOLD = 20;
 const STALENESS_THRESHOLD_ENV = 'CMOS_STALENESS_THRESHOLD_SPRINTS';
 
 /**
- * Result of staleness detection.
+ * The lowest threshold any shipped flagger used (10, before Sprint 61). A row in a sprint more
+ * recent than the highest sprint minus this could not have been flagged by any shipped version.
  */
-export interface StalenessResult {
-  /** Number of decisions flagged as stale in this run */
-  decisionsFlagged: number;
+export const FLAGGER_MIN_THRESHOLD = 10;
 
-  /** Number of learnings flagged as stale in this run */
-  learningsFlagged: number;
+/**
+ * The sprints that count on the clock: Completed sprints and the open one, matched
+ * case-insensitively. A Planned sprint has not happened yet, so it never moves the clock.
+ */
+export const SPRINT_CLOCK_STATUSES = [...SPRINT_OPEN_STATUSES, 'Completed'] as const;
 
-  /** Total stale decisions (including previously flagged) */
-  totalStaleDecisions: number;
-
-  /** Total stale learnings (including previously flagged) */
-  totalStaleLearnings: number;
-
-  /** The sprint threshold used */
-  threshold: number;
-
-  /** Current sprint number used for comparison */
-  currentSprintNumber: number | null;
-
-  /** Cutoff sprint number (items at or below this are stale candidates) */
-  cutoffSprintNumber: number | null;
-
-  /**
-   * s86-m02b — failed flagging writes, in the shape `<what> failed: <code> — <message>`.
-   *
-   * `decisionsFlagged` / `learningsFlagged` are row COUNTS, and before this field an
-   * errored `UPDATE ... SET status = 'stale'` folded into the same 0 as "the WHERE clause
-   * matched nothing". The triage surfaces built on those counts (cmos_agent_onboard,
-   * cmos_context(view)) therefore reported a clean staleness pass over a store where CMOS
-   * had written no status value at all. Both call sites hold a `warnings` array they push
-   * into; splice this into it.
-   *
-   * OPTIONAL so the read-only-role stand-in literal at cmos-context-view.ts stays
-   * assignable — a legitimate zero carries no warnings, and only an errored statement
-   * populates it.
-   */
-  warnings?: string[];
+/** SQL predicate over a sprints row's status: true for a sprint that counts on the clock. */
+export function sprintCountsOnClockSql(statusExpr = 'status'): string {
+  return statusInSql(statusExpr, SPRINT_CLOCK_STATUSES);
 }
 
 /**
- * Detect and flag stale decisions and learnings.
- *
- * Idempotent: re-running produces the same result. Items already flagged as
- * 'stale' are not re-flagged. Items with status other than 'active' are skipped.
- *
- * Referenced items are exempt:
- * - Decisions that are the target of another decision's superseded_by
- * - Decisions with non-null evidence links
- *
- * @param client - Database client
- * @param options - Optional threshold override
- * @returns Staleness detection result with counts
+ * Staleness as read: stored status counts beside computed review ages. Nothing here writes.
  */
-export function detectAndFlagStaleness(
+export interface StalenessRead {
+  /** Decisions whose stored status is 'stale' (set explicitly, or left by an older server). */
+  storedStaleDecisions: number;
+  /** Learnings (not evergreen) whose stored status is 'stale'. */
+  storedStaleLearnings: number;
+  /** Active decisions at or past the review age, computed now. */
+  dueDecisions: number;
+  /** Active learnings (not evergreen) at or past the review age, computed now. */
+  dueLearnings: number;
+  /** The review age in sprints. */
+  threshold: number;
+  /** The clock: the highest Completed or open canonical sprint number, or null. */
+  currentSprintNumber: number | null;
+  /** Rows in sprints at or below this number are at or past the review age. */
+  cutoffSprintNumber: number | null;
+  /** Reads that failed, so a zero is never mistaken for a clean count. */
+  warnings: string[];
+}
+
+/**
+ * Compute staleness for the opener and the context view. Read-only: it runs no migration and
+ * writes no row, under any role. Rows the review age applies to: active, in a canonical sprint at
+ * or below the cutoff, never reviewed since the review window opened, without evidence and not the
+ * target of a supersession (decisions), and not evergreen (learnings).
+ */
+export function readStaleness(
   client: CmosDatabaseClient,
   options?: { threshold?: number }
-): StalenessResult {
+): StalenessRead {
   const threshold = resolveThreshold(options?.threshold);
-
-  // Sprint 52 m03: ensure last_reviewed_at exists before the staleness query reads it.
-  // Sprint 61 m03: ensure the learnings.evergreen column exists on the read path so
-  // un-migrated DBs self-heal before the WHERE evergreen = 0 filter is evaluated.
-  // Both calls are idempotent and cheap once the columns are in place.
-  ensureReviewTimestamps(client);
-  ensureLearningsTable(client);
-
-  // Get the current sprint number
-  const currentSprintNumber = getCurrentSprintNumber(client);
-  if (currentSprintNumber === null) {
-    // No sprints — nothing to flag
-    return {
-      decisionsFlagged: 0,
-      learningsFlagged: 0,
-      totalStaleDecisions: countStale(client, 'strategic_decisions'),
-      totalStaleLearnings: countStale(client, 'learnings'),
-      threshold,
-      currentSprintNumber: null,
-      cutoffSprintNumber: null,
-    };
-  }
-
-  const cutoffSprintNumber = currentSprintNumber - threshold;
-  if (cutoffSprintNumber < 1) {
-    // Not enough sprints to trigger staleness
-    return {
-      decisionsFlagged: 0,
-      learningsFlagged: 0,
-      totalStaleDecisions: countStale(client, 'strategic_decisions'),
-      totalStaleLearnings: countStale(client, 'learnings'),
-      threshold,
-      currentSprintNumber,
-      cutoffSprintNumber,
-    };
-  }
-
-  // Get sprint IDs that are at or below the cutoff
-  const staleSprintIds = getStaleSprintIds(client, cutoffSprintNumber);
-  if (staleSprintIds.length === 0) {
-    return {
-      decisionsFlagged: 0,
-      learningsFlagged: 0,
-      totalStaleDecisions: countStale(client, 'strategic_decisions'),
-      totalStaleLearnings: countStale(client, 'learnings'),
-      threshold,
-      currentSprintNumber,
-      cutoffSprintNumber,
-    };
-  }
-
-  const placeholders = staleSprintIds.map(() => '?').join(', ');
-
-  // s86-m02b: both flag helpers write a status value; a failed UPDATE must not arrive here
-  // as an ordinary zero.
   const warnings: string[] = [];
+  const currentSprintNumber = getCurrentSprintNumber(client);
+  const cutoffSprintNumber = currentSprintNumber === null ? null : currentSprintNumber - threshold;
 
-  // Flag stale decisions (excluding referenced ones)
-  const decisionsFlagged = flagStaleDecisions(client, staleSprintIds, placeholders, warnings);
+  const storedStaleDecisions = countRows(
+    client,
+    'strategic_decisions',
+    "status = 'stale'",
+    warnings
+  );
+  const learningColumns = getTableColumns(client, 'learnings');
+  const notEvergreen = learningColumns.has('evergreen') ? ' AND evergreen = 0' : '';
+  const storedStaleLearnings = countRows(
+    client,
+    'learnings',
+    `status = 'stale'${notEvergreen}`,
+    warnings
+  );
 
-  // Flag stale learnings
-  const learningsFlagged = flagStaleLearnings(client, staleSprintIds, placeholders, warnings);
+  let dueDecisions = 0;
+  let dueLearnings = 0;
+  if (cutoffSprintNumber !== null && cutoffSprintNumber >= 1) {
+    const due = dueForReviewPredicates(client, cutoffSprintNumber);
+    dueDecisions = due.decisions
+      ? countRows(client, 'strategic_decisions', due.decisions.sql, warnings, due.decisions.params)
+      : 0;
+    dueLearnings = due.learnings
+      ? countRows(client, 'learnings', due.learnings.sql, warnings, due.learnings.params)
+      : 0;
+  }
 
   return {
-    decisionsFlagged,
-    learningsFlagged,
-    totalStaleDecisions: countStale(client, 'strategic_decisions'),
-    totalStaleLearnings: countStale(client, 'learnings'),
+    storedStaleDecisions,
+    storedStaleLearnings,
+    dueDecisions,
+    dueLearnings,
     threshold,
     currentSprintNumber,
     cutoffSprintNumber,
@@ -172,21 +127,85 @@ export function detectAndFlagStaleness(
 }
 
 /**
- * Get stale counts without flagging (read-only).
- * Useful when you want to report counts without mutating.
- *
- * Sprint 61 m03: ensures the learnings.evergreen column exists before reading
- * (the count filters on `evergreen = 0` to exclude institutional rules).
+ * One line for the opener: the review suggestion, with the stored stale count when there is one.
+ * Null when there is nothing to review.
  */
-export function getStaleCounts(client: CmosDatabaseClient): {
-  staleDecisions: number;
-  staleLearnings: number;
-} {
-  ensureLearningsTable(client);
-  return {
-    staleDecisions: countStale(client, 'strategic_decisions'),
-    staleLearnings: countStale(client, 'learnings'),
-  };
+export function stalenessAdvisory(read: StalenessRead): string | null {
+  const due = read.dueDecisions + read.dueLearnings;
+  const stored = read.storedStaleDecisions + read.storedStaleLearnings;
+  if (due === 0 && stored === 0) return null;
+  const parts: string[] = [];
+  if (due > 0) {
+    parts.push(
+      `${read.dueDecisions} active decision(s) and ${read.dueLearnings} learning(s) are ${read.threshold}+ sprints old with no review`
+    );
+  }
+  if (stored > 0) {
+    parts.push(
+      `${read.storedStaleDecisions} decision(s) and ${read.storedStaleLearnings} learning(s) are marked stale`
+    );
+  }
+  return (
+    `${parts.join('; ')}. Nothing changes their status on its own: ` +
+    'run cmos_decisions(action="review") to see each decision and learning with its age and a ' +
+    'suggested action.'
+  );
+}
+
+interface Predicate {
+  readonly sql: string;
+  readonly params: unknown[];
+}
+
+function dueForReviewPredicates(
+  client: CmosDatabaseClient,
+  cutoffSprintNumber: number
+): { decisions: Predicate | null; learnings: Predicate | null } {
+  const reviewCutoffIso = computeReviewCutoffIso();
+  const inOldSprint = canonicalSprintAtMostSql('sprint_id');
+
+  const decisionColumns = getTableColumns(client, 'strategic_decisions');
+  let decisions: Predicate | null = null;
+  if (decisionColumns.has('status') && decisionColumns.has('sprint_id')) {
+    const clauses = ["status = 'active'", inOldSprint];
+    const params: unknown[] = [cutoffSprintNumber];
+    if (decisionColumns.has('last_reviewed_at')) {
+      clauses.push('(last_reviewed_at IS NULL OR julianday(last_reviewed_at) < julianday(?))');
+      params.push(reviewCutoffIso);
+    }
+    if (decisionColumns.has('superseded_by')) {
+      clauses.push(
+        'id NOT IN (SELECT superseded_by FROM strategic_decisions WHERE superseded_by IS NOT NULL)'
+      );
+    }
+    if (decisionColumns.has('evidence')) {
+      clauses.push("(evidence IS NULL OR evidence = '[]' OR evidence = '')");
+    }
+    decisions = { sql: clauses.join(' AND '), params };
+  }
+
+  const learningColumns = getTableColumns(client, 'learnings');
+  let learnings: Predicate | null = null;
+  if (learningColumns.has('status') && learningColumns.has('sprint_id')) {
+    const clauses = ["status = 'active'", inOldSprint];
+    const params: unknown[] = [cutoffSprintNumber];
+    if (learningColumns.has('last_reviewed_at')) {
+      clauses.push('(last_reviewed_at IS NULL OR julianday(last_reviewed_at) < julianday(?))');
+      params.push(reviewCutoffIso);
+    }
+    if (learningColumns.has('evergreen')) clauses.push('evergreen = 0');
+    learnings = { sql: clauses.join(' AND '), params };
+  }
+
+  return { decisions, learnings };
+}
+
+/** A canonical `sprint-N` id whose N is at most the bound parameter. */
+function canonicalSprintAtMostSql(column: string): string {
+  return (
+    `(${column} GLOB 'sprint-[0-9]*' AND SUBSTR(${column}, 8) NOT GLOB '*[^0-9]*' ` +
+    `AND CAST(SUBSTR(${column}, 8) AS INTEGER) <= ?)`
+  );
 }
 
 /**
@@ -218,11 +237,32 @@ export interface StaleDecisionDetail {
 }
 
 /**
+ * s93-m11 — a learning the opener's advisory counts, as the review shows it: at or past the review
+ * age (computed now, as readStaleness counts it), or stored 'stale'. Evergreen learnings never are.
+ */
+export interface ReviewLearningDetail {
+  id: number;
+  /** A preview of at most 300 characters; cmos_learnings(action="show") reads it in full. */
+  text: string;
+  status: string;
+  sprintId: string | null;
+  /** Sprints since its own, on the review clock; null for a sprint id that is not sprint-N. */
+  sprintAge: number | null;
+  suggestedAction: 'reaffirm' | 'review';
+  suggestedReason: string;
+}
+
+/**
  * Result of a decision lifecycle review.
  */
 export interface DecisionReviewResult {
   /** Decisions needing attention (stale or approaching staleness) */
   decisions: StaleDecisionDetail[];
+  /**
+   * s93-m11 — learnings at or past the review age or stored 'stale', so every record the opener's
+   * advisory counts has a surface that shows its age.
+   */
+  learnings: ReviewLearningDetail[];
   /** Total active decisions */
   totalActive: number;
   /** Total stale decisions */
@@ -235,10 +275,7 @@ export interface DecisionReviewResult {
 
 /**
  * Get detailed staleness review for all decisions needing attention.
- * Returns per-decision scoring and suggested actions.
- *
- * Unlike detectAndFlagStaleness, this does NOT mutate the database.
- * It provides a read-only view for agents to triage.
+ * Returns per-decision scoring and suggested actions. Read-only.
  */
 export function reviewDecisionStaleness(
   client: CmosDatabaseClient,
@@ -249,10 +286,18 @@ export function reviewDecisionStaleness(
   const currentSprintNumber = getCurrentSprintNumber(client);
 
   const totalActive = countByStatus(client, 'strategic_decisions', 'active');
-  const totalStale = countStale(client, 'strategic_decisions');
+  const totalStale = countByStatus(client, 'strategic_decisions', 'stale');
+  const learnings = reviewLearnings(client, threshold, currentSprintNumber);
 
   if (currentSprintNumber === null) {
-    return { decisions: [], totalActive, totalStale, currentSprintNumber: null, threshold };
+    return {
+      decisions: [],
+      learnings,
+      totalActive,
+      totalStale,
+      currentSprintNumber: null,
+      threshold,
+    };
   }
 
   // Get referenced decision IDs (supersession targets)
@@ -279,7 +324,7 @@ export function reviewDecisionStaleness(
   );
 
   if (!result.success || !result.data) {
-    return { decisions: [], totalActive, totalStale, currentSprintNumber, threshold };
+    return { decisions: [], learnings, totalActive, totalStale, currentSprintNumber, threshold };
   }
 
   const decisions: StaleDecisionDetail[] = [];
@@ -289,7 +334,7 @@ export function reviewDecisionStaleness(
     let sprintAge: number;
     if (row.sprint_id === null) {
       // s91-m08: an untagged decision ages on wall-clock time, one sprint per MS_PER_SPRINT.
-      const created = row.created_at ? Date.parse(row.created_at) : NaN;
+      const created = storedTimeMs(row.created_at);
       if (Number.isNaN(created)) continue;
       sprintAge = Math.floor((now - created) / MS_PER_SPRINT);
     } else {
@@ -346,8 +391,494 @@ export function reviewDecisionStaleness(
   // Sort by staleness score descending (most stale first)
   decisions.sort((a, b) => b.stalenessScore - a.stalenessScore);
 
-  return { decisions, totalActive, totalStale, currentSprintNumber, threshold };
+  return { decisions, learnings, totalActive, totalStale, currentSprintNumber, threshold };
 }
+
+/**
+ * s93-m11 — the learnings readStaleness counts: stored 'stale', or at or past the review age by the
+ * same predicate, never evergreen. Oldest sprint first. Read-only.
+ */
+function reviewLearnings(
+  client: CmosDatabaseClient,
+  threshold: number,
+  currentSprintNumber: number | null
+): ReviewLearningDetail[] {
+  const columns = getTableColumns(client, 'learnings');
+  if (!columns.has('status') || !columns.has('sprint_id')) return [];
+  const notEvergreen = columns.has('evergreen') ? ' AND evergreen = 0' : '';
+  const clauses = [`(status = 'stale'${notEvergreen})`];
+  const params: unknown[] = [];
+  const cutoff = currentSprintNumber === null ? null : currentSprintNumber - threshold;
+  if (cutoff !== null && cutoff >= 1) {
+    const due = dueForReviewPredicates(client, cutoff).learnings;
+    if (due) {
+      clauses.push(`(${due.sql})`);
+      params.push(...due.params);
+    }
+  }
+  const rows = client.getMany<{
+    id: number;
+    content: string;
+    status: string;
+    sprint_id: string | null;
+  }>(
+    `SELECT id, content, status, sprint_id FROM learnings
+      WHERE ${clauses.join(' OR ')}
+      ORDER BY ${sprintIdOrderSql('sprint_id', 'ASC')}, id ASC`,
+    params
+  );
+  if (!rows.success || !rows.data) return [];
+
+  return rows.data.map((row) => {
+    const sprintNumber = row.sprint_id === null ? null : extractSprintNumber(row.sprint_id);
+    const sprintAge =
+      sprintNumber === null || currentSprintNumber === null
+        ? null
+        : currentSprintNumber - sprintNumber;
+    const stale = row.status === 'stale';
+    return {
+      id: row.id,
+      text: previewText(row.content).preview,
+      status: row.status,
+      sprintId: row.sprint_id,
+      sprintAge,
+      suggestedAction: stale ? 'review' : 'reaffirm',
+      suggestedReason: stale
+        ? 'Marked stale: set it active again or archive it'
+        : `${sprintAge ?? threshold}+ sprints old with no review: reaffirm it if it still holds`,
+    } satisfies ReviewLearningDetail;
+  });
+}
+
+// ─── The repair ────────────────────────────────────────────────────────────────────────────────
+
+/** The metadata key holding the repair's ledger. */
+export const STALENESS_REPAIR_LEDGER_KEY = 'staleness_repair';
+/** At most this many ids per table are kept in the ledger; the counts stay whole. */
+export const STALENESS_REPAIR_ID_CAP = 500;
+
+export type StaleRowTable = 'decisions' | 'learnings';
+
+/** Why a stale row was left alone: it does not have the shape the flagger wrote. */
+export type LeftReason =
+  | 'reviewed'
+  | 'has evidence'
+  | 'supersession target'
+  | 'evergreen'
+  | 'not a canonical sprint'
+  | 'sprint too recent for any flagger';
+
+export interface LeftRow {
+  readonly table: StaleRowTable;
+  readonly id: number;
+  readonly reason: LeftReason;
+}
+
+/**
+ * What the repair cannot tell apart, written into every ledger (design fork 3: "the receipt says
+ * so"). Each case is a 'stale' an older CMOS server wrote, either on purpose or on its own, that
+ * the repair reads the other way.
+ */
+export const STALENESS_REPAIR_CANNOT_SEE =
+  "An explicit 'stale' that a server before 3.3.0 wrote on a row that is otherwise flagger-shaped " +
+  'and unreviewed is restored (those servers did not stamp the review). A row an older server ' +
+  'flagged after its review aged out of the 280-day window, or under a CMOS_STALENESS_THRESHOLD_SPRINTS ' +
+  'below 10, is left and listed with the reason that kept it.';
+
+/** The ledger kept in metadata (JSON). Counts are whole; id lists are capped. */
+export interface StalenessRepairLedger {
+  readonly version: 1;
+  /** When the last run that changed something ran (ISO 8601). */
+  readonly lastRunAt: string;
+  /** When the last run that restored at least one row ran (ISO 8601); what the review reports. */
+  readonly lastRestoredAt?: string;
+  /** Runs that restored at least one row. */
+  readonly runs: number;
+  /** Every row any run restored, by table (distinct ids, capped). */
+  readonly restored: { readonly decisions: number[]; readonly learnings: number[] };
+  /** Rows the last restoring run restored, by table. */
+  readonly lastRestoredCount: { readonly decisions: number; readonly learnings: number };
+  /** Rows restored over every run, counting a row once per restore. */
+  readonly totalRestored: number;
+  /** Rows restored again after an earlier run had restored them: an older server re-flagged them. */
+  readonly reflaggedRestored: number;
+  /** Stale rows the repair leaves, itemized (capped), and how many there are in all. */
+  readonly left: LeftRow[];
+  readonly leftCount: number;
+  /** What the repair cannot tell apart ({@link STALENESS_REPAIR_CANNOT_SEE}). */
+  readonly cannotSee: string;
+}
+
+export interface StalenessRepairReceipt {
+  readonly restoredDecisionIds: number[];
+  readonly restoredLearningIds: number[];
+  /** Restored rows that a previous run had already restored. */
+  readonly reflagged: number;
+  readonly left: LeftRow[];
+  /** Whether the ledger was written by this run. */
+  readonly ledgerWritten: boolean;
+  readonly warnings: string[];
+}
+
+interface StaleCandidate {
+  readonly id: number;
+  readonly sprint_id: string | null;
+  readonly evidence?: string | null;
+  readonly last_reviewed_at?: string | null;
+  readonly evergreen?: number | null;
+  readonly is_target?: number;
+}
+
+/**
+ * Restore the rows an automatic flagger could have set to 'stale', and nothing else (s93-m11
+ * fork 3; decision #1191). A row is restored to 'active' only when it is ALL of:
+ *  - stored as 'stale';
+ *  - flagger-shaped: in a canonical `sprint-N` with N at most the highest sprint of any status minus
+ *    {@link FLAGGER_MIN_THRESHOLD} (the lowest threshold ever shipped, on the old clock that counted
+ *    Planned sprints); with no evidence and not the target of a supersession (decisions); not
+ *    evergreen (learnings);
+ *  - unreviewed: `last_reviewed_at` is NULL. An explicit status update stamps it, so a row someone
+ *    set to 'stale' on purpose with this version is never restored.
+ * Restored rows get no review stamp, so their computed age stays honest.
+ *
+ * WHAT IT CANNOT SEE is written into every ledger ({@link STALENESS_REPAIR_CANNOT_SEE}).
+ *
+ * Runs in one IMMEDIATE transaction. Writes the ledger only when it restored a row or the set of
+ * rows it leaves changed, so a store with nothing to repair, and no ledger to bring current, is
+ * not written at all.
+ */
+export function repairFlaggerStaleness(
+  client: CmosDatabaseClient,
+  nowIso: string = new Date().toISOString()
+): StalenessRepairReceipt {
+  const warnings: string[] = [];
+  const empty: StalenessRepairReceipt = {
+    restoredDecisionIds: [],
+    restoredLearningIds: [],
+    reflagged: 0,
+    left: [],
+    ledgerWritten: false,
+    warnings,
+  };
+
+  const decisionColumns = getTableColumns(client, 'strategic_decisions');
+  const learningColumns = getTableColumns(client, 'learnings');
+  if (!decisionColumns.has('status') && !learningColumns.has('status')) return empty;
+
+  // Fast path, outside any transaction: most stores hold no stale row at all.
+  const anyStale = client.getOne<{ n: number }>(
+    `SELECT ${decisionColumns.has('status') ? "(SELECT COUNT(*) FROM strategic_decisions WHERE status = 'stale')" : '0'}
+          + ${learningColumns.has('status') ? "(SELECT COUNT(*) FROM learnings WHERE status = 'stale')" : '0'} AS n`,
+    []
+  );
+  if (!anyStale.success) {
+    warnings.push(`Staleness repair skipped: ${anyStale.error?.message ?? 'the count failed'}`);
+    return empty;
+  }
+  if ((anyStale.data?.n ?? 0) === 0) {
+    // Nothing stale. A ledger that still lists rows it left (since restored or archived by hand)
+    // is brought current, so it never names a row that is no longer stale.
+    const previous = readStalenessRepairLedger(client);
+    if (previous && previous.leftCount > 0) {
+      const current: StalenessRepairLedger = {
+        ...previous,
+        lastRunAt: nowIso,
+        left: [],
+        leftCount: 0,
+        cannotSee: STALENESS_REPAIR_CANNOT_SEE,
+      };
+      const ledgerWritten = writeStalenessRepairLedger(client, current, warnings);
+      return { ...empty, ledgerWritten, warnings };
+    }
+    return empty;
+  }
+
+  const highest = getHighestSprintNumberAnyStatus(client);
+  const bound = highest === null ? null : highest - FLAGGER_MIN_THRESHOLD;
+
+  // IMMEDIATE: the candidates are re-read under the write lock, so a concurrent writer cannot
+  // change a row between its selection and its restore.
+  const begin = client.execute('BEGIN IMMEDIATE', []);
+  if (!begin.success) {
+    warnings.push(`Staleness repair skipped: ${begin.error?.message ?? 'BEGIN failed'}`);
+    return empty;
+  }
+  const rollback = (why: string): StalenessRepairReceipt => {
+    client.execute('ROLLBACK', []);
+    warnings.push(`Staleness repair rolled back: ${why}`);
+    return { ...empty, warnings };
+  };
+
+  try {
+    const previous = readStalenessRepairLedger(client);
+    const decisionCandidates = decisionColumns.has('status')
+      ? staleCandidates(client, 'strategic_decisions', decisionColumns)
+      : [];
+    const learningCandidates = learningColumns.has('status')
+      ? staleCandidates(client, 'learnings', learningColumns)
+      : [];
+
+    const left: LeftRow[] = [];
+    const restoreDecisions: number[] = [];
+    const restoreLearnings: number[] = [];
+    for (const row of decisionCandidates) {
+      const reason = leftReason(row, bound, 'decisions');
+      if (reason) left.push({ table: 'decisions', id: row.id, reason });
+      else restoreDecisions.push(row.id);
+    }
+    for (const row of learningCandidates) {
+      const reason = leftReason(row, bound, 'learnings');
+      if (reason) left.push({ table: 'learnings', id: row.id, reason });
+      else restoreLearnings.push(row.id);
+    }
+
+    const writeFailures: string[] = [];
+    const restoredDecisionIds = restoreRows(
+      client,
+      'strategic_decisions',
+      restoreDecisions,
+      writeFailures
+    );
+    const restoredLearningIds = restoreRows(client, 'learnings', restoreLearnings, writeFailures);
+    if (writeFailures.length > 0) return rollback(writeFailures.join('; '));
+
+    const before = new Set([
+      ...(previous?.restored.decisions ?? []).map((id) => `d${id}`),
+      ...(previous?.restored.learnings ?? []).map((id) => `l${id}`),
+    ]);
+    const reflagged =
+      restoredDecisionIds.filter((id) => before.has(`d${id}`)).length +
+      restoredLearningIds.filter((id) => before.has(`l${id}`)).length;
+    const union = (prior: readonly number[] = [], now: readonly number[]): number[] =>
+      [...new Set([...prior, ...now])].sort((a, b) => a - b).slice(0, STALENESS_REPAIR_ID_CAP);
+
+    const restoredAny = restoredDecisionIds.length + restoredLearningIds.length > 0;
+    const leftChanged =
+      JSON.stringify(previous?.left ?? []) !==
+        JSON.stringify(left.slice(0, STALENESS_REPAIR_ID_CAP)) ||
+      (previous?.leftCount ?? 0) !== left.length;
+    let ledgerWritten = false;
+    const lastRestoredAt = restoredAny ? nowIso : previous?.lastRestoredAt;
+    if (restoredAny || leftChanged) {
+      const ledger: StalenessRepairLedger = {
+        version: 1,
+        lastRunAt: nowIso,
+        ...(lastRestoredAt ? { lastRestoredAt } : {}),
+        runs: (previous?.runs ?? 0) + (restoredAny ? 1 : 0),
+        restored: {
+          decisions: union(previous?.restored.decisions, restoredDecisionIds),
+          learnings: union(previous?.restored.learnings, restoredLearningIds),
+        },
+        lastRestoredCount: restoredAny
+          ? { decisions: restoredDecisionIds.length, learnings: restoredLearningIds.length }
+          : (previous?.lastRestoredCount ?? { decisions: 0, learnings: 0 }),
+        totalRestored:
+          (previous?.totalRestored ?? 0) + restoredDecisionIds.length + restoredLearningIds.length,
+        reflaggedRestored: (previous?.reflaggedRestored ?? 0) + reflagged,
+        left: left.slice(0, STALENESS_REPAIR_ID_CAP),
+        leftCount: left.length,
+        cannotSee: STALENESS_REPAIR_CANNOT_SEE,
+      };
+      const ledgerFailures: string[] = [];
+      ledgerWritten = writeStalenessRepairLedger(client, ledger, ledgerFailures);
+      // A restore without its ledger could not be reported as re-flagged later: all or nothing.
+      if (!ledgerWritten) return rollback(ledgerFailures.join('; '));
+    }
+
+    const commit = client.execute('COMMIT', []);
+    if (!commit.success) return rollback(commit.error?.message ?? 'COMMIT failed');
+
+    return {
+      restoredDecisionIds,
+      restoredLearningIds,
+      reflagged,
+      left,
+      ledgerWritten,
+      warnings,
+    };
+  } catch (error) {
+    return rollback(error instanceof Error ? error.message : String(error));
+  }
+}
+
+function staleCandidates(
+  client: CmosDatabaseClient,
+  table: 'strategic_decisions' | 'learnings',
+  columns: Set<string>
+): StaleCandidate[] {
+  const select = ['id', columns.has('sprint_id') ? 'sprint_id' : 'NULL AS sprint_id'];
+  if (columns.has('last_reviewed_at')) select.push('last_reviewed_at');
+  if (table === 'strategic_decisions') {
+    if (columns.has('evidence')) select.push('evidence');
+    select.push(
+      columns.has('superseded_by')
+        ? '(id IN (SELECT superseded_by FROM strategic_decisions WHERE superseded_by IS NOT NULL)) AS is_target'
+        : '0 AS is_target'
+    );
+  } else if (columns.has('evergreen')) {
+    select.push('evergreen');
+  }
+  const rows = client.getMany<StaleCandidate>(
+    `SELECT ${select.join(', ')} FROM ${table} WHERE status = 'stale' ORDER BY id`,
+    []
+  );
+  if (!rows.success) {
+    throw new Error(`reading stale ${table} failed: ${rows.error?.message ?? 'unknown'}`);
+  }
+  return rows.data ?? [];
+}
+
+function leftReason(
+  row: StaleCandidate,
+  bound: number | null,
+  table: StaleRowTable
+): LeftReason | null {
+  if (row.last_reviewed_at != null && row.last_reviewed_at !== '') return 'reviewed';
+  const sprintNumber = row.sprint_id ? extractSprintNumber(row.sprint_id) : null;
+  if (sprintNumber === null) return 'not a canonical sprint';
+  if (bound === null || sprintNumber > bound) return 'sprint too recent for any flagger';
+  if (table === 'decisions') {
+    if (row.evidence && row.evidence !== '[]' && row.evidence !== '') return 'has evidence';
+    if (row.is_target) return 'supersession target';
+  } else if (row.evergreen) {
+    return 'evergreen';
+  }
+  return null;
+}
+
+function restoreRows(
+  client: CmosDatabaseClient,
+  table: 'strategic_decisions' | 'learnings',
+  ids: number[],
+  failures: string[]
+): number[] {
+  const restored: number[] = [];
+  // Literal statements, one per table, so the status-write and enum sweeps can read them.
+  const sql =
+    table === 'strategic_decisions'
+      ? "UPDATE strategic_decisions SET status = 'active' WHERE id = ? AND status = 'stale'"
+      : "UPDATE learnings SET status = 'active' WHERE id = ? AND status = 'stale'";
+  for (const id of ids) {
+    const result = client.execute(sql, [id]);
+    if (checkWrite(result, failures, `${table}.status restore (id ${id})`) && result.data) {
+      if (result.data.changes === 1) restored.push(id);
+    }
+  }
+  return restored;
+}
+
+/** Write the repair's ledger; a failure is recorded in `sink`. */
+function writeStalenessRepairLedger(
+  client: CmosDatabaseClient,
+  ledger: StalenessRepairLedger,
+  sink: string[]
+): boolean {
+  return checkWrite(
+    client.execute('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)', [
+      STALENESS_REPAIR_LEDGER_KEY,
+      JSON.stringify(ledger),
+    ]),
+    sink,
+    `metadata.${STALENESS_REPAIR_LEDGER_KEY}`
+  );
+}
+
+/** The repair's ledger, or null when none was written (or it does not parse). */
+export function readStalenessRepairLedger(
+  client: CmosDatabaseClient
+): StalenessRepairLedger | null {
+  const row = client.getOne<{ value: string }>('SELECT value FROM metadata WHERE key = ?', [
+    STALENESS_REPAIR_LEDGER_KEY,
+  ]);
+  if (!row.success || !row.data?.value) return null;
+  try {
+    const parsed = JSON.parse(row.data.value) as StalenessRepairLedger;
+    return parsed && parsed.version === 1 ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * For the opener, read-only: how many rows a repair restored are marked stale again with no review
+ * stamp. Only an older CMOS server writes an unstamped 'stale' (3.3.0 stamps every explicit status
+ * update), so a non-zero count means one is still running.
+ */
+export function countReflaggedSinceRepair(
+  client: CmosDatabaseClient
+): { count: number; lastRestoredAt: string } | null {
+  const ledger = readStalenessRepairLedger(client);
+  if (!ledger?.restored) return null;
+  const count =
+    countIdsStaleUnreviewed(client, 'strategic_decisions', ledger.restored.decisions) +
+    countIdsStaleUnreviewed(client, 'learnings', ledger.restored.learnings);
+  // A run that only updated the left-alone list moves lastRunAt, not when anything was restored.
+  return { count, lastRestoredAt: ledger.lastRestoredAt ?? ledger.lastRunAt };
+}
+
+function countIdsStaleUnreviewed(
+  client: CmosDatabaseClient,
+  table: 'strategic_decisions' | 'learnings',
+  ids: readonly number[]
+): number {
+  if (ids.length === 0) return 0;
+  const unreviewed = getTableColumns(client, table).has('last_reviewed_at')
+    ? ' AND last_reviewed_at IS NULL'
+    : '';
+  const result = client.getOne<{ n: number }>(
+    `SELECT COUNT(*) AS n FROM ${table} WHERE status = 'stale'${unreviewed} AND id IN (${ids.map(() => '?').join(', ')})`,
+    [...ids]
+  );
+  return result.success ? (result.data?.n ?? 0) : 0;
+}
+
+// ─── The clock ─────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The clock: the highest canonical sprint number among Completed sprints and the open one,
+ * case-insensitively. A Planned sprint never counts (until 3.3.0 the fallback took the highest
+ * sprint of any status, so seeding sprints 93-98 moved the cutoff six sprints ahead). Ids that are
+ * not `sprint-N` are skipped, as they always were.
+ */
+export function getCurrentSprintNumber(client: CmosDatabaseClient): number | null {
+  const result = client.getMany<{ id: string }>(
+    `SELECT id FROM sprints WHERE ${sprintCountsOnClockSql('status')}
+     ORDER BY ${sprintIdOrderSql('id', 'DESC')}`,
+    []
+  );
+  if (!result.success || !result.data) return null;
+  for (const row of result.data) {
+    const num = extractSprintNumber(row.id);
+    if (num !== null) return num;
+  }
+  return null;
+}
+
+/** The highest canonical sprint number of any status: the bound older flaggers worked under. */
+function getHighestSprintNumberAnyStatus(client: CmosDatabaseClient): number | null {
+  const result = client.getMany<{ id: string }>(
+    `SELECT id FROM sprints ORDER BY ${sprintIdOrderSql('id', 'DESC')}`,
+    []
+  );
+  if (!result.success || !result.data) return null;
+  for (const row of result.data) {
+    const num = extractSprintNumber(row.id);
+    if (num !== null) return num;
+  }
+  return null;
+}
+
+/**
+ * Extract the numeric suffix from a sprint ID like "sprint-26" → 26.
+ */
+function extractSprintNumber(sprintId: string): number | null {
+  const match = sprintId.match(/^sprint-(\d+)$/);
+  if (!match) return null;
+  const num = Number.parseInt(match[1], 10);
+  return Number.isFinite(num) ? num : null;
+}
+
+// ─── Helpers ───────────────────────────────────────────────────────────────────────────────────
 
 /**
  * Get IDs of decisions that are referenced by supersession chains.
@@ -369,6 +900,28 @@ function countByStatus(client: CmosDatabaseClient, tableName: string, status: st
   return result.success ? (result.data?.count ?? 0) : 0;
 }
 
+function countRows(
+  client: CmosDatabaseClient,
+  tableName: string,
+  where: string,
+  warnings: string[],
+  params: unknown[] = []
+): number {
+  const columns = getTableColumns(client, tableName);
+  if (!columns.has('status')) return 0;
+  const result = client.getOne<{ count: number }>(
+    `SELECT COUNT(*) AS count FROM ${tableName} WHERE ${where}`,
+    params
+  );
+  if (!result.success) {
+    warnings.push(
+      `Staleness count on ${tableName} failed: ${result.error?.message ?? 'unknown'}; the count shown is not complete.`
+    );
+    return 0;
+  }
+  return result.data?.count ?? 0;
+}
+
 function resolveThreshold(explicit?: number): number {
   if (explicit !== undefined && explicit > 0) {
     return explicit;
@@ -386,187 +939,11 @@ function resolveThreshold(explicit?: number): number {
 }
 
 /**
- * Get the highest canonical sprint number from Active/In Progress/Current sprints,
- * or the highest canonical sprint number overall when none of those statuses parses.
- * Legacy-shaped IDs sort after canonical IDs and are skipped by extractSprintNumber.
- * The remaining source rowid-ordering sites deliberately order carry-forward work within one sprint
- * (cmos-sprint-carry-forward.ts), blocked missions by insertion age (cmos-agent-onboard.ts), and
- * retro rows within one sprint (cmos-sprint-retro.ts); none selects the current sprint.
- */
-function getCurrentSprintNumber(client: CmosDatabaseClient): number | null {
-  // Try the highest-numbered active sprint first.
-  const activeResult = client.getOne<{ id: string }>(
-    `SELECT id FROM sprints
-     WHERE status IN ('Active', 'In Progress', 'Current')
-     ORDER BY ${sprintIdOrderSql('id', 'DESC')} LIMIT 1`,
-    []
-  );
-  if (activeResult.success && activeResult.data) {
-    const num = extractSprintNumber(activeResult.data.id);
-    if (num !== null) return num;
-  }
-
-  // Fallback to the highest-numbered canonical sprint overall.
-  const allResult = client.getMany<{ id: string }>(
-    `SELECT id FROM sprints ORDER BY ${sprintIdOrderSql('id', 'DESC')}`,
-    []
-  );
-  if (allResult.success && allResult.data) {
-    for (const row of allResult.data) {
-      const num = extractSprintNumber(row.id);
-      if (num !== null) return num;
-    }
-  }
-
-  return null;
-}
-
-/**
- * Extract the numeric suffix from a sprint ID like "sprint-26" → 26.
- */
-function extractSprintNumber(sprintId: string): number | null {
-  const match = sprintId.match(/^sprint-(\d+)$/);
-  if (!match) return null;
-  const num = Number.parseInt(match[1], 10);
-  return Number.isFinite(num) ? num : null;
-}
-
-/**
- * Get sprint IDs whose numeric suffix is at or below the cutoff.
- */
-function getStaleSprintIds(client: CmosDatabaseClient, cutoffSprintNumber: number): string[] {
-  const result = client.getMany<{ id: string }>('SELECT id FROM sprints', []);
-  if (!result.success || !result.data) return [];
-
-  return result.data
-    .filter((row) => {
-      const num = extractSprintNumber(row.id);
-      return num !== null && num <= cutoffSprintNumber;
-    })
-    .map((row) => row.id);
-}
-
-/**
- * Flag stale decisions. Excludes:
- * - Decisions that are targets of supersession chains (another decision points to them)
- * - Decisions with non-null evidence
- */
-function flagStaleDecisions(
-  client: CmosDatabaseClient,
-  staleSprintIds: string[],
-  placeholders: string,
-  warnings: string[] = []
-): number {
-  // Check if the table and required columns exist
-  const columns = getTableColumns(client, 'strategic_decisions');
-  if (!columns.has('status') || !columns.has('sprint_id')) return 0;
-
-  const hasSupersededBy = columns.has('superseded_by');
-  const hasEvidence = columns.has('evidence');
-  const hasReviewTimestamp = columns.has('last_reviewed_at');
-
-  // Build exclusion clause for referenced decisions
-  const exclusions: string[] = [];
-  if (hasSupersededBy) {
-    exclusions.push(
-      `id NOT IN (SELECT DISTINCT superseded_by FROM strategic_decisions WHERE superseded_by IS NOT NULL)`
-    );
-  }
-  if (hasEvidence) {
-    exclusions.push(`(evidence IS NULL OR evidence = '[]' OR evidence = '')`);
-  }
-
-  const exclusionClause = exclusions.length > 0 ? `AND ${exclusions.join(' AND ')}` : '';
-  const reviewClause = hasReviewTimestamp
-    ? `AND (last_reviewed_at IS NULL OR last_reviewed_at < ?)`
-    : '';
-  const cutoffIso = computeReviewCutoffIso();
-  const params: unknown[] = [...staleSprintIds];
-  if (hasReviewTimestamp) params.push(cutoffIso);
-
-  const result = client.execute(
-    `UPDATE strategic_decisions SET status = 'stale'
-     WHERE status = 'active'
-       AND sprint_id IN (${placeholders})
-       ${reviewClause}
-       ${exclusionClause}`,
-    params
-  );
-
-  return countWrite(result, warnings, "strategic_decisions.status = 'stale'");
-}
-
-/**
- * Flag stale learnings.
- *
- * Sprint 52 m03: learnings whose last_reviewed_at (or, when null, created_at) is
- * newer than the cutoff are exempt. This stops re-flagging learnings that an
- * operator has already triaged — archive/supersede/reaffirm all bump the review
- * timestamp, so the next staleness pass leaves them alone.
- *
- * Sprint 61 m03: learnings flagged `evergreen = 1` (institutional rules) drop
- * out of staleness entirely. The column is added by `ensureLearningsTable` on
- * the read path, so un-migrated DBs self-heal before this query runs.
- */
-function flagStaleLearnings(
-  client: CmosDatabaseClient,
-  staleSprintIds: string[],
-  placeholders: string,
-  warnings: string[] = []
-): number {
-  const columns = getTableColumns(client, 'learnings');
-  if (!columns.has('status') || !columns.has('sprint_id')) return 0;
-
-  const hasReviewTimestamp = columns.has('last_reviewed_at');
-  const hasEvergreen = columns.has('evergreen');
-  // A learning with a recent last_reviewed_at has been triaged by an operator
-  // (status change or reaffirm) and must not be re-flagged by the sprint-age rule.
-  // When last_reviewed_at is NULL the sprint-id rule alone governs staleness (preserves
-  // historical behavior). The cutoff is ~threshold × 14 days back from now.
-  const reviewClause = hasReviewTimestamp
-    ? `AND (last_reviewed_at IS NULL OR last_reviewed_at < ?)`
-    : '';
-  const evergreenClause = hasEvergreen ? `AND evergreen = 0` : '';
-  const cutoffIso = computeReviewCutoffIso();
-
-  const params: unknown[] = [...staleSprintIds];
-  if (hasReviewTimestamp) params.push(cutoffIso);
-
-  const result = client.execute(
-    `UPDATE learnings SET status = 'stale'
-     WHERE status = 'active'
-       AND sprint_id IN (${placeholders})
-       ${reviewClause}
-       ${evergreenClause}`,
-    params
-  );
-  return countWrite(result, warnings, "learnings.status = 'stale'");
-}
-
-/**
- * Compute a review cutoff date: now - (DEFAULT_STALENESS_THRESHOLD * ~14 days/sprint).
- * A learning whose last_reviewed_at is newer than this cutoff is considered "recently
- * triaged" and exempt from re-flagging.
+ * The review window: a row reviewed more recently than threshold × 14 days ago is not due, however
+ * old its sprint.
  */
 function computeReviewCutoffIso(): string {
   return new Date(Date.now() - DEFAULT_STALENESS_THRESHOLD * MS_PER_SPRINT).toISOString();
-}
-
-function countStale(client: CmosDatabaseClient, tableName: string): number {
-  const columns = getTableColumns(client, tableName);
-  if (!columns.has('status')) return 0;
-
-  // Sprint 61 m03: evergreen rows on the learnings table are excluded from the
-  // surfaced count so an institutional-rule learning that was flagged `stale`
-  // BEFORE evergreen was set drops out of the warning the moment the operator
-  // toggles the flag — without needing to reset its status.
-  const evergreenClause = columns.has('evergreen') ? ` AND evergreen = 0` : '';
-
-  const result = client.getOne<{ count: number }>(
-    `SELECT COUNT(*) AS count FROM ${tableName} WHERE status = 'stale'${evergreenClause}`,
-    []
-  );
-  return result.success ? (result.data?.count ?? 0) : 0;
 }
 
 function getTableColumns(client: CmosDatabaseClient, tableName: string): Set<string> {

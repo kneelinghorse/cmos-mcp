@@ -3,7 +3,7 @@
 // ABOUTME: implicit session, neither can close the other's, and a server-side close uploads nothing.
 
 /**
- * Drives the BUILT dist/index.js (run `npm run build` first). Three scenarios:
+ * Packs the existing build and drives its INSTALLED server (run `npm run build` first). Three scenarios:
  *
  *   1. ATTRIBUTION. Servers A and B run at the same time on one store. Each captures a decision and
  *      records one with no session named. Every row's author is that server's own implicit session,
@@ -18,7 +18,7 @@
  *      "nothing arrived" after an exit proves nothing.
  */
 
-import { afterAll, describe, expect, it } from '@jest/globals';
+import { afterAll, beforeAll, describe, expect, it } from '@jest/globals';
 import Database from 'better-sqlite3';
 import { spawnSync } from 'child_process';
 import * as fs from 'fs';
@@ -29,9 +29,10 @@ import { THIS_HOST_ID, processOwnerKey } from '../../src/tools/cmos/session-owne
 import { startDashboardDouble, type DashboardDouble } from '../helpers/suggestion-axes-external';
 import { reidentifyCmosTestStore, seedCmosDb } from '../helpers/seedCmosDb';
 import { connectStdioServer, dataOf, textOf, type StdioHarness } from './stdio-harness';
+import { installPackedArtifact } from './packed-artifact';
 
 const REPO_ROOT = path.resolve(__dirname, '../..');
-const SERVER = path.join(REPO_ROOT, 'dist', 'index.js');
+let installedServer = '';
 const REDIRECT_PRELOAD = path.join(__dirname, 'fixtures', 'dashboard-default-redirect.cjs');
 const SPRINT = 'sprint-e2e-m03';
 
@@ -85,7 +86,7 @@ async function server(
   dashboard?: DashboardDouble
 ): Promise<StdioHarness> {
   const harness = await connectStdioServer({
-    serverPath: SERVER,
+    serverPath: installedServer,
     cwd: projectRoot,
     env: environment(projectRoot, dashboard),
     clientName: name,
@@ -113,6 +114,10 @@ async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<boo
 }
 
 describe('s92-m03 implicit sessions over stdio', () => {
+  beforeAll(() => {
+    installedServer = installPackedArtifact(REPO_ROOT, mkTmp).serverPath;
+  }, 180_000);
+
   it("two live servers each write under their own implicit session, and cannot close each other's", async () => {
     const { projectRoot, dbPath } = buildProject();
     const a = await server(projectRoot, 'process-a');

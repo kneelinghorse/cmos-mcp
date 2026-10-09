@@ -33,19 +33,79 @@ function packageSpecs(text: string): string[] {
     .flatMap((line) => line.match(/@aquex\/cmos-mcp(@[^\s"'`,\]]*)?/g) ?? []);
 }
 
+function parseSemver(value: string): { core: bigint[]; pre: string[] } | undefined {
+  const match = value.match(
+    /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/
+  );
+  if (!match) return undefined;
+  const pre = match[4]?.split('.') ?? [];
+  if (pre.some((part) => /^0\d+$/.test(part))) return undefined;
+  return { core: match.slice(1, 4).map(BigInt), pre };
+}
+
 function compareSemver(a: string, b: string): number {
-  const pa = a.split('.').map(Number);
-  const pb = b.split('.').map(Number);
-  for (let i = 0; i < 3; i += 1) if (pa[i] !== pb[i]) return pa[i] - pb[i];
+  const pa = parseSemver(a);
+  const pb = parseSemver(b);
+  if (!pa || !pb) throw new Error(`Invalid release version: ${!pa ? a : b}`);
+  for (let i = 0; i < 3; i += 1)
+    if (pa.core[i] !== pb.core[i]) return pa.core[i] < pb.core[i] ? -1 : 1;
+  if (!pa.pre.length || !pb.pre.length)
+    return pa.pre.length === pb.pre.length ? 0 : pa.pre.length ? -1 : 1;
+  for (let i = 0; i < Math.max(pa.pre.length, pb.pre.length); i += 1) {
+    const left = pa.pre[i];
+    const right = pb.pre[i];
+    if (left === right) continue;
+    if (left === undefined || right === undefined) return left === undefined ? -1 : 1;
+    const numericLeft = /^\d+$/.test(left);
+    const numericRight = /^\d+$/.test(right);
+    if (numericLeft && numericRight) return BigInt(left) < BigInt(right) ? -1 : 1;
+    if (numericLeft !== numericRight) return numericLeft ? -1 : 1;
+    return left < right ? -1 : 1;
+  }
   return 0;
 }
 
+function isExactPackageSpec(spec: string): boolean {
+  const prefix = '@aquex/cmos-mcp@';
+  return spec.startsWith(prefix) && parseSemver(spec.slice(prefix.length)) !== undefined;
+}
+
 describe('s92-m07 — launch recipes', () => {
+  it('accepts exact stable and prerelease pins, but refuses ranges, tags and malformed versions', () => {
+    for (const version of ['3.2.0', '3.3.0-rc.1', '3.3.0-rc.1+build.2']) {
+      expect(isExactPackageSpec(`@aquex/cmos-mcp@${version}`)).toBe(true);
+    }
+    for (const spec of [
+      '@aquex/cmos-mcp',
+      '@aquex/cmos-mcp@latest',
+      '@aquex/cmos-mcp@^3.3.0',
+      '@aquex/cmos-mcp@~3.3.0',
+      '@aquex/cmos-mcp@3.3.x',
+      '@aquex/cmos-mcp@3.03.0',
+      '@aquex/cmos-mcp@3.3.0-rc.01',
+      '@aquex/cmos-mcp@3.3.0-',
+    ]) {
+      expect(isExactPackageSpec(spec)).toBe(false);
+    }
+  });
+
+  it('orders prereleases for the existing Unreleased-ahead exception without treating another RC as equal', () => {
+    expect(compareSemver('3.3.0-rc.1', '3.3.0-rc.1')).toBe(0);
+    expect(compareSemver('3.2.0', '3.3.0-rc.1')).toBeLessThan(0);
+    expect(compareSemver('3.3.0-rc.1', '3.3.0-rc.2')).toBeLessThan(0);
+    expect(compareSemver('3.3.0-rc.2', '3.3.0-rc.10')).toBeLessThan(0);
+    expect(compareSemver('3.3.0-rc.10', '3.3.0')).toBeLessThan(0);
+    expect(compareSemver('3.3.0', '3.3.0-rc.1')).toBeGreaterThan(0);
+    expect(compareSemver('3.3.0-alpha.1', '3.3.0-alpha.beta')).toBeLessThan(0);
+    expect(compareSemver('3.3.0-rc', '3.3.0-rc.1')).toBeLessThan(0);
+    expect(compareSemver('3.3.0-rc.1+build.1', '3.3.0-rc.1+build.2')).toBe(0);
+  });
+
   it('pin an exact version in every command and config', () => {
     const unpinned: string[] = [];
     for (const doc of DOCS) {
       for (const spec of packageSpecs(read(doc))) {
-        if (!/^@aquex\/cmos-mcp@\d+\.\d+\.\d+$/.test(spec)) unpinned.push(`${doc}: ${spec}`);
+        if (!isExactPackageSpec(spec)) unpinned.push(`${doc}: ${spec}`);
       }
     }
     expect(unpinned).toEqual([]);

@@ -2,6 +2,7 @@
 // ABOUTME: Verifies candidate traces include rejected and accepted roots in precedence order.
 
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
+import Database from 'better-sqlite3';
 import { promises as fs } from 'fs';
 import os from 'os';
 import path from 'path';
@@ -9,6 +10,7 @@ import path from 'path';
 import { formatMessageForLLM, getWhoamiDiagnostics } from '../../src/tools/cmos/cmos-message';
 import { CmosDetector } from '../../src/intelligence/cmos-detector';
 import { ProjectGraphRegistry } from '../../src/intelligence/project-graph-registry';
+import { resolveSenderContext } from '../../src/intelligence/sender-context';
 import { createSeededCmosProject, type SeededCmosProject } from '../helpers/seedCmosDb';
 
 async function makeTempDir(prefix: string): Promise<string> {
@@ -228,7 +230,7 @@ describe('whoami diagnostics', () => {
    * changes nothing, and passing the right context repairs a false positive AND a true negative.
    */
   describe('s87-m05 (#1015): the heal notice, silently dropped since sprint-53', () => {
-    it('reports a heal that happened on the STRICT-success path', async () => {
+    it('reports the repair a send would make, on the STRICT-success path, without making it', async () => {
       const healable = await createSeededCmosProject(
         {
           projectName: 'Healable',
@@ -247,17 +249,89 @@ describe('whoami diagnostics', () => {
           serverInstallRootOverride: '/mock/server-install',
         });
 
-        // Strict resolution SUCCEEDED — which is the whole point. The heal made the address
-        // canonical, so the candidate was accepted, so `relaxedContext` was never assigned.
+        // Strict resolution SUCCEEDED — which is the whole point. s93-m11: whoami is a diagnostic
+        // and writes nothing, so it resolves with the address the next write would store (a send
+        // repairs it before resolving), and the notice says that repair is still to come.
         expect(result.success).toBe(true);
         expect(result.data?.resolved.projectRoot).toBe(healable.projectRoot);
+        expect(result.data?.wouldAttributeAs.senderAddress).toBe('cmos://derek/healable');
 
         const warnings = (result.warnings ?? []).join('\n');
-        expect(warnings).toContain('Healed stale cmos_address');
-        expect(warnings).toContain('cmos://unknown/healable');
+        expect(warnings).toContain(
+          'Stale cmos_address cmos://unknown/healable: the next write repairs it to cmos://derek/healable'
+        );
+        expect(warnings).not.toContain('fail-closed');
+
+        // ...and the store still holds the stale address: whoami repaired nothing.
+        const db = new Database(path.join(healable.projectRoot, 'cmos', 'db', 'cmos.sqlite'), {
+          readonly: true,
+        });
+        try {
+          const row = db
+            .prepare("SELECT content FROM contexts WHERE id = 'project_identity'")
+            .get() as { content: string };
+          expect(JSON.parse(row.content).cmos_address).toBe('cmos://unknown/healable');
+        } finally {
+          db.close();
+        }
       } finally {
         await healable.cleanup();
       }
     });
+  });
+});
+
+describe('s93-m11 — diagnostics outside a dispatched call write nothing', () => {
+  // The confirming critic: whoami from the CLI and the startup lines run with no call context, where
+  // callMayWrite() is true, and validation seeded a missing project_identity row.
+  it('whoami and a startup resolution leave a store with no identity row as they found it', async () => {
+    const project = await createSeededCmosProject(
+      {
+        projectName: 'Rowless',
+        projectId: 'rowless',
+        slug: 'rowless',
+        dashboardProjectId: '11111111-2222-4333-8444-555555555555',
+        owner: 'derek',
+      },
+      'whoami-rowless-'
+    );
+    const dbPath = path.join(project.projectRoot, 'cmos', 'db', 'cmos.sqlite');
+    const rows = (): number => {
+      const db = new Database(dbPath, { readonly: true });
+      try {
+        return (
+          db.prepare("SELECT COUNT(*) AS n FROM contexts WHERE id = 'project_identity'").get() as {
+            n: number;
+          }
+        ).n;
+      } finally {
+        db.close();
+      }
+    };
+    try {
+      const db = new Database(dbPath);
+      try {
+        db.prepare("DELETE FROM contexts WHERE id = 'project_identity'").run();
+      } finally {
+        db.close();
+      }
+
+      await getWhoamiDiagnostics({
+        cwdOverride: project.projectRoot,
+        serverInstallRootOverride: '/mock/server-install',
+      });
+      expect(rows()).toBe(0);
+
+      const startup = await resolveSenderContext({
+        requireSenderIdentity: false,
+        heal: 'preview',
+        cwdOverride: project.projectRoot,
+        serverInstallRootOverride: '/mock/server-install',
+      });
+      expect(startup.projectRoot).toBe(project.projectRoot);
+      expect(rows()).toBe(0);
+    } finally {
+      await project.cleanup();
+    }
   });
 });

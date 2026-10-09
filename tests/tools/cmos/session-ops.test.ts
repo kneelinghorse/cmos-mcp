@@ -436,7 +436,11 @@ describe('cmos_session_start', () => {
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe(CMOS_ERROR_CODES.SESSION_ALREADY_ACTIVE);
       // s85-m01: suggestions now name the CONSOLIDATED tool — the pre-s85 name was removed in the 38→15 consolidation.
-      expect(result.error?.suggestion).toContain('cmos_session(action="complete")');
+      // s93-m01: and the blocking session by id, so the remedy closes that session and no other.
+      const blocking = (result.error?.currentState as { id: string }).id;
+      expect(result.error?.suggestion).toContain(
+        `cmos_session(action="complete", sessionId="${blocking}"`
+      );
     });
 
     it('should return MISSING_PARAMETER for empty title', async () => {

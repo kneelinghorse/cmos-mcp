@@ -22,6 +22,7 @@ import {
 } from './schema-migrations';
 import { appendWarnings, appendWriteFailures, attachWarnings } from './format-warnings';
 import { countWrite, type WriteFailure } from './write-guard';
+import { storedTimeMs } from './stored-time';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -112,15 +113,15 @@ function computeStalenessScore(
 ): { score: number; reason: 'expired' | 'stale_no_expiry' | 'old_sprint' } {
   // Expired constraints are maximally stale
   if (constraint.expires_at) {
-    const expiresAt = new Date(constraint.expires_at);
-    if (expiresAt <= now) {
+    // s93-m11: read as a stored time (UTC), not by new Date(), which reads SQLite's zone-less
+    // spelling as local time.
+    if (storedTimeMs(constraint.expires_at) <= now.getTime()) {
       return { score: 100, reason: 'expired' };
     }
   }
 
   const anchorIso = constraint.last_reviewed_at ?? constraint.created_at;
-  const anchoredAt = new Date(anchorIso);
-  const ageDays = (now.getTime() - anchoredAt.getTime()) / (1000 * 60 * 60 * 24);
+  const ageDays = (now.getTime() - storedTimeMs(anchorIso)) / (1000 * 60 * 60 * 24);
 
   // Age-based score: 0 at 0 days, 80 at thresholdDays
   const ageScore = Math.min(80, Math.round((ageDays / thresholdDays) * 80));
@@ -200,7 +201,7 @@ function listConstraints(
     evergreen: number | null;
   }>(
     `SELECT id, content, status, session_id, sprint_id, created_at, expires_at, archived_at, last_reviewed_at, evergreen
-     FROM constraints WHERE status = ? ORDER BY created_at ASC`,
+     FROM constraints WHERE status = ? ORDER BY julianday(created_at) ASC`,
     [status]
   );
 
@@ -252,7 +253,7 @@ function reviewConstraints(
     evergreen: number | null;
   }>(
     `SELECT id, content, status, session_id, sprint_id, created_at, expires_at, archived_at, last_reviewed_at, evergreen
-     FROM constraints WHERE status = 'active' AND evergreen = 0 ORDER BY created_at ASC`,
+     FROM constraints WHERE status = 'active' AND evergreen = 0 ORDER BY julianday(created_at) ASC`,
     []
   );
 
@@ -313,7 +314,7 @@ function archiveConstraints(
     // Archive all expired constraints
     const result = client.execute(
       `UPDATE constraints SET status = 'archived', archived_at = ?
-       WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at <= ?`,
+       WHERE status = 'active' AND expires_at IS NOT NULL AND julianday(expires_at) <= julianday(?)`,
       [now, now]
     );
     const affected = countWrite(result, writeSink, 'constraints.archive (all expired)');
@@ -455,7 +456,7 @@ export function getStaleConstraintCount(
   // Count expired
   const expiredResult = client.getOne<{ count: number }>(
     `SELECT COUNT(*) AS count FROM constraints
-     WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at <= ?${evergreenFilter}`,
+     WHERE status = 'active' AND expires_at IS NOT NULL AND julianday(expires_at) <= julianday(?)${evergreenFilter}`,
     [now.toISOString()]
   );
   const expired = expiredResult.success && expiredResult.data ? expiredResult.data.count : 0;
@@ -470,7 +471,7 @@ export function getStaleConstraintCount(
   const ageAnchor = hasReviewTs ? 'COALESCE(last_reviewed_at, created_at)' : 'created_at';
   const staleResult = client.getOne<{ count: number }>(
     `SELECT COUNT(*) AS count FROM constraints
-     WHERE status = 'active' AND expires_at IS NULL AND ${ageAnchor} <= ?${evergreenFilter}`,
+     WHERE status = 'active' AND expires_at IS NULL AND julianday(${ageAnchor}) <= julianday(?)${evergreenFilter}`,
     [thresholdDate]
   );
   const stale = staleResult.success && staleResult.data ? staleResult.data.count : 0;

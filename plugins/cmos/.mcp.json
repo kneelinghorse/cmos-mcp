@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "cmos": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/run.mjs", "serve"]
+    }
+  }
+}

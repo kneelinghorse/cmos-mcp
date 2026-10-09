@@ -5,13 +5,14 @@
  * cmos_agent_onboard Tool
  *
  * MCP tool for agent onboarding/context initialization.
- * Returns an aggregated payload bounded at ONBOARD_SIZE_BOUND_CHARS (s92-m04; it once claimed <4KB).
+ * Returns previews and selected capped lists; orphan diagnostics and warnings have no total cap.
  * Combines data from contexts, missions, sessions, and decisions.
  *
  * @module tools/cmos/cmos-agent-onboard
  */
 
 import { z } from 'zod';
+import * as fs from 'fs';
 import path from 'path';
 import { withClientAsync, type CmosDatabaseClient } from './client';
 import {
@@ -49,20 +50,18 @@ import {
 } from './context-freshness';
 import {
   getProjectIdentity as getProjectIdentityData,
-  backfillUnknownCmosAddress,
   type ProjectIdentityData,
   deriveProjectSlug,
 } from './project-identity';
 import { ProjectGraphRegistry } from '../../intelligence/project-graph-registry';
 import { SERVER_INSTALL_ROOT } from '../../intelligence/sender-context';
-import { resolveAndPersistOwner } from './owner-resolution';
 import {
   buildContextSizeWarning,
   calculateContextSizeMetrics,
   resolveContextSizeSettings,
   type ContextSizeMetrics,
 } from './context-retention';
-import { detectAndFlagStaleness } from './staleness-detection';
+import { readStaleness, stalenessAdvisory } from './staleness-detection';
 import { detectOrphans, buildOrphanWarnings, type OrphanDetectionResult } from './orphan-detection';
 import { resolveCurrentSprintId } from './current-sprint';
 import {
@@ -77,6 +76,7 @@ import { loadTierConfig, type TierConfig } from './tier-config';
 import { appendWarnings } from './format-warnings';
 import { LEASE_IDLE_WARN_DAYS, leaseState, readLeaseAges, type LeaseAge } from './next-step-lease';
 import { previewText } from './text-preview';
+import { currentSessionOwner, EMPTY_AUTOMATIC_CLOSE_PATTERN } from './session-owner';
 
 /**
  * Project identity from master context.
@@ -197,11 +197,9 @@ export interface LastSessionData {
 }
 
 /**
- * s92-m04: onboard's bound, in characters of the JSON-serialized payload. Every field that grows
- * with a project's history is capped (previews, and counts), so the payload stays under this
- * however long the history is; tests/tools/cmos/honest-opener.test.ts pins it on a fixture whose
- * every capped field is long. Before this, a 90-sprint store measured 36,142 bytes against a
- * documented "<4KB"; after it, the same store measures about 21,000.
+ * Regression budget for the long-history fixture in tests/tools/cmos/honest-opener.test.ts,
+ * in JSON characters. This is not an enforced response limit: orphan diagnostics, warnings
+ * and other variable fields can exceed it. Retained under its existing exported name.
  */
 export const ONBOARD_SIZE_BOUND_CHARS = 28_000;
 const LAST_SESSION_SUMMARY_MAX_CHARS = 1_000;
@@ -249,7 +247,7 @@ export interface SuggestedAction {
 
 /**
  * Result of agent onboard operation.
- * Bounded at ONBOARD_SIZE_BOUND_CHARS: history-scaled fields are previews or capped lists (s92-m04).
+ * History previews and selected lists are capped; the complete result has no enforced size cap.
  */
 export interface CmosAgentOnboardResult {
   /** Project identity from master_context */
@@ -310,10 +308,16 @@ export interface CmosAgentOnboardResult {
   /** s80-m07 — self-capture gap: are local commits ahead of the last CMOS write? */
   selfCapture: SelfCaptureGap;
 
-  /** Staleness detection results for decisions and learnings */
+  /**
+   * Staleness, computed when read (s93-m11). `staleDecisions`/`staleLearnings` count rows whose
+   * stored status is 'stale'; the `dueForReview*` counts are active rows past the review age. No
+   * call writes either.
+   */
   staleness: {
     staleDecisions: number;
     staleLearnings: number;
+    dueForReviewDecisions: number;
+    dueForReviewLearnings: number;
     threshold: number;
   };
 
@@ -523,6 +527,11 @@ interface InternalCmosAgentOnboardParams extends CmosAgentOnboardParams {
    * is inside the handler). Not a caller decision, so not published.
    */
   callerProvidedProjectRoot?: boolean;
+  /**
+   * @internal s93-m01: skip the dashboard (messaging and sync health), for the hook CLI's session
+   * start, which has a 3-second budget and must not wait on the network. Not a caller decision.
+   */
+  offline?: boolean;
 }
 
 /**
@@ -532,7 +541,7 @@ export const cmosAgentOnboardToolDefinition = {
   name: 'cmos_agent_onboard',
   description:
     'Get aggregated onboarding payload for agent cold-start. Returns project identity, active session, pending missions, recent decisions, and suggested actions. ' +
-    'Every field that grows with history is a 300-character preview or a capped list, so the payload stays under 28 KB however long the history (about 21 KB on a 90-sprint store); expand a decision with cmos_decisions(action="show"). For the 4 KB opener, use cmos_review. ' +
+    'Recent decisions use 300-character previews and selected lists are capped, but the payload has no enforced total size cap; orphan diagnostics and warnings can grow. Expand a decision with cmos_decisions(action="show"). For the 4 KB opener, use cmos_review. ' +
     UNTRUSTED_CONTENT_CONTRACT,
   inputSchema: {
     type: 'object',
@@ -580,21 +589,11 @@ export async function cmosAgentOnboard(
     async (client) => {
       const warnings: string[] = [];
 
-      // Sprint 52 m01: seed metadata.owner from dashboard identity if absent, then
-      // rewrite any legacy `cmos://unknown/*` address before project_identity is read.
-      // Best-effort — a THROWN failure is swallowed below; the identity row keeps an
-      // empty cmos_address until a later checkpoint resolves the owner.
-      //
-      // s86-m02b: a failed `metadata.owner` / `dashboard_slug` write is NOT swallowed.
-      // It leaves the store minting `cmos://unknown/*` addresses while this payload's
-      // projectIdentity reports a resolved identity, so the DB error rides the envelope.
-      try {
-        const ownerResult = await resolveAndPersistOwner(client);
-        warnings.push(...(ownerResult.warnings ?? []));
-        backfillUnknownCmosAddress(client);
-      } catch {
-        // never block onboard on identity resolution
-      }
+      // s93-m11: the opener writes no owner metadata and no address (decision #1191; review
+      // #1181, #606 g). Until 3.3.0 it resolved the owner through the dashboard and rewrote a
+      // cmos://unknown/* address here, on every review. The write paths that need an identity
+      // still do both: sender resolution heals the address on write-classified calls, and the
+      // checkpoint upload resolves the owner.
 
       // Get project identity from master_context + metadata
       const project = getProjectIdentity(client);
@@ -658,18 +657,13 @@ export async function cmosAgentOnboard(
         warnings.push(staleWarning);
       }
 
-      // Detect and flag stale decisions/learnings. s86-m02b: an errored
-      // `UPDATE ... SET status='stale'` folds into the same zero as "nothing matched", so
-      // without this splice `staleness.staleDecisions: 0` would read as a clean pass over a
-      // store where the flagging statement never ran.
-      const stalenessResult = detectAndFlagStaleness(client);
-      warnings.push(...(stalenessResult.warnings ?? []));
-      if (stalenessResult.totalStaleDecisions > 0 || stalenessResult.totalStaleLearnings > 0) {
-        warnings.push(
-          `${stalenessResult.totalStaleDecisions} stale decision(s) and ${stalenessResult.totalStaleLearnings} stale learning(s) detected (threshold: ${stalenessResult.threshold} sprints). ` +
-            `Run cmos_decisions(action="review") for per-decision triage with suggested actions.`
-        );
-      }
+      // s93-m11: staleness is computed when read and never written (Q10, decision #1182). The
+      // opener shows the stored stale count beside the rows now past the review age, with a
+      // suggestion; nothing here changes a record's status.
+      const stalenessRead = readStaleness(client);
+      warnings.push(...stalenessRead.warnings);
+      const stalenessLine = stalenessAdvisory(stalenessRead);
+      if (stalenessLine) warnings.push(stalenessLine);
 
       // Detect orphaned entities (sprints with no missions, missions with no sprint, stale sessions)
       const orphans = detectOrphans(client);
@@ -699,12 +693,15 @@ export async function cmosAgentOnboard(
 
       // Fetch messaging context and sync health (non-blocking — gracefully degrades)
       // Skip syncHealth fetch if tier config hides it (avoids unnecessary network calls)
-      const [messaging, syncHealth] = await Promise.all([
-        fetchMessagingContext(warnings, tierRoot),
-        hiddenFields.has('syncHealth')
-          ? Promise.resolve(null)
-          : fetchSyncHealth(client, warnings, tierRoot),
-      ]);
+      // s93-m01: an offline onboard (the hook CLI) skips both, without a warning.
+      const [messaging, syncHealth] = params.offline
+        ? [null, null]
+        : await Promise.all([
+            fetchMessagingContext(warnings, tierRoot),
+            hiddenFields.has('syncHealth')
+              ? Promise.resolve(null)
+              : fetchSyncHealth(client, warnings, tierRoot),
+          ]);
 
       // Server health (build staleness). The server-stale signal tracks THIS
       // server's OWN build (cmos-mcp-pro), not the onboarding project's — so it is
@@ -725,6 +722,23 @@ export async function cmosAgentOnboard(
       if (serverCodeStaleActionable && serverHealth.stalenessMessage) {
         warnings.push(serverHealth.stalenessMessage);
       }
+      // s93-m11 (#600): the opener shows a stale server wherever sessions open. In the server's own
+      // checkout it names that checkout's restart script, which stops only this session's server;
+      // in any other project the remedy is to restart the MCP server.
+      const serverStale = serverHealth.startupBuild != null && !serverHealth.codeIsCurrent;
+      const restartScript =
+        serverCodeStaleActionable && serverRoot != null
+          ? path.join(serverRoot, 'scripts', 'restart-session-server.sh')
+          : null;
+      const staleServer = serverStale
+        ? {
+            ownProject: serverCodeStaleActionable,
+            restartScript:
+              restartScript && fs.existsSync(restartScript)
+                ? 'scripts/restart-session-server.sh'
+                : null,
+          }
+        : null;
 
       // s80-m07 — self-capture guard: are local commits running ahead of the last CMOS
       // write? Project-local, fail-open (never throws, no advisory when a signal is
@@ -778,8 +792,8 @@ export async function cmosAgentOnboard(
         orphans,
         serverHealth,
         staleCounts: {
-          decisions: stalenessResult.totalStaleDecisions,
-          learnings: stalenessResult.totalStaleLearnings,
+          decisions: stalenessRead.storedStaleDecisions + stalenessRead.dueDecisions,
+          learnings: stalenessRead.storedStaleLearnings + stalenessRead.dueLearnings,
         },
         leaseAges,
         staleConstraintCount,
@@ -790,6 +804,8 @@ export async function cmosAgentOnboard(
         authState,
         projectRootSupplied: !!params.projectRoot,
         serverCodeStaleActionable,
+        staleServer,
+        dashboardInUse: await dashboardInUse(onboardRoot),
         localProjectId: getProjectId(client),
       });
 
@@ -822,9 +838,11 @@ export async function cmosAgentOnboard(
         contextFreshness: freshnessResult.freshness,
         selfCapture,
         staleness: {
-          staleDecisions: stalenessResult.totalStaleDecisions,
-          staleLearnings: stalenessResult.totalStaleLearnings,
-          threshold: stalenessResult.threshold,
+          staleDecisions: stalenessRead.storedStaleDecisions,
+          staleLearnings: stalenessRead.storedStaleLearnings,
+          dueForReviewDecisions: stalenessRead.dueDecisions,
+          dueForReviewLearnings: stalenessRead.dueLearnings,
+          threshold: stalenessRead.threshold,
         },
         messaging,
         syncHealth,
@@ -947,10 +965,14 @@ function getLastSession(client: CmosDatabaseClient, tier: string): LastSessionDa
     captures: string | null;
     completed_at: string;
   }>(
+    // s93-m01 (#610 related): the most recent session, except that one closed automatically with
+    // nothing in it (no capture, no decision, no learning) never displaces one that has something.
+    // Recency still decides otherwise: with hooks most sessions are implicit, and an explicit one
+    // from months ago is not where the work left off (the m01 build critic).
     `SELECT id, title, type, summary, captures, completed_at
      FROM sessions
      WHERE status = 'completed'
-     ORDER BY completed_at DESC
+     ORDER BY (COALESCE(summary, '') LIKE '${EMPTY_AUTOMATIC_CLOSE_PATTERN}'), julianday(completed_at) DESC
      LIMIT 1`,
     []
   );
@@ -1077,16 +1099,25 @@ function getActiveSession(client: CmosDatabaseClient): ActiveSessionSummary | nu
   const projExpr = tableHasColumn(client, 'sessions', 'project_id')
     ? 'project_id'
     : 'NULL AS project_id';
-  // s92-m03: the project's explicit session. Implicit sessions belong to processes and are not
-  // the "active session" an agent is told to continue or close.
-  const explicitOnly = tableHasColumn(client, 'sessions', 'implicit') ? 'AND implicit = 0' : '';
+  // s92-m03: an explicit session. Implicit sessions belong to processes and are not the "active
+  // session" an agent is told to continue or close. s93-m01: the caller's own explicit session or a
+  // keyless one, the order a capture resolves in; another harness session's is not the caller's to
+  // continue or close.
+  const migrated = tableHasColumn(client, 'sessions', 'implicit');
+  const keyed = migrated && tableHasColumn(client, 'sessions', 'owner_key');
   const result = client.getOne<Session & { project_id?: string | null }>(
-    `SELECT id, type, title, started_at, captures, ${projExpr}
-       FROM sessions
-      WHERE status = 'active' ${explicitOnly}
-      ORDER BY started_at DESC
-      LIMIT 1`,
-    []
+    keyed
+      ? `SELECT id, type, title, started_at, captures, ${projExpr}
+           FROM sessions
+          WHERE status = 'active' AND implicit = 0 AND (owner_key = ? OR owner_key IS NULL)
+          ORDER BY (owner_key IS NULL), julianday(started_at) DESC
+          LIMIT 1`
+      : `SELECT id, type, title, started_at, captures, ${projExpr}
+           FROM sessions
+          WHERE status = 'active' ${migrated ? 'AND implicit = 0' : ''}
+          ORDER BY julianday(started_at) DESC
+          LIMIT 1`,
+    keyed ? [currentSessionOwner(client.path).key] : []
   );
 
   if (!result.success || !result.data) {
@@ -1210,10 +1241,16 @@ function getRecentDecisions(client: CmosDatabaseClient): RecentDecisionSummary[]
   const projCols = client.getMany<{ name: string }>("PRAGMA table_info('strategic_decisions')", []);
   const projExpr =
     projCols.success && projCols.data?.some((c) => c.name === 'project_id') ? 'project_id' : 'NULL';
+  const columns = new Set(projCols.data?.map((column) => column.name) ?? []);
+  const eligible = [
+    columns.has('status') ? "COALESCE(status, 'active') <> 'superseded'" : '1=1',
+    columns.has('superseded_by') ? 'superseded_by IS NULL' : '1=1',
+  ].join(' AND ');
   const result = client.getMany<StrategicDecisionRow & { id: number }>(
     `SELECT id, decision_text, project_domain, created_at, ${projExpr} AS project_id
        FROM strategic_decisions
-      ORDER BY created_at DESC
+      WHERE ${eligible}
+      ORDER BY julianday(created_at) DESC
       LIMIT 10`,
     []
   );
@@ -1349,7 +1386,7 @@ function loadSessionReferenceIndex(client: CmosDatabaseClient): {
   const result = client.getMany<{ id: string }>(
     `SELECT id
        FROM sessions
-      ORDER BY COALESCE(completed_at, started_at) DESC, rowid DESC`,
+      ORDER BY julianday(COALESCE(completed_at, started_at)) DESC, rowid DESC`,
     []
   );
 
@@ -1621,14 +1658,16 @@ async function fetchSyncHealth(
       const stateResult = await client.getSyncProjectState(slug);
 
       if (stateResult.success && stateResult.data) {
-        return buildSyncHealthFromProjectState(db, stateResult.data, client, slug);
+        return await buildSyncHealthFromProjectState(db, stateResult.data, client, slug);
       }
     }
 
     // Fallback to the sync-status endpoint. s87-m03: this is a DIFFERENT endpoint from the
     // project-state one that just failed (`/api/sync/status` vs `/api/sync/projects/{slug}/state`),
     // so passing the slug here is a real scoped attempt and not a pointless retry.
-    return buildSyncHealthFromGlobalStatus(db, client, warnings, slug);
+    // Awaited inside the try, so a rejected promise (a sync status with no `tables`, say) lands in
+    // the catch below and onboard answers without sync health instead of failing (s93-m11).
+    return await buildSyncHealthFromGlobalStatus(db, client, warnings, slug);
   } catch {
     warnings.push('Sync health unavailable: unexpected error during fetch');
     return null;
@@ -1796,13 +1835,13 @@ function detectFreshProject(client: CmosDatabaseClient): boolean {
  * Build a tier-appropriate first-session prompt for fresh projects.
  * The agent uses this to kick off the opening conversation.
  */
-function buildTierSelectionPrompt(tier: string): string {
+export function buildTierSelectionPrompt(tier: string): string {
   switch (tier) {
     case 'general':
       return (
         'New project detected. This is a fresh CMOS General workspace — a thinking partner ' +
-        'with memory. Start by introducing the project: what are you working on, and what ' +
-        'would be most useful to capture and remember across conversations?'
+        'that keeps the record. Start by introducing the project: what are you working on, and ' +
+        'what would be most useful to record across conversations?'
       );
     case 'managed':
       return (
@@ -1859,15 +1898,17 @@ function buildSprintZeroContext(): SprintZeroContext {
  * Build the first-session conversation guide for general-tier fresh projects.
  * Tells the agent what to ask, what to capture, and what the user should leave with.
  */
-function buildFirstSessionPrompt(): string {
+export function buildFirstSessionPrompt(): string {
+  // s93-m12 (the build critic, B3): a new project is a Ledger by default, so every one sees this.
+  // It matches the general tier guide: there is no session to start (CMOS keeps one on its own),
+  // and every call it teaches is one the server accepts (tests/docs/seed-example-calls.test.ts).
   return (
-    'First session — General tier. Memory and thinking partner; no missions, no tasks, no structured intake.\n\n' +
+    'First session — General tier. A thinking partner that keeps the decisions and lessons; no missions, no tasks, no structured intake.\n\n' +
     "Open: One warm question about what they're working on. Do not mention CMOS, tiers, or setup.\n" +
     'Example: "What are you working on? I\'ll hold onto the things worth remembering as we go."\n\n' +
-    'During the session:\n' +
-    '- Start a session silently: cmos_session(action="start", type="custom", title="<topic>")\n' +
+    'During the session (there is no session to start; CMOS keeps one on its own):\n' +
+    '- Note what the project is as context: cmos_session(action="capture", category="context", content="<what the project is and who it is for>")\n' +
     '- Capture decisions as they surface: cmos_session(action="capture", category="decision", content="<what was decided>")\n' +
-    '- Write key context to master_context: cmos_context(action="update", contextType="master_context")\n' +
     '- Do not interrupt to announce what you are saving\n\n' +
     'End state: user has project context written, key decisions and open threads captured, ' +
     'agent ready to resume naturally next session.'
@@ -1974,6 +2015,10 @@ function generateSuggestedActions(state: {
    * drift (scoped + startup-manifest-gated). Siblings get false so the digest
    * does not promote a host-session action for an unrelated project. */
   serverCodeStaleActionable: boolean;
+  /** s93-m11 (#600): the server runs an older build than its dist/; null when it is current. */
+  staleServer?: { ownProject: boolean; restartScript: string | null } | null;
+  /** s93-m11 (#606 a): whether the dashboard is part of this user's setup. */
+  dashboardInUse?: boolean;
   /** s84-m03: the querying store's own project_id, so a foreign (pull-merged) mission's
    *  name is dropped from the action text (id-only) rather than embedded unfenced. These
    *  actions also feed the byte-capped cmos_review digest, so id-only (not a fence). */
@@ -1996,15 +2041,35 @@ function generateSuggestedActions(state: {
   // If OUR OWN server is running stale code, top priority action. Scoped to the
   // server's own project (serverCodeStaleActionable) so a sibling project's digest
   // is never told to reconnect over a cmos-mcp-pro rebuild unrelated to that project.
-  if (state.serverCodeStaleActionable) {
+  if (state.staleServer?.ownProject && state.staleServer.restartScript) {
+    actions.push({
+      action:
+        'This MCP server runs an older build than dist/: restart it before the next CMOS write (the host starts it again on the current build)',
+      command: state.staleServer.restartScript,
+      priority: 0,
+    });
+  } else if (state.serverCodeStaleActionable) {
     actions.push({
       action: 'MCP server is running stale code — use a new host session for the latest build',
       command: 'Start a new IDE/host session or reconnect before subsequent MCP calls',
       priority: 0,
     });
+  } else if (state.staleServer) {
+    actions.push({
+      action:
+        'The CMOS MCP server serving this session runs an older build than its installed code',
+      command: 'Restart the MCP server (the host starts it again on the current build)',
+      priority: 2,
+    });
   }
 
-  if (state.senderAttributionAmbiguity.ambiguous && !skippedTools.has('cmos_message')) {
+  // s93-m11 (#606 a): whoami checks the sender identity the dashboard uses, so it is prescribed
+  // only to a user who has the dashboard in their setup, like the login nag.
+  if (
+    state.senderAttributionAmbiguity.ambiguous &&
+    state.dashboardInUse !== false &&
+    !skippedTools.has('cmos_message')
+  ) {
     actions.push({
       action: 'Run whoami to confirm sender attribution',
       command: 'cmos_message(action="whoami")',
@@ -2042,7 +2107,8 @@ function generateSuggestedActions(state: {
       // s92-m04: and only after the user opted into the dashboard. A local-only user has nothing
       // to log in to, and the nag was the second of three misleading opener actions.
       actions.push({
-        action: 'No dashboard credentials configured — run login before any send/init.',
+        action:
+          'Sign in to use dashboard messaging or sync; local project initialization needs no sign-in.',
         command: 'cmos_auth(action="login")',
         priority: 1,
       });
@@ -2274,7 +2340,8 @@ function generateSuggestedActions(state: {
       action: isForeignProject(s.projectId, state.localProjectId)
         ? `Complete active session: ${s.id}`
         : `Complete active session: ${s.title}`,
-      command: `cmos_session(action="complete", summary="Session summary")`,
+      // s93-m01: by id, so the command closes this session and not whichever the caller resolves to.
+      command: `cmos_session(action="complete", sessionId="${s.id}", summary="Session summary")`,
       priority: 7,
     });
   }
@@ -2516,6 +2583,19 @@ export function formatAgentOnboardForLLM(result: CmosToolResult<CmosAgentOnboard
       lines.push(`  ${action.priority}. ${action.action}`);
       lines.push(`     → ${action.command}`);
     }
+  }
+
+  // s93-m11 (#606 d): an action that says "follow the tierSelectionPrompt" points at text this
+  // answer shows, not at a field only the structured payload carries.
+  if (data.tierSelectionPrompt) {
+    lines.push('');
+    lines.push('🧭 **tierSelectionPrompt** (open the first conversation with this)');
+    lines.push(data.tierSelectionPrompt);
+  }
+  if (data.firstSessionPrompt) {
+    lines.push('');
+    lines.push('🧭 **firstSessionPrompt**');
+    lines.push(data.firstSessionPrompt);
   }
 
   // Tier behavioral guide

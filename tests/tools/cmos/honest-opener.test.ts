@@ -115,6 +115,22 @@ describe('s92-m04 — a fresh, local-only project gets an honest review', () => 
 });
 
 describe('s92-m04 — whoami is prescribed only when the project was not named', () => {
+  // s93-m11 (#606 a): whoami checks the dashboard's sender identity, so it is prescribed only to a
+  // user who has the dashboard in their setup. Every case here opts in, so the negatives below are
+  // about naming the project and not about the dashboard.
+  beforeEach(() => {
+    process.env.CMOS_DASHBOARD_URL = 'https://dashboard.example.invalid';
+  });
+
+  it('a user without the dashboard is never told to run whoami, even with no roots and no name', async () => {
+    delete process.env.CMOS_DASHBOARD_URL;
+    const { projectRoot } = await freshProject();
+    const onboard = await cmosAgentOnboard({ projectRoot });
+    expect(commands(onboard.data!.suggestedActions)).not.toContain(WHOAMI);
+    const review = await cmosReview({ projectRoot });
+    expect(commands(review.data!.next_actions)).not.toContain(WHOAMI);
+  });
+
   it('POSITIVE CONTROL: no roots and no named project still prescribe whoami', async () => {
     const { projectRoot } = await freshProject();
     const onboard = await cmosAgentOnboard({ projectRoot });
@@ -381,10 +397,11 @@ describe('s92-m04 — onboard keeps its documented bound; the digest carries lea
     for (const step of data.nextSteps) expect(step.length).toBeLessThanOrEqual(PREVIEW_MAX_CHARS);
   }, 60_000);
 
-  it('documents the bound it keeps, and no longer claims under 4KB', () => {
+  it('does not turn a long-history fixture measurement into an unenforced total payload bound', () => {
     const description = cmosAgentOnboardToolDefinition.description;
     expect(description).not.toContain('<4KB');
-    expect(description).toContain(`${ONBOARD_SIZE_BOUND_CHARS / 1_000} KB`);
+    expect(description).not.toMatch(/under 28 KB|every field that grows/i);
+    expect(description).toContain('no enforced total size cap');
   });
 
   it('the review digest carries learnings with ids, inside its 4 KB budget, trimmed before decisions', async () => {

@@ -14,6 +14,7 @@ import { withClientValidated, type CmosDatabaseClient } from './client';
 import { genesisColumns, getProjectId } from './genesis-columns';
 import type { CmosToolResult, Context } from './types';
 import { createError, createSuccess, CMOS_ERROR_CODES } from './errors';
+import { readTimeBounds } from './stored-time';
 import {
   sanitizeContentField,
   sanitizeStringArray,
@@ -261,8 +262,12 @@ export const cmosContextUpdateToolDefinition = {
  * @returns CmosToolResult with aggregation stats or actionable error
  */
 export async function cmosContextUpdate(
-  params: CmosContextUpdateParams = {}
+  requested: CmosContextUpdateParams = {}
 ): Promise<CmosToolResult<CmosContextUpdateResult>> {
+  // s93-m11: since compares as a time; see readTimeBounds.
+  const bounds = readTimeBounds({ since: requested.since });
+  if ('error' in bounds) return createError<CmosContextUpdateResult>(bounds.error);
+  const params: CmosContextUpdateParams = { ...requested, ...bounds };
   return withClientValidated(
     (client) => {
       if (shouldUseManualMode(params)) {
@@ -310,11 +315,11 @@ function runAggregationUpdate(
   const queryParams: (string | null)[] = [];
 
   if (sinceTimestamp) {
-    sessionsQuery += ' AND completed_at > ?';
+    sessionsQuery += ' AND julianday(completed_at) > julianday(?)';
     queryParams.push(sinceTimestamp);
   }
 
-  sessionsQuery += ' ORDER BY completed_at ASC';
+  sessionsQuery += ' ORDER BY julianday(completed_at) ASC';
 
   // Get sessions to process
   const sessionsResult = client.getMany<SessionWithCaptures>(sessionsQuery, queryParams);

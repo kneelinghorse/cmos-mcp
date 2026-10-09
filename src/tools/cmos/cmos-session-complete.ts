@@ -42,6 +42,7 @@ import { isOpenStatus } from './terminal-status';
 import { resolveOpenSprintIdForWrite } from './current-sprint';
 import { ensureImplicitSessionColumns } from './schema-migrations';
 import { heldByAnotherProcess, resolveCallerSession } from './session-owner';
+import { storedTimeMs } from './stored-time';
 import {
   findReusableSnapshot,
   ONLY_COPY_SOURCE_SUFFIX,
@@ -284,7 +285,11 @@ export const cmosSessionCompleteToolDefinition = {
  * @returns CmosToolResult with completion info or actionable error
  */
 export async function cmosSessionComplete(
-  params: CmosSessionCompleteParams
+  params: CmosSessionCompleteParams,
+  // s93-m01: an automatic close (SessionEnd, reconcile, process exit) registers nothing: a hook in a
+  // second checkout of a registered project would otherwise hit the registry's collision refusal
+  // (the m01 build critic, B3). Internal and non-schema.
+  internalOpts: { registerProject?: boolean } = {}
 ): Promise<CmosToolResult<CmosSessionCompleteResult>> {
   // Validate parameters
   if (!params.summary || params.summary.trim() === '') {
@@ -362,8 +367,8 @@ export async function cmosSessionComplete(
       warnings.push(...(ensureContentPrunedColumn(client).warnings ?? []));
 
       if (!sessionId) {
-        // s92-m03: the caller's session. The project's explicit session if one is open, else this
-        // process's own implicit session. Never another process's implicit session.
+        // s92-m03: the caller's session. Its own or a keyless explicit session if one is open,
+        // else its own implicit session. Never another caller's implicit session.
         const caller = resolveCallerSession(client, { open: false });
         if (!caller.ok) {
           return createError<CmosSessionCompleteResult>(caller.error);
@@ -442,7 +447,7 @@ export async function cmosSessionComplete(
       }
 
       // Calculate duration
-      const startedAt = new Date(session.started_at);
+      const startedAt = new Date(storedTimeMs(session.started_at));
       const completedAt = new Date();
       const durationMs = completedAt.getTime() - startedAt.getTime();
       const durationMinutes = Math.round(durationMs / 60000);
@@ -879,7 +884,10 @@ export async function cmosSessionComplete(
         sanitizedFields
       );
     },
-    { projectRoot: params.projectRoot }
+    {
+      projectRoot: params.projectRoot,
+      ...(internalOpts.registerProject === false ? { registerProject: false } : {}),
+    }
   );
   return attachWarnings(result, warnings);
 }

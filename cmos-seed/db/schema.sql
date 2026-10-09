@@ -168,7 +168,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   author_user_id TEXT,
   user_id TEXT,
   -- Implicit sessions: 1 for a session the server opened because a write
-  -- named none; owner_key says whose it is (NULL on explicit sessions).
+  -- named none; owner_key says whose it is (an explicit one's starter, NULL before 3.3.0).
   implicit INTEGER NOT NULL DEFAULT 0,
   owner_key TEXT
 );
@@ -184,7 +184,7 @@ CREATE TABLE IF NOT EXISTS prompt_mappings (
   behavior TEXT NOT NULL
 );
 
--- Strategic decisions index for queryable project memory
+-- Strategic decisions index for a queryable project record
 -- Keeps decisions from MASTER_CONTEXT searchable without parsing JSON
 CREATE TABLE IF NOT EXISTS strategic_decisions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -211,6 +211,10 @@ CREATE TABLE IF NOT EXISTS strategic_decisions (
   schema_version INTEGER NOT NULL DEFAULT 1,
   -- Author identity (nullable; bound when the multi-user layer lands).
   author_user_id TEXT,
+  -- How a decision recorded from a draft was approved (NULL for a direct record).
+  approval_mode TEXT,     -- approved | agent-judged | agent-attested
+  approval_draft TEXT,    -- the draft it came from (P<n>)
+  approval_words TEXT,    -- the operator's message, for approved and agent-judged
   FOREIGN KEY (context_id) REFERENCES contexts(id) ON DELETE CASCADE,
   FOREIGN KEY (sprint_id) REFERENCES sprints(id) ON DELETE SET NULL,
   FOREIGN KEY (snapshot_id) REFERENCES context_snapshots(id) ON DELETE SET NULL,
@@ -234,7 +238,7 @@ CREATE TABLE IF NOT EXISTS learnings (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   content TEXT NOT NULL,
   category TEXT,            -- technical | process | agent-behavior | tooling
-  status TEXT NOT NULL DEFAULT 'active',  -- active | archived | superseded | stale (staleness-detection.ts writes 'stale'; no CHECK constraint)
+  status TEXT NOT NULL DEFAULT 'active',  -- active | archived | superseded | stale (set only by an explicit status update; no CHECK constraint)
   sprint_id TEXT,
   author_session_id TEXT,  -- formerly session_id: the project-scoped session of origin
   mission_id TEXT,
@@ -367,6 +371,25 @@ CREATE INDEX IF NOT EXISTS idx_constraints_aggkey ON constraints (project_id, ev
 CREATE INDEX IF NOT EXISTS idx_constraints_status ON constraints (status);
 CREATE INDEX IF NOT EXISTS idx_constraints_expires ON constraints (expires_at);
 CREATE INDEX IF NOT EXISTS idx_constraints_hash ON constraints (content_hash);
+
+-- Drafted records awaiting the operator: a carve-out outside FTS and sync events
+CREATE TABLE IF NOT EXISTS proposals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,      -- shown as P<id>
+  text TEXT NOT NULL,                        -- the line after "Would record…:"
+  kind TEXT NOT NULL DEFAULT 'decision',     -- decision | constraint | rule | profile
+  source_session TEXT,                       -- the harness session hash (16 hex), never a raw id
+  assistant_excerpt TEXT,                    -- up to 600 characters of the reply before the lines
+  evidence TEXT,                             -- JSON array of links and documents the line names
+  outside_content INTEGER,                   -- 1 seen in the session, 0 none, NULL unknown
+  created_at TEXT NOT NULL,
+  offered_at TEXT,
+  answered_at TEXT,
+  outcome TEXT NOT NULL DEFAULT 'pending',   -- pending | approved | declined | replaced | answered
+  replaced_by INTEGER,                       -- the draft that revised this one
+  record_id TEXT,                            -- the record it became: d:N, c:N, l:N or profile
+  approval_mode TEXT                         -- approved | agent-judged | agent-attested
+);
+CREATE INDEX IF NOT EXISTS idx_proposals_outcome ON proposals (outcome);
 
 -- Project identity view for easy access to project-level metadata
 CREATE VIEW IF NOT EXISTS project_identity AS

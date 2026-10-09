@@ -41,7 +41,12 @@ export interface MissionAddResult {
   /** Confirmation message */
   message: string;
 
-  /** Full mission details */
+  /**
+   * The mission's identity. s93-m11 (#602, feedback #46): the optional members (objective,
+   * context, successCriteria, deliverables, referenceDocs, domainFields, notes) stay declared but
+   * are no longer echoed back (3-5 KB a call when seeding a sprint); `fields` names what was stored,
+   * and cmos_mission(action="show") reads it.
+   */
   mission: {
     id: string;
     name: string;
@@ -55,6 +60,9 @@ export interface MissionAddResult {
     domainFields?: Record<string, unknown>;
     notes?: string;
   };
+
+  /** s93-m11: the optional fields this add stored, by name, with list lengths. */
+  fields: string[];
 }
 
 /**
@@ -369,23 +377,15 @@ export async function cmosMissionAdd(
 
       if (embedding.warnings) warnings.push(...embedding.warnings);
 
-      // Build result with full mission details
-      const mission: MissionAddResult['mission'] = {
-        id: missionId.trim(),
-        name: name.trim(),
-        sprintId: sprintId.trim(),
-        status,
-      };
-
-      if (objective) mission.objective = objective.trim();
-      if (context) {
-        mission.context = typeof context === 'string' ? context : JSON.stringify(context);
-      }
-      if (successCriteria) mission.successCriteria = successCriteria;
-      if (deliverables) mission.deliverables = deliverables;
-      if (referenceDocs) mission.referenceDocs = referenceDocs;
-      if (domainFields) mission.domainFields = domainFields;
-      if (notes) mission.notes = notes.trim();
+      // A compact receipt: which optional fields were stored, with list lengths where they help.
+      const fields: string[] = [];
+      if (objective) fields.push('objective');
+      if (context) fields.push('context');
+      if (successCriteria) fields.push(`successCriteria (${successCriteria.length})`);
+      if (deliverables) fields.push(`deliverables (${deliverables.length})`);
+      if (referenceDocs) fields.push(`referenceDocs (${referenceDocs.length})`);
+      if (domainFields) fields.push('domainFields');
+      if (notes) fields.push('notes');
 
       return createSuccess(
         {
@@ -394,7 +394,13 @@ export async function cmosMissionAdd(
           sprintId: sprintId.trim(),
           status,
           message: `Mission '${missionId}' created successfully in sprint '${sprintId}'`,
-          mission,
+          mission: {
+            id: missionId.trim(),
+            name: name.trim(),
+            sprintId: sprintId.trim(),
+            status,
+          },
+          fields,
         },
         warnings,
         sanitizedFields
@@ -434,16 +440,8 @@ export function formatMissionAddForLLM(result: CmosToolResult<MissionAddResult>)
     `Status: ${data.status}`,
   ];
 
-  if (data.mission.objective) {
-    lines.push(`Objective: ${data.mission.objective}`);
-  }
-
-  if (data.mission.successCriteria && data.mission.successCriteria.length > 0) {
-    lines.push(`Success criteria: ${data.mission.successCriteria.length} items`);
-  }
-
-  if (data.mission.deliverables && data.mission.deliverables.length > 0) {
-    lines.push(`Deliverables: ${data.mission.deliverables.length} items`);
+  if (data.fields.length > 0) {
+    lines.push(`Stored: ${data.fields.join(', ')}`);
   }
 
   appendWarnings(lines, result);

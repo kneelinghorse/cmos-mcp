@@ -13,8 +13,9 @@ import type { CmosToolResult, Session } from './types';
 import { createError, createSuccess } from './errors';
 import { VALID_SESSION_TYPES, type SessionType } from './cmos-session-start';
 import { getProjectId, tableHasColumn } from './genesis-columns';
-import { frameInlineIfForeign } from '../../intelligence/provenance-frame';
+import { frameInlineIfForeign, frameTextIfForeign } from '../../intelligence/provenance-frame';
 import { appendWarnings } from './format-warnings';
+import { previewText } from './text-preview';
 
 /**
  * Valid session statuses.
@@ -48,8 +49,18 @@ export interface SessionListItem {
   /** Agent who ran the session */
   agent: string;
 
-  /** Session summary (if completed) */
+  /**
+   * Session summary (if completed). s93-m11 (#602): a preview of at most PREVIEW_MAX_CHARS
+   * characters on a plain list (a default page was 30 KB of summaries here); in full when the list
+   * names one session (`sessionId`).
+   */
   summary: string | null;
+
+  /** Whether `summary` was cut; absent when it is whole. */
+  summaryTruncated?: boolean;
+
+  /** Characters in the full summary, when it was cut. */
+  summaryFullLength?: number;
 
   /** Number of captures in this session */
   captureCount: number;
@@ -59,6 +70,26 @@ export interface SessionListItem {
 
   /** s84-m03: the session's own project_id (guarded read). Foreign → title/summary framed. */
   projectId?: string | null;
+
+  /**
+   * s93-m11 — every capture in full, only when the list names one session (`sessionId`): search
+   * answers carry previews and point here to read a session whole.
+   */
+  captures?: SessionListCapture[];
+}
+
+/** s93-m11 — one stored capture, whole: every field a capture stores. */
+export interface SessionListCapture {
+  category: string;
+  content: string;
+  timestamp: string | null;
+  /** The capture's context note, when it was given one. */
+  context?: string;
+  missionId?: string;
+  /** A constraint capture's expiry. */
+  expiresAt?: string;
+  /** The sprint a deferred capture materializes into. */
+  sprintId?: string;
 }
 
 /**
@@ -85,6 +116,7 @@ export interface CmosSessionListResult {
     status?: SessionStatus;
     type?: SessionType;
     sprintId?: string;
+    sessionId?: string;
   };
 
   /** s84-m03: the querying store's own project_id. Sessions whose projectId differs are
@@ -112,6 +144,9 @@ export const cmosSessionListSchema = z.object({
 
   /** Filter by sprint */
   sprintId: z.string().optional().describe('Filter by sprint ID'),
+
+  /** s93-m11: only this session, so a search preview can be read in full. */
+  sessionId: z.string().optional().describe('Only this session'),
 
   /** Page number */
   page: z
@@ -165,6 +200,10 @@ export const cmosSessionListToolDefinition = {
       sprintId: {
         type: 'string',
         description: 'Filter by sprint ID',
+      },
+      sessionId: {
+        type: 'string',
+        description: 'Only this session',
       },
       page: {
         type: 'number',
@@ -222,6 +261,11 @@ export async function cmosSessionList(
         queryParams.push(params.sprintId);
       }
 
+      if (params.sessionId) {
+        conditions.push('id = ?');
+        queryParams.push(params.sessionId);
+      }
+
       const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
       // Get total count
@@ -248,7 +292,7 @@ export async function cmosSessionList(
         `SELECT id, type, title, status, started_at, completed_at, agent, summary, captures, sprint_id, ${projectIdExpr}
          FROM sessions
          ${whereClause}
-         ORDER BY started_at DESC
+         ORDER BY julianday(started_at) DESC
          LIMIT ? OFFSET ?`,
         [...queryParams, pageSize, offset]
       );
@@ -262,9 +306,11 @@ export async function cmosSessionList(
       const sessions: SessionListItem[] = (sessionsResult.data ?? []).map((s) => {
         // Count captures
         let captureCount = 0;
+        let stored: unknown[] = [];
         try {
-          const captures = s.captures ? JSON.parse(s.captures) : [];
-          captureCount = Array.isArray(captures) ? captures.length : 0;
+          const captures: unknown = s.captures ? JSON.parse(s.captures) : [];
+          stored = Array.isArray(captures) ? captures : [];
+          captureCount = stored.length;
         } catch {
           captureCount = 0;
         }
@@ -277,10 +323,11 @@ export async function cmosSessionList(
           startedAt: s.started_at,
           completedAt: s.completed_at,
           agent: s.agent,
-          summary: s.summary,
+          ...summaryAsListed(s.summary, Boolean(params.sessionId)),
           captureCount,
           sprintId: s.sprint_id,
           projectId: (s as unknown as Record<string, string | null>).project_id ?? null,
+          ...(params.sessionId ? { captures: fullCaptures(stored) } : {}),
         };
       });
 
@@ -296,12 +343,47 @@ export async function cmosSessionList(
           ...(params.status && { status: params.status }),
           ...(params.type && { type: params.type }),
           ...(params.sprintId && { sprintId: params.sprintId }),
+          ...(params.sessionId && { sessionId: params.sessionId }),
         },
         localProjectId: getProjectId(client),
       });
     },
     { projectRoot: params.projectRoot }
   );
+}
+
+/** s93-m11 — a summary as the list carries it: whole for a named session, else a preview. */
+function summaryAsListed(
+  summary: string | null,
+  whole: boolean
+): Pick<SessionListItem, 'summary' | 'summaryTruncated' | 'summaryFullLength'> {
+  if (whole || summary === null) return { summary };
+  const { preview, truncated, fullLength } = previewText(summary);
+  return truncated
+    ? { summary: preview, summaryTruncated: true, summaryFullLength: fullLength }
+    : { summary };
+}
+
+/** s93-m11 — stored captures as the full read returns them; a malformed entry is skipped. */
+function fullCaptures(stored: unknown[]): SessionListCapture[] {
+  return stored.flatMap((entry) => {
+    if (!entry || typeof entry !== 'object') return [];
+    const capture = entry as Record<string, unknown>;
+    if (typeof capture.content !== 'string') return [];
+    const optional = (key: 'context' | 'missionId' | 'expiresAt' | 'sprintId') =>
+      typeof capture[key] === 'string' ? { [key]: capture[key] as string } : {};
+    return [
+      {
+        category: typeof capture.category === 'string' ? capture.category : 'unknown',
+        content: capture.content,
+        timestamp: typeof capture.timestamp === 'string' ? capture.timestamp : null,
+        ...optional('context'),
+        ...optional('missionId'),
+        ...optional('expiresAt'),
+        ...optional('sprintId'),
+      },
+    ];
+  });
 }
 
 /**
@@ -357,7 +439,29 @@ export function formatSessionListForLLM(result: CmosToolResult<CmosSessionListRe
     const title = frameInlineIfForeign(session.title, session.projectId, data.localProjectId);
     lines.push(`${icon} **${session.id}** - ${title}${captureInfo}`);
     lines.push(`   Type: ${session.type} | Status: ${session.status} | Agent: ${session.agent}`);
-    if (session.summary) {
+    if (session.captures) {
+      // s93-m11: one session named by id is read in full, summary and every capture.
+      if (session.summary) {
+        lines.push('   Summary:');
+        lines.push(frameTextIfForeign(session.summary, session.projectId, data.localProjectId));
+      }
+      if (session.captures.length > 0) {
+        lines.push('');
+        lines.push(`   Captures (${session.captures.length}):`);
+        for (const capture of session.captures) {
+          const when = capture.timestamp ? ` ${capture.timestamp}` : '';
+          const mission = capture.missionId ? ` {${capture.missionId}}` : '';
+          lines.push(`   - [${capture.category}]${when}${mission}`);
+          lines.push(frameTextIfForeign(capture.content, session.projectId, data.localProjectId));
+          if (capture.context) {
+            lines.push(
+              `     Context: ${frameTextIfForeign(capture.context, session.projectId, data.localProjectId)}`
+            );
+          }
+          if (capture.expiresAt) lines.push(`     Expires: ${capture.expiresAt}`);
+        }
+      }
+    } else if (session.summary) {
       const shortSummary =
         session.summary.length > 80 ? session.summary.slice(0, 80) + '...' : session.summary;
       lines.push(
@@ -370,6 +474,18 @@ export function formatSessionListForLLM(result: CmosToolResult<CmosSessionListRe
   if (data.hasMore) {
     lines.push(
       `*Page ${data.page} of ${Math.ceil(data.totalCount / data.pageSize)}. Use page parameter for more.*`
+    );
+  }
+
+  // s93-m11 (#602): a plain list shows a summary's first 80 characters and carries a preview; say
+  // once how to read a session whole.
+  const cut = data.sessions.find(
+    (session) => !session.captures && session.summary && session.summary.length > 80
+  );
+  if (cut) {
+    lines.push(
+      `Summaries are cut here. Read a session in full with ` +
+        `cmos_session(action="list", sessionId="${cut.id}").`
     );
   }
 

@@ -8,26 +8,12 @@
  * per store, and merges the results by the m03 per-row schema keys
  * `(occurred_at, origin_seq, project_id)`.
  *
- * **Transparent-upgrade contract (ADR Section 5.5):** the call signature bakes in
- * NO "must fan out locally" assumption. When the App-View triggers fire (N>125 or
- * fan-in p95>200ms), an internal dispatch can serve the SAME `queryAcrossStores`
- * shape from the App-View Postgres instead — only latency changes. Callers never
- * pick the path.
- *
- * **Merge algorithm:** each store's query is wrapped in `SELECT * FROM (<sql>)
- * ORDER BY <merge key> LIMIT <limit>`, so each store returns at most `limit`
- * already-sorted rows (bounded — NOT the whole table). The per-store arrays are
- * then combined by a **min-heap k-way merge** that pulls rows in lockstep and stops
- * at the global `limit`, touching only ~`limit + N` rows rather than sorting all
- * `N × limit`. (A live-`.iterate()` cursor variant would shave the per-store
- * materialization further, but it is deferred: keeping N cursors open at once
- * fights the file-handle concurrency cap at N > cap, whereas open→query→CLOSE per
- * store keeps open handles ≤ `concurrency` regardless of N.)
- *
- * **Read-only + isolation:** every store opens with `readonly: true`, so a write
- * query throws at the connection. Per-store failures (unreadable DB, missing
- * column on an un-migrated/foreign store, write attempt) are caught and reported
- * in `errors[]` — one bad store never fails the whole query.
+ * Bounded, sorted per-store arrays feed a min-heap merge that stops at the global
+ * limit. Opening, querying and closing each store in one task bounds open handles.
+ * Readonly connections reject writes; one store's failure is named in errors[]
+ * without failing the rest. A custom query supports legacy schemas without merge
+ * columns; it must return the same sorted, bounded row shape.
+ * ADR §5.5 reserves an eventual App-View dispatch when N>125 or fan-in p95>200ms.
  *
  * @module intelligence/cross-store-query
  */
@@ -73,26 +59,34 @@ export interface CrossStoreQueryOptions {
   concurrency?: number;
   /** Injectable registry (tests); defaults to the singleton via `create()`. */
   registry?: ProjectGraphRegistry;
+  /** Existing discovery snapshot; even [] bypasses registry creation and backfills. */
+  stores?: readonly ProjectGraphEntry[];
+  /** Legacy-schema query. Return at most limitWithSentinel rows sorted by the merge keys. */
+  perStoreQuery?: (
+    db: Database.Database,
+    store: ProjectGraphEntry,
+    limitWithSentinel: number
+  ) => CrossStoreRow[];
+  /** SQLite busy timeout per store; clipped to remaining deadline time when provided. */
+  timeoutMs?: number;
+  /** Absolute deadline in clock() units. Late and unvisited stores are named failures. */
+  deadlineAtMs?: number;
 
   /**
-   * s87-m03 (#529) — an optional extra read, run ON THE CONNECTION THIS FAN-OUT ALREADY OPENS.
-   *
-   * WHY IT EXISTS. `cmos_review`'s drift signal derived store silence from a file mtime that
-   * THIS fan-out creates: opening a WAL database makes SQLite write the `-wal` sidecar, and the
-   * drift computation then read that sidecar's mtime as evidence of freshness. The instrument
-   * fabricated its own evidence. The only honest signal is the content the reason string already
-   * claims to describe, and the cheapest place to read it is the connection that is open anyway.
-   *
-   * WHY IT IS A CALLBACK AND NOT A SECOND QUERY. Decision #1016 (superseding #671 in part)
-   * replaced a syntax fence with a COST fence: no new store opens, no new connections, no
-   * network. A probe that runs inside the existing per-store task satisfies that by
-   * construction; one that opens its own connection could not.
-   *
-   * Its return value is collected by `project_id` into {@link CrossStoreQueryResult.probes}. A
-   * probe that THROWS is recorded in `probeErrors`, never in `errors` — see there for why.
+   * s87-m03 (#529): an extra read ON THE EXISTING CONNECTION. Review drift must read content,
+   * not sidecar mtimes its own readonly open creates. Decision #1016's cost fence permits no
+   * new opens, connections or network; this callback satisfies it by construction.
+   * Results are keyed by registry project_id in probes. Failures stay in probeErrors, never
+   * errors: an optional probe failure cannot reclassify a successfully queried store as unreadable.
    */
-  perStoreProbe?: (db: Database.Database) => number | null;
+  perStoreProbe?: (db: Database.Database) => CrossStoreProbeValue;
 }
+
+/**
+ * What a per-store probe may return: a number, `null` for "found nothing to report", or (s93-m11)
+ * `'no-history'` for a store whose domain tables hold no row yet.
+ */
+export type CrossStoreProbeValue = number | null | 'no-history';
 
 /** A per-store failure, isolated from the rest of the query. */
 export interface CrossStoreError {
@@ -105,7 +99,7 @@ export interface CrossStoreError {
 export interface CrossStoreProbe {
   projectId: string;
   /** Whatever the probe returned; `null` means "the probe ran and found nothing to report". */
-  value: number | null;
+  value: CrossStoreProbeValue;
 }
 
 /** The fan-out result: merged rows + isolated errors + latency instrumentation. */
@@ -120,14 +114,8 @@ export interface CrossStoreQueryResult<T extends CrossStoreRow = CrossStoreRow> 
   probes: CrossStoreProbe[];
 
   /**
-   * s87-m03 — probe failures, KEPT STRICTLY APART FROM {@link errors}, and that separation is
-   * load-bearing rather than tidy.
-   *
-   * `errors` is what `deriveDrift` reads to classify a store `unmigrated` or `unreadable`. If a
-   * probe throw landed there, an optional extra read failing would silently reclassify a store
-   * the fan-out read perfectly well as one it could not read — a new false signal introduced by
-   * the fix for a false signal. The probe is additive: it can degrade the drift verdict to
-   * "unknown", never the store's reachability.
+   * s87-m03 — separate from errors, which deriveDrift uses to classify store reachability.
+   * An optional probe failure degrades drift to unknown, never the store to unreadable.
    */
   probeErrors: CrossStoreError[];
   metadata: {
@@ -155,7 +143,10 @@ export function storeDbPath(storeRoot: string): string {
  * returned connection throws `SqliteError: attempt to write a readonly database`.
  * Throws if the DB file is absent (caller isolates per-store).
  */
-export function openStoreReadOnly(storeRoot: string): Database.Database {
+export function openStoreReadOnly(
+  storeRoot: string,
+  timeoutMs = STORE_OPEN_TIMEOUT_MS
+): Database.Database {
   const dbPath = storeDbPath(storeRoot);
   if (!existsSync(dbPath)) {
     throw new Error(`store DB not found: ${dbPath}`);
@@ -163,7 +154,7 @@ export function openStoreReadOnly(storeRoot: string): Database.Database {
   return new Database(dbPath, {
     readonly: true,
     fileMustExist: true,
-    timeout: STORE_OPEN_TIMEOUT_MS,
+    timeout: timeoutMs,
   });
 }
 
@@ -264,13 +255,8 @@ function p95(samples: number[]): number | null {
 }
 
 /**
- * Fan a single parameterized query out across every (active) store in the
- * project-graph registry and k-way merge the results by `(occurred_at,
- * origin_seq, project_id)`. See the module docstring for the full contract.
- *
- * `clock` is injectable for deterministic latency tests; it defaults to a
- * monotonic timer (`performance.now`-equivalent via `Date.now`, never the
- * forbidden-in-workflows path — this is runtime code).
+ * Query active stores and merge by (occurred_at, origin_seq, project_id).
+ * The injectable clock governs both latency measurements and optional absolute deadlines.
  */
 export async function queryAcrossStores<T extends CrossStoreRow = CrossStoreRow>(
   options: CrossStoreQueryOptions,
@@ -281,8 +267,9 @@ export async function queryAcrossStores<T extends CrossStoreRow = CrossStoreRow>
   const concurrency = options.concurrency ?? DEFAULT_CONCURRENCY;
   const params = options.params ?? [];
 
-  const registry = options.registry ?? (await ProjectGraphRegistry.create());
-  const stores = registry.list().filter(options.projectFilter ?? (() => true));
+  const discovered =
+    options.stores ?? (options.registry ?? (await ProjectGraphRegistry.create())).list();
+  const stores = discovered.filter(options.projectFilter ?? (() => true));
 
   // Pull `limit + 1` per store so a store holding EXACTLY `limit` rows is
   // distinguishable from one holding more — `capped` is then provable (returned
@@ -295,6 +282,10 @@ export async function queryAcrossStores<T extends CrossStoreRow = CrossStoreRow>
   const probeErrors: CrossStoreError[] = [];
   const perStoreMs: number[] = [];
   const cappedFlags: boolean[] = [];
+  const checkDeadline = (): void => {
+    if (options.deadlineAtMs !== undefined && clock() >= options.deadlineAtMs)
+      throw new Error('Cross-store read deadline exceeded; this store was not included.');
+  };
 
   // One bounded, read-only, isolated query per store. open → query → CLOSE keeps
   // open file handles ≤ concurrency regardless of N.
@@ -302,10 +293,20 @@ export async function queryAcrossStores<T extends CrossStoreRow = CrossStoreRow>
     const start = clock();
     let db: Database.Database | null = null;
     try {
-      db = openStoreReadOnly(store.store_path);
-      const raw = db.prepare(wrapped).all(...params, limit + 1) as T[];
-      const capped = raw.length > limit;
-      cappedFlags.push(capped);
+      checkDeadline();
+      const timeout = options.timeoutMs ?? STORE_OPEN_TIMEOUT_MS;
+      db = openStoreReadOnly(
+        store.store_path,
+        options.deadlineAtMs === undefined
+          ? timeout
+          : Math.min(timeout, Math.max(0, Math.floor(options.deadlineAtMs - clock())))
+      );
+      const raw = (
+        options.perStoreQuery
+          ? options.perStoreQuery(db, store, limit + 1)
+          : db.prepare(wrapped).all(...params, limit + 1)
+      ) as T[];
+      checkDeadline();
 
       // s87-m03 (#529) — the optional probe, on THIS connection, inside its OWN try/catch. The
       // inner catch is the whole point: a probe throw must not reach the outer handler, because
@@ -313,7 +314,9 @@ export async function queryAcrossStores<T extends CrossStoreRow = CrossStoreRow>
       // unreadable on the strength of an optional extra read failing.
       if (options.perStoreProbe) {
         try {
-          probes.push({ projectId: store.project_id, value: options.perStoreProbe(db) });
+          const value = options.perStoreProbe(db);
+          checkDeadline();
+          probes.push({ projectId: store.project_id, value });
         } catch (probeErr) {
           probeErrors.push({
             projectId: store.project_id,
@@ -322,11 +325,14 @@ export async function queryAcrossStores<T extends CrossStoreRow = CrossStoreRow>
           });
         }
       }
+      checkDeadline();
 
       // Measured AFTER the probe, so the recorded per-store latency includes it. A probe whose
       // cost is invisible to the p95 the cost fence is judged against would make that fence
       // unfalsifiable (#1016 requires the per-store cost to be measured, not asserted).
       perStoreMs.push(clock() - start);
+      const capped = raw.length > limit;
+      cappedFlags.push(capped);
       return capped ? raw.slice(0, limit) : raw;
     } catch (err) {
       errors.push({

@@ -12,6 +12,7 @@ import { z } from 'zod';
 import { withClient } from './client';
 import type { CmosToolResult } from './types';
 import { createError, createSuccess } from './errors';
+import { readTimeBounds, storedTimeMs } from './stored-time';
 import { tableHasColumn } from './genesis-columns';
 import { appendWarnings } from './format-warnings';
 
@@ -173,8 +174,12 @@ export const cmosContextHistoryToolDefinition = {
  * @returns CmosToolResult with snapshot history or actionable error
  */
 export async function cmosContextHistory(
-  params: CmosContextHistoryParams = {}
+  requested: CmosContextHistoryParams = {}
 ): Promise<CmosToolResult<CmosContextHistoryResult>> {
+  // s93-m11: since/until compare as times; see readTimeBounds.
+  const bounds = readTimeBounds(requested);
+  if ('error' in bounds) return createError<CmosContextHistoryResult>(bounds.error);
+  const params: CmosContextHistoryParams = { ...requested, ...bounds };
   const page = params.page ?? 1;
   const pageSize = params.pageSize ?? 20;
   const offset = (page - 1) * pageSize;
@@ -191,12 +196,12 @@ export async function cmosContextHistory(
       }
 
       if (params.since) {
-        conditions.push('created_at >= ?');
+        conditions.push('julianday(created_at) >= julianday(?)');
         queryParams.push(params.since);
       }
 
       if (params.until) {
-        conditions.push('created_at <= ?');
+        conditions.push('julianday(created_at) <= julianday(?)');
         queryParams.push(params.until);
       }
 
@@ -241,7 +246,7 @@ export async function cmosContextHistory(
         `SELECT id, context_id, session_id, source, content_hash, content, created_at, ${prunedExpr}
          FROM context_snapshots
          ${whereClause}
-         ORDER BY created_at DESC
+         ORDER BY julianday(created_at) DESC
          LIMIT ? OFFSET ?`,
         [...queryParams, pageSize, offset]
       );
@@ -328,7 +333,7 @@ export function formatContextHistoryForLLM(
   lines.push('|---|---|---|---|---|');
 
   for (const snap of data.snapshots) {
-    const dateStr = new Date(snap.createdAt).toLocaleString('en-US', {
+    const dateStr = new Date(storedTimeMs(snap.createdAt)).toLocaleString('en-US', {
       month: 'short',
       day: 'numeric',
       hour: '2-digit',

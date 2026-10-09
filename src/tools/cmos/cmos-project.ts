@@ -85,7 +85,7 @@ export const CMOS_PROJECT_ACTION_PARAMS: ActionParamMap<CmosProjectAction, CmosP
     'projectType',
   ],
   register: ['action', 'projectRoot', 'name', 'setAsDefault'],
-  list: ['action', 'prune', 'validate'],
+  list: ['action', 'validate'],
   unregister: ['action', 'projectRoot'],
   validate: ['action', 'prune'],
   prune: ['action'],
@@ -153,7 +153,7 @@ export const cmosProjectSchema = z
       .boolean()
       .optional()
       .describe(
-        'Prune invalid entries for validate action, or for list action when validate is set'
+        'validate: archive the registry entries whose store is missing, stale or ephemeral'
       ),
     // list with validate flag
     validate: z
@@ -164,7 +164,7 @@ export const cmosProjectSchema = z
     projectType: z
       .enum(['general', 'managed', 'build'])
       .optional()
-      .describe('Project type/tier for update action: general | managed | build'),
+      .describe('The level of record for init and update: general | managed | build'),
     // sweep params
     instances: z
       .array(z.string())
@@ -260,7 +260,7 @@ export const cmosProjectToolDefinition = {
       prune: {
         type: 'boolean',
         description:
-          'Prune invalid entries for validate action, or for list action when validate is set',
+          'validate: archive the registry entries whose store is missing, stale or ephemeral',
       },
       validate: {
         type: 'boolean',
@@ -270,7 +270,7 @@ export const cmosProjectToolDefinition = {
         type: 'string',
         enum: ['general', 'managed', 'build'],
         description:
-          'Project type/tier for the init and update actions (defaults to build for new projects)',
+          'The level of record for init and update: general (decisions and lessons), managed (also next steps, as tasks in cycles) or build (sprints and missions); a new project defaults to general, or to the level its folder AGENTS.md already names, and init keeps an existing project level unless one is passed',
       },
       instances: {
         type: 'array',
@@ -339,11 +339,19 @@ export async function cmosProject(
         setAsDefault: params.setAsDefault,
       } satisfies CmosProjectRegisterParams);
     case 'list':
-      // Support validate flag on list action
+      // s93-m11 (#606 g): list is read-classified, so it never prunes. validate=true reports the
+      // registry's health; archiving entries is validate's or prune's job, both writes.
+      if (params.prune === true) {
+        return createError<CmosProjectResult>({
+          code: 'INVALID_PARAMETER',
+          message:
+            'cmos_project(action="list") only reads the registry, so it does not take prune.',
+          suggestion:
+            'To archive the registry entries whose store is gone, call cmos_project(action="prune"), or cmos_project(action="validate", prune=true) to see the report first.',
+        });
+      }
       if (params.validate) {
-        return cmosProjectValidate({
-          prune: params.prune,
-        } satisfies CmosProjectValidateParams);
+        return cmosProjectValidate({} satisfies CmosProjectValidateParams);
       }
       return cmosProjectList({} satisfies CmosProjectListParams);
     case 'unregister':

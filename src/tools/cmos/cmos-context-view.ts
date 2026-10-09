@@ -18,12 +18,12 @@ import {
   resolveContextSizeSettings,
   type ContextSizeMetrics,
 } from './context-retention';
-import { detectAndFlagStaleness } from './staleness-detection';
-import { applyPendingBlobMigrations } from './blob-migrations';
+import { readStaleness, sprintCountsOnClockSql, stalenessAdvisory } from './staleness-detection';
+import { migrateBlobForRead } from './blob-migrations';
 import { getProjectId } from './genesis-columns';
 import { frameForeignText, provenanceTag } from '../../intelligence/provenance-frame';
-import { isReadOnlyAgentSession } from './read-only-agent-guard';
 import { appendWarnings } from './format-warnings';
+import { storedTimeMs } from './stored-time';
 
 /**
  * Parsed context content with type-safe structure.
@@ -158,7 +158,7 @@ export type CmosContextViewParams = z.infer<typeof cmosContextViewSchema>;
 export const cmosContextViewToolDefinition = {
   name: 'cmos_context_view',
   description:
-    'Render aggregated context from CMOS database. Returns master_context (project history, decisions, constraints) and project_context (current session state, working memory) merged. Use this to understand project state before starting work.',
+    'Render aggregated context from CMOS database. Returns master_context (project history, decisions, constraints) and project_context (current session state and next steps) merged. Use this to understand project state before starting work.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -214,7 +214,7 @@ export async function cmosContextView(
 
       // Get master_context if not filtered to project_context only
       if (!params.contextType || params.contextType === 'master_context') {
-        const masterResult = getContextById(client, 'master_context', warnings);
+        const masterResult = getContextById(client, 'master_context');
         if (masterResult) {
           masterContext = masterResult;
         }
@@ -222,7 +222,7 @@ export async function cmosContextView(
 
       // Get project_context if not filtered to master_context only
       if (!params.contextType || params.contextType === 'project_context') {
-        const projectResult = getContextById(client, 'project_context', warnings);
+        const projectResult = getContextById(client, 'project_context');
         if (projectResult) {
           projectContext = projectResult;
         }
@@ -259,29 +259,18 @@ export async function cmosContextView(
         totalSizeBytes,
       };
 
-      // Detect and flag stale decisions/learnings. Skipped under the read-only review
-      // role (s78-m04): detectAndFlagStaleness UPDATEs decision/learning status — a store
-      // write a read-only session must not perform. The view still renders; it simply does
-      // not re-run staleness maintenance (that lands on the next non-review session).
-      //
-      // s86-m02b: an errored `UPDATE ... SET status='stale'` returns the same zero as a
-      // WHERE that matched nothing, so the counts below would report a clean staleness pass
-      // over a store where CMOS wrote no status at all. The read-only stand-in carries an
-      // empty `warnings` because it performs no write — there is nothing that can have failed.
-      const stalenessResult = isReadOnlyAgentSession()
-        ? { totalStaleDecisions: 0, totalStaleLearnings: 0, threshold: 0, warnings: [] }
-        : detectAndFlagStaleness(client);
-      warnings.push(...(stalenessResult.warnings ?? []));
+      // s93-m11: staleness is computed when read and never written (Q10, decision #1182), so the
+      // view counts it the same way under every role. A failed count rides the warnings rather
+      // than reading as a clean zero.
+      const stalenessRead = readStaleness(client);
+      warnings.push(...stalenessRead.warnings);
       const staleness = {
-        staleDecisions: stalenessResult.totalStaleDecisions,
-        staleLearnings: stalenessResult.totalStaleLearnings,
-        threshold: stalenessResult.threshold,
+        staleDecisions: stalenessRead.storedStaleDecisions,
+        staleLearnings: stalenessRead.storedStaleLearnings,
+        threshold: stalenessRead.threshold,
       };
-      if (stalenessResult.totalStaleDecisions > 0 || stalenessResult.totalStaleLearnings > 0) {
-        warnings.push(
-          `${stalenessResult.totalStaleDecisions} stale decision(s) and ${stalenessResult.totalStaleLearnings} stale learning(s) detected.`
-        );
-      }
+      const stalenessLine = stalenessAdvisory(stalenessRead);
+      if (stalenessLine) warnings.push(stalenessLine);
 
       // Compute health metrics from structured tables
       const healthMetrics = computeHealthMetrics(client, staleness, totalSizeKb);
@@ -378,19 +367,10 @@ export async function cmosContextView(
 /**
  * Get a context by ID from the database.
  *
- * Applies any pending blob migrations before returning content.
- * Migrations are lazy, one-time, and self-healing — each project upgrades
- * automatically on the first read after a server update. See blob-migrations.ts.
- *
- * @param warnings - the handler's envelope sink. The migration's own writes (snapshot,
- *   blob write-back, version bump) each report through it, so a HALF-applied migration
- *   reaches the answer instead of being inferred from `migrated: true` (s86-m02b).
+ * Applies any pending blob migrations in memory before returning content; the stored blob is
+ * migrated at the store's first write (s93-m11). See blob-migrations.ts.
  */
-function getContextById(
-  client: CmosDatabaseClient,
-  contextId: string,
-  warnings: string[]
-): ParsedContext | null {
+function getContextById(client: CmosDatabaseClient, contextId: string): ParsedContext | null {
   const result = client.getOne<Context>(
     'SELECT id, source_path, content, updated_at FROM contexts WHERE id = ?',
     [contextId]
@@ -410,19 +390,16 @@ function getContextById(
     parsedContent = {};
   }
 
-  // Apply any pending blob migrations (lazy, idempotent, snapshot-protected).
-  // No-op if blob_schema_version in metadata is already current. Skipped under the
-  // read-only review role (s78-m04): the migration INSERTs a snapshot + UPDATEs
-  // contexts/metadata (store writes). The view reads the pre-migration blob as-is;
-  // the migration lands on the next non-review session.
-  const migrationResult = isReadOnlyAgentSession()
-    ? { blob: parsedContent, migrated: false, warnings: [] }
-    : applyPendingBlobMigrations(client, contextId, ctx.content, parsedContent);
-  parsedContent = migrationResult.blob;
-  warnings.push(...migrationResult.warnings);
+  // s93-m11: a pending blob migration is applied in memory only. The view is a read and never
+  // writes the record (decision #1182); the stored blob migrates at the store's first write
+  // (first-write-maintenance.ts). Every migration is a pure function, so this is the shape that
+  // will be stored.
+  const migratedContent = migrateBlobForRead(client, contextId, parsedContent);
+  const migrated = migratedContent !== parsedContent;
+  parsedContent = migratedContent;
 
   // Use post-migration content for size calculation when blob was pruned
-  const contentForSize = migrationResult.migrated ? JSON.stringify(parsedContent) : ctx.content;
+  const contentForSize = migrated ? JSON.stringify(parsedContent) : ctx.content;
 
   const sizeSettings = resolveContextSizeSettings(parsedContent);
   const size = calculateContextSizeMetrics(contentForSize, sizeSettings);
@@ -500,7 +477,7 @@ function buildAggregatedView(
       decision_text: string;
       project_id: string | null;
     }>(
-      `SELECT decision_text, ${decProjExpr} AS project_id FROM strategic_decisions WHERE status = 'active' ORDER BY created_at DESC`,
+      `SELECT decision_text, ${decProjExpr} AS project_id FROM strategic_decisions WHERE status = 'active' ORDER BY julianday(created_at) DESC`,
       []
     );
     if (structuredDecisions.success && structuredDecisions.data) {
@@ -521,7 +498,7 @@ function buildAggregatedView(
   if (client) {
     const learnProjExpr = tableHasColumn(client, 'learnings', 'project_id') ? 'project_id' : 'NULL';
     const structuredLearnings = client.getMany<{ content: string; project_id: string | null }>(
-      `SELECT content, ${learnProjExpr} AS project_id FROM learnings WHERE status = 'active' ORDER BY created_at DESC`,
+      `SELECT content, ${learnProjExpr} AS project_id FROM learnings WHERE status = 'active' ORDER BY julianday(created_at) DESC`,
       []
     );
     if (structuredLearnings.success && structuredLearnings.data) {
@@ -561,12 +538,12 @@ function computeHealthMetrics(
 
   // Last snapshot age
   const lastSnapshot = client.getOne<{ created_at: string }>(
-    'SELECT created_at FROM context_snapshots ORDER BY created_at DESC LIMIT 1',
+    'SELECT created_at FROM context_snapshots ORDER BY julianday(created_at) DESC LIMIT 1',
     []
   );
   let lastSnapshotAge: string | null = null;
   if (lastSnapshot.success && lastSnapshot.data?.created_at) {
-    const snapshotDate = new Date(lastSnapshot.data.created_at);
+    const snapshotDate = new Date(storedTimeMs(lastSnapshot.data.created_at));
     const now = new Date();
     const hoursAgo = Math.round((now.getTime() - snapshotDate.getTime()) / (1000 * 60 * 60));
     if (hoursAgo < 24) {
@@ -577,9 +554,10 @@ function computeHealthMetrics(
     }
   }
 
-  // Recent sprint count
+  // Recent sprint count. s93-m11: the sprints that have happened (Completed and the open one,
+  // case-insensitively), on the staleness clock's rule; a Planned sprint has not happened yet.
   const recentSprints = client.getOne<{ count: number }>(
-    'SELECT COUNT(*) AS count FROM sprints',
+    `SELECT COUNT(*) AS count FROM sprints WHERE ${sprintCountsOnClockSql('status')}`,
     []
   );
 
@@ -799,7 +777,7 @@ export function formatContextViewForLLM(result: CmosToolResult<CmosContextViewRe
   lines.push('');
 
   if (data.masterContext) {
-    lines.push('**Master Context** (strategic memory)');
+    lines.push('**Master Context** (the strategic record)');
     lines.push(`  Source: ${data.masterContext.sourcePath}`);
     lines.push(`  Updated: ${data.masterContext.updatedAt ?? 'Never'}`);
     if (data.masterContext.size) {

@@ -645,8 +645,16 @@ async function callMissionUpdate(
         );
       }
 
+      // s93-m11: this copy of the handler (next-step #592 tracks retiring it) keeps the shipped
+      // receipt's shape; the real handler's receipt is pinned in mission-receipts.test.ts.
+      const current = client.getOne<{ name: string; status: MissionStatus }>(
+        'SELECT name, status FROM missions WHERE id = ?',
+        [missionId]
+      );
       const result: MissionUpdateResult = {
         missionId,
+        name: current.data?.name ?? '',
+        status: current.data?.status ?? (newStatus as MissionStatus),
         updatedFields: fieldKeys,
         message: 'Updated',
       };

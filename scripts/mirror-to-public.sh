@@ -16,10 +16,15 @@
 #   PUBLIC_REMOTE   default git@github.com:kneelinghorse/cmos-mcp.git (point at a local --bare repo to test)
 #   PUBLIC_BRANCH   default main
 #   DRY_RUN=1       stage, leak-check, commit locally, print the staged tree, then stop before push
+#   DRY_RUN_KEEP=1  with DRY_RUN=1 only, retain the sanitized checkout and print DRY_RUN_TREE=<path>
 set -euo pipefail
 
 PUBLIC_REMOTE="${PUBLIC_REMOTE:-git@github.com:kneelinghorse/cmos-mcp.git}"
 PUBLIC_BRANCH="${PUBLIC_BRANCH:-main}"
+if [[ "${DRY_RUN_KEEP:-0}" == "1" && "${DRY_RUN:-0}" != "1" ]]; then
+  echo "ERROR: DRY_RUN_KEEP requires DRY_RUN=1" >&2
+  exit 1
+fi
 
 # Top-level paths that must NEVER reach the public repo. The leak-assert below is load-bearing.
 PRIVATE_PATHS=( cmos analysis artifacts tmp SESSIONS.jsonl agents.md CLAUDE.md ecosystem.config.js )
@@ -47,7 +52,16 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"; cd "$REPO_ROOT"
 PKG_VERSION="$(node -p "require('./package.json').version")"
 [[ "$SEMVER" == "$PKG_VERSION" ]] || { echo "ERROR: tag $VERSION != package.json version $PKG_VERSION"; exit 1; }
 
-WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/cmos-mirror.XXXXXXXX")"
+RETAINED_ROOT=""
+RETAINED_READY=0
+cleanup() {
+  rm -rf "$WORK"
+  if [[ -n "$RETAINED_ROOT" && "$RETAINED_READY" != "1" ]]; then
+    rm -rf "$RETAINED_ROOT"
+  fi
+}
+trap cleanup EXIT
 PUB="$WORK/public"
 STAGE="$WORK/stage"
 
@@ -91,6 +105,67 @@ echo "✓ leak-guard passed: no PRIVATE_PATHS, nested exclusions, *.sqlite, or .
 
 cd "$PUB"
 git add -A
+
+# Compare Git trees, not filesystem names: a case-insensitive checkout/index can lose a
+# case-only rename while rsync and git add both succeed. Only the declared root exclusions
+# above and the explicit real-.env rule may differ; every remaining path, mode, and object
+# must equal the committed source before we create a commit or tag (including dry runs).
+PUBLIC_TREE="$(git write-tree)"
+node - "$REPO_ROOT" "$PUB" "$PUBLIC_TREE" "${PRIVATE_PATHS[@]}" "${DOCS_EXCLUDES[@]}" <<'NODE'
+const { execFileSync } = require('node:child_process');
+const [source, destination, stagedTree, ...excludedPaths] = process.argv.slice(2);
+const excluded = excludedPaths.map((name) => Buffer.from(name));
+function tree(cwd, ref) {
+  const output = execFileSync('git', ['ls-tree', '-rz', '--full-tree', ref], {
+    cwd,
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  const entries = new Map();
+  let start = 0;
+  while (start < output.length) {
+    const end = output.indexOf(0, start);
+    const tab = output.indexOf(9, start);
+    if (end < 0 || tab < start || tab >= end) throw new Error('Malformed git ls-tree record');
+    const name = output.subarray(tab + 1, end);
+    entries.set(name.toString('hex'), {
+      name,
+      identity: output.subarray(start, tab).toString('ascii'),
+    });
+    start = end + 1;
+  }
+  return entries;
+}
+function isExcluded(name) {
+  if (excluded.some((prefix) => name.equals(prefix) ||
+    (name.length > prefix.length && name[prefix.length] === 47 &&
+      name.subarray(0, prefix.length).equals(prefix)))) return true;
+  // Matches the removal/leak-guard policy above, never all dotfiles or all nested docs.
+  const basename = name.subarray(name.lastIndexOf(47) + 1).toString('utf8');
+  return basename === '.env' || (basename.startsWith('.env.') && basename !== '.env.template');
+}
+const expected = tree(source, 'HEAD');
+for (const [key, entry] of expected) if (isExcluded(entry.name)) expected.delete(key);
+const actual = tree(destination, stagedTree);
+const differences = [];
+for (const [key, entry] of expected) {
+  const observed = actual.get(key);
+  const label = JSON.stringify(entry.name.toString('utf8'));
+  if (!observed) differences.push(`missing ${label}`);
+  else if (observed.identity !== entry.identity) {
+    differences.push(`changed ${label}: expected ${entry.identity}; got ${observed.identity}`);
+  }
+}
+for (const [key, entry] of actual) {
+  if (!expected.has(key)) differences.push(`unexpected ${JSON.stringify(entry.name.toString('utf8'))}`);
+}
+if (differences.length) {
+  console.error('ABORT: public tree differs from committed source (case-sensitive paths, modes, objects):');
+  for (const difference of differences) console.error(`  ${difference}`);
+  process.exit(1);
+}
+console.log(`✓ exact committed-tree comparison passed: ${expected.size} public entries`);
+NODE
+
 if git diff --cached --quiet; then
   echo "no source changes to mirror — public already matches this HEAD; checking release tag"
 else
@@ -123,6 +198,13 @@ if [[ "${DRY_RUN:-0}" == "1" ]]; then
     [[ -e "$PUB/$p" ]] && echo "  STILL PRESENT ⚠  $p" || echo "  absent OK     $p"
   done
   echo "── DRY_RUN — not pushing. Re-run without DRY_RUN=1 to push main + $VERSION ──"
+  if [[ "${DRY_RUN_KEEP:-0}" == "1" ]]; then
+    # WORK/stage contains the private archive. Retain ONLY the already-checked public clone.
+    RETAINED_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/cmos-mirror.XXXXXXXX")"
+    mv "$PUB" "$RETAINED_ROOT/public"
+    echo "DRY_RUN_TREE=$RETAINED_ROOT/public"
+    RETAINED_READY=1
+  fi
   exit 0
 fi
 

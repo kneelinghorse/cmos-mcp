@@ -1,7 +1,7 @@
 {
   "name": "@aquex/cmos-mcp",
-  "version": "3.2.0",
-  "description": "MCP server for CMOS — typed, safe, SQLite-backed project management for AI agents",
+  "version": "3.3.0",
+  "description": "Decisions that survive the session. A local project record that AI agents keep through MCP, skills and hooks.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/kneelinghorse/cmos-mcp.git"
@@ -24,18 +24,21 @@
     "./package.json": "./package.json"
   },
   "bin": {
-    "cmos-mcp": "./dist/index.js"
+    "cmos-mcp": "./dist/bin.js"
   },
   "files": [
     "dist",
     "cmos-seed",
+    "plugins/cmos",
+    "adapters",
     "LICENSE",
     "NOTICE",
     "README.md",
     "CHANGELOG.md",
     "SECURITY.md",
     "TOOL_REFERENCE.md",
-    "docs/getting-started.md"
+    "docs/getting-started.md",
+    "docs/harnesses.md"
   ],
   "engines": {
     "node": ">=20"
@@ -44,8 +47,8 @@
     "test": "tests"
   },
   "scripts": {
-    "lint": "eslint \"src/**/*.{ts,js}\" \"tests/**/*.ts\" \"scripts/**/*.{ts,js}\"",
-    "lint:fix": "eslint \"src/**/*.{ts,js}\" \"tests/**/*.ts\" \"scripts/**/*.{ts,js}\" --fix",
+    "lint": "eslint \"src/**/*.{ts,js}\" \"tests/**/*.ts\" \"scripts/**/*.{ts,js}\" \"plugins/**/*.mjs\"",
+    "lint:fix": "eslint \"src/**/*.{ts,js}\" \"tests/**/*.ts\" \"scripts/**/*.{ts,js}\" \"plugins/**/*.mjs\" --fix",
     "lint:staged": "lint-staged",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
@@ -80,6 +83,10 @@
     "mcp",
     "cmos",
     "claude",
+    "codex",
+    "decisions",
+    "agent-hooks",
+    "project-records",
     "sqlite",
     "project-management",
     "ai-agents"
@@ -127,7 +134,7 @@
     "protobufjs": "^7.6.5"
   },
   "lint-staged": {
-    "!(*.config).{js,ts}": [
+    "!(*.config).{js,ts,mjs}": [
       "eslint --cache --fix --max-warnings=0",
       "prettier --cache --write"
     ],

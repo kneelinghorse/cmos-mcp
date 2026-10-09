@@ -18,7 +18,7 @@ Feature: Create a mission
     Given no mission with id "test-m02" exists
     When I call cmos_mission_add with all fields populated including objective, context, successCriteria, deliverables, referenceDocs, domainFields, and notes
     Then the mission is created successfully
-    And the returned mission object includes all provided fields
+    And the receipt names every stored field and show reads each one back
 
   Scenario: Create a mission with an explicit status
     Given no mission with id "test-m03" exists

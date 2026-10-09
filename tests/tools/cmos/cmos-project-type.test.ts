@@ -297,7 +297,9 @@ describe('project_type metadata', () => {
       expect(ob.data?.tierSelectionPrompt).toContain('Managed workspace');
     });
 
-    it('defaults project_type=build for a fresh init with no projectType (FORK-E6)', async () => {
+    // s93-m12 (#1185): a new project with no answer to the init question is a Ledger (general),
+    // a stranger's default; FORK-E6's build default is retired.
+    it('defaults project_type=general for a fresh init with no projectType', async () => {
       const dir = freshDir();
       const res = await cmosProject({
         action: 'init',
@@ -311,7 +313,7 @@ describe('project_type metadata', () => {
         | { value: string }
         | undefined;
       db.close();
-      expect(row?.value).toBe('build');
+      expect(row?.value).toBe('general');
     });
 
     it('does NOT clobber an existing project_type on idempotent re-init without projectType', async () => {
@@ -320,10 +322,11 @@ describe('project_type metadata', () => {
         action: 'init',
         projectRoot: dir,
         projectName: 'P',
-        projectType: 'general',
+        projectType: 'build',
       });
-      // Re-init WITHOUT projectType — the existing 'general' row must survive so a
-      // later choice is not silently reset to the build default.
+      // Re-init WITHOUT projectType — the existing 'build' row must survive so a
+      // later choice is not silently reset to the general default (s93-m12: the
+      // default is general, so the row this test plants must differ from it).
       const res = await cmosProject({ action: 'init', projectRoot: dir, projectName: 'P' });
       expect(res.success).toBe(true);
 
@@ -332,7 +335,7 @@ describe('project_type metadata', () => {
         | { value: string }
         | undefined;
       db.close();
-      expect(row?.value).toBe('general');
+      expect(row?.value).toBe('build');
     });
   });
 });

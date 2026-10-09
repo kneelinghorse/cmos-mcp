@@ -9,9 +9,20 @@ import { ensureMissionIdColumn } from './cmos-mission-complete';
 import { resolveOpenSprintIdForWrite } from './current-sprint';
 import {
   ensureAuthorNamespaceColumns,
+  ensureDecisionApprovalColumns,
   ensureFirehoseEventColumns,
   ensureImplicitSessionColumns,
 } from './schema-migrations';
+import {
+  approvalEcho,
+  directRecordAnswers,
+  evaluateDraft,
+  recordDraftOfKind,
+  type ApprovalEcho,
+  type CmosDraftRecordResult,
+  type DraftEvaluation,
+} from './draft-approval';
+import { clientRunner, draftLabel, markAnswered, markApproved } from './proposals';
 import { findExistingDecisionId, insertDecisionRow, followDecisionInsert } from './decision-write';
 import { applyLearningReaffirm, sanitizeLearningIds } from './learning-reaffirm';
 import type { SupersessionCandidate } from './supersession-detection';
@@ -45,6 +56,8 @@ import {
 
 export interface CmosDecisionsRecordParams {
   content: string;
+  /** s93-m06: the draft (P<n>) the operator answered; its kind decides what is written. */
+  fromDraft?: string;
   missionId?: string;
   sprintId?: string;
   supersedes?: number[];
@@ -81,14 +94,27 @@ export interface CmosDecisionsRecordResult {
   closedSessions?: ClosedSessionReceipt[];
   writeFailures: WriteFailure[];
   message: string;
+  /** s93-m06: how the operator's approval of the draft is known; present only with fromDraft. */
+  approval?: ApprovalEcho;
+  /** s93-m06: drafts this direct record answered (it covered them) inside the operator's turn. */
+  answeredDrafts?: string[];
+  /** s93-m06: drafts the operator's message is still open on that this record did not cover. */
+  stillPendingDrafts?: string[];
 }
 
 /** Thrown inside the transaction so better-sqlite3 rolls the INSERT back with the UPDATEs. */
 class RecordRollback extends Error {}
 
+/** Without fromDraft a record is always a decision; with it, the draft's kind decides (s93-m06). */
+export async function cmosDecisionsRecord(
+  params: CmosDecisionsRecordParams & { fromDraft?: undefined }
+): Promise<CmosToolResult<CmosDecisionsRecordResult>>;
 export async function cmosDecisionsRecord(
   params: CmosDecisionsRecordParams
-): Promise<CmosToolResult<CmosDecisionsRecordResult>> {
+): Promise<CmosToolResult<CmosDecisionsRecordResult | CmosDraftRecordResult>>;
+export async function cmosDecisionsRecord(
+  params: CmosDecisionsRecordParams
+): Promise<CmosToolResult<CmosDecisionsRecordResult | CmosDraftRecordResult>> {
   // A wrong-typed `content` is refused by the router's boundary guard (param-type-guard.ts).
   const rawContent = (params.content ?? '').trim();
   if (rawContent === '') {
@@ -101,6 +127,32 @@ export async function cmosDecisionsRecord(
     sanitizedFields.push({ field: 'content', reason: sanitized.reason ?? '' });
   }
   const content = sanitized.cleaned;
+
+  // s93-m06: a draft's approval is read first, on its own connection. A constraint, rule or
+  // profile draft is written by its own path; a decision draft continues here and is approved in
+  // the same transaction as its row (draft-approval.ts).
+  let draft: DraftEvaluation | null = null;
+  if (params.fromDraft !== undefined && params.fromDraft !== null) {
+    const evaluated = await withClientAsync(
+      async (client) =>
+        createSuccess(evaluateDraft(client, params.fromDraft, content, process.env, Date.now())),
+      { projectRoot: params.projectRoot }
+    );
+    if (!evaluated.success || !evaluated.data) return createError(evaluated.error!);
+    if (!evaluated.data.ok) return createError(evaluated.data.error);
+    draft = evaluated.data.value;
+    if (draft.draft.kind !== 'decision') {
+      return recordDraftOfKind(
+        {
+          content,
+          missionId: params.missionId,
+          sprintId: params.sprintId,
+          projectRoot: params.projectRoot,
+        },
+        draft
+      );
+    }
+  }
 
   const supersedes = [...new Set(params.supersedes ?? [])];
   const missionId = params.missionId?.trim() || undefined;
@@ -179,6 +231,9 @@ export async function cmosDecisionsRecord(
       // Migrations that toggle foreign_keys are no-ops inside a transaction: run them first.
       warnings.push(...(ensureFirehoseEventColumns(client).warnings ?? []));
       warnings.push(...(ensureAuthorNamespaceColumns(client).warnings ?? []));
+      if (draft) warnings.push(...(ensureDecisionApprovalColumns(client).warnings ?? []));
+      // s93-m06 (B12): a direct record inside the operator's turn answers the drafts it covers.
+      const direct = draft ? null : directRecordAnswers(client, content, process.env, Date.now());
 
       const existingId = findExistingDecisionId(client, content, authorSessionId);
       if (existingId !== undefined && targets.has(existingId)) {
@@ -192,6 +247,7 @@ export async function cmosDecisionsRecord(
       }
 
       const now = new Date().toISOString();
+      let draftRaced = false;
       const committed = client.transaction(() => {
         let decisionId = existingId;
         if (decisionId === undefined) {
@@ -205,6 +261,9 @@ export async function cmosDecisionsRecord(
               missionId,
               evidence: params.evidence,
               projectDomain: params.domain?.trim() || undefined,
+              approval: draft
+                ? { mode: draft.mode, draft: draft.label, words: draft.words }
+                : undefined,
             },
             writeSink
           );
@@ -212,6 +271,24 @@ export async function cmosDecisionsRecord(
             throw new RecordRollback('strategic_decisions.insert');
           }
           decisionId = written.decisionId;
+          if (draft) {
+            const approved = markApproved(clientRunner(client), draft.draft.id, {
+              recordId: `d:${decisionId}`,
+              mode: draft.mode,
+              at: now,
+            });
+            if (approved === 0) {
+              draftRaced = true;
+              throw new RecordRollback('proposals.approve');
+            }
+          }
+        } else if (draft) {
+          // Already recorded directly with this text (the plan critic, N2): the draft is answered
+          // by that row, which keeps no approval it never had.
+          markAnswered(clientRunner(client), [draft.draft.id], `d:${decisionId}`, now);
+        }
+        if (direct?.answered.length) {
+          markAnswered(clientRunner(client), direct.answered, `d:${decisionId}`, now);
         }
         for (const id of supersedes) {
           const updated = client.execute(
@@ -225,6 +302,13 @@ export async function cmosDecisionsRecord(
         return decisionId;
       });
 
+      if (draft && !committed.success && draftRaced) {
+        return createError<CmosDecisionsRecordResult>({
+          code: CMOS_ERROR_CODES.DRAFT_NOT_PENDING,
+          message: `Draft ${draft.label} was answered by another call first; nothing was recorded.`,
+          suggestion: 'Read the drafts with `cmos-mcp drafts list` before recording again.',
+        });
+      }
       if (!committed.success || committed.data === undefined) {
         return createError<CmosDecisionsRecordResult>({
           code: CMOS_ERROR_CODES.DB_QUERY_FAILED,
@@ -253,6 +337,13 @@ export async function cmosDecisionsRecord(
       };
       if (missionId) answer.missionId = missionId;
       if (caller.session?.implicit) answer.implicitSession = { opened: caller.session.opened };
+      if (draft && existingId === undefined) answer.approval = approvalEcho(draft);
+      if (draft && existingId !== undefined) {
+        answer.message = `Decision #${decisionId} was already recorded directly with this text; draft ${draft.label} is marked answered by it.`;
+      }
+      if (direct?.answered.length) answer.answeredDrafts = direct.answered.map(draftLabel);
+      if (direct?.stillPending.length)
+        answer.stillPendingDrafts = direct.stillPending.map(draftLabel);
 
       if (existingId === undefined) {
         // s92-m04: embedding only; the automatic supersession offer is retired.
@@ -291,9 +382,33 @@ export async function cmosDecisionsRecord(
   return attachWarnings(result, warnings);
 }
 
+function approvalLines(approval: ApprovalEcho | undefined): string[] {
+  if (!approval) return [];
+  const how = {
+    approved: 'approved: the operator answered this draft alone with a plain approval',
+    'agent-judged':
+      'agent-judged: the record wording changed, or the words were not a plain approval of this draft alone',
+    'agent-attested': 'agent-attested: no operator words were found for this session',
+  }[approval.mode];
+  return [
+    `**From draft**: ${approval.draft} (${approval.kind}) — ${how}`,
+    ...(approval.words ? [`**Operator’s words**: "${approval.words.slice(0, 200)}"`] : []),
+  ];
+}
+
 export function formatDecisionsRecordForLLM(
-  result: CmosToolResult<CmosDecisionsRecordResult>
+  result: CmosToolResult<CmosDecisionsRecordResult | CmosDraftRecordResult>
 ): string {
+  if (result.success && result.data && 'recorded' in result.data) {
+    const lines = [
+      '✓ **Draft Recorded**',
+      '',
+      result.data.message,
+      ...approvalLines(result.data.approval),
+    ];
+    appendWarnings(lines, result);
+    return lines.join('\n');
+  }
   if (!result.success || !result.data) {
     const error = result.error;
     const lines = [
@@ -306,7 +421,7 @@ export function formatDecisionsRecordForLLM(
     return lines.join('\n');
   }
 
-  const d = result.data;
+  const d = result.data as CmosDecisionsRecordResult;
   const lines = [
     d.materialization === 'existing'
       ? '✓ **Decision Already Recorded**'
@@ -316,6 +431,14 @@ export function formatDecisionsRecordForLLM(
     `**Sprint**: ${d.sprintId ?? '(none — no open sprint)'}`,
   ];
   if (d.missionId) lines.push(`**Mission**: ${d.missionId}`);
+  lines.push(...approvalLines(d.approval));
+  if (d.approval === undefined && /marked answered/.test(d.message)) lines.push(d.message);
+  if (d.answeredDrafts?.length)
+    lines.push(`**Answered drafts**: ${d.answeredDrafts.join(', ')} (this record covers them)`);
+  if (d.stillPendingDrafts?.length)
+    lines.push(
+      `**Still pending**: ${d.stillPendingDrafts.join(', ')} — not covered by this record; record one with fromDraft only if the operator approved it`
+    );
   if (d.superseded.length > 0) {
     lines.push('**Superseded**:');
     for (const s of d.superseded) {

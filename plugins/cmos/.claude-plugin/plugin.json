@@ -1,0 +1,11 @@
+{
+  "name": "cmos",
+  "version": "3.3.0",
+  "description": "Keep project decisions, learnings and work available across Claude Code sessions.",
+  "author": {
+    "name": "CMOS"
+  },
+  "homepage": "https://github.com/kneelinghorse/cmos-mcp",
+  "repository": "https://github.com/kneelinghorse/cmos-mcp",
+  "license": "Apache-2.0"
+}

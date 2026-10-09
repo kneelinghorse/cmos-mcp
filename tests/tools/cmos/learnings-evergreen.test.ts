@@ -7,8 +7,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { CmosDatabaseClient } from '../../../src/tools/cmos/client';
 import {
-  detectAndFlagStaleness,
-  getStaleCounts,
+  readStaleness,
   DEFAULT_STALENESS_THRESHOLD,
 } from '../../../src/tools/cmos/staleness-detection';
 import {
@@ -158,8 +157,8 @@ describe('ensureLearningsTable — evergreen lazy migration', () => {
   });
 });
 
-describe('staleness query gates on evergreen = 0', () => {
-  it('flagStaleLearnings does NOT flag rows where evergreen = 1', async () => {
+describe('staleness gates on evergreen = 0', () => {
+  it('counts a non-evergreen old learning as due for review and never an evergreen one', async () => {
     const { tempDir, dbPath } = makeUnmigratedDb();
     const client = await openClient(dbPath);
     try {
@@ -186,9 +185,9 @@ describe('staleness query gates on evergreen = 0', () => {
       ensureLearningsTable(client);
       client.execute(`UPDATE learnings SET evergreen = 1 WHERE id = 1`, []);
 
-      const result = detectAndFlagStaleness(client);
-      // Only the non-evergreen one should be flagged.
-      expect(result.learningsFlagged).toBe(1);
+      const result = readStaleness(client);
+      // Only the non-evergreen one is due; s93-m11: neither is written.
+      expect(result.dueLearnings).toBe(1);
 
       const db2 = new Database(dbPath);
       const rows = db2.prepare('SELECT id, status FROM learnings ORDER BY id').all() as Array<{
@@ -197,15 +196,15 @@ describe('staleness query gates on evergreen = 0', () => {
       }>;
       db2.close();
       expect(rows).toEqual([
-        { id: 1, status: 'active' }, // evergreen — exempt
-        { id: 2, status: 'stale' }, // not evergreen — flagged
+        { id: 1, status: 'active' },
+        { id: 2, status: 'active' },
       ]);
     } finally {
       cleanup(tempDir, client);
     }
   });
 
-  it('getStaleCounts excludes evergreen rows from the count', async () => {
+  it('the stored stale count excludes evergreen rows', async () => {
     const { tempDir, dbPath } = makeUnmigratedDb();
     const client = await openClient(dbPath);
     try {
@@ -219,18 +218,18 @@ describe('staleness query gates on evergreen = 0', () => {
       ).run('Genuinely stale');
       db.close();
 
-      const counts = getStaleCounts(client);
-      expect(counts.staleLearnings).toBe(1); // evergreen one excluded
+      expect(readStaleness(client).storedStaleLearnings).toBe(1); // evergreen one excluded
     } finally {
       cleanup(tempDir, client);
     }
   });
 
-  it('detectAndFlagStaleness on an un-migrated DB succeeds (read-path self-heal)', async () => {
+  // s93-m11: the staleness read runs no migration. On a store without the evergreen column it
+  // reads every learning as non-evergreen, and leaves the schema as it found it.
+  it('reads an un-migrated DB without adding the column', async () => {
     const { tempDir, dbPath } = makeUnmigratedDb();
     const client = await openClient(dbPath);
     try {
-      // Seed minimal data; do NOT call ensureLearningsTable manually.
       const db = new Database(dbPath);
       db.prepare(
         `INSERT INTO sprints (id, title, status) VALUES ('sprint-1', 'S1', 'Active')`
@@ -238,12 +237,8 @@ describe('staleness query gates on evergreen = 0', () => {
       db.close();
 
       expect(hasColumn(dbPath, 'learnings', 'evergreen')).toBe(false);
-
-      // Should not throw `no such column: evergreen` — the staleness path
-      // calls ensureLearningsTable to self-heal before reading the column.
-      expect(() => detectAndFlagStaleness(client)).not.toThrow();
-
-      expect(hasColumn(dbPath, 'learnings', 'evergreen')).toBe(true);
+      expect(() => readStaleness(client)).not.toThrow();
+      expect(hasColumn(dbPath, 'learnings', 'evergreen')).toBe(false);
     } finally {
       cleanup(tempDir, client);
     }

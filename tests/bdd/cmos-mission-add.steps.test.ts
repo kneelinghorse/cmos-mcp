@@ -107,15 +107,33 @@ defineFeature(feature, (test) => {
       expect(result.success).toBe(true);
     });
 
-    and('the returned mission object includes all provided fields', () => {
-      const mission = result.data?.mission;
-      expect(mission?.objective).toBe('Validate all optional fields are stored');
-      expect(mission?.context).toBe('Some background context');
-      expect(mission?.successCriteria).toEqual(['Criterion A', 'Criterion B']);
-      expect(mission?.deliverables).toEqual(['artifact.ts']);
-      expect(mission?.referenceDocs).toEqual(['docs/spec.md']);
-      expect(mission?.domainFields).toEqual({ priority: 'high' });
-      expect(mission?.notes).toBe('Some notes here');
+    and('the receipt names every stored field and show reads each one back', async () => {
+      // s93-m11 (#602): the receipt names what was stored instead of echoing it back.
+      expect(result.data?.fields).toEqual([
+        'objective',
+        'context',
+        'successCriteria (2)',
+        'deliverables (1)',
+        'referenceDocs (1)',
+        'domainFields',
+        'notes',
+      ]);
+      const { cmosMissionShow } = await import('../../src/tools/cmos/cmos-mission-show');
+      const shown = await cmosMissionShow({
+        missionId: result.data!.id,
+        projectRoot: instance.projectRoot,
+      });
+      const mission = JSON.stringify(shown.data);
+      for (const stored of [
+        'Validate all optional fields are stored',
+        'Some background context',
+        'Criterion A',
+        'artifact.ts',
+        'docs/spec.md',
+        'Some notes here',
+      ]) {
+        expect(mission).toContain(stored);
+      }
     });
   });
 

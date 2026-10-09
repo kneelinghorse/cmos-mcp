@@ -1,8 +1,10 @@
 /**
  * Staleness Detection Tests
  *
- * Tests for detecting and flagging stale decisions/learnings
- * based on sprint age thresholds.
+ * s93-m11 (operator Q10, decision #1182): staleness is computed when read and never written. These
+ * tests pin the three halves: readStaleness counts what is due for review with the old flagger's
+ * exemptions and changes no row; the clock counts only Completed sprints and the open one; and
+ * repairFlaggerStaleness restores exactly the rows an automatic flagger could have written.
  *
  * @module tests/tools/cmos/staleness-detection
  */
@@ -12,8 +14,10 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import {
-  detectAndFlagStaleness,
-  getStaleCounts,
+  countReflaggedSinceRepair,
+  readStaleness,
+  readStalenessRepairLedger,
+  repairFlaggerStaleness,
   reviewDecisionStaleness,
   DEFAULT_STALENESS_THRESHOLD,
 } from '../../../src/tools/cmos/staleness-detection';
@@ -207,40 +211,39 @@ describe('staleness-detection', () => {
     expect(oldRow!.stalenessScore).toBeGreaterThan(freshScore);
   });
 
-  it('flags stale decisions when sprint age exceeds threshold', async () => {
+  /** Every status in both tables, so a test can prove a read changed none of them. */
+  function statuses(): string {
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      return JSON.stringify([
+        db.prepare('SELECT id, status FROM strategic_decisions ORDER BY id').all(),
+        db.prepare('SELECT id, status FROM learnings ORDER BY id').all(),
+      ]);
+    } finally {
+      db.close();
+    }
+  }
+
+  it('counts decisions past the review age and changes no status', async () => {
     const totalSprints = DEFAULT_STALENESS_THRESHOLD + 5;
     seedSprints(totalSprints); // active sprint = totalSprints
-    // "Old decision" lives in sprint-3 — older than threshold (cutoff = 5).
-    // "Recent decision" lives just past the cutoff.
     const recentSprintNum = totalSprints - 3;
     seedDecisions([
       { text: 'Old decision', sprintId: 'sprint-3' },
       { text: 'Recent decision', sprintId: `sprint-${recentSprintNum}` },
     ]);
+    const before = statuses();
 
     const result = await runWithClient((client) =>
-      detectAndFlagStaleness(client, { threshold: DEFAULT_STALENESS_THRESHOLD })
+      readStaleness(client, { threshold: DEFAULT_STALENESS_THRESHOLD })
     );
 
-    expect(result.decisionsFlagged).toBe(1);
-    expect(result.totalStaleDecisions).toBe(1);
+    expect(result.dueDecisions).toBe(1);
+    expect(result.storedStaleDecisions).toBe(0);
     expect(result.currentSprintNumber).toBe(totalSprints);
     expect(result.cutoffSprintNumber).toBe(totalSprints - DEFAULT_STALENESS_THRESHOLD);
-
-    // Verify DB state
-    const db = new Database(dbPath);
-    const stale = db
-      .prepare("SELECT decision_text FROM strategic_decisions WHERE status = 'stale'")
-      .all() as Array<{ decision_text: string }>;
-    const active = db
-      .prepare("SELECT decision_text FROM strategic_decisions WHERE status = 'active'")
-      .all() as Array<{ decision_text: string }>;
-    db.close();
-
-    expect(stale).toHaveLength(1);
-    expect(stale[0].decision_text).toBe('Old decision');
-    expect(active).toHaveLength(1);
-    expect(active[0].decision_text).toBe('Recent decision');
+    // The point of Q10: a read computes the age; it never writes it back as status='stale'.
+    expect(statuses()).toBe(before);
   });
 
   it.each([
@@ -269,21 +272,55 @@ describe('staleness-detection', () => {
     seedDecisions([{ text: 'Old decision', sprintId: 'sprint-2' }]);
 
     const result = await runWithClient((client) =>
-      detectAndFlagStaleness(client, { threshold: DEFAULT_STALENESS_THRESHOLD })
+      readStaleness(client, { threshold: DEFAULT_STALENESS_THRESHOLD })
     );
 
     expect({
       currentSprintNumber: result.currentSprintNumber,
       cutoffSprintNumber: result.cutoffSprintNumber,
-      decisionsFlagged: result.decisionsFlagged,
+      dueDecisions: result.dueDecisions,
     }).toEqual({
       currentSprintNumber: currentSprint,
       cutoffSprintNumber: currentSprint - DEFAULT_STALENESS_THRESHOLD,
-      decisionsFlagged: 1,
+      dueDecisions: 1,
     });
   });
 
-  it('does not flag a stale-sprint decision when last_reviewed_at is recent', async () => {
+  // The defect review #1181 found: seeding sprints 93-98 as Planned moved the cutoff six sprints
+  // ahead, and 20 decisions were flagged early. A Planned sprint has not happened.
+  it('never counts a Planned sprint on the clock, in any letter case', async () => {
+    seedSprints(DEFAULT_STALENESS_THRESHOLD + 5, 0); // all Completed
+    const db = new Database(dbPath);
+    const insert = db.prepare(`INSERT INTO sprints (id, title, status) VALUES (?, ?, ?)`);
+    for (let n = 1; n <= 6; n++) {
+      insert.run(`sprint-${DEFAULT_STALENESS_THRESHOLD + 5 + n}`, `Planned ${n}`, 'Planned');
+    }
+    insert.run(`sprint-${DEFAULT_STALENESS_THRESHOLD + 40}`, 'lower-case planned', 'planned');
+    db.close();
+    // The old clock took sprint-(T+45) and flagged this; on the real clock it is 3 sprints short.
+    seedDecisions([{ text: 'Not yet due', sprintId: 'sprint-8' }]);
+
+    const result = await runWithClient((client) =>
+      readStaleness(client, { threshold: DEFAULT_STALENESS_THRESHOLD })
+    );
+
+    expect(result.currentSprintNumber).toBe(DEFAULT_STALENESS_THRESHOLD + 5);
+    expect(result.dueDecisions).toBe(0);
+  });
+
+  it('reads a lower-case completed or active sprint on the clock', async () => {
+    const db = new Database(dbPath);
+    const insert = db.prepare(`INSERT INTO sprints (id, title, status) VALUES (?, ?, ?)`);
+    insert.run('sprint-1', 'One', 'completed');
+    insert.run('sprint-2', 'Two', 'active');
+    db.close();
+
+    const result = await runWithClient((client) => readStaleness(client));
+
+    expect(result.currentSprintNumber).toBe(2);
+  });
+
+  it('does not count a decision reviewed inside the review window', async () => {
     seedSprints(DEFAULT_STALENESS_THRESHOLD + 5);
 
     const recentReviewIso = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
@@ -300,56 +337,42 @@ describe('staleness-detection', () => {
     db.close();
 
     const result = await runWithClient((client) =>
-      detectAndFlagStaleness(client, { threshold: DEFAULT_STALENESS_THRESHOLD })
+      readStaleness(client, { threshold: DEFAULT_STALENESS_THRESHOLD })
     );
 
-    expect(result.decisionsFlagged).toBe(0);
-    expect(result.totalStaleDecisions).toBe(0);
-
-    const db2 = new Database(dbPath);
-    const decision = db2
-      .prepare(
-        `SELECT status, last_reviewed_at
-         FROM strategic_decisions
-         WHERE decision_text = 'Recently reviewed decision'`
-      )
-      .get() as { status: string; last_reviewed_at: string | null };
-    db2.close();
-
-    expect(decision.status).toBe('active');
-    expect(decision.last_reviewed_at).toBe(recentReviewIso);
+    expect(result.dueDecisions).toBe(0);
+    expect(result.storedStaleDecisions).toBe(0);
   });
 
-  it('flags stale learnings', async () => {
+  it('counts learnings past the review age without writing them', async () => {
     seedSprints(DEFAULT_STALENESS_THRESHOLD + 5);
     seedLearnings([
       { content: 'Old learning', sprintId: 'sprint-2' },
       { content: 'New learning', sprintId: 'sprint-14' },
     ]);
+    const before = statuses();
 
     const result = await runWithClient((client) =>
-      detectAndFlagStaleness(client, { threshold: DEFAULT_STALENESS_THRESHOLD })
+      readStaleness(client, { threshold: DEFAULT_STALENESS_THRESHOLD })
     );
 
-    expect(result.learningsFlagged).toBe(1);
-    expect(result.totalStaleLearnings).toBe(1);
+    expect(result.dueLearnings).toBe(1);
+    expect(result.storedStaleLearnings).toBe(0);
+    expect(statuses()).toBe(before);
   });
 
   it('exempts decisions referenced via supersession chain', async () => {
     seedSprints(DEFAULT_STALENESS_THRESHOLD + 5);
 
     const db = new Database(dbPath);
-    // Decision A (old, in sprint-2)
     db.prepare(
       `INSERT INTO strategic_decisions (id, decision_text, created_at, sprint_id, status)
        VALUES (1, 'Old decision A', '2026-01-01T00:00:00Z', 'sprint-2', 'active')`
     ).run();
-    // Decision B (newer, references A via superseded_by)
     db.prepare(
       `INSERT INTO strategic_decisions (id, decision_text, created_at, sprint_id, status, superseded_by)
        VALUES (2, 'Old decision B', '2026-01-01T00:00:00Z', 'sprint-2', 'active', 1)`
     ).run();
-    // Decision C (old, unreferenced)
     db.prepare(
       `INSERT INTO strategic_decisions (id, decision_text, created_at, sprint_id, status)
        VALUES (3, 'Unreferenced old', '2026-01-01T00:00:00Z', 'sprint-3', 'active')`
@@ -357,25 +380,11 @@ describe('staleness-detection', () => {
     db.close();
 
     const result = await runWithClient((client) =>
-      detectAndFlagStaleness(client, { threshold: DEFAULT_STALENESS_THRESHOLD })
+      readStaleness(client, { threshold: DEFAULT_STALENESS_THRESHOLD })
     );
 
-    // Decision A is referenced (another decision's superseded_by = 1), so exempt
-    // Decision B is not referenced by anything, but has superseded_by itself (it points to A) — B should be flagged
-    // Decision C is unreferenced — should be flagged
-    expect(result.decisionsFlagged).toBe(2); // B and C
-
-    const db2 = new Database(dbPath);
-    const staleIds = db2
-      .prepare("SELECT id FROM strategic_decisions WHERE status = 'stale' ORDER BY id")
-      .all() as Array<{ id: number }>;
-    const activeIds = db2
-      .prepare("SELECT id FROM strategic_decisions WHERE status = 'active' ORDER BY id")
-      .all() as Array<{ id: number }>;
-    db2.close();
-
-    expect(activeIds.map((r) => r.id)).toEqual([1]); // A exempt
-    expect(staleIds.map((r) => r.id)).toEqual([2, 3]); // B and C flagged
+    // A is a supersession target, so it is exempt; B and C are due.
+    expect(result.dueDecisions).toBe(2);
   });
 
   it('exempts decisions with evidence links', async () => {
@@ -386,77 +395,42 @@ describe('staleness-detection', () => {
     ]);
 
     const result = await runWithClient((client) =>
-      detectAndFlagStaleness(client, { threshold: DEFAULT_STALENESS_THRESHOLD })
+      readStaleness(client, { threshold: DEFAULT_STALENESS_THRESHOLD })
     );
 
-    expect(result.decisionsFlagged).toBe(1); // only "No evidence" flagged
-
-    const db = new Database(dbPath);
-    const stale = db
-      .prepare("SELECT decision_text FROM strategic_decisions WHERE status = 'stale'")
-      .all() as Array<{ decision_text: string }>;
-    db.close();
-
-    expect(stale).toHaveLength(1);
-    expect(stale[0].decision_text).toBe('No evidence');
+    expect(result.dueDecisions).toBe(1);
   });
 
-  it('does not flag when there are fewer sprints than threshold', async () => {
+  it('counts nothing when there are fewer sprints than threshold', async () => {
     const seedCount = DEFAULT_STALENESS_THRESHOLD - 5;
-    seedSprints(seedCount); // Half-the-threshold sprints — cutoff goes negative.
+    seedSprints(seedCount);
     seedDecisions([{ text: 'Sprint 1 decision', sprintId: 'sprint-1' }]);
 
     const result = await runWithClient((client) =>
-      detectAndFlagStaleness(client, { threshold: DEFAULT_STALENESS_THRESHOLD })
+      readStaleness(client, { threshold: DEFAULT_STALENESS_THRESHOLD })
     );
 
-    expect(result.decisionsFlagged).toBe(0);
+    expect(result.dueDecisions).toBe(0);
     expect(result.cutoffSprintNumber).toBe(seedCount - DEFAULT_STALENESS_THRESHOLD);
   });
 
-  it('is idempotent — re-running does not re-flag already stale items', async () => {
-    seedSprints(DEFAULT_STALENESS_THRESHOLD + 5);
-    seedDecisions([{ text: 'Old decision', sprintId: 'sprint-2' }]);
-
-    const result1 = await runWithClient((client) =>
-      detectAndFlagStaleness(client, { threshold: DEFAULT_STALENESS_THRESHOLD })
-    );
-    expect(result1.decisionsFlagged).toBe(1);
-
-    const result2 = await runWithClient((client) =>
-      detectAndFlagStaleness(client, { threshold: DEFAULT_STALENESS_THRESHOLD })
-    );
-    expect(result2.decisionsFlagged).toBe(0); // already flagged, no new flags
-    expect(result2.totalStaleDecisions).toBe(1); // still counts as stale
-  });
-
-  it('does not flag non-active items', async () => {
-    seedSprints(DEFAULT_STALENESS_THRESHOLD + 5);
-    seedDecisions([
-      { text: 'Already archived', sprintId: 'sprint-2', status: 'archived' },
-      { text: 'Already superseded', sprintId: 'sprint-2', status: 'superseded' },
-    ]);
-
-    const result = await runWithClient((client) =>
-      detectAndFlagStaleness(client, { threshold: DEFAULT_STALENESS_THRESHOLD })
-    );
-
-    expect(result.decisionsFlagged).toBe(0);
-    expect(result.totalStaleDecisions).toBe(0);
-  });
-
-  it('getStaleCounts returns counts without mutating', async () => {
+  it('reports rows stored as stale beside the computed ones, and counts non-active rows as neither', async () => {
     seedSprints(DEFAULT_STALENESS_THRESHOLD + 5);
     seedDecisions([
       { text: 'Stale one', sprintId: 'sprint-2', status: 'stale' },
+      { text: 'Already archived', sprintId: 'sprint-2', status: 'archived' },
+      { text: 'Already superseded', sprintId: 'sprint-2', status: 'superseded' },
       { text: 'Active one', sprintId: 'sprint-14' },
     ]);
     seedLearnings([{ content: 'Stale learning', sprintId: 'sprint-1', status: 'stale' }]);
 
-    const counts = await runWithClient((client) => getStaleCounts(client));
+    const result = await runWithClient((client) =>
+      readStaleness(client, { threshold: DEFAULT_STALENESS_THRESHOLD })
+    );
 
-    expect(counts.staleDecisions).toBe(1);
-    expect(counts.staleLearnings).toBe(1);
+    expect(result.storedStaleDecisions).toBe(1);
+    expect(result.storedStaleLearnings).toBe(1);
+    expect(result.dueDecisions).toBe(0);
   });
 
   it('works when decisions/learnings tables do not exist', async () => {
@@ -468,39 +442,235 @@ describe('staleness-detection', () => {
     seedSprints(DEFAULT_STALENESS_THRESHOLD + 5);
 
     const result = await runWithClient((client) =>
-      detectAndFlagStaleness(client, { threshold: DEFAULT_STALENESS_THRESHOLD })
+      readStaleness(client, { threshold: DEFAULT_STALENESS_THRESHOLD })
     );
 
-    expect(result.decisionsFlagged).toBe(0);
-    expect(result.learningsFlagged).toBe(0);
-    expect(result.totalStaleDecisions).toBe(0);
-    expect(result.totalStaleLearnings).toBe(0);
+    expect(result).toMatchObject({
+      dueDecisions: 0,
+      dueLearnings: 0,
+      storedStaleDecisions: 0,
+      storedStaleLearnings: 0,
+    });
   });
 
   it('uses configurable threshold', async () => {
-    // This test exercises the threshold override path with explicit values, so
-    // it deliberately uses a fixed seed (15 sprints) and explicit threshold
-    // arguments — the math here is NOT keyed off DEFAULT_STALENESS_THRESHOLD.
+    // Fixed seed (15 sprints) and explicit thresholds: the math is not keyed off the default.
     seedSprints(15);
-    seedDecisions([
-      { text: 'Sprint 10 decision', sprintId: 'sprint-10' }, // 5 sprints old
-    ]);
+    seedDecisions([{ text: 'Sprint 10 decision', sprintId: 'sprint-10' }]); // 5 sprints old
 
-    // With threshold 3, sprint-10 is stale (15 - 3 = 12, and 10 <= 12)
-    const result3 = await runWithClient((client) =>
-      detectAndFlagStaleness(client, { threshold: 3 })
-    );
-    expect(result3.decisionsFlagged).toBe(1);
+    // With threshold 3, sprint-10 is due (15 - 3 = 12, and 10 <= 12)
+    const result3 = await runWithClient((client) => readStaleness(client, { threshold: 3 }));
+    expect(result3.dueDecisions).toBe(1);
 
-    // Reset status for next test
-    const db = new Database(dbPath);
-    db.prepare("UPDATE strategic_decisions SET status = 'active'").run();
-    db.close();
+    // With threshold 10, sprint-10 is not due (15 - 10 = 5, and 10 > 5)
+    const result10 = await runWithClient((client) => readStaleness(client, { threshold: 10 }));
+    expect(result10.dueDecisions).toBe(0);
+  });
 
-    // With threshold 10, sprint-10 is NOT stale (15 - 10 = 5, and 10 > 5)
-    const result10 = await runWithClient((client) =>
-      detectAndFlagStaleness(client, { threshold: 10 })
-    );
-    expect(result10.decisionsFlagged).toBe(0);
+  describe('repairFlaggerStaleness — restores only what a flagger could have written', () => {
+    function seedStaleRows(): void {
+      // 31 sprints, so a flagger-shaped row sits in sprint-N with N <= 31 - 10 = 21.
+      seedSprints(31);
+      const db = new Database(dbPath);
+      db.exec(`ALTER TABLE learnings ADD COLUMN evergreen INTEGER NOT NULL DEFAULT 0`);
+      db.exec(`ALTER TABLE learnings ADD COLUMN last_reviewed_at TEXT`);
+      const decision = db.prepare(
+        `INSERT INTO strategic_decisions (id, decision_text, created_at, sprint_id, status, evidence, last_reviewed_at)
+         VALUES (?, ?, '2026-01-01T00:00:00Z', ?, 'stale', ?, ?)`
+      );
+      decision.run(1, 'flagger-shaped', 'sprint-5', null, null);
+      decision.run(2, 'has evidence', 'sprint-5', '[{"type":"doc","id":"x"}]', null);
+      decision.run(3, 'reviewed on purpose', 'sprint-5', null, '2026-06-01T00:00:00.000Z');
+      decision.run(4, 'too recent for any flagger', 'sprint-25', null, null);
+      decision.run(5, 'non-canonical sprint', 'S8', null, null);
+      decision.run(6, 'target of a supersession', 'sprint-5', null, null);
+      db.prepare(
+        `INSERT INTO strategic_decisions (id, decision_text, created_at, sprint_id, status, superseded_by)
+         VALUES (7, 'the newer one', '2026-01-01T00:00:00Z', 'sprint-30', 'active', 6)`
+      ).run();
+      db.prepare(
+        `INSERT INTO sprints (id, title, status) VALUES ('S8', 'Legacy id', 'Completed')`
+      ).run();
+      const learning = db.prepare(
+        `INSERT INTO learnings (id, content, created_at, sprint_id, status, evergreen)
+         VALUES (?, ?, '2026-01-01T00:00:00Z', ?, 'stale', ?)`
+      );
+      learning.run(1, 'flagger-shaped learning', 'sprint-4', 0);
+      learning.run(2, 'evergreen learning', 'sprint-4', 1);
+      db.close();
+    }
+
+    function statusOf(table: string, id: number): string {
+      const db = new Database(dbPath, { readonly: true });
+      try {
+        return (
+          db.prepare(`SELECT status FROM ${table} WHERE id = ?`).get(id) as { status: string }
+        ).status;
+      } finally {
+        db.close();
+      }
+    }
+
+    it('restores the flagger-shaped rows, itemizes every row it leaves, and stamps no review', async () => {
+      seedStaleRows();
+
+      const receipt = await runWithClient((client) => repairFlaggerStaleness(client));
+
+      expect(receipt.warnings).toEqual([]);
+      expect(receipt.restoredDecisionIds).toEqual([1]);
+      expect(receipt.restoredLearningIds).toEqual([1]);
+      expect(receipt.left).toEqual([
+        { table: 'decisions', id: 2, reason: 'has evidence' },
+        { table: 'decisions', id: 3, reason: 'reviewed' },
+        { table: 'decisions', id: 4, reason: 'sprint too recent for any flagger' },
+        { table: 'decisions', id: 5, reason: 'not a canonical sprint' },
+        { table: 'decisions', id: 6, reason: 'supersession target' },
+        { table: 'learnings', id: 2, reason: 'evergreen' },
+      ]);
+      expect(statusOf('strategic_decisions', 1)).toBe('active');
+      expect(statusOf('learnings', 1)).toBe('active');
+      for (const id of [2, 3, 4, 5, 6]) expect(statusOf('strategic_decisions', id)).toBe('stale');
+      expect(statusOf('learnings', 2)).toBe('stale');
+
+      // A restored row keeps no review stamp, so its computed age stays honest.
+      const db = new Database(dbPath, { readonly: true });
+      const reviewed = db
+        .prepare('SELECT last_reviewed_at FROM strategic_decisions WHERE id = 1')
+        .get() as { last_reviewed_at: string | null };
+      db.close();
+      expect(reviewed.last_reviewed_at).toBeNull();
+
+      const ledger = await runWithClient((client) => readStalenessRepairLedger(client));
+      expect(ledger).toMatchObject({
+        runs: 1,
+        totalRestored: 2,
+        reflaggedRestored: 0,
+        restored: { decisions: [1], learnings: [1] },
+        leftCount: 6,
+      });
+    });
+
+    it('restores again after an older server re-flags, and says it was re-flagged', async () => {
+      seedStaleRows();
+      await runWithClient((client) => repairFlaggerStaleness(client));
+
+      // An older server's opener writes 'stale' again on the restored rows.
+      const db = new Database(dbPath);
+      db.prepare("UPDATE strategic_decisions SET status = 'stale' WHERE id = 1").run();
+      db.prepare("UPDATE learnings SET status = 'stale' WHERE id = 1").run();
+      db.close();
+
+      const seen = await runWithClient((client) => countReflaggedSinceRepair(client));
+      expect(seen?.count).toBe(2);
+
+      const second = await runWithClient((client) => repairFlaggerStaleness(client));
+      expect(second.restoredDecisionIds).toEqual([1]);
+      expect(second.reflagged).toBe(2);
+      expect(statusOf('strategic_decisions', 1)).toBe('active');
+
+      const ledger = await runWithClient((client) => readStalenessRepairLedger(client));
+      expect(ledger).toMatchObject({ runs: 2, totalRestored: 4, reflaggedRestored: 2 });
+      expect((await runWithClient((client) => countReflaggedSinceRepair(client)))?.count).toBe(0);
+    });
+
+    // Data-integrity critic N3: the ledger keeps every row any run restored, so a partial re-flag
+    // followed by a full one is still counted in full.
+    it('counts a re-flag of any row any run restored, across partial re-flags', async () => {
+      seedStaleRows();
+      const db = new Database(dbPath);
+      db.prepare(
+        `INSERT INTO strategic_decisions (id, decision_text, created_at, sprint_id, status)
+         VALUES (8, 'second flagger-shaped', '2026-01-01T00:00:00Z', 'sprint-6', 'stale')`
+      ).run();
+      db.close();
+      await runWithClient((client) => repairFlaggerStaleness(client)); // restores 1, 8, learning 1
+
+      const reflag = (ids: number[]): void => {
+        const w = new Database(dbPath);
+        w.prepare(
+          `UPDATE strategic_decisions SET status = 'stale' WHERE id IN (${ids.join(',')})`
+        ).run();
+        w.close();
+      };
+      reflag([1]);
+      expect((await runWithClient((client) => repairFlaggerStaleness(client))).reflagged).toBe(1);
+      reflag([1, 8]); // both, including the one the second run did not touch
+      expect((await runWithClient((client) => countReflaggedSinceRepair(client)))?.count).toBe(2);
+      expect((await runWithClient((client) => repairFlaggerStaleness(client))).reflagged).toBe(2);
+    });
+
+    // Critic N2: a stale someone set on purpose (stamped) is not an older server's re-flag.
+    it('does not report a deliberately stamped stale row as a re-flag', async () => {
+      seedStaleRows();
+      await runWithClient((client) => repairFlaggerStaleness(client));
+      const db = new Database(dbPath);
+      db.prepare(
+        `UPDATE strategic_decisions SET status = 'stale', last_reviewed_at = ? WHERE id = 1`
+      ).run(new Date().toISOString());
+      db.close();
+      expect((await runWithClient((client) => countReflaggedSinceRepair(client)))?.count).toBe(0);
+    });
+
+    // Critic N4: once nothing is stale, the ledger stops listing rows it left.
+    it('brings the ledger current when the rows it left are no longer stale', async () => {
+      seedStaleRows();
+      await runWithClient((client) => repairFlaggerStaleness(client));
+      const db = new Database(dbPath);
+      db.prepare(`UPDATE strategic_decisions SET status = 'archived' WHERE status = 'stale'`).run();
+      db.prepare(`UPDATE learnings SET status = 'archived' WHERE status = 'stale'`).run();
+      db.close();
+
+      await runWithClient((client) => repairFlaggerStaleness(client));
+      const ledger = await runWithClient((client) => readStalenessRepairLedger(client));
+      expect(ledger).toMatchObject({ left: [], leftCount: 0 });
+      expect(ledger?.cannotSee).toMatch(/explicit 'stale'/);
+    });
+
+    // The contract critic: lastRunAt moves on a run that only updates the left-alone list, yet the
+    // review printed it as the day rows were restored. lastRestoredAt moves only when rows were.
+    it('keeps the day rows were restored apart from a run that only updated what it left', async () => {
+      seedStaleRows();
+      await runWithClient((client) => repairFlaggerStaleness(client, '2026-10-01T00:00:00.000Z'));
+      const db = new Database(dbPath);
+      db.prepare(`UPDATE strategic_decisions SET status = 'archived' WHERE id = 2`).run();
+      db.close();
+      await runWithClient((client) => repairFlaggerStaleness(client, '2026-10-05T00:00:00.000Z'));
+
+      const ledger = await runWithClient((client) => readStalenessRepairLedger(client));
+      expect(ledger).toMatchObject({
+        lastRunAt: '2026-10-05T00:00:00.000Z',
+        lastRestoredAt: '2026-10-01T00:00:00.000Z',
+        leftCount: 5,
+      });
+      const db2 = new Database(dbPath);
+      db2.prepare("UPDATE strategic_decisions SET status = 'stale' WHERE id = 1").run();
+      db2.close();
+      expect(await runWithClient((client) => countReflaggedSinceRepair(client))).toEqual({
+        count: 1,
+        lastRestoredAt: '2026-10-01T00:00:00.000Z',
+      });
+    });
+
+    it('writes nothing on a store with no stale row', async () => {
+      seedSprints(31);
+      seedDecisions([{ text: 'Old but active', sprintId: 'sprint-2' }]);
+      const before = statuses();
+
+      const receipt = await runWithClient((client) => repairFlaggerStaleness(client));
+
+      expect(receipt.ledgerWritten).toBe(false);
+      expect(statuses()).toBe(before);
+      expect(await runWithClient((client) => readStalenessRepairLedger(client))).toBeNull();
+    });
+
+    it('does not rewrite the ledger when nothing changed since the last run', async () => {
+      seedStaleRows();
+      await runWithClient((client) => repairFlaggerStaleness(client));
+
+      const again = await runWithClient((client) => repairFlaggerStaleness(client));
+
+      expect(again.restoredDecisionIds).toEqual([]);
+      expect(again.ledgerWritten).toBe(false);
+    });
   });
 });

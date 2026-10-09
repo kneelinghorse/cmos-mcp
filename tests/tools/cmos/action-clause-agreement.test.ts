@@ -205,6 +205,11 @@ describe('a parameter description names the actions ACTION_PARAMS gives it (s86-
       }
       return { ...def, inputSchema: { ...def.inputSchema, properties } };
     });
-    expect(disagreements(clausesOf(mutated))).toHaveLength(13);
+    // s93-m11: 13 -> 12. cmos_project(list) no longer takes prune (a read never prunes), so the
+    // pre-fix prune text, "for validate action", now agrees with ACTION_PARAMS; the other 12 still
+    // reproduce, and the cmos_project row is named so the drop is checked, not assumed.
+    const red = disagreements(clausesOf(mutated));
+    expect(red).toHaveLength(12);
+    expect(red.some((line) => line.startsWith('cmos_project.prune'))).toBe(false);
   });
 });

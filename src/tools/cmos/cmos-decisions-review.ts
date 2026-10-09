@@ -2,8 +2,10 @@
  * cmos_decisions review action
  *
  * Returns stale and approaching-stale decisions with per-decision
- * staleness scores and suggested lifecycle actions (archive/confirm/review).
- * Read-only — does not mutate the database.
+ * staleness scores and suggested lifecycle actions (archive/confirm/review),
+ * and (s93-m11) the learnings past the review age or marked stale, each with its age.
+ * Read-only — does not mutate the database (read-classified since s93-m11, so a review-role
+ * agent can run the remedy the opener names).
  *
  * @module tools/cmos/cmos-decisions-review
  */
@@ -64,6 +66,7 @@ export function formatDecisionsReviewForLLM(
   }
 
   const data = result.data;
+  const learnings = data.learnings ?? [];
   const lines: string[] = [];
 
   lines.push('📋 **Decision Lifecycle Review**');
@@ -72,15 +75,19 @@ export function formatDecisionsReviewForLLM(
     `Active: ${data.totalActive} | Stale: ${data.totalStale} | Threshold: ${data.threshold} sprints | Current Sprint: ${data.currentSprintNumber ?? 'unknown'}`
   );
 
-  if (data.decisions.length === 0) {
+  if (data.decisions.length === 0 && learnings.length === 0) {
     lines.push('');
-    lines.push('✅ No decisions need attention.');
+    lines.push('✅ No decisions or learnings need attention.');
     appendWarnings(lines, result);
     return lines.join('\n');
   }
 
   lines.push('');
-  lines.push(`**${data.decisions.length} decision(s) need attention:**`);
+  if (data.decisions.length === 0) {
+    lines.push('✅ No decisions need attention.');
+  } else {
+    lines.push(`**${data.decisions.length} decision(s) need attention:**`);
+  }
   lines.push('');
 
   // Group by suggested action
@@ -115,6 +122,20 @@ export function formatDecisionsReviewForLLM(
       const tag = d.hasEvidence ? '(has evidence)' : '(referenced)';
       lines.push(`  #${d.id} [${d.sprintId}] score=${d.stalenessScore} ${tag} — ${d.text}`);
     }
+    lines.push('');
+  }
+
+  if (learnings.length > 0) {
+    lines.push(`**📚 Learnings (${learnings.length})**`);
+    for (const l of learnings) {
+      const age = l.sprintAge === null ? 'age unknown' : `${l.sprintAge} sprints old`;
+      lines.push(`  #${l.id} [${l.sprintId ?? 'no sprint'}] ${l.status}, ${age} — ${l.text}`);
+    }
+    lines.push(
+      '  → still holds: cmos_learnings(action="reaffirm", learningId=…) records the review; ' +
+        'no longer holds: cmos_learnings(action="update", learningId=…, status="archived"); ' +
+        'show reads one in full.'
+    );
     lines.push('');
   }
 

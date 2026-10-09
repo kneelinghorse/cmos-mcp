@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // ABOUTME: s77-m10 capstone — pack the tarball, install it into a temp dir, and drive
-// the full documented getting-started quickstart over real MCP stdio against the
+// ABOUTME: the full documented getting-started quickstart over real MCP stdio against the
 // INSTALLED server. Guards the published first-run experience against silent breakage.
 
 /**
  * First-run E2E (s77-m10).
  *
- * This is NOT a unit test — it builds + packs the package, installs the tarball into
+ * This is NOT a unit test — it packs the existing build, installs the tarball into
  * an isolated temp host, and speaks the Model Context Protocol over stdio to the
  * installed dist. It asserts the published artifact announces `cmos-mcp` @ the
  * package version (what siblings consume, not just the repo dist) and that every
@@ -31,6 +31,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import Database from 'better-sqlite3';
 import { connectStdioServer, textOf, dataOf, type StdioHarness } from './stdio-harness';
+import { installPackedArtifact } from './packed-artifact';
 
 const REPO_ROOT = path.resolve(__dirname, '../..');
 const PKG = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8')) as {
@@ -68,39 +69,10 @@ async function callOk(name: string, args: Record<string, unknown>): Promise<any>
 
 describe('first-run E2E: pack -> install -> drive quickstart over stdio (s77-m10)', () => {
   beforeAll(async () => {
-    // 1. Build + pack the current tree into an isolated tarball dir.
-    const build = spawnSync('npm', ['run', 'build'], { cwd: REPO_ROOT, encoding: 'utf8' });
-    if (build.status !== 0) {
-      throw new Error(`npm run build failed:\n${build.stdout}\n${build.stderr}`);
-    }
-    const packDir = mkTmp('cmos-e2e-pack-');
-    const pack = spawnSync('npm', ['pack', '--pack-destination', packDir], {
-      cwd: REPO_ROOT,
-      encoding: 'utf8',
-    });
-    if (pack.status !== 0) {
-      throw new Error(`npm pack failed:\n${pack.stdout}\n${pack.stderr}`);
-    }
-    const tgz = fs.readdirSync(packDir).find((f) => f.endsWith('.tgz'));
-    if (!tgz) throw new Error(`no .tgz produced in ${packDir}`);
-    const tarball = path.join(packDir, tgz);
-
-    // 2. Install the tarball into a fresh host dir (as a consumer would).
-    hostDir = mkTmp('cmos-e2e-host-');
-    fs.writeFileSync(
-      path.join(hostDir, 'package.json'),
-      JSON.stringify({ name: 'cmos-e2e-host', version: '1.0.0', private: true }) + '\n'
-    );
-    const install = spawnSync(
-      'npm',
-      ['install', tarball, '--prefer-offline', '--no-audit', '--no-fund'],
-      { cwd: hostDir, encoding: 'utf8' }
-    );
-    if (install.status !== 0) {
-      throw new Error(`npm install <tarball> failed:\n${install.stdout}\n${install.stderr}`);
-    }
-    installedServer = path.join(hostDir, 'node_modules', PKG.name, 'dist', 'index.js');
-    expect(fs.existsSync(installedServer)).toBe(true);
+    // 1–2. Pack the build from the preceding release gate, then install as a consumer would.
+    const artifact = installPackedArtifact(REPO_ROOT, mkTmp);
+    hostDir = artifact.hostDir;
+    installedServer = artifact.serverPath;
 
     // 3. Spawn the INSTALLED server over real MCP stdio from a fresh project cwd,
     //    with an isolated config dir and CMOS_PROJECT_ROOT deleted (auto-discovery).
@@ -212,10 +184,14 @@ describe('first-run E2E: pack -> install -> drive quickstart over stdio (s77-m10
 
   it('drives the documented quickstart lifecycle end-to-end', async () => {
     // Init a fresh project — the seed store must land in the project cwd.
+    // s93-m12: a new project defaults to the Ledger level, where onboard hides the mission queue.
+    // The documented quick starts teach sprints and missions, so they init at the Builder level,
+    // and so does this; the queued-mission check below fails for a Ledger project.
     await callOk('cmos_project', {
       action: 'init',
       projectRoot: projectDir,
       projectName: 'e2e-first-run',
+      projectType: 'build',
     });
     expect(fs.existsSync(path.join(projectDir, 'cmos', 'db', 'cmos.sqlite'))).toBe(true);
 
@@ -259,6 +235,11 @@ describe('first-run E2E: pack -> install -> drive quickstart over stdio (s77-m10
       successCriteria: ['Feature works', 'Tests pass'],
       projectRoot: projectDir,
     });
+    // A Builder project's onboard lists the queued mission; a Ledger project's leaves it out.
+    const queued = dataOf(await callOk('cmos_agent_onboard', { projectRoot: projectDir }));
+    expect((queued?.pendingMissions ?? []).map((mission: { id: string }) => mission.id)).toContain(
+      's01-m01'
+    );
     await callOk('cmos_mission_transition', {
       action: 'start',
       missionId: 's01-m01',

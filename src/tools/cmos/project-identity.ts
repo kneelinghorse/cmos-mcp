@@ -3,6 +3,7 @@
 
 import type { CmosDatabaseClient } from './client';
 import type { MigrationResult } from './schema-migrations';
+import { asLazyRepair, callMayWrite } from './tool-call-context';
 import { checkWrite } from './write-guard';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
@@ -172,6 +173,10 @@ function extractStr(obj: Record<string, unknown> | null, key: string): string {
  * Ensure the `project_identity` context row exists.
  * If absent, seeds from existing master_context blob + metadata.
  * Safe to call multiple times (idempotent).
+ *
+ * s93-m11: seeding inserts a row, so a read-classified call (or the review role) never seeds:
+ * reads never write the record (decision #1182). It returns the seed as `deferred`, the caller
+ * computes the identity in memory (getProjectIdentity), and the next write stores it.
  */
 export function ensureProjectIdentityRow(client: CmosDatabaseClient): MigrationResult {
   const existing = client.getOne<{ id: string }>(
@@ -183,13 +188,51 @@ export function ensureProjectIdentityRow(client: CmosDatabaseClient): MigrationR
     return { columnsAdded: [], indexesCreated: [], rowsUpdated: 0, alreadyCurrent: true };
   }
 
+  if (!callMayWrite()) {
+    return {
+      columnsAdded: [],
+      indexesCreated: [],
+      rowsUpdated: 0,
+      alreadyCurrent: false,
+      deferred: [
+        'No project_identity row is stored yet. This is the identity derived from the master ' +
+          "context and metadata; the project's next CMOS write stores it.",
+      ],
+    };
+  }
+
+  const identity = seedIdentityFor(client, new Date().toISOString());
+
+  const warnings: string[] = [];
+  const insertResult = client.execute(
+    `INSERT OR IGNORE INTO contexts (id, source_path, content, updated_at)
+     VALUES ('project_identity', 'cmos/contexts/project-identity.json', ?, ?)`,
+    [JSON.stringify(identity), identity.updated_at]
+  );
+
+  // s86-m02b: a failed seed was indistinguishable from "the row was already current" —
+  // `inserted` went false, `alreadyCurrent` went true and nothing named the DB error.
+  // The flags keep their meaning (reporting `alreadyCurrent: false` here would make the
+  // view handler claim it seeded a row that does not exist); the MigrationResult warnings
+  // channel (fork f23) carries the failure out.
+  const inserted = checkWrite(insertResult, warnings, 'contexts.project_identity seed');
+  return {
+    columnsAdded: [],
+    indexesCreated: [],
+    rowsUpdated: inserted ? 1 : 0,
+    alreadyCurrent: !inserted,
+    warnings,
+  };
+}
+
+/** The identity a missing row is seeded with, from the master_context blob and metadata. */
+function seedIdentityFor(client: CmosDatabaseClient, now: string): ProjectIdentityData {
   // Seed from existing blob
   const projectSection =
     getMasterContextSection(client, 'project_identity') ??
     getMasterContextSection(client, 'project') ??
     {};
 
-  const now = new Date().toISOString();
   const projectId = getMetadataValue(client, 'project_id') ?? '';
   const projectName =
     extractStr(projectSection, 'name') || getMetadataValue(client, 'project_name') || '';
@@ -202,8 +245,10 @@ export function ensureProjectIdentityRow(client: CmosDatabaseClient): MigrationR
     "SELECT content FROM contexts WHERE id = 'project_context'",
     []
   );
-  let tier = 'build';
-  if (tierResult.success && tierResult.data) {
+  // s93-m12: the stored tier (metadata.project_type) first, so a new Ledger project's identity
+  // says general rather than the old build default; then a legacy project_context tier.
+  let tier = getMetadataValue(client, 'project_type')?.trim() || 'build';
+  if (!getMetadataValue(client, 'project_type')?.trim() && tierResult.success && tierResult.data) {
     try {
       const pc = JSON.parse(tierResult.data.content) as Record<string, unknown>;
       if (typeof pc['tier'] === 'string') tier = pc['tier'];
@@ -226,7 +271,7 @@ export function ensureProjectIdentityRow(client: CmosDatabaseClient): MigrationR
     extractStr(projectSection, 'description') ||
     '';
 
-  const identity: ProjectIdentityData = {
+  return {
     ...IDENTITY_TEMPLATE,
     project_id: projectId,
     project_name: projectName,
@@ -237,44 +282,42 @@ export function ensureProjectIdentityRow(client: CmosDatabaseClient): MigrationR
     created_at: getMetadataValue(client, 'seeded_at') ?? now,
     updated_at: now,
   };
-
-  const warnings: string[] = [];
-  const insertResult = client.execute(
-    `INSERT OR IGNORE INTO contexts (id, source_path, content, updated_at)
-     VALUES ('project_identity', 'cmos/contexts/project-identity.json', ?, ?)`,
-    [JSON.stringify(identity), now]
-  );
-
-  // s86-m02b: a failed seed was indistinguishable from "the row was already current" —
-  // `inserted` went false, `alreadyCurrent` went true and nothing named the DB error.
-  // The flags keep their meaning (reporting `alreadyCurrent: false` here would make the
-  // view handler claim it seeded a row that does not exist); the MigrationResult warnings
-  // channel (fork f23) carries the failure out.
-  const inserted = checkWrite(insertResult, warnings, 'contexts.project_identity seed');
-  return {
-    columnsAdded: [],
-    indexesCreated: [],
-    rowsUpdated: inserted ? 1 : 0,
-    alreadyCurrent: !inserted,
-    warnings,
-  };
 }
 
 /**
  * Fetch and parse the project_identity context row.
  * Returns null if not found.
- * Automatically seeds the row if absent.
+ *
+ * A missing row is seeded on a call that may write, as a lazy repair: the seed is not the caller's
+ * write, so it never starts first-write upkeep. s93-m11: on a read it is computed in memory and
+ * nothing is inserted, because reads never write the record (decision #1182).
  */
 export function getProjectIdentity(client: CmosDatabaseClient): ProjectIdentityData | null {
-  ensureProjectIdentityRow(client);
+  if (!callMayWrite()) return readProjectIdentity(client);
+  asLazyRepair(() => ensureProjectIdentityRow(client));
+  const stored = readStoredIdentity(client);
+  return stored === undefined ? null : stored;
+}
 
+/**
+ * s93-m11 — the project identity without ever writing: the stored row, or the identity a seed
+ * would store, derived in memory. For a diagnostic that must not write even outside a dispatched
+ * call (whoami, the startup lines, a heal preview), where callMayWrite() is true.
+ */
+export function readProjectIdentity(client: CmosDatabaseClient): ProjectIdentityData | null {
+  const stored = readStoredIdentity(client);
+  if (stored !== undefined) return stored;
+  return seedIdentityFor(client, new Date().toISOString());
+}
+
+/** The stored identity row: undefined when there is none, null when it cannot be read. */
+function readStoredIdentity(client: CmosDatabaseClient): ProjectIdentityData | null | undefined {
   const result = client.getOne<{ content: string; updated_at: string | null }>(
     "SELECT content, updated_at FROM contexts WHERE id = 'project_identity'",
     []
   );
-
-  if (!result.success || !result.data) return null;
-
+  if (!result.success) return null;
+  if (!result.data) return undefined;
   try {
     return JSON.parse(result.data.content) as ProjectIdentityData;
   } catch {
@@ -340,8 +383,27 @@ export function backfillUnknownCmosAddress(client: CmosDatabaseClient): {
   previous: string | null;
   next: string | null;
 } {
-  const current = getProjectIdentity(client);
-  if (!current) return { rewritten: false, previous: null, next: null };
+  const preview = previewUnknownCmosAddressHeal(client);
+  if (!preview.next || preview.next === preview.previous) {
+    return { rewritten: false, previous: preview.previous, next: preview.previous };
+  }
+  const ok = patchProjectIdentity(client, { cmos_address: preview.next });
+  return { rewritten: ok, previous: preview.previous, next: ok ? preview.next : preview.previous };
+}
+
+/**
+ * s93-m11 — the address backfillUnknownCmosAddress would write, computed without writing: `next`
+ * is null when there is nothing to repair (an address that is set and not cmos://unknown/*, no
+ * owner to build one from, or no identity at all). A read uses it to say what the next write will
+ * repair, and to predict, as whoami does, what a write-classified call would resolve.
+ */
+export function previewUnknownCmosAddressHeal(client: CmosDatabaseClient): {
+  previous: string | null;
+  next: string | null;
+} {
+  // Never seeds: a preview writes nothing, whatever the call may do.
+  const current = readProjectIdentity(client);
+  if (!current) return { previous: null, next: null };
 
   const existing = current.cmos_address ?? '';
 
@@ -351,23 +413,16 @@ export function backfillUnknownCmosAddress(client: CmosDatabaseClient): {
   // checkpoint-backfill) silently reverted manual flips on the next observation —
   // decision #682.
   const needsHeal = existing === '' || /^cmos:\/\/unknown\//.test(existing);
-  if (!needsHeal) {
-    return { rewritten: false, previous: existing, next: existing };
-  }
+  if (!needsHeal) return { previous: existing, next: null };
 
   const owner = resolveLocalOwner(client);
-  if (!owner) return { rewritten: false, previous: existing, next: existing };
+  if (!owner) return { previous: existing, next: null };
 
   const slugSource =
     getMetadataValue(client, 'dashboard_slug') ?? current.project_name ?? current.project_id ?? '';
   const slug = slugSource.toLowerCase().replace(/\s+/g, '-');
   const next = buildCmosAddress(owner, slug);
-  if (!next || next === existing) {
-    return { rewritten: false, previous: existing, next: existing };
-  }
-
-  const ok = patchProjectIdentity(client, { cmos_address: next });
-  return { rewritten: ok, previous: existing, next: ok ? next : existing };
+  return { previous: existing, next: next && next !== existing ? next : null };
 }
 
 /**

@@ -2,6 +2,290 @@
 
 All notable changes to cmos-mcp are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+## 3.3.0 — 2026-10-09
+
+This stable release includes the CLI, Claude Code plugin, digest, recall, feedback and local
+measurements described in the development candidate below, plus proposal approvals and the
+portable adapters listed here.
+
+### Added
+
+- **Portable harness adapters and MCP prompts.** Native hook files for Codex, Cursor, Devin,
+  Copilot and VS Code Local share the installed CLI, with a dated coverage matrix and explicit
+  live-verification limits in [the harness guide](docs/harnesses.md). The four MCP prompts
+  `cmos-start`, `cmos-close-out`, `cmos-plan` and `cmos-build` read their corresponding skill
+  sources; the plugin gains the read-only start skill. Foreign transcripts are not interpreted
+  as Claude transcripts, and native adapters cannot inherit a parent Claude project's identity.
+- **Proposals: agents draft, the operator approves.** An agent ends a reply that puts a choice to
+  the operator with `Would record: <decision and reason>` (or `Would record (constraint|rule|profile): …`),
+  up to three trailing lines. The silent Stop hook stores each as a draft (`P<n>`) in a new
+  `proposals` table; the operator's next message binds only to the drafts that reply showed. A plain
+  approval, nuance, a question, an amendment (a revised line replaces the draft) and a plain decline
+  are read by published phrase lists. `cmos_decisions(action="record", content, fromDraft="P<n>")`
+  records it, and the record says how the approval was known: `approved`, `agent-judged` (the
+  operator's words attached) or `agent-attested`. Decision rows gain nullable `approval_mode`,
+  `approval_draft` and `approval_words`. The record answer gains optional `approval` (draft, kind,
+  mode, words), `answeredDrafts` and `stillPendingDrafts`; constraint, rule and profile drafts answer
+  with `recorded` (kind, id, typedId, materialization) and are never recorded as agent-attested.
+  New error codes: `DRAFT_NOT_FOUND`, `DRAFT_NOT_PENDING`, `APPROVAL_REQUIRED`. Drafts expire unanswered
+  after 7 days or 3 session starts, flag outside content the session read, appear in the digest, and
+  are listed by `cmos-mcp drafts list`; `stats` reports their outcomes and acceptance rate. The
+  operator's words stay outside the store for at most two hours until a record copies them.
+
+### Fixed
+
+- Release E2E tests consume the existing build; implicit-session scenarios run the installed
+  tarball. CI verifies the built server before running artifact consumers. The release scan
+  rejects failed or empty tarball listings, and the public mirror compares exact Git paths,
+  modes and objects before committing or tagging.
+- Telemetry and recall identify a physical store by its native real path, so alternate path
+  casing cannot split measurements or repeat same-session recall on case-insensitive disks.
+  Prerelease files keyed from a differently cased path remain on disk; their opaque keys are
+  not automatically reassigned, so old alias history may not appear in stable-version stats
+  and first recall may replay once after upgrade. Draft approval state already uses native paths.
+- Decision-timing statistics ignore undated completed missions with no linked decisions,
+  because those missions cannot enter the measure. Undated missions with any linked decision
+  still make timing unavailable; no historical timestamps are inferred or rewritten.
+
+### Documentation corrections
+
+- Measurement correction, checked 2026-10-09 on the published 3.2.0 package: an empty
+  macOS arm64 install with `npm install --omit=dev @aquex/cmos-mcp@3.2.0` used 45,972 KiB
+  under `node_modules` by `du -sk` (44.9 MiB). Earlier 44.7 MB and 44.9 MB labels below
+  are corrected to that measured allocation and unit; this is not a portable install-size
+  guarantee. The actual `tools/list` tool array has 19,523 JSON characters
+  (`JSON.stringify(result.tools).length`, 15 tools), correcting the earlier 18,906 figure.
+- The front door describes decisions that survive the session, includes a three-command first
+  digest and plugin commands, and explains what leaves the machine. Onboard previews and selected
+  list caps do not enforce a total response size: the earlier 28 KB claim was a fixture budget.
+- The earlier 3.2.0 upload and snapshot descriptions were too broad. Successful explicit
+  completion calls start a best-effort checkpoint, with a user-key or environment-credential
+  gate; they do not guarantee an upload. Shared-store propagation is a separate path.
+  Sprint backup failures warn, and restore's pre-restore copy requires manual recovery.
+  [SECURITY.md](SECURITY.md) states the current contract and failure cases.
+
+## 3.3.0-rc.1 — 2026-10-08
+
+Prerelease published under the `next` dist-tag. Proposal drafts and the additional portable
+adapters landed afterward in 3.3.0.
+
+### Added
+
+- **A Claude Code plugin and marketplace.** The canonical `plugins/cmos` subtree contains six
+  skills, lifecycle hooks and an MCP server entrypoint. Hooks use a pinned package validated for
+  the current platform, architecture and Node ABI; a detached installer publishes a complete
+  native SQLite installation atomically. Hooks never invoke npx. Explicit commands and server
+  startup may use the pinned npx fallback. `pluginServer: off` exposes an empty MCP surface even
+  on a cold install without npm. Named hook sources elect one adapter per verified harness
+  lifetime; real prompt IDs suppress successful repeated turn events. Missing IDs and
+  unverifiable process lifetimes retain documented duplication limits. Compact reloads the
+  digest; session end closes only an existing owned session and records bounded Git observations.
+- **Later-prompt keyword recall.** After the first eligible prompt, hooks emit at most three
+  unseen local decisions within 1,500 characters, requiring three whole-keyword matches. Seen
+  state records complete delivered spans from recall and the digest. Short later prompts, slash
+  commands and acknowledgements skip retrieval after telemetry. First-prompt policy is unchanged.
+- **Standalone feedback and a read-only fleet view.** `cmos-mcp feedback --content <text>` files
+  friction without a session or mission, with dry-run and JSON receipts; the package ships a
+  feedback skill. `cmos_feedback(list, acrossProjects=true)` returns bounded newest rows with
+  source-store provenance, full filtered counts, and explicit missing-store coverage. Additive
+  result fields are `entries[].sourceProjectId`, `entries[].provenance`, and `fleet` with `complete`
+  and per-store `projectId`, `totalCount`, `state`, and optional `error`. Sibling stores are never
+  written by fleet reads; their dispositions are requested through authorized messages. Triage
+  accepts `resolutionNote`. The shared digest includes open fleet feedback with a bounded read
+  budget and marks unavailable coverage instead of presenting it as zero.
+- **Digest v2 and first-prompt recall.** Session start, CLI review and MCP review share a stable
+  local digest with the whole approved operator profile, binding rules, recent decisions and
+  learnings, and open work within 4,000 characters. MCP keeps its bounded legacy structured result
+  and appends portfolio context below the text pointer. Superseded choices are excluded. The first
+  eligible prompt returns up to five decision previews using keyword retrieval and one hop of
+  explicit local decision citations, without a vector model. External runtime state serializes
+  delivery across processes and survives resume/compact; errors remain retryable. Typed item spans
+  measure what actually survives output caps.
+  The new `RecallResult`, `RecallItem` and `RecallVia` types are internal hook retrieval data;
+  they do not add fields to MCP review's structured response.
+- **Local usage measurements and `cmos-mcp stats`.** One best-effort record per MCP call or CLI
+  invocation records typed IDs, counts, hashes and outcomes, never prompt text or record bodies.
+  Measurements live outside repositories and SQLite under `<configDir>/telemetry/`, retaining the
+  three newest monthly files per store; they are neither uploaded nor packed. Prompt hooks record
+  procedure-pattern and rule-restatement matches before skips. `stats` reads these files and the
+  store for G1 and sprint-close reports, states each counting rule, and marks missing evidence as
+  unavailable. `stats --export` emits aggregate counts and ratios without local record details.
+- **A command-line interface for hooks, inside the same bin.** `cmos-mcp` with no verb (or with
+  `serve`) is still the MCP server, and `node dist/index.js` still starts it too. The verbs load only
+  what they need, never the server:
+  - `cmos-mcp hook session-start|prompt|stop|pre-compact|session-end` reads a harness hook's JSON on
+    stdin. Session start injects the record's digest (Claude Code's
+    `hookSpecificOutput.additionalContext`, at most 6,000 characters; `--format text` for plain text).
+    Every hook verb exits 0, writes at most one stderr line (anything else written to stderr while it
+    runs is held back), and prints nothing past its deadline, counted from process start (session
+    start 3 s, prompt 0.8 s, stop 0.5 s, session end 1 s); stop, pre-compact and session end never
+    print. A missing, locked or unreadable store gets that one line and a record in
+    `<configDir>/runtime/fail-open.jsonl`, never an init offer. A word the CLI does not know is a
+    usage error with exit 1 (exit 2 would block a prompt in Claude Code), never the MCP server.
+  - `cmos-mcp review --format=context` prints the digest, and `cmos-mcp relevant --query <text>`
+    prints matching decisions and learnings as previews, superseded rows dropped.
+  - `cmos-mcp capture` and `cmos-mcp session ensure|close` write with `--session-id`; without one they
+    refuse rather than open a session per process.
+  - `cmos-mcp ambient on|off|digest-off` sets how present CMOS is in a project's sessions, and
+    `CMOS_AMBIENT` overrides it for one session. In a git repository with no CMOS record, session
+    start offers `/cmos:init` in one line; `cmos-mcp ambient off` there stops the offer.
+- **One harness session is one CMOS session, in the conversation's own project.** Session start
+  records which session a harness process is in (`<configDir>/runtime/harness/<pid>.json`, holding
+  hashes of the session ids that process has had, never the ids, and the conversation's folder).
+  The MCP server that harness started writes into that session, across a server restart and after
+  `/clear`, whether it is the harness's direct child or runs through a launcher such as `npx` (it
+  matches the session id it was spawned with). The session opens at the conversation's first write,
+  so a conversation that never uses CMOS adds no row, and session end closes it. A server never
+  closes it when it exits; it closes only the sessions it opened for itself. Writes to another
+  project, and servers no hook links (Codex, editor extension hosts, Claude Desktop), keep a session
+  per server process, as in 3.2.0. Hooks and the server must share `CMOS_CONFIG_DIR` (both default
+  to `~/.config/cmos-mcp`).
+- **One AGENTS.md for every new project.** `cmos_project(action="init")` and the new
+  `cmos-mcp init` write the same AGENTS.md: the universal rules, about a dozen learned practices
+  (probe before you encode, fix the class, no silent fail-open, tests never touch the network or
+  live data, stay in your own repository, and more), trimmed placeholders, about 120 lines in all,
+  and exactly one CMOS line naming the project's level and how to turn the hooks off. How to use
+  CMOS arrives through its tools, hooks and tier guides instead. Init's CLAUDE.md now imports the
+  agents file (`@AGENTS.md`) and names no tool prefix. The `--level` option of `cmos-mcp init`
+  (ledger, planner or builder) answers the init question, and `--no-hooks` adds a labelled block
+  of CMOS steps for a harness without hooks. The CMOS line follows the project: a level change
+  (`cmos_project(action="update")`, or init run again with a level) and `cmos-mcp ambient` rewrite
+  it in place, and a rules file without the line is left alone. Init says what it leaves undone:
+  an existing CLAUDE.md that does not import the agents file, or a hook-less block it could not
+  add.
+- **The operator profile.** `<configDir>/profile.md` holds how the operator likes to work, for
+  every project: outside every repository and store, so never uploaded. `cmos-mcp profile show`
+  prints it. CMOS adds a line only from a draft the operator approved, refuses one past the
+  1,100-character cap, and never cuts the profile to fit; the operator edits the file directly.
+
+### Changed
+
+- **An explicit session started inside a harness session belongs to that conversation.**
+  `cmos_session(action="start")` records the harness session's key; the session absorbs only that
+  conversation's writes, and session end (a `/clear` included) closes it. One started without a
+  harness link stays keyless and absorbs every caller's writes, as in 3.2.0, so a server restart
+  never orphans it. A write that names no session lands in the caller's own explicit session, else a
+  keyless one, else the caller's implicit session. Another conversation's explicit session no longer
+  blocks a start, and the refusal from one's own names the session to complete by id, as does
+  onboard's "complete active session" command.
+- **A new project is a Ledger by default.** With no level chosen, init stores the tier `general`
+  (decisions and lessons) instead of `build`, unless the folder's AGENTS.md already names a level
+  in its CMOS line (a team's committed file, or a store recreated beside it), which init keeps; its
+  answer names the level and where it came from (`level` and `levelSource` on init's answer). A store that has no tier recorded still reads as
+  `build`, as before. The tier guides now teach only calls the server accepts: the general guide
+  opens with `cmos_review` and has no session ritual, the managed guide starts a cycle before
+  adding tasks to it (each task names its id and cycle), and the build guide records decisions one
+  way. Every `cmos_*(…)` example in the shipped seed now runs without a refusal.
+- Onboard's "last session" is the most recent one, except that an automatic close that held nothing
+  never displaces a handoff. The untagged-session advisory counts explicit sessions only.
+- **Automatic session closes register nothing.** Reconcile, a server's exit and session end close
+  sessions without registering the project, so a second checkout of a registered project no longer
+  hits the registry's collision refusal on close. The registry's 5-second lock wait gives way to a
+  hook's shorter one.
+
+- **Reads never write the record.** Every read-classified call leaves the store as it found it, with
+  or without `CMOS_AGENT_ROLE=review`. In 3.2.0, `cmos_review`, `cmos_agent_onboard` and
+  `cmos_context(action="view")` marked old decisions and learnings `stale` on every call (the review
+  role skipped only the view's copy); onboard resolved the owner through the dashboard and wrote it
+  to metadata; every call, reads included, rewrote a `cmos://unknown/...` address; the view ran the
+  master_context blob migration (a snapshot, a rewrite, and the event-column backfill); both searches
+  raised the schema label, and rebuilt a search index that already existed (rewriting its completion
+  marker); and a read, the identity view included, seeded a missing project_identity row. A
+  migration may still run on a read when it is DDL, the filling of what that call added, and its own
+  new marker row in a call that ran that DDL. A read that finds a search index out of step with its
+  table says so on its answer ("Store upkeep"), since it may miss rows until a write rebuilds it.
+- **Staleness is computed when read and never written.** Onboard, the review and the context view
+  show the rows past the review age (20 sprints, as before) beside the rows stored as `stale`, with
+  `cmos_decisions(action="review")` for each one's age and suggested action. The review now lists
+  the learnings past the review age or marked stale too (`learnings` in its data, with their ages),
+  and it is read-classified, so an agent under `CMOS_AGENT_ROLE=review` can run it. Onboard's `staleness`
+  gains `dueForReviewDecisions` and `dueForReviewLearnings`. The clock counts Completed sprints and
+  the open one, in any letter case; a Planned sprint no longer moves it, and the context view's
+  `recentSprintCount` uses the same rule.
+- **An explicit decision status update stamps `last_reviewed_at`** (update and batch_update), as the
+  learnings update already did, including one that leaves the status as it was: keeping a decision
+  `stale` on purpose is recorded as a review. Where the stamp cannot be written, an explicit `stale`
+  is refused.
+- **A server process's first write to a store restores the rows an older CMOS marked stale on its
+  own**: a `stale` row in a `sprint-N` at least 10 sprints below the highest, with no evidence, not
+  the target of a supersession, not evergreen, and never reviewed. It runs after a call that answered
+  without error and changed a row in that store for its caller: never after a read, a report, a
+  refusal or onboard (which makes no status write, feedback or not), and a repair made on a call's
+  way (an address heal, a seeded identity row, the schema label) does not count as its write. It keeps
+  a ledger in the store's metadata (`staleness_repair`, which also states what the repair cannot tell
+  apart), the write's answer says what it restored under "Store upkeep", and `cmos_review` says when
+  rows it restored are marked stale again with no review stamp, because only an older server writes
+  that. Across copies of the 24 stores on the maintainer's machine it restores 453 of 457 stale rows
+  and itemizes the 4 it leaves. The same first write migrates a pending master_context blob (a read
+  shows the migrated shape without writing it) and rebuilds a search index a read found out of step
+  or built before its completion marker; a server whose read found a gap after its first write
+  rebuilds it at its next one.
+- **Previews, not bodies**, in `cmos_decisions(action="search")`, `cmos_decisions(action="list")`,
+  `cmos_learnings(action="list")`, `cmos_session(action="search")` and `cmos_session(action="list")`:
+  each decision, learning, summary and capture is cut at 300 characters with `truncated` and
+  `fullLength` (`summaryTruncated` and `summaryFullLength` for a session), and the answer says how to
+  read one in full. `cmos_session(action="list", sessionId=...)` reads one session whole, its summary
+  and every capture, in its text and its data (`captures`). A list never points `show` at another
+  project's id. Next steps and constraints stay whole: each is the item an agent acts on, and no
+  action reads one by id.
+- **Compact mission receipts.** `cmos_mission(action="add")` names the stored fields in `fields`,
+  and its `mission` keeps the mission's `id`, `name`, `sprintId` and `status` but no longer echoes
+  the optional `objective`, `context`, `successCriteria`, `deliverables`, `referenceDocs`,
+  `domainFields` and `notes`; `cmos_mission(action="show")` reads them. They were optional members of
+  the receipt, so no published field is removed or renamed, but a caller that read them from add's
+  answer now finds them absent. `update` adds `name` and `status`.
+- **Every answer that touched a project names it** on its first line, however the project was
+  chosen, an error answer from a call that resolved its project included.
+- **Timestamps compare and sort as times** (`julianday()`) everywhere a stored timestamp is compared
+  or ordered, in SQL and in TypeScript (a decisions list's order, search ties, the `since`/`until`
+  filter over session-capture decisions, the backfill cursor, and every parse of a stored time for
+  an age, a duration or a freshness lag), which reads SQLite's zone-less spelling as UTC as
+  `julianday()` does. Mixed spellings (`T` and space separators, offsets,
+  date-only values) used to compare as text: a session that went stale earlier the same day was not
+  flagged until the date rolled over, and a list put #480 (`2026-06-30 03:10:21`) after #475
+  (`2026-06-30T02:14:08.987Z`). A `since` or `until` of a year or a month (`2026-10`) covers that
+  period, in every read that takes one (decisions list, learnings list, session search, context
+  history and context update); one no stored time can be compared with is refused instead of
+  matching nothing.
+- **CMOS describes itself as the project's record, never its memory**, in the server instructions,
+  the tool text, the general tier and the seed.
+
+### Fixed
+
+- **A re-init keeps the project's identity.** Running init again on an existing project minted a
+  new project id and blanked its name, after which every write was refused as an identity
+  conflict. Init now keeps the project's id (the store's own; for a store that was deleted and
+  recreated while its `cmos/` folder stayed, the id the project registry holds for the folder) and
+  its name, TraceLab link and
+  level unless they are passed, and refuses a different project id before it writes anything. A
+  new project in a folder a moved project left behind gets an id of its own. A new project's
+  identity also names its real tier.
+
+- `cmos_project(action="list")` never prunes: with `prune` it refuses and names `prune` and
+  `validate`, which archive registry rows.
+- `roots/list` is sent only to a client that declared the roots capability; a client that ignored it
+  stalled the first CMOS call until the request timed out.
+- `cmos_review` and onboard show a server running older code than its `dist/`: in the server's own
+  checkout they name `scripts/restart-session-server.sh`, elsewhere they say to restart the MCP
+  server, and the stale-server warning states the fact without a remedy of its own that could
+  contradict that. whoami is prescribed only to a user who has the dashboard in their setup.
+  whoami and the startup lines write nothing, from a call or from the command line: they resolve
+  with the address the next write will store (so whoami's verdict on a send matches the send), and
+  whoami says that repair is still to come.
+- A brand-new project is not reported as drifting in the portfolio section.
+- `cmos_project(action="init")` without `projectRoot` refuses with the call to make, and init in a
+  temporary folder warns as `register` does.
+- A failed learnings count at mission completion says so instead of reporting none recorded.
+- Onboard (and so `cmos_review`) no longer fails when the dashboard's sync status carries no
+  `tables`: the error escaped its catch, un-awaited. It answers without sync health and says so.
+- The evergreen parameter's description says what it does now: the learning is never shown as past
+  the review age.
+- `cmos_sprint(action="list")` says how many Planned sprints a page left out.
+- The shutdown lines on SIGINT and SIGTERM print only with `CMOS_DEBUG=1`.
+- Onboard's text shows the tierSelectionPrompt its suggested action points at.
+
 ## 3.2.0 — 2026-10-07
 
 Sprint 92 "Safe & Light": a stranger's first hour is safe and quiet, and no ceremony is destructive
@@ -19,7 +303,7 @@ removed or renamed. A 3.1.0 caller can observe four behaviour changes, each deta
   with the itemized receipt.
 
 Install and audit, measured on the packed tree installed with `npm install --omit=dev` into an empty
-project: 44.9 MB on disk across 138 production dependencies (3.1.0: 305.7 MB), and
+project: 44.9 MiB on disk across 138 production dependencies (3.1.0: 305.7 MB), and
 `npm audit --omit=dev` reports no vulnerabilities (3.1.0: 1 critical and 5 high, all through the
 embedding stack, now an optional peer). The tarball is 1.19 MB, 5.17 MB unpacked.
 
@@ -134,7 +418,7 @@ embedding stack, now an optional peer). The tarball is 1.19 MB, 5.17 MB unpacked
   `show` actions. Measured on a fixture of 2,000-character rows, a 10-hit search answer went from
   24,796 characters to 7,226. Rows are still scored on their full text.
 - **`tools/list` is about half the size.** The descriptions clients receive are short:
-  18,906 characters, about 4,700 tokens, where they were 38,141. The schemas are unchanged, and
+  19,523 characters, about 4,881 tokens, where they were 38,141. The schemas are unchanged, and
   TOOL_REFERENCE.md keeps every full description. A test holds the list under 6,000 tokens at four
   characters a token.
 - **Completing a mission counts the decisions it recorded.** The recommended path records each
@@ -192,7 +476,7 @@ embedding stack, now an optional peer). The tarball is 1.19 MB, 5.17 MB unpacked
 - **The embedding stack is an optional peer dependency.** `@xenova/transformers` is no longer
   installed with cmos-mcp. On the same labels, keyword-only retrieval beats the old equal-weight
   hybrid, and the stack was most of the install.
-  - Measured on packed tarballs installed with `npm install --omit=dev`: 305.7 MB → 44.7 MB, and
+  - Measured on packed tarballs installed with `npm install --omit=dev`: 305.7 MB → 44.9 MiB, and
     `npm audit` went from 1 critical and 5 high advisories (all through `@xenova/transformers`:
     protobufjs, onnx-proto, onnxruntime-web, sharp) to none.
   - Without the package, writes record no embedding and searches are keyword-only, both silently,

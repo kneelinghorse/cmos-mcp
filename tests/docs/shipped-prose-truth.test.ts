@@ -80,10 +80,13 @@
 
 import { describe, expect, it } from '@jest/globals';
 import Database from 'better-sqlite3';
+import { createHash } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as ts from 'typescript';
 import { CMOS_TOOL_DEFINITIONS } from '../../src/tools/cmos';
+import { cmosRulesLine } from '../../src/tools/cmos/rules-files';
+import { rulesStatistics } from '../../src/tools/cmos/telemetry-stats-rules';
 import { requiresPrivateEvidence } from '../helpers/public-mirror';
 import { lastUpdatedBodyChangeFindings } from './last-updated-body-oracle';
 import { inspectNpmPack, toPackagePath } from './npm-pack-inspection';
@@ -104,6 +107,7 @@ const PUBLIC_TARGETS = [
   'README.md',
   'SECURITY.md',
   'docs/getting-started.md',
+  'docs/harnesses.md',
   'TOOL_REFERENCE.md',
   // Ships inside the `cmos-seed` files[] entry and is the seed's own front page — every claim in
   // it reaches a consumer. It was absent from BOTH lists in the first revision, which is the
@@ -126,10 +130,19 @@ const PRIVATE = requiresPrivateEvidence({
   paths: {
     agents: 'agents.md',
     buildSessionPrompt: 'cmos/docs/build-session-prompt.md',
+    // s93-m12: agents.md's architecture reference, environment lists included, moved here.
+    architecture: 'cmos/docs/architecture.md',
+    rulesPreservation: 'cmos/research/2026-10-s93-probes/m10-repo-rules-preservation.json',
   },
 });
-const PRIVATE_TARGETS = Object.values(PRIVATE.relativePaths);
-const presentPrivateTargets = PRIVATE.availableRelativePaths;
+const PRIVATE_TARGETS: readonly string[] = [
+  PRIVATE.relativePaths.agents,
+  PRIVATE.relativePaths.buildSessionPrompt,
+  PRIVATE.relativePaths.architecture,
+];
+const presentPrivateTargets = PRIVATE.availableRelativePaths.filter((file) =>
+  PRIVATE_TARGETS.includes(file)
+);
 
 /**
  * s87-m04 — the seed's own documentation, swept for IDENTIFIER claims.
@@ -165,11 +178,17 @@ const SEED_TIER_TARGETS = fs
   .map((f) => `cmos-seed/tiers/${f}`)
   .sort();
 
+/** Plugin skills are shipped agent instructions, just like the seed's tier guides. */
+const PLUGIN_SKILL_TARGETS = walkFiles(r('plugins/cmos/skills'), '.md')
+  .map((absolute) => toPackagePath(path.relative(REPO_ROOT, absolute)))
+  .sort();
+
 const TARGETS = [
   ...PUBLIC_TARGETS,
   ...SEED_DOC_TARGETS,
   ...SEED_TEMPLATE_TARGETS,
   ...SEED_TIER_TARGETS,
+  ...PLUGIN_SKILL_TARGETS,
   ...presentPrivateTargets,
 ];
 
@@ -656,28 +675,44 @@ const ROLE_COMPLEMENT: ReadonlyArray<{ role: string; reason: string }> = [
 
 /**
  * Authored per-target regression floors. Summing only TARGETS makes mirror scope explicit:
- * 243 shared claims + 36 agents.md + 70 private build-session claims = 349 in this checkout,
- * while the staged public mirror derives 243 because both private targets are absent.
+ * The per-file predicate is the call-like `cmos_tool(action="value")` regex in sweepToolActionRoles.
+ * 276 shared claims + 0 agents.md + 46 architecture.md + 63 private build-session claims = 385 in
+ * this checkout, while the staged public mirror derives 276 because the private targets are absent.
+ * s93-m12 moved agents.md's architecture reference (and its claims) to cmos/docs/architecture.md,
+ * and the seed's AGENTS.md now names no CMOS call (its hook-less block, a separate template, does).
+ * s93-m10 removes generic call recipes from agents.md and replaces the private close recipe with
+ * the release checklist and runtime carrier. Its zero/63 floors follow those actual scoped texts.
  */
 const TOOL_ACTION_CLAIM_FLOORS: Readonly<Record<string, number>> = {
   'README.md': 13,
   'SECURITY.md': 13,
   'docs/getting-started.md': 22,
+  'docs/harnesses.md': 0,
   'TOOL_REFERENCE.md': 85,
   'cmos-seed/README.md': 5,
   'cmos-seed/docs/README.md': 32,
-  'cmos-seed/docs/agents-md-guide.md': 1,
+  'cmos-seed/docs/agents-md-guide.md': 2,
   'cmos-seed/docs/build-session-prompt.md': 8,
   'cmos-seed/docs/getting-started.md': 22,
   'cmos-seed/docs/session-management-guide.md': 19,
   'cmos-seed/docs/sqlite-schema-reference.md': 0,
   'cmos-seed/templates/PROJECT-README-template.md': 3,
-  'cmos-seed/templates/AGENTS.md': 1,
-  'cmos-seed/tiers/build.md': 13,
+  'cmos-seed/templates/AGENTS.md': 0,
+  'cmos-seed/templates/AGENTS-no-hooks.md': 2,
+  'cmos-seed/templates/CLAUDE-import.md': 0,
+  'cmos-seed/tiers/build.md': 14,
   'cmos-seed/tiers/general.md': 3,
-  'cmos-seed/tiers/managed.md': 3,
-  'agents.md': 36,
-  'cmos/docs/build-session-prompt.md': 70,
+  'cmos-seed/tiers/managed.md': 4,
+  'plugins/cmos/skills/build/SKILL.md': 9,
+  'plugins/cmos/skills/close-out/SKILL.md': 6,
+  'plugins/cmos/skills/feedback/SKILL.md': 3,
+  'plugins/cmos/skills/init/SKILL.md': 0,
+  'plugins/cmos/skills/plan/SKILL.md': 7,
+  'plugins/cmos/skills/record-decision/SKILL.md': 3,
+  'plugins/cmos/skills/start/SKILL.md': 1,
+  'agents.md': 0,
+  'cmos/docs/build-session-prompt.md': 63,
+  'cmos/docs/architecture.md': 46,
 };
 
 function targetDocuments(): TargetDocument[] {
@@ -870,12 +905,15 @@ describe('shipped-prose truth (s86-m05 Instrument 3)', () => {
     expect(TARGETS.some((t) => t.startsWith('cmos/planning/'))).toBe(false);
   });
 
-  it('accounts for every shipped Markdown file under cmos-seed', () => {
-    const shippedSeedMarkdown = walkFiles(r('cmos-seed'), '.md')
+  it('accounts for every shipped Markdown file under the seed and plugin', () => {
+    const shippedMarkdown = [
+      ...walkFiles(r('cmos-seed'), '.md'),
+      ...walkFiles(r('plugins/cmos'), '.md'),
+    ]
       .map((absolute) => toPackagePath(path.relative(REPO_ROOT, absolute)))
       .sort();
     expect(
-      shippedSeedMarkdown.filter((rel) => !TARGETS.includes(rel) && !isExplicitlyExcluded(rel))
+      shippedMarkdown.filter((rel) => !TARGETS.includes(rel) && !isExplicitlyExcluded(rel))
     ).toEqual([]);
   });
 
@@ -983,7 +1021,8 @@ describe('role-bearing shipped prose (s89-m02)', () => {
       `R1 column roles: ${result.objectCount} oracle objects, ` +
         `${result.keyColumnTableCount} Key-Columns table(s), ${result.claimCount} claims`
     );
-    expect(result.objectCount).toBe(26);
+    // s93-m06: the schema reference names `proposals` (26 -> 27).
+    expect(result.objectCount).toBe(27);
     expect(result.keyColumnTableCount).toBeGreaterThanOrEqual(1);
     expect(result.claimCount).toBeGreaterThanOrEqual(65);
     expect(result.findings.map((finding) => finding.message)).toEqual([]);
@@ -1153,9 +1192,12 @@ function deriveEnvReads(root: string): Set<string> {
   return out;
 }
 
-/** The CMOS_* names agents.md lists, split by which subsection they appear under. */
+/**
+ * The CMOS_* names the environment lists hold, split by which subsection they appear under. They
+ * moved with agents.md's architecture reference to cmos/docs/architecture.md in s93-m12.
+ */
 function agentsMdEnvSections(): { server: string[]; scripts: string[] } {
-  const content = fs.readFileSync(PRIVATE.paths.agents, 'utf8');
+  const content = fs.readFileSync(PRIVATE.paths.architecture, 'utf8');
   // Read the FENCED BLOCK under the heading, not the whole section. Prose around the block
   // legitimately mentions other variables (the note that CMOS_PROJECT_ROOT is optional), and
   // counting those would make the assertion depend on the surrounding wording rather than on
@@ -1223,8 +1265,9 @@ describePrivate('agents.md environment-variable block is derived, not maintained
     // (`process.env[CMOS_CHECKPOINT_SYNC_ENV]`, constant declared :64). 17 is the measured
     // number and the one the document carries. s92-m01 adds CMOS_EPHEMERAL_PATHS (the extra
     // ephemeral store locations, resolution-policy.ts), making 18. s92-m07 adds CMOS_DEBUG (the
-    // stderr diagnostics gate, debug-log.ts), making 19.
-    expect(srcReads.size).toBe(19);
+    // stderr diagnostics gate, debug-log.ts), making 19. s93-m01 added CMOS_AMBIENT (the hook
+    // CLI's per-session off switch, src/cli/core.ts), making 20.
+    expect(srcReads.size).toBe(20);
     expect(agentsMdEnvSections().server.sort()).toEqual([...srcReads].sort());
   });
 
@@ -1245,7 +1288,73 @@ describePrivate('agents.md environment-variable block is derived, not maintained
 
 // ─── Stamps, citations and the build-session-prompt reconcile ────────────────
 
+function releaseOrder(a: string, b: string): number {
+  const parse = (value: string): { core: bigint[]; pre: string[] } => {
+    const match = value.match(
+      /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/
+    );
+    if (!match) throw new Error(`Invalid release version: ${value}`);
+    const pre = match[4]?.split('.') ?? [];
+    if (pre.some((part) => /^0\d+$/.test(part)))
+      throw new Error(`Invalid release version: ${value}`);
+    return { core: match.slice(1, 4).map(BigInt), pre };
+  };
+  const pa = parse(a);
+  const pb = parse(b);
+  for (let i = 0; i < 3; i += 1)
+    if (pa.core[i] !== pb.core[i]) return pa.core[i] < pb.core[i] ? -1 : 1;
+  if (!pa.pre.length || !pb.pre.length)
+    return pa.pre.length === pb.pre.length ? 0 : pa.pre.length ? -1 : 1;
+  for (let i = 0; i < Math.max(pa.pre.length, pb.pre.length); i += 1) {
+    const left = pa.pre[i];
+    const right = pb.pre[i];
+    if (left === right) continue;
+    if (left === undefined || right === undefined) return left === undefined ? -1 : 1;
+    const numericLeft = /^\d+$/.test(left);
+    const numericRight = /^\d+$/.test(right);
+    if (numericLeft && numericRight) return BigInt(left) < BigInt(right) ? -1 : 1;
+    if (numericLeft !== numericRight) return numericLeft ? -1 : 1;
+    return left < right ? -1 : 1;
+  }
+  return 0;
+}
+
+function newestReleasedHeading(changelog: string): RegExpMatchArray | null {
+  return changelog.match(
+    /^##\s*\[?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)\]?\s*[—-]\s*(\d{4}-\d{2}-\d{2})/m
+  );
+}
+
 describe('shipped-document stamps and citations (s86-m05)', () => {
+  it('does not let an older stable release hide a newer RC from authority-document stamps', () => {
+    const today = new Date(Date.now()).toISOString().slice(0, 10);
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const stable = `## 3.2.0 — ${yesterday}`;
+    expect(newestReleasedHeading(stable)?.slice(1)).toEqual(['3.2.0', yesterday]);
+    for (const version of ['3.3.0-rc.1', '3.3.0-rc.1+build.2']) {
+      for (const heading of [version, `[${version}]`]) {
+        const release = newestReleasedHeading(
+          `## Unreleased\n\n## ${heading} — ${today}\n\n${stable}`
+        );
+        expect(release?.slice(1)).toEqual([version, today]);
+        // A stamp valid for the older stable release must now fail the same date boundary.
+        expect(new Date(yesterday).getTime()).toBeLessThan(new Date(release![2]).getTime());
+      }
+    }
+  });
+
+  it('orders release candidates without accepting an older or different candidate stamp', () => {
+    expect(releaseOrder('3.3.0-rc.1', '3.3.0-rc.1')).toBe(0);
+    expect(releaseOrder('3.3.0-rc.1', '3.3.0-rc.2')).toBeLessThan(0);
+    expect(releaseOrder('3.3.0-rc.2', '3.3.0-rc.10')).toBeLessThan(0);
+    expect(releaseOrder('3.3.0-rc.10', '3.3.0')).toBeLessThan(0);
+    expect(releaseOrder('3.3.0', '3.3.0-rc.1')).toBeGreaterThan(0);
+    expect(releaseOrder('3.2.0', '3.3.0-rc.1')).toBeLessThan(0);
+    expect(releaseOrder('3.3.0-alpha.1', '3.3.0-alpha.beta')).toBeLessThan(0);
+    expect(releaseOrder('3.3.0-rc', '3.3.0-rc.1')).toBeLessThan(0);
+    expect(() => releaseOrder('3.3.0-rc.01', '3.3.0')).toThrow(/version/);
+  });
+
   it('cites a CHANGELOG section that exists and is non-empty', () => {
     // SECURITY.md cited "the `[Unreleased] → Removed` entry"; [Unreleased] is empty and the
     // HTTP-transport removal lives under 2.0.0. A citation into an empty section is a claim
@@ -1289,21 +1398,15 @@ describe('shipped-document stamps and citations (s86-m05)', () => {
     // prepared while CHANGELOG.md opens with "## Unreleased", as the launch recipes may.
     const security = fs.readFileSync(r('SECURITY.md'), 'utf8');
     const footer = security.match(
-      /_Last verified against the source for release (\d+\.\d+\.\d+)\._/
+      /_Last verified against the source for release ([0-9A-Za-z.+-]+)\._/
     );
     expect(footer).not.toBeNull();
     const verified = (footer as RegExpMatchArray)[1];
     const pkgVersion = (
       JSON.parse(fs.readFileSync(r('package.json'), 'utf8')) as { version: string }
     ).version;
-    const order = (a: string, b: string): number => {
-      const pa = a.split('.').map(Number);
-      const pb = b.split('.').map(Number);
-      for (let i = 0; i < 3; i += 1) if (pa[i] !== pb[i]) return pa[i] - pb[i];
-      return 0;
-    };
     const preparing = /^## Unreleased\b/m.test(fs.readFileSync(r('CHANGELOG.md'), 'utf8'));
-    const cmp = order(verified, pkgVersion);
+    const cmp = releaseOrder(verified, pkgVersion);
     expect({ verified, pkgVersion, ok: cmp === 0 || (cmp > 0 && preparing) }).toEqual({
       verified,
       pkgVersion,
@@ -1324,7 +1427,7 @@ describe('shipped-document stamps and citations (s86-m05)', () => {
       // release, so a stamp predating that release is stale by construction. Derived from repo
       // content, no hardcoded date, and it fails for the reason its name gives.
       const changelog = fs.readFileSync(r('CHANGELOG.md'), 'utf8');
-      const release = changelog.match(/^##\s*\[?(\d+\.\d+\.\d+)\]?\s*[—-]\s*(\d{4}-\d{2}-\d{2})/m);
+      const release = newestReleasedHeading(changelog);
       expect(release).not.toBeNull();
       const releaseDate = new Date((release as RegExpMatchArray)[2]).getTime();
       expect(Number.isNaN(releaseDate)).toBe(false);
@@ -1354,6 +1457,109 @@ describe('shipped-document stamps and citations (s86-m05)', () => {
     });
   });
 });
+
+describe('shipped standing-method carrier', () => {
+  it('tells every consumer to keep standing-method learnings evergreen', () => {
+    const build = fs.readFileSync(r('plugins/cmos/skills/build/SKILL.md'), 'utf8');
+    expect(build).toMatch(/evergreen: true/);
+    expect(build).toMatch(/standing method/);
+    expect(build).toMatch(/staleness archival/);
+  });
+});
+
+describePrivate(
+  'repo rules refresh preserves current conventions and the fixed G1 predicate',
+  () => {
+    type ProtectedLine = { line: number; text: string; home: string; disposition: string };
+    const readLedger = () =>
+      JSON.parse(fs.readFileSync(PRIVATE.paths.rulesPreservation, 'utf8')) as {
+        sources: Array<{ path: string; sha256: string; content: string }>;
+        protected: ProtectedLine[];
+        counts: { protectedNonemptyLines: number; retained: number; moved: number };
+        migrationReceipt: { architectureAfterSha256: string };
+      };
+    const normalize = (value: string) => value.replace(/\s+/g, ' ').trim();
+    const missingLines = (entries: ProtectedLine[], homes: Map<string, string>) =>
+      entries.filter(
+        (entry) => !normalize(homes.get(entry.home) ?? '').includes(normalize(entry.text))
+      );
+    const homes = () =>
+      new Map<string, string>([
+        [PRIVATE.relativePaths.agents, fs.readFileSync(PRIVATE.paths.agents, 'utf8')],
+        [
+          PRIVATE.relativePaths.buildSessionPrompt,
+          fs.readFileSync(PRIVATE.paths.buildSessionPrompt, 'utf8'),
+        ],
+      ]);
+
+    it('preserves every protected current line in its declared home, with audited moved counts', () => {
+      const ledger = readLedger();
+      for (const source of ledger.sources) {
+        expect(createHash('sha256').update(source.content).digest('hex')).toBe(source.sha256);
+      }
+      expect(ledger.protected.length).toBe(ledger.counts.protectedNonemptyLines);
+      expect(ledger.protected.filter((entry) => entry.disposition === 'retained').length).toBe(
+        ledger.counts.retained
+      );
+      expect(ledger.protected.filter((entry) => entry.disposition === 'moved').length).toBe(
+        ledger.counts.moved
+      );
+      expect(missingLines(ledger.protected, homes())).toEqual([]);
+      const architecture = ledger.sources.find(
+        (source) => source.path === PRIVATE.relativePaths.architecture
+      )!;
+      // The already-moved architecture text was unchanged at this migration boundary. Keep
+      // that receipt without freezing the entire architecture document against future edits.
+      expect(ledger.migrationReceipt.architectureAfterSha256).toBe(architecture.sha256);
+    });
+
+    it('detects deletion of the shared-host safeguard from an isolated carrier copy', () => {
+      const ledger = readLedger();
+      const safeguard = ledger.protected.find((entry) =>
+        entry.text.includes('Never restart the shared app host')
+      )!;
+      expect(safeguard).toBeDefined();
+      const copies = homes();
+      expect(missingLines([safeguard], copies)).toEqual([]);
+      copies.set(safeguard.home, copies.get(safeguard.home)!.replace(safeguard.text, ''));
+      expect(missingLines([safeguard], copies)).toEqual([safeguard]);
+    });
+
+    it('keeps exactly the Builder pointer and zero procedure matches without weakening the matcher', () => {
+      const agents = fs.readFileSync(PRIVATE.paths.agents, 'utf8');
+      expect(
+        agents.split('\n').filter((line) => line.startsWith("CMOS keeps this project's record"))
+      ).toEqual([cmosRulesLine('builder')]);
+      const scan = rulesStatistics(REPO_ROOT);
+      expect(scan.files).toBeGreaterThan(0);
+      expect(scan.warnings).toEqual([]);
+      expect(scan.hits).toEqual([]);
+      expect(scan.matchingLines).toBe(0);
+    });
+
+    it("retains this repository's release and close safeguards in the rules file", () => {
+      const agents = fs.readFileSync(PRIVATE.paths.agents, 'utf8');
+      const checklist =
+        agents.split('### Release execution and close checklist')[1]?.split('\n### ')[0] ?? '';
+      expect(checklist).toMatch(/authorized release end to end/);
+      for (const required of [
+        'origin/main',
+        'full-suite witness',
+        'measuredAt',
+        'startup/current build hashes',
+        'archivedDecisionIds',
+        'learningIds',
+        'Array.isArray',
+        'do not retry the close',
+        'separate post-release state commit',
+      ])
+        expect(checklist).toContain(required);
+      expect(checklist).toMatch(/stop and fail loudly/);
+      expect(agents).toContain("Restart only this session's server after every build");
+      expect(agents).toContain('never hand the\nreconnect to the operator');
+    });
+  }
+);
 
 describePrivate('build-session-prompt ↔ agents.md process-hardening parity (s86-m05, #500)', () => {
   const promptPath = PRIVATE.paths.buildSessionPrompt;
@@ -1466,9 +1672,9 @@ describePrivate('build-session-prompt ↔ agents.md process-hardening parity (s8
    *
    * This block runs only in the private tree. Both targets are PRIVATE_PATHS in
    * scripts/mirror-to-public.sh; the enclosing private-only block skips by scope in the public
-   * mirror and prints what it skipped. The complement — cmos-seed/docs/build-session-prompt.md,
-   * cmos-seed/templates/AGENTS.md, and cmos/templates/agents.md — deliberately has no Process
-   * Hardening section, as the existing seed assertion below requires. Finally, this gates two of
+   * mirror and prints what it skipped. The complement — cmos-seed/docs/build-session-prompt.md and
+   * cmos-seed/templates/AGENTS.md (s93-m12 retired the private cmos/templates/agents.md) —
+   * deliberately has no Process Hardening section, as the existing seed assertion below requires. Finally, this gates two of
    * the twenty standing process-rule decision rows absent from both authority documents before
    * this mission; the other eighteen remain out of scope and are named as a next-step. Historical
    * planning prose that proposed these rules is evidence, not either designated authority.
@@ -1673,12 +1879,12 @@ describe('the seed ships stamps that describe the seed (s87-m04 + s88-m03 + s88-
     );
 
   it('records that the old private-only Last Updated arm covered zero tarball stamps', () => {
-    // These two private paths are excluded from both the tarball and the public mirror.
-    expect(PRIVATE_TARGETS).toHaveLength(2);
+    // These private paths are excluded from both the tarball and the public mirror.
+    expect(PRIVATE_TARGETS).toHaveLength(3);
     expect(PRIVATE_TARGETS.filter(shipsInPackage)).toEqual([]);
   });
 
-  it('checks the eight bold Last Updated stamps in actual packed seed Markdown', () => {
+  it('checks the seven bold Last Updated stamps in actual packed seed Markdown', () => {
     const stamps = lastUpdatedStamps();
     const expectedStampPaths = [
       'cmos-seed/README.md',
@@ -1688,17 +1894,16 @@ describe('the seed ships stamps that describe the seed (s87-m04 + s88-m03 + s88-
       'cmos-seed/docs/getting-started.md',
       'cmos-seed/docs/session-management-guide.md',
       'cmos-seed/docs/sqlite-schema-reference.md',
-      'cmos-seed/templates/AGENTS.md',
     ].sort();
 
-    // The count is a regression floor, not prose: six docs + the seed README + templates/AGENTS.md.
-    // Both template files are also ordinary identifier/contradiction targets even though only one
-    // currently carries a date stamp.
-    expect(stamps).toHaveLength(8);
+    // The count is a regression floor, not prose: six docs + the seed README. s93-m12 dropped the
+    // AGENTS.md template's footer stamp, which init would copy into every new project's rules
+    // file. The four template files are ordinary identifier/contradiction targets all the same.
+    expect(stamps).toHaveLength(7);
     expect(stamps.map((stamp) => stamp.rel).sort()).toEqual(expectedStampPaths);
     expect([...PACKED.seedMarkdown.keys()].sort()).toEqual(SEED_MD);
     expect(stamps.every((stamp) => shipsInPackage(stamp.rel))).toBe(true);
-    expect(SEED_TEMPLATE_TARGETS).toHaveLength(2);
+    expect(SEED_TEMPLATE_TARGETS).toHaveLength(4);
     expect(SEED_TEMPLATE_TARGETS.every((rel) => TARGETS.includes(rel))).toBe(true);
     expect(SEED_TEMPLATE_TARGETS.every(shipsInPackage)).toBe(true);
 
@@ -1758,7 +1963,7 @@ describe('the seed ships stamps that describe the seed (s87-m04 + s88-m03 + s88-
   it('this arm is not gated on the public mirror, and the seed is not a PRIVATE_TARGET', () => {
     // The trap, asserted rather than intended. cmos-seed/** ships to the public repo, so gating
     // these checks on `inPublicMirror` would leave the public copies unchecked.
-    expect(PRIVATE_TARGETS).toHaveLength(2);
+    expect(PRIVATE_TARGETS).toHaveLength(3);
     expect(PRIVATE_TARGETS.some((t) => t.startsWith('cmos-seed'))).toBe(false);
     for (const rel of SEED_MD) expect(fs.existsSync(r(rel))).toBe(true);
   });

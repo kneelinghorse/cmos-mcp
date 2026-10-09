@@ -415,17 +415,21 @@ export async function cmosMissionComplete(
         warnings.push(decisionResult.warning);
       }
 
-      // Learning capture soft nudge
+      // Learning capture soft nudge. s93-m11 (#606 h): a count that failed says so; it is not a
+      // claim that the mission recorded no learning.
       const learningCountResult = client.getOne<{ count: number }>(
         'SELECT COUNT(*) AS count FROM learnings WHERE mission_id = ?',
         [missionId]
       );
-      const learningCount =
-        learningCountResult.success && learningCountResult.data
-          ? learningCountResult.data.count
-          : 0;
-
-      if (learningCount === 0) {
+      const learningCount = learningCountResult.success
+        ? (learningCountResult.data?.count ?? 0)
+        : undefined;
+      if (!learningCountResult.success) {
+        warnings.push(
+          `Could not count this mission's learnings (${learningCountResult.error?.message ?? 'the query failed'}); ` +
+            'no learning nudge is shown, which does not mean one was recorded.'
+        );
+      } else if (learningCount === 0) {
         warnings.push(
           'No learnings captured for this mission. Consider capturing at least one learning before proceeding.'
         );
@@ -466,7 +470,8 @@ export async function cmosMissionComplete(
           ...(decisionResult.missionDecisionCount !== null
             ? { missionDecisionCount: decisionResult.missionDecisionCount }
             : {}),
-          learningCount,
+          // Omitted when the count failed, so the receipt never reports an unknown count as zero.
+          ...(learningCount !== undefined ? { learningCount } : {}),
           ...(feedbackId !== undefined ? { feedbackId } : {}),
         },
         warnings,
@@ -522,8 +527,8 @@ async function captureDecisions(
     );
     const projectDomain = domainResult.success ? (domainResult.data?.value ?? null) : null;
 
-    // s92-m03: the caller's session (the open explicit session, else this process's implicit
-    // session, opened for these decisions), never another process's. If this is the process's
+    // s92-m03: the caller's session (its own or a keyless explicit session, else its implicit
+    // session, opened for these decisions), never another caller's. If this is the process's
     // first write to the store, the handler reconciles after its connection closes.
     const caller = resolveCallerSession(client, { open: true });
     if (!caller.ok) {

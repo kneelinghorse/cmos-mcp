@@ -90,6 +90,9 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Verify built server
+        run: npm run verify:dist
+
       # Packs the tarball, installs it into a temp dir, and drives the documented
       # getting-started quickstart over real MCP stdio against the INSTALLED server
       # (s77-m10). Guards the published first-run experience against silent breakage.

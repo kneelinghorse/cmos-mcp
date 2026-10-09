@@ -42,7 +42,7 @@ import Database from 'better-sqlite3';
 import * as fs from 'fs';
 import * as path from 'path';
 
-/** The 8 firehose tables (agents.md §"firehose"), each carrying a per-row `project_id`. */
+/** The 8 firehose tables (cmos/docs/architecture.md §"Per-row event schema"), each carrying a per-row `project_id`. */
 const FIREHOSE_TABLES = [
   'strategic_decisions',
   'learnings',

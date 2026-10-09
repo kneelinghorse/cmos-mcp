@@ -381,8 +381,10 @@ describe('ACTION_PARAMS vacuity floor (s86-m04)', () => {
       // add `show`, each with exactly three params (action, the row id, projectRoot).
       // s92-m09: 83 -> 84 actions and 402 -> 409 entries for cmos_db prune_snapshots (action,
       // confirm, keepIds, keepSince, keepSources, keepLast, projectRoot).
+      // Feedback list adds acrossProjects; triage now accepts resolutionNote: 409 -> 411.
+      // s93-m06: decisions record accepts fromDraft: 411 -> 412.
       expect(actionCount).toBe(84);
-      expect(entryCount).toBe(409);
+      expect(entryCount).toBe(412);
 
       // Floors, so a walker that silently stops producing branches fails here rather than passing
       // every applicability case with nothing to check.

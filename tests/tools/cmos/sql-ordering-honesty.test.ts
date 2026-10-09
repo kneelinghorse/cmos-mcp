@@ -513,14 +513,16 @@ describe('sql-ordering honesty (s86-m05 Instrument 2)', () => {
 
     it('sees the write it was built for (staleness-detection writes learnings.status)', () => {
       // Guards against the sweep going vacuous if the UPDATE is ever reshaped: the gate must
-      // still be READING the statement whose value it validates.
+      // still be READING the statement whose value it validates. s93-m11: the flagger's 'stale'
+      // write is gone; the module's literal write now is the first-write repair's restore.
       const content = fs.readFileSync(
         path.join(SRC_ROOT, 'tools/cmos/staleness-detection.ts'),
         'utf8'
       );
       UPDATE_WRITE_RE.lastIndex = 0;
       const writes = [...content.matchAll(UPDATE_WRITE_RE)].map((m) => `${m[1]}.${m[2]}='${m[3]}'`);
-      expect(writes).toContain("learnings.status='stale'");
+      expect(writes).toContain("learnings.status='active'");
+      expect(writes).not.toContain("learnings.status='stale'");
     });
 
     it('writes no value its own published enum forbids a caller from naming', () => {

@@ -59,7 +59,7 @@
 
 ## Project Management with CMOS
 
-This project uses CMOS for project memory and the workflow selected by its active tier.
+This project uses CMOS to keep its record of decisions and the workflow selected by its active tier.
 
 **For contributors**:
 - Mission tracking, project history and session logs all live in `cmos/db/cmos.sqlite`

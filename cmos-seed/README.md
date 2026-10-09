@@ -32,20 +32,23 @@ cmos-seed/
 
 ## Quick Start
 
-### Option 1: Use cmos_project(action="init") (Recommended)
+### Option 1: The init tool (Recommended)
 
-The `cmos_project(action="init")` MCP tool creates CMOS structure directly:
+The `cmos_project(action="init", projectRoot="...", projectType="build")` MCP tool creates CMOS structure directly, at the Builder level this README uses:
 
 ```
 cmos_project({
   action: "init",
   projectRoot: "/path/to/your/project",
-  projectName: "My Project",
-  projectId: "my-project-id",  // optional, auto-generated if omitted
+  projectName: "My Project",   // the id is generated once and kept for life
+  projectType: "build",        // Builder: sprints and missions; without it, a Ledger unless AGENTS.md names a level
   initialSprint: {             // optional
     id: "sprint-01",
     title: "Initial Sprint"
-  }
+  },
+  initialMissions: [           // optional
+    { id: "s01-m01", name: "First mission", sprintId: "sprint-01" }
+  ]
 })
 ```
 
@@ -131,7 +134,7 @@ Queued → Current → In Progress → Completed
 ### Context Layers
 
 - **project_identity**: Stable project identity and registered foundational documents
-- **project_context**: Current session state, working memory
+- **project_context**: Current session state and next steps
 - **master_context**: Project history, strategic decisions, constraints
 
 ### Sessions
@@ -165,4 +168,4 @@ See `docs/` for complete documentation:
 ---
 
 **Schema Version**: 2.1
-**Last Updated**: 2026-10-07
+**Last Updated**: 2026-10-08

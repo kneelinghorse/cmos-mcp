@@ -1,0 +1,14 @@
+{
+  "name": "cmos",
+  "owner": { "name": "CMOS" },
+  "metadata": {
+    "description": "CMOS project record: decisions, learnings and work that carry across sessions."
+  },
+  "plugins": [
+    {
+      "name": "cmos",
+      "source": "./plugins/cmos",
+      "description": "Bring the CMOS record into Claude Code with hooks, skills and an MCP server."
+    }
+  ]
+}

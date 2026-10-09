@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-// ABOUTME: s92-m03 — whose session a write belongs to: the project's one explicit session, else this
-// ABOUTME: process's own implicit session, opened lazily. Also the facts reconcile decides on.
+// ABOUTME: s92-m03 — whose session a write belongs to: the caller's explicit session, else its own implicit
+// ABOUTME: session, opened lazily. Also the facts reconcile decides on.
 
 import { createHash } from 'crypto';
 import * as fs from 'fs';
@@ -10,9 +10,10 @@ import { performance } from 'perf_hooks';
 import type { CmosDatabaseClient } from './client';
 import { CMOS_ERROR_CODES } from './errors';
 import { genesisColumns, getProjectId, tableHasColumn } from './genesis-columns';
-import { normalizeCloseTimestamp } from './sprint-end-date-repair';
+import { harnessKeyAppliesTo, harnessSessionHash, linkedHarness } from './harness-session';
 import type { CmosToolError } from './types';
 import { checkWrite } from './write-guard';
+import { storedTimeMs } from './stored-time';
 
 /**
  * WHY (aquex.ai message 9b183348 item 4; s92 design, m03). A capture with no open session was
@@ -22,17 +23,27 @@ import { checkWrite } from './write-guard';
  * process.
  *
  * THE CALLER'S SESSION, in order:
- *   1. the project's active EXPLICIT session, if there is one. Explicit sessions stay project-wide
- *      and one at a time, exactly as before;
- *   2. otherwise this process's own active implicit session;
- *   3. otherwise, for a write, a new implicit session owned by this process.
- * No lookup ever returns another process's implicit session. The six single-active readers this
- * replaces each took "the" active row, which stops being one row once every process has its own.
+ *   1. an active EXPLICIT session the caller started (its owner key);
+ *   2. otherwise an active keyless explicit session, which absorbs every caller's writes as the
+ *      project's one explicit session did before 3.3.0;
+ *   3. otherwise the caller's own active implicit session;
+ *   4. otherwise, for a write, a new implicit session owned by the caller.
+ * No lookup ever returns another caller's implicit session, or another harness session's explicit
+ * one.
  *
- * WHO A PROCESS IS. `ext:<id>` when an external id was set: S93's hook CLI runs one process per
- * hook and keys by the harness session id. Otherwise `pid:<host>:<pid>:<start>`, where host is a
- * short hash of the hostname (never the name) and start is this process's start time in ms, so a
- * reused pid is a different owner.
+ * WHO A CALLER IS. `ext:<hash>` for a harness session: the hook CLI keys by the hash of its stdin
+ * session id, and since s93-m01 an MCP server whose harness linked a session (SessionStart's
+ * runtime file, harness-session.ts) writes into that session too, in the conversation's own store,
+ * so one harness session is one CMOS session there across server restarts and `/clear` (decision
+ * #1189). In any other store, and for a server with no link,
+ * `pid:<host>:<pid>:<start>`, where host is a short hash of the hostname (never the name) and start
+ * is this process's start time in ms, so a reused pid is a different owner.
+ *
+ * WHICH EXPLICIT SESSIONS CARRY A KEY (s93-m01). Only one started inside a harness session: it
+ * belongs to that conversation, absorbs only its writes, and closes when the harness session ends
+ * (SessionEnd, `/clear` included). One started by a pid-keyed caller stays keyless, because a pid
+ * key names a server process, not a conversation: a keyed one would be orphaned by the restart
+ * every build requires (the m01 build critic, B1).
  *
  * NO SPRINT. A process outlives sprints, so an implicit session carries no sprint_id. Every row it
  * writes resolves its own sprint when it is written, as any untagged write does, instead of
@@ -76,10 +87,13 @@ const PROCESS_STARTED_MS = Math.round(performance.timeOrigin);
 let externalOwnerId: string | null = null;
 let ownerOverride: SessionOwner | null = null;
 
-/** Key this process's implicit sessions by an external id (S93's hook CLI: the harness session). */
+/**
+ * Key this process's sessions by a harness session (the hook CLI: stdin `session_id`). The raw id
+ * is hashed here, through the one shared helper, so it never reaches the store.
+ */
 export function setExternalSessionOwner(id: string | null): void {
   const trimmed = id?.trim();
-  externalOwnerId = trimmed ? trimmed : null;
+  externalOwnerId = trimmed ? harnessSessionHash(trimmed) : null;
 }
 
 /** Test seam: act as another owner. Shipped code never calls it. */
@@ -92,16 +106,46 @@ export function processOwnerKey(pid: number, startedMs: number, hostId = THIS_HO
   return `pid:${hostId}:${pid}:${startedMs}`;
 }
 
-export function currentSessionOwner(): SessionOwner {
+/**
+ * Who a write into the store at `dbPath` is made as. Resolved per call, never cached: SessionStart
+ * rewrites the harness link on `/clear`, and the next write must land in the new session. A linked
+ * server writes as its harness session only in the conversation's own store (harnessKeyAppliesTo);
+ * elsewhere as itself. Without `dbPath` the harness session counts wherever the link points.
+ */
+export function currentSessionOwner(dbPath?: string): SessionOwner {
   if (ownerOverride) return ownerOverride;
   if (externalOwnerId) {
     return { key: `ext:${externalOwnerId}`, kind: 'external', pid: process.pid };
   }
+  const linked = linkedHarness();
+  if (linked && (dbPath === undefined || harnessKeyAppliesTo(linked, dbPath))) {
+    return { key: `ext:${linked.hash}`, kind: 'external', pid: process.pid };
+  }
+  return processSessionOwner();
+}
+
+/**
+ * This process's own pid-keyed identity, whatever harness link it has. A server closes only these
+ * sessions when it exits: a harness session's sessions close at SessionEnd (mechanism critic B2).
+ */
+export function processSessionOwner(): SessionOwner {
+  // The test seam acts as another process; an external override has no pid key of its own.
+  if (ownerOverride?.kind === 'process') return ownerOverride;
   return {
     key: processOwnerKey(process.pid, PROCESS_STARTED_MS),
     kind: 'process',
     pid: process.pid,
   };
+}
+
+/**
+ * The owner key an explicit session started by `owner` records: a harness session's key, or none
+ * (see WHICH EXPLICIT SESSIONS CARRY A KEY).
+ */
+export function explicitSessionOwnerKey(
+  owner: SessionOwner = currentSessionOwner()
+): string | null {
+  return owner.kind === 'external' ? owner.key : null;
 }
 
 /**
@@ -304,10 +348,15 @@ export function resolveCallerSession(
   options: { open: boolean; agent?: string; now?: string }
 ): CallerSessionOutcome {
   const warnings: string[] = [];
+  const owner = currentSessionOwner(client.path);
 
+  // An explicit session this caller started comes first; a keyless one (started before 3.3.0)
+  // absorbs keyless writers as it always did. Another caller's keyed explicit session never does.
   const explicit = client.getOne<{ id: string }>(
-    `SELECT id FROM sessions WHERE status = 'active' AND implicit = 0 ORDER BY started_at DESC LIMIT 1`,
-    []
+    `SELECT id FROM sessions
+      WHERE status = 'active' AND implicit = 0 AND (owner_key = ? OR owner_key IS NULL)
+      ORDER BY (owner_key IS NULL), julianday(started_at) DESC LIMIT 1`,
+    [owner.key]
   );
   if (!explicit.success) {
     return {
@@ -326,11 +375,10 @@ export function resolveCallerSession(
     };
   }
 
-  const owner = currentSessionOwner();
   const own = client.getOne<{ id: string }>(
     `SELECT id FROM sessions
       WHERE status = 'active' AND implicit = 1 AND owner_key = ?
-      ORDER BY started_at DESC LIMIT 1`,
+      ORDER BY julianday(started_at) DESC LIMIT 1`,
     [owner.key]
   );
   if (!own.success) {
@@ -382,7 +430,7 @@ export function lastActivityMs(
   client: CmosDatabaseClient,
   session: { id: string; started_at: string; captures: string | null }
 ): number {
-  const parse = (value: string): number => Date.parse(normalizeCloseTimestamp(value));
+  const parse = (value: string): number => storedTimeMs(value);
   const times: number[] = [parse(session.started_at)];
   try {
     const captures: unknown = JSON.parse(session.captures ?? '[]');
@@ -397,7 +445,7 @@ export function lastActivityMs(
   }
   for (const table of ['strategic_decisions', 'learnings'] as const) {
     const newest = client.getOne<{ newest: string | null }>(
-      `SELECT MAX(created_at) AS newest FROM ${table} WHERE author_session_id = ?`,
+      `SELECT strftime('%Y-%m-%dT%H:%M:%fZ', MAX(julianday(created_at))) AS newest FROM ${table} WHERE author_session_id = ?`,
       [session.id]
     );
     if (newest.success && newest.data?.newest) times.push(parse(newest.data.newest));
@@ -424,7 +472,7 @@ export function heldByAnotherProcess(
   },
   purpose: 'write' | 'complete',
   nowMs: number = Date.now(),
-  self: SessionOwner = currentSessionOwner()
+  self: SessionOwner = currentSessionOwner(client.path)
 ): boolean {
   if (session.implicit !== 1) return false;
   const liveness = ownerLiveness(session.owner_key ?? null, self);
@@ -433,7 +481,7 @@ export function heldByAnotherProcess(
   return nowMs - lastActivityMs(client, session) <= IMPLICIT_SESSION_IDLE_HOURS * HOUR_MS;
 }
 
-export type CloseReason = 'owner-exited' | 'idle' | 'process-exit';
+export type CloseReason = 'owner-exited' | 'idle' | 'process-exit' | 'harness-ended';
 
 export interface SessionToClose {
   sessionId: string;
@@ -462,13 +510,13 @@ const roundHours = (ms: number): number => Math.round((ms / HOUR_MS) * 10) / 10;
 export function implicitSessionsToClose(
   client: CmosDatabaseClient,
   nowMs: number = Date.now(),
-  self: SessionOwner = currentSessionOwner()
+  self: SessionOwner = currentSessionOwner(client.path)
 ): SessionToClose[] | null {
   if (!tableHasColumn(client, 'sessions', 'implicit')) return [];
   const rows = client.getMany<ActiveSessionRow>(
     `SELECT id, title, started_at, captures, owner_key FROM sessions
       WHERE status = 'active' AND implicit = 1 AND (owner_key IS NULL OR owner_key <> ?)
-      ORDER BY started_at ASC`,
+      ORDER BY julianday(started_at) ASC`,
     [self.key]
   );
   if (!rows.success || !rows.data) return null;
@@ -499,22 +547,30 @@ export function implicitSessionsToClose(
 }
 
 /**
- * The explicit sessions an explicit start would meet: those idle past the bound (closed first, with
- * a receipt) and a count of live ones (which make the start refuse). Null when the read failed.
+ * The explicit sessions an explicit start would meet: those idle past the bound, whoever started
+ * them (closed first, with a receipt), and a count of live ones that block this caller's start: its
+ * own and keyless ones, never another harness session's (which make the start refuse). Null when
+ * the read failed.
  */
 export function explicitSessionsAtStart(
   client: CmosDatabaseClient,
-  nowMs: number = Date.now()
+  nowMs: number = Date.now(),
+  self: SessionOwner = currentSessionOwner(client.path)
 ): { idle: SessionToClose[]; live: number } | null {
   const migrated = tableHasColumn(client, 'sessions', 'implicit');
+  const keyed = migrated && tableHasColumn(client, 'sessions', 'owner_key');
   const rows = client.getMany<ActiveSessionRow>(
-    migrated
+    keyed
       ? `SELECT id, title, started_at, captures, owner_key FROM sessions
           WHERE status = 'active' AND implicit = 0
-          ORDER BY started_at ASC`
-      : `SELECT id, title, started_at, captures, NULL AS owner_key FROM sessions
-          WHERE status = 'active'
-          ORDER BY started_at ASC`,
+          ORDER BY julianday(started_at) ASC`
+      : migrated
+        ? `SELECT id, title, started_at, captures, NULL AS owner_key FROM sessions
+            WHERE status = 'active' AND implicit = 0
+            ORDER BY julianday(started_at) ASC`
+        : `SELECT id, title, started_at, captures, NULL AS owner_key FROM sessions
+            WHERE status = 'active'
+            ORDER BY julianday(started_at) ASC`,
     []
   );
   if (!rows.success || !rows.data) return null;
@@ -530,27 +586,65 @@ export function explicitSessionsAtStart(
         reason: 'idle',
         idleHours: roundHours(idleMs),
       });
-    } else {
+    } else if (row.owner_key === null || row.owner_key === self.key) {
       live += 1;
     }
   }
   return { idle, live };
 }
 
+/**
+ * The active sessions a harness session owns (`ext:<hash>`): its implicit session and any explicit
+ * session it started. SessionEnd closes them all.
+ */
+export function harnessSessions(
+  client: CmosDatabaseClient,
+  ownerKey: string
+): Array<{ id: string; title: string; implicit: boolean }> {
+  if (
+    !tableHasColumn(client, 'sessions', 'implicit') ||
+    !tableHasColumn(client, 'sessions', 'owner_key')
+  ) {
+    return [];
+  }
+  const rows = client.getMany<{ id: string; title: string; implicit: number }>(
+    `SELECT id, title, implicit FROM sessions
+      WHERE status = 'active' AND owner_key = ?
+      ORDER BY julianday(started_at) ASC`,
+    [ownerKey]
+  );
+  if (!rows.success) {
+    throw new Error(rows.error?.message ?? "Failed to read the harness session's sessions");
+  }
+  return (rows.data ?? []).map((row) => ({
+    id: row.id,
+    title: row.title,
+    implicit: row.implicit === 1,
+  }));
+}
+
 /** This process's own active implicit session in a store, if any. */
 export function ownImplicitSession(
   client: CmosDatabaseClient,
-  self: SessionOwner = currentSessionOwner()
+  self: SessionOwner = currentSessionOwner(client.path)
 ): { id: string; title: string } | null {
   if (!tableHasColumn(client, 'sessions', 'implicit')) return null;
   const own = client.getOne<{ id: string; title: string }>(
     `SELECT id, title FROM sessions
       WHERE status = 'active' AND implicit = 1 AND owner_key = ?
-      ORDER BY started_at DESC LIMIT 1`,
+      ORDER BY julianday(started_at) DESC LIMIT 1`,
     [self.key]
   );
   return own.success && own.data ? own.data : null;
 }
+
+/**
+ * A SQL LIKE pattern matching {@link automaticCloseSummary} for a session that held nothing: no
+ * capture, no decision, no learning. Onboard's "last session" never lets one displace a session
+ * that has something.
+ */
+export const EMPTY_AUTOMATIC_CLOSE_PATTERN =
+  'Closed automatically:%. 0 captures; 0 decisions and 0 learnings authored%';
 
 /**
  * The summary a session closed by the server carries: counts and mission ids, nothing generated.
@@ -565,9 +659,11 @@ export function automaticCloseSummary(input: {
   const why =
     input.reason === 'process-exit'
       ? 'its process ended'
-      : input.reason === 'owner-exited'
-        ? 'the process that opened it is gone'
-        : `idle ${input.idleHours ?? '?'} h, past the ${IMPLICIT_SESSION_IDLE_HOURS} h bound`;
+      : input.reason === 'harness-ended'
+        ? 'its harness session ended'
+        : input.reason === 'owner-exited'
+          ? 'the process that opened it is gone'
+          : `idle ${input.idleHours ?? '?'} h, past the ${IMPLICIT_SESSION_IDLE_HOURS} h bound`;
   const byCategory = new Map<string, number>();
   const missions = new Set<string>();
   try {

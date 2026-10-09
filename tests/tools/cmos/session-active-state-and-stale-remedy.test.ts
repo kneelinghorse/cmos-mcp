@@ -126,7 +126,11 @@ describe('s88-m04 stale-runtime remedy', () => {
     fs.rmSync(projectRoot, { recursive: true, force: true });
   });
 
-  it('server health prescribes a new host session, not an operator-owned child restart', () => {
+  // s93-m11 (the contract critic): the message states the fact and prescribes nothing, never an
+  // operator-owned child restart (s88-m04's rule). The remedy depends on where the session runs, so
+  // the opener's action names it (the host session here, the checkout's script in this repository),
+  // and a fixed remedy in this message no longer contradicts that action.
+  it('server health states the stale fact and prescribes no remedy of its own', () => {
     writeManifest(manifest('old-build', '2026-08-28T20:00:00Z'));
     initServerHealth(projectRoot);
     writeManifest(manifest('new-build', '2026-08-28T20:12:00Z'));
@@ -134,8 +138,8 @@ describe('s88-m04 stale-runtime remedy', () => {
     const health = getServerHealth();
 
     expect(health.codeIsCurrent).toBe(false);
-    expect(health.stalenessMessage).toMatch(/new .*host session|reconnect/i);
-    expect(health.stalenessMessage).not.toMatch(/restart.*(?:mcp|server)|restart required/i);
+    expect(health.stalenessMessage).toMatch(/running stale code/i);
+    expect(health.stalenessMessage).not.toMatch(/restart|new .*host session|reconnect/i);
   });
 
   it('onboard promotes the same available host-session lever', async () => {

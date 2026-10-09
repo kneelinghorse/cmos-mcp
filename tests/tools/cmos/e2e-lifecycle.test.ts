@@ -21,7 +21,7 @@ import { CmosDetector } from '../../../src/intelligence/cmos-detector';
 import { cmosAgentOnboard } from '../../../src/tools/cmos/cmos-agent-onboard';
 import { cmosSprintComplete } from '../../../src/tools/cmos/cmos-sprint-complete';
 import {
-  detectAndFlagStaleness,
+  readStaleness,
   DEFAULT_STALENESS_THRESHOLD,
 } from '../../../src/tools/cmos/staleness-detection';
 import { findRelevantDecisions } from '../../../src/tools/cmos/relevance-surfacing';
@@ -395,7 +395,7 @@ describe('E2E Lifecycle Integration', () => {
   });
 
   describe('staleness detection', () => {
-    it('flags old decisions from past sprints as stale', async () => {
+    it('counts old decisions from past sprints as due for review without changing them', async () => {
       const { db, dbPath } = testDb;
 
       // Create old and new sprints — total = threshold + 5 so the active sprint
@@ -427,16 +427,16 @@ describe('E2E Lifecycle Integration', () => {
       ).run(`Recent decision from sprint ${recentSprintNum}`, `sprint-${recentSprintNum}`);
 
       const result = await callWithDb(dbPath, (client: any) => {
-        return detectAndFlagStaleness(client, { threshold: DEFAULT_STALENESS_THRESHOLD });
+        return readStaleness(client, { threshold: DEFAULT_STALENESS_THRESHOLD });
       });
 
-      expect(result.decisionsFlagged).toBeGreaterThanOrEqual(1);
+      // s93-m11: the old decision is counted as due for review; its status is not changed.
+      expect(result.dueDecisions).toBe(1);
 
-      // Verify old decision is stale
       const oldDecision = db
         .prepare(`SELECT status FROM strategic_decisions WHERE decision_text LIKE '%sprint 1%'`)
         .get() as { status: string };
-      expect(oldDecision.status).toBe('stale');
+      expect(oldDecision.status).toBe('active');
 
       // Verify recent decision is still active
       const recentDecision = db

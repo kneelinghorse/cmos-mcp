@@ -24,7 +24,8 @@ import { createError, createSuccess, CmosErrors, CMOS_ERROR_CODES } from './erro
 import { loadVecExtension } from './vec-loader';
 import { assertJestDbPathIsolated, RealStoreGuardError } from './real-store-guard';
 import { isReadOnlyAgentSession } from './read-only-agent-guard';
-import { currentToolCallActionMode } from './tool-call-context';
+import { currentToolCallActionMode, recordStoreWrite } from './tool-call-context';
+import { processBusyTimeout } from './sqlite-busy';
 
 // Re-export the resolver for convenience. s80-m01 trimmed the dead JSON
 // `ProjectRegistry` / `RegisteredProject` / `ProjectValidation` /
@@ -110,6 +111,9 @@ function shouldRegisterProject(options: CmosDatabaseClientOptions): boolean {
   return actionMode === undefined || actionMode === 'write';
 }
 
+/** A statement that changes rows (not DDL, not a pragma, not a transaction verb). */
+const ROW_WRITE_SQL = /^\s*(INSERT|UPDATE|DELETE|REPLACE)\b/i;
+
 /**
  * Query parameters for parameterized queries
  */
@@ -162,7 +166,8 @@ export class CmosDatabaseClient {
   private constructor(dbPath: string, options: CmosDatabaseClientOptions = {}) {
     this.dbPath = dbPath;
     this.options = {
-      timeout: options.timeout ?? 5000,
+      // s93-m01: a hook verb lowers the process-wide default so a held store fails fast.
+      timeout: options.timeout ?? processBusyTimeout() ?? 5000,
       readonly: options.readonly ?? false,
       verbose: options.verbose ?? false,
     };
@@ -456,6 +461,9 @@ export class CmosDatabaseClient {
     try {
       const stmt = this.prepareStatement(sql);
       const result = params ? stmt.run(params) : stmt.run();
+      // s93-m11: a row changed in this store during a dispatched call (first-write upkeep runs
+      // only for stores a call really wrote).
+      if (result.changes > 0 && ROW_WRITE_SQL.test(sql)) recordStoreWrite(this.path);
       return createSuccess({
         changes: result.changes,
         lastInsertRowid: result.lastInsertRowid,

@@ -67,6 +67,9 @@ const ownerB: SessionOwner = {
   kind: 'process',
   pid: process.pid,
 };
+/** Two harness sessions (decision #1189): their writes carry the hashed harness session id. */
+const harnessA: SessionOwner = { key: 'ext:aaaaaaaaaaaaaaaa', kind: 'external', pid: process.pid };
+const harnessB: SessionOwner = { key: 'ext:bbbbbbbbbbbbbbbb', kind: 'external', pid: process.pid };
 
 /** A pid that was real and is now gone: a child that exited and was reaped. */
 function deadPid(): number {
@@ -223,24 +226,106 @@ describe('s92-m03 — a capture never fails for lack of a session', () => {
     expect(second.data!.implicitSession).toEqual({ opened: false });
   });
 
-  it('an open explicit session still takes every capture that names none, as before 3.2.0', async () => {
+  // s93-m01 (#1189): an explicit session started inside a harness session records that harness
+  // session's key and takes only its captures; another harness session writes into its own.
+  it("a harness session's explicit session takes its captures, and another harness session's go to its own", async () => {
     const store = buildStore();
-    setSessionOwnerForTesting(ownerA);
+    setSessionOwnerForTesting(harnessA);
     const started = await cmosSessionStart({
       type: 'planning',
       title: 'explicit planning',
       projectRoot: store.projectRoot,
     });
     expect(started.success).toBe(true);
+    expect(sessionRow(store, started.data!.sessionId).owner_key).toBe(harnessA.key);
+    const fromA = await cmosSessionCapture({
+      category: 'context',
+      content: "lands in A's explicit session",
+      projectRoot: store.projectRoot,
+    });
+    expect(fromA.data!.sessionId).toBe(started.data!.sessionId);
+    expect(fromA.data!.implicitSession).toBeUndefined();
 
+    setSessionOwnerForTesting(harnessB);
+    const fromB = await cmosSessionCapture({
+      category: 'context',
+      content: "lands in B's own session",
+      projectRoot: store.projectRoot,
+    });
+    expect(fromB.success).toBe(true);
+    expect(fromB.data!.sessionId).not.toBe(started.data!.sessionId);
+    expect(fromB.data!.implicitSession).toEqual({ opened: true });
+
+    // A's keyed session neither blocks B's own start nor is B's to close.
+    const startedB = await cmosSessionStart({
+      type: 'research',
+      title: "B's own explicit session",
+      projectRoot: store.projectRoot,
+    });
+    expect(startedB.success).toBe(true);
+    expect(sessionRow(store, startedB.data!.sessionId).owner_key).toBe(harnessB.key);
+    const closedB = await cmosSessionComplete({
+      summary: 'B done',
+      projectRoot: store.projectRoot,
+    });
+    expect(closedB.data!.sessionId).toBe(startedB.data!.sessionId);
+    expect(sessionRow(store, started.data!.sessionId).status).toBe('active');
+  });
+
+  // The m01 build critic, B1 scenario A: a server with no harness link restarts after every build.
+  // A pid key names that server process, not a conversation, so its explicit session stays keyless
+  // and the restarted server keeps writing into it, as in 3.2.0.
+  it('an explicit session started without a harness survives a server restart', async () => {
+    const store = buildStore();
+    setSessionOwnerForTesting(ownerA);
+    const started = await cmosSessionStart({
+      type: 'planning',
+      title: 'before the restart',
+      projectRoot: store.projectRoot,
+    });
+    expect(started.success).toBe(true);
+    const sessionId = started.data!.sessionId;
+    expect(sessionRow(store, sessionId).owner_key).toBeNull();
+
+    setSessionOwnerForTesting(ownerB); // the server, restarted on a new build
+    const captured = await cmosSessionCapture({
+      category: 'context',
+      content: 'after the restart',
+      projectRoot: store.projectRoot,
+    });
+    expect(captured.data!.sessionId).toBe(sessionId);
+    expect(query(store, 'SELECT id FROM sessions WHERE implicit = 1')).toEqual([]);
+
+    const refused = await cmosSessionStart({
+      type: 'planning',
+      title: 'a second start',
+      projectRoot: store.projectRoot,
+    });
+    expect(refused.error?.code).toBe(CMOS_ERROR_CODES.SESSION_ALREADY_ACTIVE);
+    // The remedy names the session, so following it closes this one and no other.
+    expect(refused.error?.suggestion).toContain(`sessionId="${sessionId}"`);
+
+    const closed = await cmosSessionComplete({ summary: 'done', projectRoot: store.projectRoot });
+    expect(closed.data!.sessionId).toBe(sessionId);
+    expect(sessionRow(store, sessionId).status).toBe('completed');
+  });
+
+  it('a keyless explicit session (started before 3.3.0) still takes every capture that names none', async () => {
+    const store = buildStore();
+    const legacy = await plantSession(store, {
+      implicit: false,
+      ownerKey: null,
+      startedAt: hoursAgo(1),
+      title: 'explicit, started by 3.2.0',
+    });
     setSessionOwnerForTesting(ownerB);
     const captured = await cmosSessionCapture({
       category: 'context',
-      content: 'lands in the explicit session',
+      content: 'lands in the keyless explicit session',
       projectRoot: store.projectRoot,
     });
     expect(captured.success).toBe(true);
-    expect(captured.data!.sessionId).toBe(started.data!.sessionId);
+    expect(captured.data!.sessionId).toBe(legacy);
     expect(captured.data!.implicitSession).toBeUndefined();
     expect(query(store, 'SELECT id FROM sessions WHERE implicit = 1')).toEqual([]);
   });
@@ -509,6 +594,8 @@ describe('s92-m03 — reconcile', () => {
       startedAt: hoursAgo(1),
       title: 'orphan beside an explicit session',
     });
+    // A server with no harness link starts a keyless explicit session, as in 3.2.0.
+    setSessionOwnerForTesting(ownerA);
     const started = await cmosSessionStart({
       type: 'planning',
       title: 'sprint-long explicit',
@@ -518,7 +605,6 @@ describe('s92-m03 — reconcile', () => {
     // a process that died after the explicit session began.
     run(store, `UPDATE sessions SET status = 'active', completed_at = NULL WHERE id = ?`, orphan);
 
-    setSessionOwnerForTesting(ownerA);
     const captured = await cmosSessionCapture({
       category: 'context',
       content: 'lands in the explicit session',
@@ -854,9 +940,8 @@ describe('s92-m03 — the listers show explicit sessions only', () => {
 
   it('orphan detection and the cross-project sweep skip implicit sessions', async () => {
     const store = buildStore();
-    // 30 h, not 3: orphan detection compares ISO started_at with SQLite datetime() text, so a
-    // session stale since earlier the same calendar day is not yet flagged (a separate defect,
-    // recorded as a next-step; not this mission's).
+    // 30 h so the cross-project sweep below, which has its own 24 h bound, sees them too. The
+    // same-day case is pinned by the next test (s93-m11, #597).
     const explicit = await plantSession(store, {
       implicit: false,
       ownerKey: null,
@@ -888,6 +973,27 @@ describe('s92-m03 — the listers show explicit sessions only', () => {
       ProjectGraphRegistry.resetInstance();
       fs.rmSync(configDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('s93-m11 (#597) — a session that went stale earlier the same day is flagged', () => {
+  it('compares started_at as a time, so ISO text against SQLite datetime() text cannot hide it', async () => {
+    const store = buildStore();
+    // Three minutes old against a threshold of about a minute: on the same UTC calendar day as
+    // "now" (except in the first three minutes after midnight), where the old string comparison
+    // read '…T…Z' as later than SQLite's '… …' text and never flagged it.
+    const sameDay = await plantSession(store, {
+      implicit: false,
+      ownerKey: null,
+      startedAt: hoursAgo(0.05),
+      title: 'explicit, stale since a few minutes ago',
+    });
+
+    const orphans = await withClientAsync(
+      async (client) => createSuccess(detectOrphans(client, { staleSessionHours: 0.02 })),
+      { projectRoot: store.projectRoot }
+    );
+    expect(orphans.data!.staleSessions.map((s) => s.id)).toEqual([sameDay]);
   });
 });
 
@@ -995,6 +1101,14 @@ describe('s92-m03 — practice 2 and practice 8 fences', () => {
         file: 'src/tools/cmos/session-owner.ts',
         fragment: /NULL AS owner_key/,
         reason: 'explicitSessionsAtStart on a store without the column, so no implicit session',
+      },
+      {
+        file: 'src/tools/cmos/session-owner.ts',
+        fragment:
+          /SELECT id, title, implicit FROM sessions\s+WHERE status = 'active' AND owner_key = \?/,
+        reason:
+          'harnessSessions: SessionEnd closes every session one harness session owns, implicit and ' +
+          'explicit alike; the owner key scopes it to that conversation',
       },
     ];
     const offenders: string[] = [];

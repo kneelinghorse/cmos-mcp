@@ -137,7 +137,7 @@ function getLastMissionActivity(client: CmosDatabaseClient): string | null {
     const completedResult = client.getOne<{ completed_at: string | null }>(
       `SELECT completed_at FROM missions
        WHERE completed_at IS NOT NULL
-       ORDER BY completed_at DESC
+       ORDER BY julianday(completed_at) DESC
        LIMIT 1`
     );
 
@@ -169,7 +169,7 @@ function getLastSessionActivity(client: CmosDatabaseClient): string | null {
     const completedResult = client.getOne<{ completed_at: string | null }>(
       `SELECT completed_at FROM sessions
        WHERE completed_at IS NOT NULL
-       ORDER BY completed_at DESC
+       ORDER BY julianday(completed_at) DESC
        LIMIT 1`
     );
 
@@ -180,7 +180,7 @@ function getLastSessionActivity(client: CmosDatabaseClient): string | null {
     // Check started_at for any session
     const startedResult = client.getOne<{ started_at: string }>(
       `SELECT started_at FROM sessions
-       ORDER BY started_at DESC
+       ORDER BY julianday(started_at) DESC
        LIMIT 1`
     );
 
@@ -202,7 +202,7 @@ function getLastContextUpdate(client: CmosDatabaseClient): string | null {
     const result = client.getOne<{ updated_at: string | null }>(
       `SELECT updated_at FROM contexts
        WHERE updated_at IS NOT NULL
-       ORDER BY updated_at DESC
+       ORDER BY julianday(updated_at) DESC
        LIMIT 1`
     );
 

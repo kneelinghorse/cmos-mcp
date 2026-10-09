@@ -91,7 +91,7 @@ export function resolveCurrentSprintId(client: CmosDatabaseClient): string | nul
         WHEN 'Active' THEN 2
         WHEN 'Planned' THEN 3
         ELSE 4
-      END, COALESCE(s.start_date, '9999-12-31') ASC, s.rowid ASC
+      END, julianday(COALESCE(s.start_date, '9999-12-31')) ASC, s.rowid ASC
      LIMIT 1`,
     []
   );
@@ -122,7 +122,7 @@ export function resolveCurrentSprintId(client: CmosDatabaseClient): string | nul
         WHEN 'Planned' THEN 3
         WHEN 'Completed' THEN 4
         ELSE 5
-      END, COALESCE(end_date, start_date, '') DESC, rowid DESC
+      END, julianday(COALESCE(end_date, start_date)) DESC, rowid DESC
       LIMIT 1`,
     []
   );
@@ -201,7 +201,7 @@ function getOpenStatusSprintId(client: CmosDatabaseClient): string | null {
     `SELECT s.id
        FROM sprints s
        LEFT JOIN (
-         SELECT sprint_id, MAX(activity_at) AS last_activity
+         SELECT sprint_id, MAX(julianday(activity_at)) AS last_activity
            FROM (
              SELECT m.sprint_id AS sprint_id, m.completed_at AS activity_at
                FROM missions m
@@ -220,7 +220,7 @@ function getOpenStatusSprintId(client: CmosDatabaseClient): string | null {
         WHEN 'Current' THEN 1
         WHEN 'Active' THEN 2
         ELSE 3
-      END, COALESCE(act.last_activity, '') DESC, s.rowid DESC
+      END, COALESCE(act.last_activity, 0) DESC, s.rowid DESC
       LIMIT 1`,
     []
   );
@@ -244,7 +244,7 @@ function getExplicitOpenSprintId(client: CmosDatabaseClient): string | null {
     `SELECT s.id
        FROM sprints s
        LEFT JOIN (
-         SELECT sprint_id, MAX(activity_at) AS last_activity
+         SELECT sprint_id, MAX(julianday(activity_at)) AS last_activity
            FROM (
              SELECT m.sprint_id AS sprint_id, m.completed_at AS activity_at
                FROM missions m
@@ -272,7 +272,7 @@ function getExplicitOpenSprintId(client: CmosDatabaseClient): string | null {
         WHEN 'Current' THEN 1
         WHEN 'Active' THEN 2
         ELSE 3
-      END, COALESCE(act.last_activity, '') DESC, s.rowid DESC
+      END, COALESCE(act.last_activity, 0) DESC, s.rowid DESC
       LIMIT 1`,
     []
   );
@@ -304,7 +304,7 @@ function getMostRecentlyActiveSprintId(client: CmosDatabaseClient): string | nul
        ) AS activity
       WHERE activity.activity_at IS NOT NULL
       GROUP BY activity.sprint_id
-      ORDER BY MAX(activity.activity_at) DESC, ${sprintIdOrderSql('activity.sprint_id', 'DESC')}
+      ORDER BY MAX(julianday(activity.activity_at)) DESC, ${sprintIdOrderSql('activity.sprint_id', 'DESC')}
       LIMIT 1`,
     []
   );
@@ -338,7 +338,7 @@ function getMostRecentlyActiveSprintIdIncludingCompleted(
        ) AS activity
       WHERE activity.activity_at IS NOT NULL
       GROUP BY activity.sprint_id
-      ORDER BY MAX(activity.activity_at) DESC, ${sprintIdOrderSql('activity.sprint_id', 'DESC')}
+      ORDER BY MAX(julianday(activity.activity_at)) DESC, ${sprintIdOrderSql('activity.sprint_id', 'DESC')}
       LIMIT 1`,
     []
   );

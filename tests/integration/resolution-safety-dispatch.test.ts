@@ -294,8 +294,9 @@ describe('s92-m01 resolution safety at the dispatch boundary', () => {
           tool,
           data: { projectRoot: path.resolve(projectA), resolvedBy: 'cwd' },
         });
-        // cwd and explicit are how a caller expects a project to be chosen: no extra line.
-        expect(textOf(result)).not.toMatch(/^Project: /);
+        // s93-m11 (#606 c): every answer names the project it touched; a cwd project needs no
+        // reason beside it.
+        expect(textOf(result).startsWith(`Project: ${path.resolve(projectA)}\n`)).toBe(true);
       }
     });
 

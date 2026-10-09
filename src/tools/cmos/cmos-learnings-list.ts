@@ -9,7 +9,7 @@
 
 import { withClient } from './client';
 import type { CmosToolResult } from './types';
-import { createSuccess } from './errors';
+import { createError, createSuccess } from './errors';
 import { ensureLearningsTable } from './schema-migrations';
 import { getProjectId } from './genesis-columns';
 import { frameForeignText } from '../../intelligence/provenance-frame';
@@ -17,6 +17,8 @@ import { learningsTaggedAcrossProjects } from '../../intelligence/cross-store-qu
 import type { CrossStoreError, CrossStoreQueryResult } from '../../intelligence/cross-store-query';
 import type { ProjectGraphRegistry } from '../../intelligence/project-graph-registry';
 import { appendWarnings, attachWarnings } from './format-warnings';
+import { readTimeBounds } from './stored-time';
+import { PREVIEW_MAX_CHARS, previewText } from './text-preview';
 
 /**
  * Learning record surfaced to clients.
@@ -25,8 +27,17 @@ export interface Learning {
   /** Learning ID */
   id: number;
 
-  /** Learning content text */
+  /**
+   * s93-m11 (#602): a preview of the learning, at most PREVIEW_MAX_CHARS characters (a default page
+   * was 20 KB of full text here). cmos_learnings(action="show", learningId) reads it in full.
+   */
   content: string;
+
+  /** Whether `content` was cut. */
+  truncated: boolean;
+
+  /** Characters in the full learning. */
+  fullLength: number;
 
   /** Category (technical, process, agent-behavior, tooling) */
   category: string | null;
@@ -51,11 +62,17 @@ export interface Learning {
   projectId: string | null;
 
   /**
-   * Sprint 61 m03 — institutional-rule flag. When 1, the learning is excluded
-   * from staleness flagging and from the staleness count surfaced on agent
-   * onboard. Toggle via cmos_learnings(action="update", evergreen=true|false).
+   * Sprint 61 m03 — institutional-rule flag. When 1, the learning never shows as past the
+   * review age (s93-m11: the age is computed at read; nothing flags it) and is left out of the
+   * count surfaced on agent onboard. Toggle via cmos_learnings(action="update", evergreen=true|false).
    */
   evergreen: boolean;
+}
+
+/** s93-m11: a learning's text as a list carries it, a preview with its cut and full length. */
+function contentPreview(text: string): Pick<Learning, 'content' | 'truncated' | 'fullLength'> {
+  const { preview, truncated, fullLength } = previewText(text);
+  return { content: preview, truncated, fullLength };
 }
 
 /**
@@ -127,8 +144,12 @@ export interface CmosLearningsListParams {
  * Execute the learnings list action.
  */
 export async function cmosLearningsList(
-  params: CmosLearningsListParams = {}
+  requested: CmosLearningsListParams = {}
 ): Promise<CmosToolResult<CmosLearningsListResult>> {
+  // s93-m11: since/until compare as times; see readTimeBounds.
+  const bounds = readTimeBounds(requested);
+  if ('error' in bounds) return createError<CmosLearningsListResult>(bounds.error);
+  const params: CmosLearningsListParams = { ...requested, ...bounds };
   const page = params.page ?? 1;
   const pageSize = params.pageSize ?? 20;
   const offset = (page - 1) * pageSize;
@@ -165,12 +186,12 @@ export async function cmosLearningsList(
       }
 
       if (params.since) {
-        conditions.push('created_at >= ?');
+        conditions.push('julianday(created_at) >= julianday(?)');
         queryParams.push(params.since);
       }
 
       if (params.until) {
-        conditions.push('created_at <= ?');
+        conditions.push('julianday(created_at) <= julianday(?)');
         queryParams.push(params.until);
       }
 
@@ -214,7 +235,7 @@ export async function cmosLearningsList(
       }>(
         `SELECT id, content, category, status, sprint_id, ${sessCol} AS session_id, mission_id, created_at, evergreen, ${projectExpr} AS project_id
          FROM learnings ${whereClause}
-         ORDER BY created_at DESC, id DESC
+         ORDER BY julianday(created_at) DESC, id DESC
          LIMIT ? OFFSET ?`,
         [...queryParams, pageSize, offset]
       );
@@ -223,7 +244,7 @@ export async function cmosLearningsList(
         listResult.success && listResult.data
           ? listResult.data.map((row) => ({
               id: row.id,
-              content: row.content,
+              ...contentPreview(row.content),
               category: row.category,
               status: row.status,
               sprintId: row.sprint_id,
@@ -294,7 +315,7 @@ export async function cmosLearningsListAcrossProjects(
 
   const learnings: Learning[] = fanout.results.map((row) => ({
     id: row.id,
-    content: row.content,
+    ...contentPreview(row.content),
     category: row.category,
     status: 'active',
     sprintId: null,
@@ -380,6 +401,23 @@ export function formatLearningsListForLLM(result: CmosToolResult<CmosLearningsLi
 
   if (data.hasMore) {
     lines.push(`More results available. Use page=${data.page + 1} to see next page.`);
+  }
+
+  // s93-m11 (#602): learnings are previews; say once how to read one in full. A row from another
+  // project is read in that project: its id is that store's.
+  const foreign = (l: Learning): boolean =>
+    l.projectId != null && (data.localProjectId == null || l.projectId !== data.localProjectId);
+  const cut = data.learnings.find((l) => l.truncated && !foreign(l));
+  if (cut) {
+    lines.push(
+      `Learnings are cut at ${PREVIEW_MAX_CHARS} characters. Read one in full with ` +
+        `cmos_learnings(action="show", learningId=${cut.id}).`
+    );
+  } else if (data.learnings.some((l) => l.truncated)) {
+    lines.push(
+      `Learnings are cut at ${PREVIEW_MAX_CHARS} characters. A row tagged proj:… reads in full ` +
+        'with cmos_learnings(action="show") in that project, with its projectRoot: the id is that project\'s.'
+    );
   }
 
   appendWarnings(lines, result);

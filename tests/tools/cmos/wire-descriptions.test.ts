@@ -9,6 +9,7 @@ import {
   SERVER_INSTRUCTIONS,
   SERVER_INSTRUCTIONS_LEVELS,
   SERVER_INSTRUCTIONS_LOOP,
+  SERVER_INSTRUCTIONS_PROPOSALS,
 } from '../../../src/server-instructions';
 import { CMOS_ACTION_PARAMS, CMOS_TOOL_DEFINITIONS } from '../../../src/tools/cmos';
 import { WIRE_TEXT } from '../../../src/tools/cmos/wire-descriptions';
@@ -138,5 +139,132 @@ describe('s92-m08 — server instructions', () => {
     expect(SERVER_INSTRUCTIONS).toContain(SERVER_INSTRUCTIONS_LEVELS);
     expect(SERVER_INSTRUCTIONS.length).toBeLessThan(1_200);
     expect(SERVER_INSTRUCTIONS).not.toMatch(/\bs\d{2}-m\d{2}\b|sprint-\d+|#\d+|\bArc [A-Z]\b/);
+  });
+
+  // s93-m06: the convention reaches every harness, hook-less ones included, inside the ceiling.
+  it('say which choices wait for the operator, and how to put one to them', () => {
+    expect(SERVER_INSTRUCTIONS.endsWith(SERVER_INSTRUCTIONS_PROPOSALS)).toBe(true);
+    expect(SERVER_INSTRUCTIONS_PROPOSALS).toContain('Would record: <decision and reason>');
+    expect(SERVER_INSTRUCTIONS_PROPOSALS).toContain('fromDraft when CMOS gave it an id');
+    expect(SERVER_INSTRUCTIONS_PROPOSALS).toMatch(/scope, cost, outside commitments/);
+    expect(SERVER_INSTRUCTIONS_PROPOSALS).toMatch(/your own remit directly/);
+  });
+});
+
+/**
+ * s93-m11 (#604; operator Q3, decision #1163): CMOS is positioned as the record keeper agents keep,
+ * "decisions that survive the session", never as "memory". This is the positioning check beside the
+ * jargon check above.
+ *
+ * SCOPE AND WHAT IT CANNOT SEE (one contract). Scope: every string literal in src/ (the text the
+ * server can send), the shipped seed, README.md, docs/getting-started.md, TOOL_REFERENCE.md and
+ * SECURITY.md, matched on the word "memory" in any case. Rendered onboard text is composed at run
+ * time, so it is checked by sampling: a fresh general-tier and build-tier onboard, not every state.
+ * Not seen: CHANGELOG.md (a release record), code comments and module paths in imports (never
+ * sent), and synonyms of the word.
+ * Allowed: a technical term ("in-memory", SQLite's ":memory:") and the path of the agent-local
+ * folder AGENTS.md tells agents never to write (~/.claude/projects/.../memory/), which names a
+ * folder, not CMOS.
+ */
+describe('s93-m11 — no shipped self-description calls CMOS memory', () => {
+  /* eslint-disable @typescript-eslint/no-require-imports */
+  const fs = require('fs') as typeof import('fs');
+  const path = require('path') as typeof import('path');
+  const ts = require('typescript') as typeof import('typescript');
+  /* eslint-enable @typescript-eslint/no-require-imports */
+  const ROOT = path.resolve(__dirname, '..', '..', '..');
+  const WORD = /\bmemory\b/i;
+  const ALLOWED = [/in-memory/i, /:memory:/, /~\/\.claude\/projects\/\.\.\.\/memory\//];
+  const offends = (text: string): boolean =>
+    WORD.test(ALLOWED.reduce((rest, allowed) => rest.replace(new RegExp(allowed, 'gi'), ''), text));
+
+  function walk(dir: string, keep: (file: string) => boolean): string[] {
+    const out: string[] = [];
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) out.push(...walk(full, keep));
+      else if (keep(full)) out.push(full);
+    }
+    return out;
+  }
+
+  it('no string literal in src/ says it', () => {
+    const hits: string[] = [];
+    for (const file of walk(path.join(ROOT, 'src'), (f) => f.endsWith('.ts'))) {
+      const source = ts.createSourceFile(
+        file,
+        fs.readFileSync(file, 'utf8'),
+        ts.ScriptTarget.Latest,
+        true
+      );
+      const visit = (node: import('typescript').Node): void => {
+        const isModulePath =
+          ts.isStringLiteral(node) &&
+          (ts.isImportDeclaration(node.parent) ||
+            ts.isExportDeclaration(node.parent) ||
+            (ts.isCallExpression(node.parent) &&
+              (node.parent.expression.kind === ts.SyntaxKind.ImportKeyword ||
+                (ts.isIdentifier(node.parent.expression) &&
+                  node.parent.expression.text === 'require'))));
+        if (
+          !isModulePath &&
+          (ts.isStringLiteral(node) ||
+            ts.isNoSubstitutionTemplateLiteral(node) ||
+            ts.isTemplateHead(node) ||
+            ts.isTemplateMiddle(node) ||
+            ts.isTemplateTail(node)) &&
+          offends(node.text)
+        ) {
+          const { line } = source.getLineAndCharacterOfPosition(node.getStart(source));
+          hits.push(`${path.relative(ROOT, file)}:${line + 1}: ${node.text.slice(0, 80)}`);
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(source);
+    }
+    expect(hits).toEqual([]);
+  });
+
+  it('no shipped document or seed file says it', () => {
+    const shipped = [
+      ...walk(path.join(ROOT, 'cmos-seed'), () => true),
+      ...['README.md', 'docs/getting-started.md', 'TOOL_REFERENCE.md', 'SECURITY.md'].map((f) =>
+        path.join(ROOT, f)
+      ),
+    ];
+    const hits: string[] = [];
+    for (const file of shipped) {
+      fs.readFileSync(file, 'utf8')
+        .split('\n')
+        .forEach((line, index) => {
+          if (offends(line)) hits.push(`${path.relative(ROOT, file)}:${index + 1}: ${line.trim()}`);
+        });
+    }
+    expect(hits).toEqual([]);
+  });
+
+  it('the rendered onboard text does not say it (sampled: a fresh general and a build project)', async () => {
+    /* eslint-disable @typescript-eslint/no-require-imports */
+    const os = require('os') as typeof import('os');
+    const { cmosAgentOnboard, formatAgentOnboardForLLM } =
+      require('../../../src/tools/cmos/cmos-agent-onboard') as typeof import('../../../src/tools/cmos/cmos-agent-onboard');
+    const { seedCmosDb } =
+      require('../../helpers/seedCmosDb') as typeof import('../../helpers/seedCmosDb');
+    /* eslint-enable @typescript-eslint/no-require-imports */
+    for (const tier of ['general', 'build']) {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), `cmos-s93m11-memory-${tier}-`));
+      try {
+        seedCmosDb(root, { projectName: `positioning ${tier}`, tier });
+        const onboard = await cmosAgentOnboard({
+          projectRoot: root,
+          callerProvidedProjectRoot: true,
+        });
+        expect(onboard.success).toBe(true);
+        expect(offends(formatAgentOnboardForLLM(onboard))).toBe(false);
+        expect(offends(JSON.stringify(onboard.data))).toBe(false);
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    }
   });
 });

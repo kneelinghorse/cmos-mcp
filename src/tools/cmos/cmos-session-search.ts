@@ -21,6 +21,8 @@ import { VALID_CAPTURE_CATEGORIES, type CaptureCategory } from './cmos-session-c
 import { getProjectId, tableHasColumn } from './genesis-columns';
 import { frameInlineIfForeign } from '../../intelligence/provenance-frame';
 import { appendWarnings } from './format-warnings';
+import { PREVIEW_MAX_CHARS, previewText } from './text-preview';
+import { readTimeBounds } from './stored-time';
 
 // Re-export for convenience
 export { VALID_SESSION_TYPES };
@@ -33,8 +35,14 @@ export interface MatchedCapture {
   /** Capture category */
   category: CaptureCategory;
 
-  /** Capture content */
+  /** s93-m11 (#602): a preview of the capture, at most PREVIEW_MAX_CHARS characters. */
   content: string;
+
+  /** Whether `content` was cut. */
+  truncated: boolean;
+
+  /** Characters in the full capture. */
+  fullLength: number;
 
   /** Timestamp of capture */
   timestamp: string;
@@ -68,8 +76,17 @@ export interface SessionSearchResult {
   /** When the session completed (if completed) */
   completedAt: string | null;
 
-  /** Session summary (if available) */
+  /**
+   * s93-m11 (#602): a preview of the session summary, at most PREVIEW_MAX_CHARS characters; read
+   * it in full with cmos_session(action="list", sessionId).
+   */
   summary: string | null;
+
+  /** Whether `summary` was cut. */
+  summaryTruncated: boolean;
+
+  /** Characters in the full summary (0 when there is none). */
+  summaryFullLength: number;
 
   /** Total captures in session */
   captureCount: number;
@@ -206,8 +223,12 @@ interface ParsedCapture {
  * @returns CmosToolResult with search results
  */
 export async function cmosSessionSearch(
-  params: CmosSessionSearchParams
+  requested: CmosSessionSearchParams
 ): Promise<CmosToolResult<CmosSessionSearchResult>> {
+  // s93-m11: since/until compare as times; see readTimeBounds.
+  const bounds = readTimeBounds(requested);
+  if ('error' in bounds) return createError<CmosSessionSearchResult>(bounds.error);
+  const params: CmosSessionSearchParams = { ...requested, ...bounds };
   if (!params.query || params.query.trim().length === 0) {
     return createError(CmosErrors.missingParameter('query'));
   }
@@ -238,12 +259,12 @@ export async function cmosSessionSearch(
 
       // Add date range filters
       if (params.since) {
-        clauses.push('started_at >= ?');
+        clauses.push('julianday(started_at) >= julianday(?)');
         queryParams.push(params.since);
       }
 
       if (params.until) {
-        clauses.push('started_at <= ?');
+        clauses.push('julianday(started_at) <= julianday(?)');
         queryParams.push(params.until);
       }
 
@@ -272,7 +293,7 @@ export async function cmosSessionSearch(
         `SELECT id, type, title, status, sprint_id, started_at, completed_at, summary, captures, ${projectIdExpr}
            FROM sessions
            ${whereClause}
-          ORDER BY started_at DESC
+          ORDER BY julianday(started_at) DESC
           LIMIT ?`,
         [...queryParams, limit + 10] // Fetch extra for filtering
       );
@@ -353,9 +374,12 @@ export async function cmosSessionSearch(
             // Create highlight snippet
             const highlight = createHighlight(capture.content, keywords);
 
+            const preview = previewText(capture.content);
             matchedCaptures.push({
               category: capture.category as CaptureCategory,
-              content: capture.content,
+              content: preview.preview,
+              truncated: preview.truncated,
+              fullLength: preview.fullLength,
               timestamp: capture.timestamp,
               highlight,
             });
@@ -383,7 +407,13 @@ export async function cmosSessionSearch(
           sprintId: row.sprint_id,
           startedAt: row.started_at,
           completedAt: row.completed_at,
-          summary: row.summary,
+          ...(row.summary
+            ? (({ preview, truncated, fullLength }) => ({
+                summary: preview,
+                summaryTruncated: truncated,
+                summaryFullLength: fullLength,
+              }))(previewText(row.summary))
+            : { summary: null, summaryTruncated: false, summaryFullLength: 0 }),
           captureCount: captures.length,
           matchedCaptures,
           matchedIn,
@@ -524,6 +554,17 @@ export function formatSessionSearchForLLM(result: CmosToolResult<CmosSessionSear
       }
     }
     lines.push('');
+  }
+
+  // s93-m11 (#602): summaries and captures are previews; say once how to read one in full.
+  const cut = data.results.find(
+    (r) => r.summaryTruncated || r.matchedCaptures.some((capture) => capture.truncated)
+  );
+  if (cut) {
+    lines.push(
+      `Summaries and captures are cut at ${PREVIEW_MAX_CHARS} characters. Read a session in full ` +
+        `with cmos_session(action="list", sessionId="${cut.id}").`
+    );
   }
 
   appendWarnings(lines, result);

@@ -35,6 +35,7 @@
  */
 
 import Database from 'better-sqlite3';
+import { processBusyTimeout } from '../tools/cmos/sqlite-busy';
 import { randomUUID } from 'crypto';
 import { existsSync, readFileSync, realpathSync } from 'fs';
 import os from 'os';
@@ -101,6 +102,14 @@ export const PROJECT_GRAPH_SCHEMA_VERSION = 2;
 
 /** Busy timeout (ms) so concurrent writers from sibling MCP processes wait. */
 const BUSY_TIMEOUT_MS = 5000;
+
+/**
+ * s93-m01: a hook verb's process busy timeout wins, so a registry another process holds cannot hold
+ * a hook past its budget (the m01 build critic measured 5.5 s against session start's 3 s).
+ */
+function busyTimeoutMs(): number {
+  return processBusyTimeout() ?? BUSY_TIMEOUT_MS;
+}
 
 /** registry_meta key set once the s69-m05 one-time backfill has run. */
 const BACKFILL_MARKER_KEY = 'backfill_done';
@@ -264,9 +273,9 @@ export class ProjectGraphRegistry {
     // start. If the timeout were armed only by a pragma AFTER the flip, that flip
     // would throw SQLITE_BUSY immediately instead of waiting. Mirrors the
     // convention in client.ts (constructor timeout, then WAL).
-    const db = new Database(this.registryPath, { timeout: BUSY_TIMEOUT_MS });
+    const db = new Database(this.registryPath, { timeout: busyTimeoutMs() });
     db.pragma('journal_mode = WAL');
-    db.pragma(`busy_timeout = ${BUSY_TIMEOUT_MS}`); // redundant w/ constructor; kept explicit
+    db.pragma(`busy_timeout = ${busyTimeoutMs()}`); // redundant w/ constructor; kept explicit
     this.db = db;
     return db;
   }
@@ -624,7 +633,14 @@ export class ProjectGraphRegistry {
     }
     const projectId = existingGraphId ?? storedProjectId ?? slugifyName(path.basename(resolved));
     const identity = readStoreIdentity(resolved);
-    const name = opts.name ?? identity?.name ?? path.basename(resolved);
+    // s93-m12: with no name passed and none stored, a re-registration keeps the name the registry
+    // already has (a bare re-init used to rename a registered project after its folder).
+    const name =
+      opts.name ??
+      identity?.storedName ??
+      (existingGraphId ? this.get(existingGraphId)?.name : undefined) ??
+      identity?.name ??
+      path.basename(resolved);
     const entry = this.register({ project_id: projectId, store_path: resolved, name });
     if (entry.project_id !== projectId || !isSameStorePath(entry.store_path, resolved)) {
       throw new Error(
@@ -855,12 +871,14 @@ function readLegacyJsonRegistry(configDir: string): LegacyJsonRegistry | null {
  *
  * @param storePath absolute path to the project ROOT (cmos/db/cmos.sqlite under it).
  */
-export function readStoreIdentity(storePath: string): { project_id: string; name: string } | null {
+export function readStoreIdentity(
+  storePath: string
+): { project_id: string; name: string; storedName?: string } | null {
   const dbPath = path.join(storePath, 'cmos', 'db', 'cmos.sqlite');
   if (!existsSync(dbPath)) return null;
   let db: Database.Database | null = null;
   try {
-    db = new Database(dbPath, { readonly: true, fileMustExist: true, timeout: BUSY_TIMEOUT_MS });
+    db = new Database(dbPath, { readonly: true, fileMustExist: true, timeout: busyTimeoutMs() });
     const idRow = db.prepare("SELECT value FROM metadata WHERE key = 'project_id'").get() as
       | MetaRow
       | undefined;
@@ -869,8 +887,9 @@ export function readStoreIdentity(storePath: string): { project_id: string; name
     const nameRow = db.prepare("SELECT value FROM metadata WHERE key = 'project_name'").get() as
       | MetaRow
       | undefined;
-    const name = nameRow?.value?.trim() || path.basename(path.resolve(storePath));
-    return { project_id: projectId, name };
+    const storedName = nameRow?.value?.trim() || undefined;
+    const name = storedName ?? path.basename(path.resolve(storePath));
+    return { project_id: projectId, name, ...(storedName ? { storedName } : {}) };
   } catch {
     return null;
   } finally {
@@ -897,7 +916,7 @@ export function mintProjectId(storePath: string, preferredId?: string): string |
   if (!existsSync(dbPath)) return null;
   let db: Database.Database | null = null;
   try {
-    db = new Database(dbPath, { fileMustExist: true, timeout: BUSY_TIMEOUT_MS });
+    db = new Database(dbPath, { fileMustExist: true, timeout: busyTimeoutMs() });
     const idRow = db.prepare("SELECT value FROM metadata WHERE key = 'project_id'").get() as
       | MetaRow
       | undefined;

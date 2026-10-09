@@ -14,6 +14,7 @@ import { ensureLearningsTable } from './schema-migrations';
 import { getProjectId } from './genesis-columns';
 import { frameForeignText } from '../../intelligence/provenance-frame';
 import { appendWarnings, attachWarnings } from './format-warnings';
+import { compareStoredTimes } from './stored-time';
 import { PREVIEW_MAX_CHARS, previewText } from './text-preview';
 
 /**
@@ -179,7 +180,7 @@ export async function cmosLearningsSearch(
         `SELECT id, content, category, status, sprint_id, ${sessCol} AS session_id, mission_id, created_at,
                 ${projExpr} AS project_id
          FROM learnings ${whereClause}
-         ORDER BY created_at DESC, id DESC`,
+         ORDER BY julianday(created_at) DESC, id DESC`,
         queryParams
       );
 
@@ -208,7 +209,7 @@ export async function cmosLearningsSearch(
         .sort(
           (a, b) =>
             b.relevance - a.relevance ||
-            b.row.created_at.localeCompare(a.row.created_at) ||
+            compareStoredTimes(b.row.created_at, a.row.created_at) ||
             b.row.id - a.row.id
         );
 

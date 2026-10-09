@@ -1192,8 +1192,11 @@ describe('registerProject', () => {
     const authHeader = (options?.headers as Record<string, string>)['Authorization'];
     expect(authHeader).toBe('Bearer cmk_test-key');
 
-    // Verify body is FormData
+    // The upload contains the database alone, never local telemetry or another config file.
     expect(options?.body).toBeInstanceOf(FormData);
+    const formData = options?.body as FormData;
+    expect([...formData.keys()].sort()).toEqual(['database', 'projectName']);
+    expect(await (formData.get('database') as Blob).text()).toBe('fake-sqlite-data');
   });
 
   it('should handle re-registration (200 response)', async () => {
@@ -1443,6 +1446,9 @@ describe('syncSqliteFile', () => {
     expect(options?.body).toBeInstanceOf(FormData);
     const formData = options?.body as FormData;
     expect(formData.get('projectSlug')).toBe('my-project');
+    // Exact keys and exact file bytes reject an added telemetry part or a bundled archive.
+    expect([...formData.keys()].sort()).toEqual(['database', 'projectSlug']);
+    expect(await (formData.get('database') as Blob).text()).toBe('fake-sqlite-data');
   });
 
   it('should return error when SQLite file does not exist', async () => {

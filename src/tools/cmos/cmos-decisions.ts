@@ -43,6 +43,7 @@ import {
   type CmosDecisionsRecordParams,
   type CmosDecisionsRecordResult,
 } from './cmos-decisions-record';
+import type { CmosDraftRecordResult } from './draft-approval';
 import {
   cmosDecisionsBatchUpdate,
   formatDecisionsBatchUpdateForLLM,
@@ -94,6 +95,7 @@ export const CMOS_DECISIONS_ACTION_PARAMS: ActionParamMap<
   record: [
     'action',
     'content',
+    'fromDraft',
     'missionId',
     'sprintId',
     'supersedes',
@@ -111,6 +113,7 @@ export type CmosDecisionsResult =
   | CmosDecisionsReviewResult
   | CmosDecisionsBatchUpdateResult
   | CmosDecisionsRecordResult
+  | CmosDraftRecordResult
   | CmosDecisionsShowResult;
 
 export const cmosDecisionsSchema = z
@@ -174,6 +177,13 @@ export const cmosDecisionsSchema = z
       .describe('Array of decision IDs for batch_update action (max 100)'),
     // record params (s91-m04)
     content: z.string().optional().describe('Decision text for record action (required)'),
+    // s93-m06
+    fromDraft: z
+      .string()
+      .optional()
+      .describe(
+        'record action: the CMOS draft id (P<n>) the operator just answered; its kind decides what is written'
+      ),
     supersedes: z
       .array(z.number().int().positive())
       .optional()
@@ -205,7 +215,11 @@ export const cmosDecisionsToolDefinition = {
     'Use review to triage stale decisions with scores and suggested actions. ' +
     'Use batch_update to archive/supersede multiple decisions at once. ' +
     'Use record to write a decision without a session. Decision text is never amended in ' +
-    'place: correct a decision by recording a new one with supersedes=[<old id>].',
+    'place: correct a decision by recording a new one with supersedes=[<old id>]. ' +
+    'When the operator answers a CMOS draft (a "Would record:" line CMOS gave an id, P<n>), ' +
+    'record it with fromDraft="P<n>": the record then says how the approval was known ' +
+    '(approved, agent-judged or agent-attested), and a constraint, rule or profile draft is ' +
+    'written as that kind. A subagent shares its parent session and binds as the parent.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -229,6 +243,11 @@ export const cmosDecisionsToolDefinition = {
           'Only rows recorded for this mission; for record, the mission to record it for (its sprint is used)',
       },
       content: { type: 'string', description: 'Decision text for record action (required)' },
+      fromDraft: {
+        type: 'string',
+        description:
+          'record action: the CMOS draft id (P<n>) the operator just answered; its kind decides what is written',
+      },
       supersedes: {
         type: 'array',
         items: { type: 'integer', minimum: 1 },
@@ -383,6 +402,7 @@ export async function cmosDecisions(
     case 'record':
       return cmosDecisionsRecord({
         content: params.content ?? '',
+        fromDraft: params.fromDraft,
         missionId: params.missionId,
         sprintId: params.sprintId,
         supersedes: params.supersedes,

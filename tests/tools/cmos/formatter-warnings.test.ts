@@ -675,10 +675,12 @@ describe('s86-m02 Step 1 — the envelope warnings channel is universal', () => 
       // the cmos_decisions and cmos_learnings dispatchers gain one delegated return each.
       // s92-m09: formatPruneSnapshotsForLLM adds one error preamble and one render return, and the
       // cmos_db dispatcher gains one delegated return.
-      terminalReturns: 277,
+      // s93-m06: formatDecisionsRecordForLLM adds one render return, for a draft recorded as a
+      // constraint, rule or profile line; it renders the envelope's warnings.
+      terminalReturns: 278,
       errorPreambles: 95,
       delegatedReturns: 75,
-      genuineRenderReturns: 107,
+      genuineRenderReturns: 108,
     });
     expect(
       uncoveredGenuineReturns.map(
@@ -704,7 +706,13 @@ describe('s86-m02 Step 1 — the envelope warnings channel is universal', () => 
       // included), and its formatter renders the envelope on both branches.
       // s92-m09: cmos-db-prune-snapshots.ts joins (its refusals after the content_pruned_at
       // migration carry the migration's warnings), and formatPruneSnapshotsForLLM renders them.
-    }).toEqual({ warningEnvelopeModules: 30, modulesWithFormatters: 28, formatters: 31 });
+      // s93-m11: cmos-decisions-update.ts and cmos-decisions-batch-update.ts join (the
+      // review-timestamp migration's warnings reach every answer through attachWarnings), and both
+      // formatters render the envelope.
+      // s93-m06: draft-approval.ts joins (a draft written as a constraint, rule or profile line
+      // whose draft cannot then name it carries that as a warning); it has no formatter of its own,
+      // and formatDecisionsRecordForLLM renders the warning.
+    }).toEqual({ warningEnvelopeModules: 33, modulesWithFormatters: 30, formatters: 33 });
     expect(
       [...new Set(looseErrorPreambles.map((row) => row.errorPreambleCondition))].sort()
     ).toEqual(['!result.success || !result.data']);

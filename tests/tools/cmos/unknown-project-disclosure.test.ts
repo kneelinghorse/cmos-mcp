@@ -267,6 +267,7 @@ describe('s87-m04 — an unrecorded identity is disclosed per store, and named h
     const PREMISE = /never\s+fires\s+in\s+production|always\s+carry\s+a\s+non-empty\s+project_id/g;
     for (const rel of [
       'src/tools/cmos/genesis-columns.ts',
+      'src/tools/cmos/project-id.ts',
       'src/tools/cmos/schema-migrations.ts',
     ]) {
       const normalized = fs

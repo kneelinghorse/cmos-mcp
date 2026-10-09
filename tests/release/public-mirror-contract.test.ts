@@ -3,7 +3,7 @@
 // ABOUTME: Proves fail-loud routing without duplicating the mirror script's exclusion lists.
 
 import { afterAll, describe, expect, it, jest } from '@jest/globals';
-import { execFileSync } from 'child_process';
+import { execFileSync, spawnSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -861,5 +861,198 @@ describe('public mirror routed-test class gate', () => {
     expect(guardSource).toContain('path.parse(os.tmpdir()).root');
     expect(guardSource).toContain('const NON_TMP_STORE =');
     expect(guardSource).not.toContain('const REPO_ROOT =');
+  });
+});
+
+describe('public mirror exact committed-tree boundary', () => {
+  const gitEnv = {
+    ...process.env,
+    GIT_AUTHOR_NAME: 'CMOS Test',
+    GIT_AUTHOR_EMAIL: 'cmos-test@example.invalid',
+    GIT_COMMITTER_NAME: 'CMOS Test',
+    GIT_COMMITTER_EMAIL: 'cmos-test@example.invalid',
+  };
+  function git(cwd: string, ...args: string[]): string {
+    return execFileSync('git', ['-c', 'commit.gpgsign=false', ...args], {
+      cwd,
+      env: gitEnv,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim();
+  }
+  const wrongCaseIndex =
+    'command git ls-files --stage -z > "$MIRROR_FIXTURE_INDEX_BEFORE"; ' +
+    'read -r mode blob stage spelling <<< "$(command git ls-files --stage -- Case.md)"; ' +
+    '[[ "$stage" == 0 && "$spelling" == Case.md ]]; ' +
+    'command git update-index --force-remove -- Case.md; ' +
+    'command git update-index --add --cacheinfo "$mode,$blob,case.md"; ' +
+    'command git ls-files --stage -z > "$MIRROR_FIXTURE_INDEX_AFTER"';
+
+  function exactTreeFixture(fault = '', indexFault = '', disableComparison = false) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-mirror-exact-'));
+    fixtureRoots.push(root);
+    const source = path.join(root, 'source');
+    const publicSeed = path.join(root, 'public-seed');
+    const remote = path.join(root, 'public.git');
+    const scratch = path.join(root, 'scratch');
+    const actions = path.join(root, 'release-actions');
+    const indexBefore = path.join(root, 'index-before');
+    const indexAfter = path.join(root, 'index-after');
+    for (const dir of [source, publicSeed, scratch]) fs.mkdirSync(dir);
+    git(publicSeed, 'init', '-q', '-b', 'main');
+    fs.writeFileSync(path.join(publicSeed, 'Case.md'), 'previous public bytes\n');
+    git(publicSeed, 'add', '.');
+    git(publicSeed, 'commit', '-qm', 'public fixture');
+    git(root, 'clone', '-q', '--bare', publicSeed, remote);
+    git(source, 'init', '-q', '-b', 'main');
+    git(source, 'config', 'core.ignorecase', 'false');
+    const files: Record<string, string> = {
+      'package.json': JSON.stringify({ version: '1.2.3' }),
+      'Case.md': 'committed case-sensitive spelling\n',
+      'public.txt': 'committed public bytes\n',
+      'run.sh': '#!/bin/sh\nexit 0\n',
+      'odd\tname\n.txt': 'paths must be NUL-delimited\n',
+      'cmos/private.txt': 'excluded by exact root\n',
+      'docs/specs/phase2-pg-mirror-schema.md': 'excluded nested file\n',
+      'docs/cmos/public.txt': 'same basename below a public directory survives\n',
+      '.env.fixture': 'defense-in-depth exclusion\n',
+      '.env.template': 'public template\n',
+    };
+    let script = fs.readFileSync(path.join(REPO_ROOT, 'scripts/mirror-to-public.sh'), 'utf8');
+    if (disableComparison) {
+      const conditional = 'if (differences.length) {';
+      expect(script.split(conditional)).toHaveLength(2);
+      script = script.replace(conditional, 'if (false) {');
+    }
+    // A real rsync followed by a controlled transport fault: the comparison must validate
+    // Git's staged tree, rather than trusting a successful copy or filesystem spelling.
+    files['scripts/mirror-to-public.sh'] = script.replace(
+      '\n',
+      `\nrsync() { command rsync "$@"; ${fault || ':'}; }\n` +
+        `git() { if [[ "$1" == write-tree && "$PWD" == "\${PUB:-}" ]]; then ${indexFault || ':'}; fi; ` +
+        'if [[ "$1" == commit || "$1" == tag ]]; then printf "%s\\n" "$1" >> "$MIRROR_FIXTURE_ACTIONS"; fi; command git "$@"; }\n'
+    );
+    for (const [name, content] of Object.entries(files)) {
+      fs.mkdirSync(path.dirname(path.join(source, name)), { recursive: true });
+      fs.writeFileSync(path.join(source, name), content);
+    }
+    fs.chmodSync(path.join(source, 'run.sh'), 0o755);
+    fs.symlinkSync('public.txt', path.join(source, 'public-link'));
+    git(source, 'add', '-A');
+    git(source, 'commit', '-qm', 'source fixture');
+    const before = git(remote, 'show-ref');
+    const result = spawnSync('bash', ['scripts/mirror-to-public.sh', 'v1.2.3'], {
+      cwd: source,
+      env: {
+        ...gitEnv,
+        TMPDIR: scratch,
+        PUBLIC_REMOTE: remote,
+        PUBLIC_BRANCH: 'main',
+        MIRROR_FIXTURE_ACTIONS: actions,
+        MIRROR_FIXTURE_INDEX_BEFORE: indexBefore,
+        MIRROR_FIXTURE_INDEX_AFTER: indexAfter,
+        DRY_RUN: '1',
+        DRY_RUN_KEEP: '1',
+      },
+      encoding: 'utf8',
+      timeout: 20_000,
+    });
+    expect(git(remote, 'show-ref')).toBe(before);
+    return {
+      result,
+      scratch,
+      actions: fs.existsSync(actions) ? fs.readFileSync(actions, 'utf8') : '',
+      indexBefore: fs.existsSync(indexBefore) ? fs.readFileSync(indexBefore, 'utf8') : '',
+      indexAfter: fs.existsSync(indexAfter) ? fs.readFileSync(indexAfter, 'utf8') : '',
+    };
+  }
+
+  function expectWrongCaseIndex(fixture: ReturnType<typeof exactTreeFixture>): void {
+    const entries = (records: string) =>
+      new Map(
+        records
+          .split('\0')
+          .filter(Boolean)
+          .map((record) => {
+            const tab = record.indexOf('\t');
+            return [record.slice(tab + 1), record.slice(0, tab)];
+          })
+      );
+    const before = entries(fixture.indexBefore);
+    const after = entries(fixture.indexAfter);
+    expect(before.get('Case.md')).toMatch(/^100644 [a-f0-9]+ 0$/);
+    expect(before.has('case.md')).toBe(false);
+    expect(after.has('Case.md')).toBe(false);
+    expect(after.get('case.md')).toBe(before.get('Case.md'));
+    before.delete('Case.md');
+    after.delete('case.md');
+    expect(after).toEqual(before);
+  }
+
+  function expectRejected(fixture: ReturnType<typeof exactTreeFixture>, diagnostic: RegExp): void {
+    const { result, scratch, actions } = fixture;
+    expect({ status: result.status, stderr: result.stderr }).toMatchObject({ status: 1 });
+    expect(result.stderr).toContain('ABORT: public tree differs from committed source');
+    expect(result.stderr).toMatch(diagnostic);
+    expect(actions).toBe('');
+    expect(result.stdout).not.toContain('PUBLIC_COMMIT=');
+    expect(result.stdout).not.toContain('DRY_RUN_TREE=');
+    expect(fs.readdirSync(scratch)).toEqual([]);
+  }
+
+  it('preserves public bytes, modes, symlinks and unusual names under only declared exclusions', () => {
+    // The successful control keeps the exact source spelling already in the public index.
+    const { result, actions } = exactTreeFixture('git -C "$PUB" config core.ignorecase false');
+    expect({ status: result.status, stderr: result.stderr }).toMatchObject({ status: 0 });
+    expect(actions).toBe('commit\ntag\n');
+    expect(result.stdout).toContain('exact committed-tree comparison passed');
+    const retained = /^DRY_RUN_TREE=(.+)$/m.exec(result.stdout)?.[1];
+    expect(retained).toBeDefined();
+    expect(git(retained!, 'ls-tree', 'HEAD', 'Case.md')).toMatch(/100644 blob/);
+    expect(git(retained!, 'ls-tree', 'HEAD', 'case.md')).toBe('');
+    expect(git(retained!, 'ls-tree', 'HEAD', 'run.sh')).toMatch(/100755 blob/);
+    expect(git(retained!, 'ls-tree', 'HEAD', 'public-link')).toMatch(/120000 blob/);
+    expect(fs.readFileSync(path.join(retained!, 'odd\tname\n.txt'), 'utf8')).toContain('NUL');
+    expect(fs.existsSync(path.join(retained!, 'cmos'))).toBe(false);
+    expect(fs.existsSync(path.join(retained!, '.env.fixture'))).toBe(false);
+    expect(fs.existsSync(path.join(retained!, '.env.template'))).toBe(true);
+    expect(fs.existsSync(path.join(retained!, 'docs/cmos/public.txt'))).toBe(true);
+  });
+
+  it.each([
+    [
+      'a case-only rename lost by a case-folding Git index',
+      '',
+      /missing "Case\.md"[\s\S]*unexpected "case\.md"/,
+      wrongCaseIndex,
+    ],
+    ['a changed public blob', 'printf changed > "$PUB/public.txt"', /changed "public\.txt"/],
+    ['a lost executable mode', 'chmod -x "$PUB/run.sh"', /changed "run\.sh": expected 100755/],
+    ['an undeclared missing public path', 'rm "$PUB/public.txt"', /missing "public\.txt"/],
+    [
+      'an undeclared extra public path',
+      'printf extra > "$PUB/extra.txt"',
+      /unexpected "extra\.txt"/,
+    ],
+  ])(
+    'refuses %s before creating a release commit or tag',
+    (_reason, fault, diagnostic, indexFault = '') => {
+      const fixture = exactTreeFixture(fault, indexFault);
+      if (indexFault) expectWrongCaseIndex(fixture);
+      expectRejected(fixture, diagnostic);
+    }
+  );
+
+  it('the wrong-case rejection oracle fails when only the copied comparison guard is disabled', () => {
+    const fixture = exactTreeFixture('', wrongCaseIndex, true);
+    expectWrongCaseIndex(fixture);
+    expect({ status: fixture.result.status, stderr: fixture.result.stderr }).toMatchObject({
+      status: 0,
+    });
+    expect(fixture.actions).toBe('commit\ntag\n');
+    expect(fixture.result.stdout).toContain('PUBLIC_COMMIT=');
+    expect(() =>
+      expectRejected(fixture, /missing "Case\.md"[\s\S]*unexpected "case\.md"/)
+    ).toThrow();
   });
 });

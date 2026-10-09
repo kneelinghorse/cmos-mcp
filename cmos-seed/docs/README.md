@@ -30,7 +30,7 @@
 ### "I'm setting up CMOS for the first time"
 
 1. Read [Getting Started](./getting-started.md)
-2. Use `cmos_project(action="init")` to initialize
+2. Use `cmos_project(action="init", projectRoot="...", projectType="build")` to initialize a Builder project (without `projectType`, a Ledger, unless the folder's AGENTS.md already names a level)
 
 ### "I'm starting a build session"
 
@@ -40,7 +40,7 @@
 ### "I'm planning a sprint"
 
 1. Read [Session Management Guide](./session-management-guide.md)
-2. Use `cmos_session(action="start", type="planning")`
+2. Use `cmos_session(action="start", type="planning", title="Sprint planning")`
 
 ### "I need database information"
 
@@ -66,7 +66,7 @@ Build work: implementing features, writing code. Managed via `cmos_mission` (que
 ### Contexts
 
 - **project_identity**: Stable identity and foundational-document registry
-- **project_context**: Current session state, working memory
+- **project_context**: Current session state and next steps
 - **master_context**: Project history, decisions, constraints
 
 ### Database
@@ -85,17 +85,17 @@ which take no `action` parameter.
 # Onboarding
 cmos_review()                                                 # Session-opener digest
 cmos_agent_onboard()                                          # Cold-start project state
-cmos_project(action="init", ...)                              # Initialize new project
+cmos_project(action="init", projectRoot="...", projectType="build")  # New Builder project
 
 # Missions — queries on cmos_mission, state changes on cmos_mission_transition
 cmos_mission(action="status")                                 # View work queue
 cmos_mission(action="show", missionId="...")                  # Mission details
 cmos_mission(action="add", ...)                               # Create mission
-cmos_mission(action="update", missionId="...")                # Update fields
+cmos_mission(action="update", missionId="...", fields={...})  # Update fields
 cmos_mission(action="depends", ...)                           # Add dependency
 cmos_mission_transition(action="start", missionId="...")      # Begin mission
 cmos_mission_transition(action="complete", missionId="...")   # Mark done
-cmos_mission_transition(action="block", missionId="...")      # Block mission
+cmos_mission_transition(action="block", missionId="...", reason="...")  # Block mission
 cmos_mission_transition(action="unblock", missionId="...")    # Unblock mission
 
 # Sessions
@@ -110,7 +110,7 @@ cmos_sprint(action="list")                                    # List sprints
 cmos_sprint(action="show", sprintId="...")                    # Sprint details
 cmos_sprint(action="add", ...)                                # Create sprint
 cmos_sprint(action="update", ...)                             # Update sprint
-cmos_sprint(action="complete", sprintId="...")                # Close a sprint
+cmos_sprint(action="complete", sprintId="...", summary="...")  # Close a sprint
 
 # Context
 cmos_context(action="view")                                   # View context
@@ -130,6 +130,6 @@ cmos_db(action="snapshot")                                    # Snapshot the dat
 
 ---
 
-**Last Updated**: 2026-08-28
+**Last Updated**: 2026-10-08
 **Schema Version**: 2.1 (MCP-first)
 **Tool Count**: 15 consolidated tools

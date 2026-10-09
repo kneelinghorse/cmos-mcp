@@ -791,22 +791,30 @@ describe('cmos_agent_onboard', () => {
       expect(result.data?.recentDecisions).toHaveLength(0);
     });
 
-    it('surfaces whoami as a priority-1 action when attribution is ambiguous at onboard time', async () => {
+    it('surfaces whoami as a priority-1 action when attribution is ambiguous and the dashboard is in use', async () => {
       const originalEnvProjectRoot = process.env.CMOS_PROJECT_ROOT;
+      const originalDashboardUrl = process.env.CMOS_DASHBOARD_URL;
       process.env.CMOS_PROJECT_ROOT = '/tmp/pinned-cmos-mcp';
 
-      try {
+      const whoamiOf = async () => {
         const result = await cmosAgentOnboard({
           projectRoot: tempDir,
           advertisedRoots: [],
         } as Parameters<typeof cmosAgentOnboard>[0]);
-
         expect(result.success).toBe(true);
-        const actions = result.data?.suggestedActions ?? [];
-        const whoamiAction = actions.find(
+        return (result.data?.suggestedActions ?? []).find(
           (action) => action.command === 'cmos_message(action="whoami")'
         );
+      };
 
+      try {
+        // s93-m11 (#606 a): whoami checks the dashboard's sender identity, so a user who never set
+        // the dashboard up is not told to run it; it used to fail and be prescribed again.
+        delete process.env.CMOS_DASHBOARD_URL;
+        expect(await whoamiOf()).toBeUndefined();
+
+        process.env.CMOS_DASHBOARD_URL = 'http://127.0.0.1:9';
+        const whoamiAction = await whoamiOf();
         expect(whoamiAction).toBeDefined();
         expect(whoamiAction?.action).toBe('Run whoami to confirm sender attribution');
         expect(whoamiAction?.priority).toBe(1);
@@ -816,6 +824,8 @@ describe('cmos_agent_onboard', () => {
         } else {
           process.env.CMOS_PROJECT_ROOT = originalEnvProjectRoot;
         }
+        if (originalDashboardUrl === undefined) delete process.env.CMOS_DASHBOARD_URL;
+        else process.env.CMOS_DASHBOARD_URL = originalDashboardUrl;
       }
     });
   });
@@ -1175,6 +1185,8 @@ describe('cmos_agent_onboard', () => {
           staleness: {
             staleDecisions: 0,
             staleLearnings: 0,
+            dueForReviewDecisions: 0,
+            dueForReviewLearnings: 0,
             threshold: DEFAULT_STALENESS_THRESHOLD,
           },
           messaging: {
@@ -1396,6 +1408,61 @@ describe('cmos_agent_onboard', () => {
         process.env.CMOS_DASHBOARD_URL = originalUrl;
         process.env.CMOS_DASHBOARD_USER = originalUser;
         process.env.CMOS_DASHBOARD_PASSWORD = originalPassword;
+      }
+    });
+
+    it('answers without sync health when the sync status carries no tables (s93-m11)', async () => {
+      // The m11 reads critic: buildSyncHealthFromGlobalStatus iterated `pgStatus.tables`, and its
+      // promise was returned un-awaited from inside fetchSyncHealth's try, so the TypeError escaped
+      // the catch and failed the whole onboard (and cmos_review, which composes it).
+      const saved = {
+        url: process.env.CMOS_DASHBOARD_URL,
+        user: process.env.CMOS_DASHBOARD_USER,
+        password: process.env.CMOS_DASHBOARD_PASSWORD,
+      };
+      process.env.CMOS_DASHBOARD_URL = 'http://localhost:3100';
+      process.env.CMOS_DASHBOARD_USER = 'test@example.com';
+      process.env.CMOS_DASHBOARD_PASSWORD = 'test-password';
+      const login = {
+        success: true,
+        data: {
+          token: 'test-jwt',
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+          user: { id: 'u1', email: 'test@example.com', projects: [] },
+        },
+      };
+      const originalFetch = global.fetch;
+      global.fetch = (async (input: string | URL | Request) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url.includes('/api/auth/login')) {
+          return new Response(JSON.stringify(login), { status: 200 });
+        }
+        if (url.includes('/api/sync/status')) {
+          return new Response(JSON.stringify({ success: true, data: {} }), { status: 200 });
+        }
+        if (url.includes('/api/messages')) {
+          return new Response(JSON.stringify({ messages: [], unreadCount: 0, totalCount: 0 }), {
+            status: 200,
+          });
+        }
+        return new Response('{}', { status: 404 });
+      }) as typeof global.fetch;
+
+      try {
+        const result = await cmosAgentOnboardWithDb(dbPath);
+        expect(result.success).toBe(true);
+        expect(result.data?.syncHealth).toBeNull();
+        expect(result.warnings ?? []).toContain(
+          'Sync health unavailable: unexpected error during fetch'
+        );
+      } finally {
+        global.fetch = originalFetch;
+        if (saved.url === undefined) delete process.env.CMOS_DASHBOARD_URL;
+        else process.env.CMOS_DASHBOARD_URL = saved.url;
+        if (saved.user === undefined) delete process.env.CMOS_DASHBOARD_USER;
+        else process.env.CMOS_DASHBOARD_USER = saved.user;
+        if (saved.password === undefined) delete process.env.CMOS_DASHBOARD_PASSWORD;
+        else process.env.CMOS_DASHBOARD_PASSWORD = saved.password;
       }
     });
 
@@ -1680,8 +1747,12 @@ describe('cmos_agent_onboard', () => {
       expect(result.success).toBe(true);
 
       const actions = result.data?.suggestedActions ?? [];
+      // s93-m01: "Complete active session" names its session by id too; it is not a cleanup action.
       const sessionActions = actions.filter(
-        (a) => a.command.includes('cmos_session') && a.command.includes('sessionId')
+        (a) =>
+          a.command.includes('cmos_session') &&
+          a.command.includes('sessionId') &&
+          !a.action.startsWith('Complete active session')
       );
 
       // Should have at least 2 individual session actions (PS-2024-01-15-001 + PS-stale-002)
@@ -2277,7 +2348,7 @@ describe('cmos_agent_onboard authState (Sprint 57 m04)', () => {
     if (credDir) fs.rmSync(credDir, { recursive: true, force: true });
   });
 
-  it('attaches authState=none with a setup suggestedAction when no credentials exist', async () => {
+  it('offers dashboard sign-in without making it a prerequisite for local initialization', async () => {
     const projectRoot = path.resolve(dbPath, '..', '..', '..');
     const result = await cmosAgentOnboard({ projectRoot });
 
@@ -2287,7 +2358,10 @@ describe('cmos_agent_onboard authState (Sprint 57 m04)', () => {
     expect(result.data?.suggestedActions).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          action: expect.stringMatching(/No dashboard credentials/),
+          action: expect.stringMatching(
+            /Sign in to use dashboard messaging or sync; local project initialization needs no sign-in/
+          ),
+          command: 'cmos_auth(action="login")',
         }),
       ])
     );

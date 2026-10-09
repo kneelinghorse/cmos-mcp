@@ -69,6 +69,13 @@ export interface CmosSprintListResult {
   /** Total count of sprints (before limit) */
   totalCount: number;
 
+  /**
+   * s93-m11 (feedback #47): Planned sprints this page left out. The page orders by start date and a
+   * Planned sprint has none yet, so a short page used to drop every one of them without a word.
+   * Present only for an unfiltered list that left one out.
+   */
+  omittedPlanned?: number;
+
   /** Filters applied */
   filters: {
     status: string | null;
@@ -203,10 +210,23 @@ export async function cmosSprintList(
       // Transform to output format
       const sprints = sprintsResult.data.map(parseSprintRow);
 
+      // s93-m11 (feedback #47): say how many Planned sprints an unfiltered page left out.
+      let omittedPlanned: number | undefined;
+      if (!params.status && sprints.length < totalCount) {
+        const planned = client.getOne<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM sprint_summary WHERE UPPER(status) = 'PLANNED'",
+          []
+        );
+        const onPage = sprints.filter((sprint) => sprint.status?.toUpperCase() === 'PLANNED');
+        const missing = (planned.success ? (planned.data?.count ?? 0) : 0) - onPage.length;
+        if (missing > 0) omittedPlanned = missing;
+      }
+
       return createSuccess(
         {
           sprints,
           totalCount,
+          ...(omittedPlanned !== undefined ? { omittedPlanned } : {}),
           filters: {
             status: params.status ?? null,
             limit,
@@ -255,7 +275,7 @@ function buildQuery(
     ${whereClause}
     ORDER BY
       CASE WHEN start_date IS NULL THEN 1 ELSE 0 END,
-      start_date DESC,
+      julianday(start_date) DESC,
       ${sprintIdOrderSql('sprint_id', 'DESC')}
     LIMIT ?
   `;
@@ -320,6 +340,14 @@ export function formatSprintListForLLM(result: CmosToolResult<CmosSprintListResu
     lines.push('No sprints found matching the filters.');
     appendWarnings(lines, result);
     return lines.join('\n');
+  }
+
+  if (data.omittedPlanned) {
+    lines.push(
+      `${data.omittedPlanned} Planned sprint(s) are not on this page; ` +
+        'cmos_sprint(action="list", status="Planned") lists them.'
+    );
+    lines.push('');
   }
 
   // List sprints with statistics

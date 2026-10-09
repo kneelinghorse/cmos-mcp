@@ -29,8 +29,16 @@ import type { CmosDatabaseClient } from './client';
  * That is the whole point — these rows are invisible to every sprint-scoped query.
  */
 export function countUntaggedSessions(client: CmosDatabaseClient): number | null {
+  // s93-m01 (#610 related): implicit sessions carry no sprint by design (a process outlives sprints)
+  // and every row they write resolves its own, so only explicit sessions count as untagged.
+  const implicitColumn = client.getOne<{ n: number }>(
+    "SELECT COUNT(*) AS n FROM pragma_table_info('sessions') WHERE name = 'implicit'",
+    []
+  );
+  const explicitOnly =
+    implicitColumn.success && (implicitColumn.data?.n ?? 0) > 0 ? ' AND implicit = 0' : '';
   const result = client.getOne<{ count: number }>(
-    'SELECT COUNT(*) AS count FROM sessions WHERE sprint_id IS NULL',
+    `SELECT COUNT(*) AS count FROM sessions WHERE sprint_id IS NULL${explicitOnly}`,
     []
   );
   return result.success && result.data ? result.data.count : null;

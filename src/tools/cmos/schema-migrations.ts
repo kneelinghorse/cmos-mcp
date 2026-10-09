@@ -8,10 +8,12 @@
  */
 
 import * as crypto from 'crypto';
+import * as path from 'path';
 import { ulid } from 'ulid';
 import type { CmosDatabaseClient } from './client';
 import { checkWrite, countWrite } from './write-guard';
 import { isReadOnlyAgentSession } from './read-only-agent-guard';
+import { asLazyRepair, callMayWrite } from './tool-call-context';
 import { SPRINT_SUMMARY_VIEW_SQL } from './schema';
 import {
   FIREHOSE_TABLES,
@@ -102,6 +104,20 @@ function schemaVersionIsLower(current: string | undefined, target: string): bool
 }
 
 function stampSchemaVersionAtLeast(
+  client: CmosDatabaseClient,
+  version: string,
+  warnings: string[]
+): void {
+  // s93-m11: raising the label rewrites an existing value, so a read-classified call never does
+  // it (decision #1182). A migration may still run its DDL on a read; the label heals at the next
+  // write that runs one. Nothing branches on the label, so a lower label costs nothing. The label
+  // is a lazy repair, not the caller's write, so it never starts first-write upkeep.
+  if (!callMayWrite()) return;
+  asLazyRepair(() => raiseSchemaVersionLabel(client, version, warnings));
+}
+
+/** The raise itself: a read probe, then one atomic compare-and-replace. */
+function raiseSchemaVersionLabel(
   client: CmosDatabaseClient,
   version: string,
   warnings: string[]
@@ -244,6 +260,14 @@ export interface MigrationResult {
    * and the sprint-current-invariant sites have cmos_sprint answer carriers; neither belongs in C.
    */
   warnings?: string[];
+  /**
+   * s93-m11 — work a read-classified call found owed and left for a write, worded for the answer.
+   * A read may run DDL and fill what it created, but never rewrites what was there (decision
+   * #1182): it does not rebuild an existing search index or seed the project_identity row. The
+   * first write repairs them (first-write-maintenance.ts); until then the answer says what the
+   * read could not see.
+   */
+  deferred?: string[];
 }
 
 /**
@@ -953,6 +977,34 @@ export function ensureConstraintEvergreen(client: CmosDatabaseClient): Migration
 }
 
 /**
+ * s93-m06 — how a decision recorded from a draft was approved: `approval_mode` (approved,
+ * agent-judged or agent-attested), `approval_draft` (`P<n>`) and `approval_words` (the operator's
+ * message, kept for approved and agent-judged). Plain nullable `ALTER ADD COLUMN`s, idempotent, no
+ * backfill: NULL means a direct record, which every existing row is. Run on the record path only
+ * when a draft is being recorded; the seed schema carries them for fresh stores.
+ */
+export function ensureDecisionApprovalColumns(client: CmosDatabaseClient): MigrationResult {
+  const existing = getTableColumns(client, 'strategic_decisions');
+  if (existing.size === 0) {
+    return { columnsAdded: [], indexesCreated: [], rowsUpdated: 0, alreadyCurrent: true };
+  }
+  const warnings: string[] = [];
+  const columnsAdded: string[] = [];
+  for (const name of ['approval_mode', 'approval_draft', 'approval_words']) {
+    if (ensureColumn(client, 'strategic_decisions', { name, type: 'TEXT' }, existing, warnings)) {
+      columnsAdded.push(`strategic_decisions.${name}`);
+    }
+  }
+  return {
+    columnsAdded,
+    indexesCreated: [],
+    rowsUpdated: 0,
+    alreadyCurrent: columnsAdded.length === 0,
+    warnings,
+  };
+}
+
+/**
  * s84-m04 (critic Rev4 — the dedup black-hole fix) — the WHERE-clause fragment every
  * `context_snapshots` content_hash dedup SELECT appends so a content-TOMBSTONED row (its content
  * emptied by the prune) is never a dedup hit. Without it, a future identical-content write would
@@ -984,6 +1036,11 @@ interface ExternalFtsResult {
   readonly triggersCreated: string[];
   readonly rowsUpdated: number;
   readonly rebuilt: boolean;
+  /**
+   * s93-m11 — a rebuild this read-classified call needed and left for a write, with the index's
+   * size beside its table's. Null when nothing was left.
+   */
+  readonly deferred: { readonly indexed: number | null; readonly total: number | null } | null;
 }
 
 /**
@@ -1178,6 +1235,12 @@ function readMigrationCount(
  * Ensure one external-content FTS5 table, its three source triggers, and its initial/retry rebuild.
  * `forceRebuild` is the durable retry signal used by vector storage while its own marker is stale.
  * Without it, a docsize/source count mismatch detects a prior decisions_fts rebuild failure.
+ *
+ * s93-m11: a read-classified call (or the review role) may create the table and its triggers and
+ * fill a table it created, but never rebuilds one that was already there, because a rebuild
+ * rewrites existing rows (decision #1182). It returns the rebuild as `deferred`, with the index's
+ * size beside its table's, and this process's first write to the store runs it
+ * (first-write-maintenance.ts).
  */
 function ensureExternalFts(
   client: CmosDatabaseClient,
@@ -1199,6 +1262,7 @@ function ensureExternalFts(
       triggersCreated: [],
       rowsUpdated: 0,
       rebuilt: false,
+      deferred: null,
     };
   }
 
@@ -1209,24 +1273,37 @@ function ensureExternalFts(
   const triggersCreated = triggerResults.filter((result) => result.created).map((r) => r.name);
   const triggersReady = triggerResults.every((result) => result.ready);
 
-  let readinessCheckSucceeded = true;
-  let needsRebuild =
-    params.forceRebuild || table.created || triggersCreated.length > 0 || !triggersReady;
-  if (!needsRebuild && params.verifyIndexedRowCount) {
-    const sourceCount = readMigrationCount(
+  const countRows = (): { indexed: number | null; total: number | null } => ({
+    total: readMigrationCount(
       client,
       `SELECT COUNT(*) AS count FROM ${params.sourceTable}`,
       warnings,
       `${params.name} source row count`
-    );
-    const indexedCount = readMigrationCount(
+    ),
+    indexed: readMigrationCount(
       client,
       `SELECT COUNT(*) AS count FROM ${params.name}_docsize`,
       warnings,
       `${params.name} indexed row count`
-    );
-    readinessCheckSucceeded = sourceCount !== null && indexedCount !== null;
-    needsRebuild = readinessCheckSucceeded && sourceCount !== indexedCount;
+    ),
+  });
+
+  let readinessCheckSucceeded = true;
+  let counts: { indexed: number | null; total: number | null } | null = null;
+  let needsRebuild =
+    params.forceRebuild || table.created || triggersCreated.length > 0 || !triggersReady;
+  if (!needsRebuild && params.verifyIndexedRowCount) {
+    counts = countRows();
+    readinessCheckSucceeded = counts.total !== null && counts.indexed !== null;
+    needsRebuild = readinessCheckSucceeded && counts.total !== counts.indexed;
+  }
+
+  // A read leaves an index it did not create as it found it, and says how far out of step it is.
+  let deferred: ExternalFtsResult['deferred'] = null;
+  if (needsRebuild && !table.created && !callMayWrite()) {
+    needsRebuild = false;
+    deferred = counts ?? countRows();
+    indexRebuildOwed.add(storeRootOf(client.path));
   }
 
   let rowsUpdated = 0;
@@ -1255,12 +1332,62 @@ function ensureExternalFts(
   }
 
   return {
-    ready: table.ready && triggersReady && readinessCheckSucceeded && rebuildReady,
+    ready:
+      table.ready && triggersReady && readinessCheckSucceeded && rebuildReady && deferred === null,
     tableCreated: table.created,
     triggersCreated,
     rowsUpdated,
     rebuilt,
+    deferred,
   };
+}
+
+/**
+ * s93-m11 — stores (by project root) whose index rebuild a read deferred, or whose rebuild failed,
+ * in this process. First-write upkeep runs the rebuild at this process's next write to such a store
+ * even after its first, so a read's promise holds (first-write-maintenance.ts).
+ */
+const indexRebuildOwed = new Set<string>();
+
+/** The project root of a store's database file (<root>/cmos/db/cmos.sqlite). */
+function storeRootOf(dbPath: string): string {
+  return path.resolve(dbPath, '..', '..', '..');
+}
+
+/** Whether this process owes the store at `projectRoot` an index rebuild. */
+export function indexRebuildIsOwed(projectRoot: string): boolean {
+  return indexRebuildOwed.has(path.resolve(projectRoot));
+}
+
+/** Record whether a rebuild is still owed after first-write upkeep tried it. */
+export function settleIndexRebuild(projectRoot: string, stillOwed: boolean): void {
+  if (stillOwed) indexRebuildOwed.add(path.resolve(projectRoot));
+  else indexRebuildOwed.delete(path.resolve(projectRoot));
+}
+
+/** Test seam: forget every owed rebuild. */
+export function resetIndexRebuildOwed(): void {
+  indexRebuildOwed.clear();
+}
+
+/**
+ * s93-m11 — the answer line for a rebuild a read left for a write, or nothing when the index is
+ * the size of its table (a marker-only retry, which loses no search result).
+ */
+function deferredIndexNote(label: string, deferred: ExternalFtsResult['deferred']): string | null {
+  if (deferred === null) return null;
+  const { indexed, total } = deferred;
+  if (indexed !== null && total !== null && indexed === total) return null;
+  const size =
+    indexed === null || total === null
+      ? 'could not be checked against its table, so a search can miss records'
+      : indexed < total
+        ? `holds ${indexed} of ${total} ${label}, so a search can miss ${total - indexed}`
+        : `holds ${indexed} entries for ${total} ${label}, so it is out of step with its table`;
+  return (
+    `The ${label} search index ${size}. A read never rebuilds an index: this server rebuilds it ` +
+    'at its next write to this store, and any other CMOS server at its first.'
+  );
 }
 
 export function ensureDecisionsFts5(client: CmosDatabaseClient): MigrationResult {
@@ -1306,12 +1433,14 @@ export function ensureDecisionsFts5(client: CmosDatabaseClient): MigrationResult
   );
 
   const didWork = fts.tableCreated || fts.triggersCreated.length > 0 || fts.rebuilt;
+  const deferredNote = deferredIndexNote('decisions', fts.deferred);
   return {
     columnsAdded: fts.tableCreated ? ['decisions_fts (virtual table)'] : [],
     indexesCreated: fts.triggersCreated,
     rowsUpdated: fts.rowsUpdated,
     alreadyCurrent: fts.ready && !didWork && warnings.length === 0,
     warnings,
+    ...(deferredNote ? { deferred: [deferredNote] } : {}),
   };
 }
 
@@ -1630,9 +1759,21 @@ export function ensureVectorStorage(client: CmosDatabaseClient): MigrationResult
   // A stale marker is a durable retry signal: even when every object now exists, re-run the FTS
   // rebuilds above and retry this write. Only a warning-free, structurally ready store may claim
   // vector schema 2.3.
-  if (!markerCurrent && allReady && warnings.length === 0) {
+  //
+  // s93-m11: a read writes the marker only as part of DDL it ran itself (`didWork`, before any
+  // marker write, means this call created an object or filled one it created), only where no
+  // marker row exists, and never replaces an existing value (decision #1182). A store whose
+  // objects predate their marker gets it at the first write, with the rebuilds above.
+  const mayWrite = callMayWrite();
+  const markerAbsent = !metadataValues.has(VECTOR_STORAGE_MARKER_KEY);
+  if (
+    !markerCurrent &&
+    allReady &&
+    warnings.length === 0 &&
+    (mayWrite || (didWork && markerAbsent))
+  ) {
     const markerResult = client.execute(
-      `INSERT OR REPLACE INTO metadata (key, value) VALUES ('${VECTOR_STORAGE_MARKER_KEY}', '${VECTOR_STORAGE_SCHEMA_VERSION}')`,
+      `INSERT OR ${mayWrite ? 'REPLACE' : 'IGNORE'} INTO metadata (key, value) VALUES ('${VECTOR_STORAGE_MARKER_KEY}', '${VECTOR_STORAGE_SCHEMA_VERSION}')`,
       []
     );
     if (
@@ -1656,12 +1797,17 @@ export function ensureVectorStorage(client: CmosDatabaseClient): MigrationResult
   // Label healing is deliberately last and does not affect storage readiness or work accounting.
   stampSchemaVersionAtLeast(client, labelVersion, warnings);
 
+  const deferred = [
+    deferredIndexNote('learnings', learningsFts.deferred),
+    deferredIndexNote('missions', missionsFts.deferred),
+  ].filter((note): note is string => note !== null);
   return {
     columnsAdded,
     indexesCreated,
     rowsUpdated,
     alreadyCurrent,
     warnings,
+    ...(deferred.length > 0 ? { deferred } : {}),
   };
 }
 

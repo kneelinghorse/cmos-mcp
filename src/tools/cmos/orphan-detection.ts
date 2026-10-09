@@ -210,8 +210,8 @@ function findOrphanedMissions(client: CmosDatabaseClient, staleDays: number): Or
     `SELECT id, name, status, started_at
      FROM missions
      WHERE status = 'In Progress'
-       AND started_at < datetime('now', '-' || ? || ' days')
-     ORDER BY started_at`,
+       AND julianday(started_at) < julianday('now', '-' || ? || ' days')
+     ORDER BY julianday(started_at)`,
     [staleDays]
   );
   if (staleResult.success && staleResult.data) {
@@ -242,8 +242,8 @@ function findStaleSessions(client: CmosDatabaseClient, staleHours: number): Stal
             CAST((julianday('now') - julianday(started_at)) * 24 AS REAL) AS hours_active
      FROM sessions
      WHERE status = 'active' ${explicitOnly}
-       AND started_at < datetime('now', '-' || ? || ' hours')
-     ORDER BY started_at`,
+       AND julianday(started_at) < julianday('now', '-' || ? || ' hours')
+     ORDER BY julianday(started_at)`,
     [staleHours]
   );
 

@@ -1,8 +1,15 @@
+// ABOUTME: Release versions must agree across package metadata, plugin metadata and published documentation.
+// ABOUTME: Mutation controls preserve the release and public-mirror boundaries without publishing anything.
+
 import { describe, expect, test } from '@jest/globals';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
+import * as ts from 'typescript';
+import { parse } from 'yaml';
 import { requiresPrivateEvidence } from '../helpers/public-mirror';
+import { installPackedArtifact } from '../e2e/packed-artifact';
 
 type PackageJsonExports = {
   [key: string]:
@@ -47,6 +54,7 @@ interface VersionLedgerRow {
 
 interface ReleaseVersionState {
   readonly packageVersion: string;
+  readonly pluginVersion: string;
   readonly lockVersion: string;
   readonly lockSelfVersion: string;
   readonly changelog: string;
@@ -63,7 +71,6 @@ const PRIVATE = requiresPrivateEvidence({
     releaseRunbook: 'cmos/docs/release.md',
     agents: 'agents.md',
     buildSessionPrompt: 'cmos/docs/build-session-prompt.md',
-    templateScaffold: 'cmos/templates/agents.md',
   },
 });
 
@@ -77,7 +84,6 @@ const RECORD_TREE_PREFIXES = [
   'cmos/docs/archive/',
   'cmos/research/',
 ] as const;
-const UNFILLED_SCAFFOLD_PATH = 'cmos/templates/agents.md';
 const RELEASE_GATE_COMMAND =
   'npx jest tests/release/publish-pipeline.test.ts --coverage=false --runInBand';
 
@@ -92,6 +98,37 @@ function trackedFiles(): string[] {
   })
     .split('\0')
     .filter(Boolean);
+}
+
+/** Literal child-process build commands; dynamic commands and package lifecycle scripts need review. */
+function e2eBuildCalls(filename: string, text: string): number[] {
+  const source = ts.createSourceFile(filename, text, ts.ScriptTarget.Latest, true);
+  const found: number[] = [];
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isCallExpression(node) &&
+      /(?:spawn|exec)(?:File)?(?:Sync)?$/.test(node.expression.getText(source))
+    ) {
+      const [command, args] = node.arguments;
+      const npmBuild =
+        command &&
+        ts.isStringLiteralLike(command) &&
+        command.text === 'npm' &&
+        args &&
+        ts.isArrayLiteralExpression(args) &&
+        args.elements.length >= 2 &&
+        args.elements
+          .slice(0, 2)
+          .every((arg, i) => ts.isStringLiteralLike(arg) && arg.text === ['run', 'build'][i]);
+      const shellBuild =
+        command && ts.isStringLiteralLike(command) && /\bnpm\s+run\s+build\b/.test(command.text);
+      if (npmBuild || shellBuild)
+        found.push(source.getLineAndCharacterOfPosition(node.getStart()).line + 1);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return found;
 }
 
 function isInVersionSweep(relativePath: string): boolean {
@@ -132,6 +169,13 @@ function loadReleaseVersionState(): ReleaseVersionState {
 
   return {
     packageVersion: pkg.version ?? '',
+    pluginVersion: fs.existsSync(path.join(projectRoot, 'plugins/cmos/.claude-plugin/plugin.json'))
+      ? ((
+          JSON.parse(readTextFile('plugins/cmos/.claude-plugin/plugin.json')) as {
+            version?: string;
+          }
+        ).version ?? '')
+      : '<missing>',
     lockVersion: lock.version ?? '',
     lockSelfVersion: lock.packages?.['']?.version ?? '',
     changelog: readTextFile('CHANGELOG.md'),
@@ -165,6 +209,13 @@ function evaluateReleaseVersionClass(state: ReleaseVersionState): {
     )
   );
   add(
+    'plugins/cmos/.claude-plugin/plugin.json $.version',
+    state.pluginVersion,
+    'ASSERTED',
+    'exactly equals package.json $.version; the plugin shim derives its package pin here',
+    state.pluginVersion === state.packageVersion
+  );
+  add(
     'package-lock.json $.version',
     state.lockVersion,
     'ASSERTED',
@@ -196,20 +247,6 @@ function evaluateReleaseVersionClass(state: ReleaseVersionState): {
         stamp.value,
         'EXCLUDED',
         `${stamp.label} is an adjacent schema/template-format axis`,
-        true
-      );
-      continue;
-    }
-    if (
-      stamp.relativePath === UNFILLED_SCAFFOLD_PATH &&
-      stamp.label === 'Version' &&
-      /^\[[^\]]+\]$/.test(stamp.lastUpdated ?? '')
-    ) {
-      add(
-        source,
-        stamp.value,
-        'EXCLUDED',
-        `unfilled scaffold while Last Updated remains ${stamp.lastUpdated}`,
         true
       );
       continue;
@@ -281,7 +318,8 @@ function runbookUsesCanonicalReleaseGate(runbook: string): boolean {
  * s90-m06 — one ledger for the release-version class.
  *
  * SCOPE. The authority is package.json. Continuous checkout state includes both package-lock
- * roots, the newest DATED CHANGELOG heading, and bold Markdown Version/CMOS Version stamps.
+ * roots, plugin.json's version (the install pin), the newest DATED CHANGELOG heading, and bold
+ * Markdown Version/CMOS Version stamps.
  * Schema Version and Template Version are neighbouring axes, not release versions; an unfilled
  * scaffold is excluded only while its own Last Updated value is bracketed. The broad locator
  * still prints all of them so an exclusion cannot make a matching site disappear. Git tags are
@@ -312,7 +350,7 @@ describe('release-version class', () => {
     expect(files.length).toBeGreaterThan(0);
     expect(sweptFiles.length).toBeGreaterThan(0);
     expect(state.stamps.length).toBeGreaterThan(0);
-    expect(evaluation.rows).toHaveLength(state.stamps.length + 5);
+    expect(evaluation.rows).toHaveLength(state.stamps.length + 6);
     expect(evaluation.failures).toEqual([]);
 
     console.log(
@@ -336,9 +374,17 @@ describe('release-version class', () => {
       expect.arrayContaining([
         expect.stringContaining('package-lock.json $.version'),
         expect.stringContaining('package-lock.json $.packages[""].version'),
+        expect.stringContaining('plugins/cmos/.claude-plugin/plugin.json $.version'),
         expect.stringContaining('CHANGELOG.md newest dated heading'),
       ])
     );
+  });
+
+  test('turns red when the plugin install pin drifts independently from the package', () => {
+    const state = loadReleaseVersionState();
+    expect(evaluateReleaseVersionClass({ ...state, pluginVersion: '99.99.99' }).failures).toEqual([
+      expect.stringContaining('plugins/cmos/.claude-plugin/plugin.json $.version'),
+    ]);
   });
 
   test('ignores an UNRELEASED accumulation heading but rejects a wrong dated heading', () => {
@@ -372,7 +418,7 @@ describe('release-version class', () => {
       (dated?.[0] ?? '').replace(dated?.[1] ?? '', prerelease)
     );
     const stamps = state.stamps.map((stamp) => {
-      if (stamp.label === 'Version' && stamp.relativePath !== UNFILLED_SCAFFOLD_PATH) {
+      if (stamp.label === 'Version') {
         return { ...stamp, value: prerelease };
       }
       if (stamp.label === 'CMOS Version') {
@@ -385,6 +431,7 @@ describe('release-version class', () => {
       evaluateReleaseVersionClass({
         ...state,
         packageVersion: prerelease,
+        pluginVersion: prerelease,
         lockVersion: prerelease,
         lockSelfVersion: prerelease,
         changelog,
@@ -410,12 +457,10 @@ describe('release-version class', () => {
     const declaredPrivateStamps = [
       { relativePath: PRIVATE.relativePaths.agents, label: 'Version' },
       { relativePath: PRIVATE.relativePaths.buildSessionPrompt, label: 'CMOS Version' },
-      { relativePath: PRIVATE.relativePaths.templateScaffold, label: 'Version' },
     ] as const;
 
     test('locates every declared private stamp before applying its rule', () => {
       const state = loadReleaseVersionState();
-      expect(PRIVATE.relativePaths.templateScaffold).toBe(UNFILLED_SCAFFOLD_PATH);
       expect(missingDeclaredStamps(state.stamps, declaredPrivateStamps)).toEqual([]);
 
       const withoutAgents = state.stamps.filter(
@@ -426,18 +471,10 @@ describe('release-version class', () => {
       ]);
     });
 
-    test('re-enters a filled scaffold into the exact-version class', () => {
+    // s93-m12 retired the unfilled private scaffold (cmos/templates/agents.md) and its exemption, so
+    // a placeholder Last Updated exempts no Version stamp: the release authority still fails.
+    test('a placeholder Last Updated exempts no Version stamp', () => {
       const state = loadReleaseVersionState();
-      const filledScaffold = state.stamps.map((stamp) =>
-        stamp.relativePath === PRIVATE.relativePaths.templateScaffold && stamp.label === 'Version'
-          ? { ...stamp, lastUpdated: '2026-09-01' }
-          : stamp
-      );
-      const evaluation = evaluateReleaseVersionClass({ ...state, stamps: filledScaffold });
-      expect(evaluation.failures).toEqual([
-        expect.stringContaining(PRIVATE.relativePaths.templateScaffold),
-      ]);
-
       const disguisedAuthority = state.stamps.map((stamp) =>
         stamp.relativePath === PRIVATE.relativePaths.agents
           ? { ...stamp, value: '1.0.0', lastUpdated: '[Date]' }
@@ -480,14 +517,166 @@ describe('release-version class', () => {
 });
 
 describe('npm publish pipeline configuration', () => {
+  test('packed E2E consumers install the prebuilt tarball and fail before packing when dist is absent', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-pack-contract-'));
+    const mkTmp = (prefix: string): string => fs.mkdtempSync(path.join(root, prefix));
+    const calls: string[][] = [];
+    const runNpm = (args: string[], cwd: string) => {
+      calls.push(args);
+      if (args[0] === 'pack') {
+        fs.writeFileSync(
+          path.join(args[args.indexOf('--pack-destination') + 1], 'fixture.tgz'),
+          'tarball'
+        );
+      } else if (args[0] === 'install') {
+        for (const file of [
+          'node_modules/@cmos/fixture/dist/index.js',
+          'node_modules/.bin/cmos-mcp',
+        ]) {
+          fs.mkdirSync(path.dirname(path.join(cwd, file)), { recursive: true });
+          fs.writeFileSync(path.join(cwd, file), 'installed');
+        }
+      } else throw new Error(`Unexpected npm command: ${args.join(' ')}`);
+      return { status: 0, stdout: '', stderr: '' };
+    };
+    try {
+      fs.writeFileSync(path.join(root, 'package.json'), '{"name":"@cmos/fixture"}');
+      expect(() => installPackedArtifact(root, mkTmp, runNpm)).toThrow(/build.*first/i);
+      expect(calls).toEqual([]);
+      fs.mkdirSync(path.join(root, 'dist'));
+      fs.writeFileSync(path.join(root, 'dist/index.js'), 'prebuilt');
+      const installed = installPackedArtifact(root, mkTmp, runNpm);
+      expect(calls.map((args) => args[0])).toEqual(['pack', 'install']);
+      expect(calls[1][1]).toBe(installed.tarball);
+      expect(fs.readFileSync(installed.serverPath, 'utf8')).toBe('installed');
+      expect(installed.serverPath).toBe(
+        path.join(installed.hostDir, 'node_modules/@cmos/fixture/dist/index.js')
+      );
+      expect(fs.readFileSync(path.join(root, 'dist/index.js'), 'utf8')).toBe('prebuilt');
+      expect(() =>
+        installPackedArtifact(root, mkTmp, () => ({
+          status: 1,
+          stdout: '',
+          stderr: 'pack refused',
+        }))
+      ).toThrow(/pack refused/);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('the E2E lane consumes its prebuilt artifact without replacing it', () => {
+    expect(e2eBuildCalls('control.ts', "spawnSync('npm', ['run', 'build']);")).toEqual([1]);
+    expect(e2eBuildCalls('control.ts', "execSync('npm run build');")).toEqual([1]);
+    expect(
+      e2eBuildCalls('control.ts', "// npm run build\nthrow new Error('Run npm run build first');")
+    ).toEqual([]);
+    const builds = trackedFiles()
+      .filter((file) => file.startsWith('tests/e2e/'))
+      .flatMap((file) => e2eBuildCalls(file, readTextFile(file)).map((line) => `${file}:${line}`));
+    expect(builds).toEqual([]);
+  });
+
+  test('every CI artifact build passes verify:dist before E2E or publishing', () => {
+    const files = trackedFiles().filter((file) => /^\.github\/workflows\/.*\.ya?ml$/.test(file));
+    let builds = 0;
+    for (const file of files) {
+      const workflow = parse(readTextFile(file)) as {
+        jobs?: Record<string, { steps?: Array<{ run?: string }> }>;
+      };
+      for (const [job, definition] of Object.entries(workflow.jobs ?? {})) {
+        const commands = (definition.steps ?? []).map((step) => step.run ?? '');
+        const buildSteps = commands.flatMap((command, index) =>
+          /\bnpm run build\b/.test(command) ? [index] : []
+        );
+        for (const [buildNumber, build] of buildSteps.entries()) {
+          builds++;
+          const nextBuild = buildSteps[buildNumber + 1] ?? commands.length;
+          const verify = commands.findIndex(
+            (command, index) =>
+              index > build && index < nextBuild && /\bnpm run verify:dist\b/.test(command)
+          );
+          expect({ file, job, build, verifyAfterBuild: verify > build }).toEqual({
+            file,
+            job,
+            build,
+            verifyAfterBuild: true,
+          });
+          for (const [index, command] of commands.entries()) {
+            if (
+              index > build &&
+              index < nextBuild &&
+              /\bnpm (?:publish|run test:e2e-firstrun)\b/.test(command)
+            )
+              expect(index).toBeGreaterThan(verify);
+          }
+        }
+      }
+    }
+    expect(builds).toBeGreaterThan(0);
+  });
+
+  PRIVATE.describe('the release tarball scan fails closed without shell errexit', () => {
+    test.each([
+      ['a nonempty clean tarball', 0, 'package/dist/index.js\n', 1, 0],
+      ['an empty listing', 0, '', 1, 1],
+      ['a tar failure', 2, '', 1, 1],
+      ['a partial listing followed by tar failure', 2, 'package/dist/index.js\n', 1, 1],
+      ['a private path match', 0, 'package/cmos/db/cmos.sqlite\n', 0, 1],
+      ['a broken scanner', 0, 'package/dist/index.js\n', 2, 1],
+      ['a missing scanner', 0, 'package/dist/index.js\n', 127, 1],
+      ['a failed counter despite positive output', 0, 'package/dist/index.js\n', 1, 1, 1],
+    ])('%s', (_name, tarStatus, listing, scanStatus, expected, countStatus = 0) => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-release-scan-'));
+      try {
+        for (const [name, body] of Object.entries({
+          tar: 'printf "%s" "$CMOS_TEST_LISTING"; exit "$CMOS_TEST_TAR_STATUS"',
+          rg: 'exit "$CMOS_TEST_SCAN_STATUS"',
+          wc: 'if [ "$CMOS_TEST_COUNT_STATUS" -ne 0 ]; then printf "1\\n"; exit "$CMOS_TEST_COUNT_STATUS"; fi; exec /usr/bin/wc "$@"',
+        }))
+          fs.writeFileSync(path.join(root, name), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+        const runbook = fs.readFileSync(PRIVATE.paths.releaseRunbook, 'utf8');
+        const block = runbook.match(/```bash\n([^`]*tar -tzf[\s\S]*?)\n```/)?.[1];
+        expect(block).toBeDefined();
+        const start = block!.split('\n').findIndex((line) => /^(?:if ! )?tar -tzf/.test(line));
+        expect(start).toBeGreaterThanOrEqual(0);
+        const run = spawnSync(
+          'bash',
+          ['-c', `set +e\n${block!.split('\n').slice(start).join('\n')}`],
+          {
+            encoding: 'utf8',
+            env: {
+              PATH: `${root}:${process.env.PATH}`,
+              CMOS_TARBALL_DIR: root,
+              CMOS_TARBALL: path.join(root, 'candidate.tgz'),
+              CMOS_TEST_TAR_STATUS: String(tarStatus),
+              CMOS_TEST_LISTING: String(listing),
+              CMOS_TEST_SCAN_STATUS: String(scanStatus),
+              CMOS_TEST_COUNT_STATUS: String(countStatus),
+            },
+          }
+        );
+        expect({ status: run.status, error: run.error }).toEqual({
+          status: expected,
+          error: undefined,
+        });
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    });
+  });
+
   test('package.json exposes dist entry points and declaration files', () => {
     const packageJson = JSON.parse(readTextFile('package.json')) as PackageJson;
 
     expect(packageJson.main).toBe('dist/index.js');
     expect(packageJson.types).toBe('dist/index.d.ts');
     expect(packageJson.files).toContain('dist');
+    // s93-m01: the bin is dist/bin.js, which sends a CLI verb to dist/cli.js before any server
+    // module loads and starts the server through dist/index.js for no verb, `serve` or a server
+    // flag. main and the exports stay dist/index.js, which still starts the server when run directly.
     expect(packageJson.bin).toMatchObject({
-      'cmos-mcp': './dist/index.js',
+      'cmos-mcp': './dist/bin.js',
     });
 
     expect(packageJson.exports).toMatchObject({
@@ -523,8 +712,8 @@ describe('npm publish pipeline configuration', () => {
     ].some((value) => typeof value === 'string' && value.includes('http-server'));
     expect(referencesHttpServer).toBe(false);
 
-    // The stdio bin — the product — is untouched.
-    expect(packageJson.bin).toMatchObject({ 'cmos-mcp': './dist/index.js' });
+    // The stdio bin — the product — is dist/bin.js since s93-m01 (it starts the same server).
+    expect(packageJson.bin).toMatchObject({ 'cmos-mcp': './dist/bin.js' });
   });
 
   test('the http-server source and transport docs are deleted from the repo', () => {

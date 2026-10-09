@@ -4,6 +4,7 @@
 
 import type { CmosDatabaseClient } from './client';
 import { checkWrite, countWrite } from './write-guard';
+import { storedTimeMs } from './stored-time';
 
 /**
  * WHY. Before 3.2.0 `cmos_sprint(complete)` wrote `end_date = COALESCE(end_date, ?)`, so a sprint
@@ -85,11 +86,17 @@ export function repairCompletedSprintEndDates(
   if (endDateRepairHasRun(client)) return null;
 
   const rows = client.getMany<AnchorRow>(
+    // s93-m11: the latest anchor by time (julianday), returned as stored, so the end_date the
+    // repair writes keeps its anchor's own spelling.
     `SELECT s.id AS id, s.end_date AS end_date,
-            (SELECT MAX(e.ts) FROM session_events e
-              WHERE e.action = 'sprint_complete' AND e.mission = s.id) AS event_ts,
-            (SELECT MAX(c.created_at) FROM context_snapshots c
-              WHERE c.source = 'sprint_complete:' || s.id) AS snapshot_at
+            (SELECT e.ts FROM session_events e
+              WHERE e.action = 'sprint_complete' AND e.mission = s.id
+                AND julianday(e.ts) IS NOT NULL
+              ORDER BY julianday(e.ts) DESC LIMIT 1) AS event_ts,
+            (SELECT c.created_at FROM context_snapshots c
+              WHERE c.source = 'sprint_complete:' || s.id
+                AND julianday(c.created_at) IS NOT NULL
+              ORDER BY julianday(c.created_at) DESC LIMIT 1) AS snapshot_at
        FROM sprints s
       WHERE s.status = 'Completed'
       ORDER BY s.id ASC`,
@@ -106,8 +113,8 @@ export function repairCompletedSprintEndDates(
       continue;
     }
     const anchor = normalizeCloseTimestamp(anchorRaw);
-    const endMs = row.end_date ? Date.parse(row.end_date) : NaN;
-    const anchorMs = Date.parse(anchor);
+    const endMs = storedTimeMs(row.end_date);
+    const anchorMs = storedTimeMs(anchor);
     if (Number.isNaN(endMs) || Number.isNaN(anchorMs) || endMs <= anchorMs) continue;
 
     const changed = countWrite(

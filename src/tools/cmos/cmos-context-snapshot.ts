@@ -55,7 +55,7 @@ export const cmosContextSnapshotSchema = z.object({
   contextType: z
     .enum(['master_context', 'project_context'])
     .describe(
-      'Which context to snapshot: master_context (strategic memory) or project_context (session state)'
+      'Which context to snapshot: master_context (the strategic record) or project_context (session state)'
     ),
 
   /** Descriptive source/reason for the snapshot */
@@ -93,7 +93,7 @@ export const cmosContextSnapshotToolDefinition = {
         type: 'string',
         enum: ['master_context', 'project_context'],
         description:
-          'Which context to snapshot: master_context (strategic memory) or project_context (session state)',
+          'Which context to snapshot: master_context (the strategic record) or project_context (session state)',
       },
       source: {
         type: 'string',

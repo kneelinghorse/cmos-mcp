@@ -11,12 +11,18 @@ import {
   type ProjectIdentityData,
 } from './project-identity';
 import { appendWarnings } from './format-warnings';
+import { storedTimeMs } from './stored-time';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
 export interface ProjectIdentityViewResult {
   projectIdentity: ProjectIdentityData;
   seeded: boolean;
+  /**
+   * s93-m11 — whether the identity shown is the stored row. False on a read of a project with no
+   * row yet: a read never seeds one, so the identity is derived in memory.
+   */
+  stored: boolean;
 }
 
 export interface ProjectIdentityUpdateResult {
@@ -40,7 +46,8 @@ export interface ProjectIdentityUpdateParams {
 
 /**
  * View the project_identity context row.
- * Auto-seeds the row if it doesn't exist yet.
+ * Auto-seeds the row if it doesn't exist yet, on a call that may write. A read seeds nothing and
+ * shows the identity derived in memory, with `stored: false` (s93-m11, decision #1182).
  */
 export async function cmosContextViewProjectIdentity(
   params: ProjectIdentityViewParams
@@ -58,14 +65,15 @@ export async function cmosContextViewProjectIdentity(
         });
       }
 
-      // s86-m02b: `seeded` is derived from `alreadyCurrent`, which a FAILED seed INSERT sets
-      // exactly the way a genuinely-present row does — so `seeded: false` would report "the
-      // row already existed" off a write that never landed. The migration's warnings channel
-      // carries the DB error onto the envelope (rendered by appendWarnings below).
+      // s86-m02b: a FAILED seed INSERT sets `alreadyCurrent` exactly the way a genuinely-present
+      // row does, so `seeded` counts the row this call inserted rather than reading that flag. The
+      // migration's warnings channel carries the DB error onto the envelope (rendered by
+      // appendWarnings below). s93-m11: a read inserts nothing and reports the seed as deferred.
       return createSuccess<ProjectIdentityViewResult>(
         {
           projectIdentity: identity,
-          seeded: !migration.alreadyCurrent,
+          seeded: migration.rowsUpdated > 0,
+          stored: migration.deferred === undefined,
         },
         migration.warnings
       );
@@ -136,11 +144,17 @@ export function formatProjectIdentityViewForLLM(
     return `❌ Failed to view project_identity: ${result.error?.message ?? 'Unknown error'}`;
   }
 
-  const { projectIdentity, seeded } = result.data;
+  const { projectIdentity, seeded, stored } = result.data;
   const lines: string[] = [];
 
   if (seeded) {
     lines.push('ℹ️ project_identity row was created automatically (seeded from existing context).');
+    lines.push('');
+  } else if (stored === false) {
+    lines.push(
+      'ℹ️ No project_identity row is stored yet. This is the identity derived from the master ' +
+        "context and metadata; the project's next CMOS write stores it."
+    );
     lines.push('');
   }
 
@@ -200,7 +214,7 @@ export function formatProjectIdentityViewForLLM(
   }
 
   lines.push(
-    `*Updated: ${projectIdentity.updated_at ? new Date(projectIdentity.updated_at).toLocaleString() : 'unknown'}*`
+    `*Updated: ${projectIdentity.updated_at ? new Date(storedTimeMs(projectIdentity.updated_at)).toLocaleString() : 'unknown'}*`
   );
 
   appendWarnings(lines, result);

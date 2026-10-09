@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // ABOUTME: s92-m04 over stdio: a project the client's roots or the operator's --project-root named
-// ABOUTME: gets no whoami nudge from cmos_review, and one inferred from the working directory does.
+// ABOUTME: gets no whoami nudge; one inferred from cwd does only when the dashboard is explicitly in use.
 
 /**
  * The in-process tests cover the handler rule; this proves the dispatcher feeds it, from the built
  * dist/index.js with a real client advertising real roots.
  *
- * ISOLATION: HOME and CMOS_CONFIG_DIR are throwaway directories and CMOS_PROJECT_ROOT is unset
- * (setting it is itself a whoami reason). The server therefore bootstraps this repository's .env,
- * which opts into the dashboard; that is why these cases assert whoami and the onboard-only action
- * only, never the dashboard nag (the in-process suite covers a local-only user).
+ * ISOLATION: HOME and CMOS_CONFIG_DIR are throwaway directories. An empty CMOS_PROJECT_ROOT
+ * makes index's nullish .env-root fallback resolve against scratch cwd instead of the checkout;
+ * the attribution check trims that empty value, so it does not itself become a whoami reason.
+ * Dashboard opt-in is explicit and loopback-only, with no credentials. All attribution cases
+ * enable it, so the named-project negatives cannot pass merely because the dashboard is off.
  */
 
 import { afterAll, describe, expect, it } from '@jest/globals';
@@ -37,6 +38,7 @@ function mkTmp(prefix: string): string {
 async function connect(opts: {
   cwd: string;
   home: string;
+  dashboardOptedIn?: boolean;
   roots?: string[];
   serverArgs?: string[];
 }): Promise<StdioHarness> {
@@ -46,9 +48,11 @@ async function connect(opts: {
     env: {
       HOME: opts.home,
       CMOS_CONFIG_DIR: mkTmp('cmos-e2e-m04-config-'),
+      CMOS_PROJECT_ROOT: '',
       CMOS_CHECKPOINT_SYNC: 'off',
       PATH: process.env.PATH ?? path.dirname(process.execPath),
       NODE_ENV: 'test',
+      ...(opts.dashboardOptedIn ? { CMOS_DASHBOARD_URL: 'http://127.0.0.1:9' } : {}),
     },
     clientName: 's92-m04-honest-opener',
     ...(opts.roots ? { roots: opts.roots } : {}),
@@ -86,17 +90,34 @@ describe('s92-m04 honest opener over stdio', () => {
   it('POSITIVE CONTROL: a project inferred from the working directory is prescribed whoami', async () => {
     const projectRoot = freshProject();
     const answer = await review(
-      await connect({ cwd: projectRoot, home: mkTmp('cmos-e2e-m04-home-') })
+      await connect({
+        cwd: projectRoot,
+        home: mkTmp('cmos-e2e-m04-home-'),
+        dashboardOptedIn: true,
+      })
     );
     expect(answer.resolvedBy).toBe('cwd');
     expect(answer.commands).toContain(WHOAMI);
     expect(answer.text).toContain(WHOAMI);
   });
 
+  it('a local-only project inferred from cwd gets no whoami or login nudge', async () => {
+    const answer = await review(
+      await connect({ cwd: freshProject(), home: mkTmp('cmos-e2e-m04-local-home-') })
+    );
+    expect(answer.resolvedBy).toBe('cwd');
+    expect(answer.commands).not.toContain(WHOAMI);
+    expect(answer.commands).not.toContain('cmos_auth(action="login")');
+    expect(answer.text).not.toContain(WHOAMI);
+    expect(answer.text).not.toContain('cmos_auth(action="login")');
+  });
+
   it("a project named by the client's roots is not, and the onboard-only action stays home", async () => {
     const projectRoot = freshProject();
     const home = mkTmp('cmos-e2e-m04-home-');
-    const answer = await review(await connect({ cwd: home, home, roots: [projectRoot] }));
+    const answer = await review(
+      await connect({ cwd: home, home, roots: [projectRoot], dashboardOptedIn: true })
+    );
     expect(answer.resolvedBy).toBe('mcp-roots');
     expect(answer.commands).not.toContain(WHOAMI);
     expect(answer.commands[0]).toBe('cmos_agent_onboard()');
@@ -107,7 +128,12 @@ describe('s92-m04 honest opener over stdio', () => {
     const projectRoot = freshProject();
     const home = mkTmp('cmos-e2e-m04-home-');
     const answer = await review(
-      await connect({ cwd: home, home, serverArgs: ['--project-root', projectRoot] })
+      await connect({
+        cwd: home,
+        home,
+        serverArgs: ['--project-root', projectRoot],
+        dashboardOptedIn: true,
+      })
     );
     expect(answer.resolvedBy).toBe('server-project-root');
     expect(answer.commands).not.toContain(WHOAMI);

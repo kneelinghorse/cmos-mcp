@@ -27,6 +27,7 @@ Quick reference for querying CMOS history using any SQLite client.
 | `constraints`          | Project constraints and review state     | `id`, `content`, `status`, `content_hash`                    |
 | `sync_event_queue`     | Outbound synchronization queue           | `id`, `event_type`, `envelope`, `status`                     |
 | `prompt_mappings`      | Prompt → behavior mapping                | `prompt`, `behavior`                                         |
+| `proposals`            | Drafted records awaiting the operator    | `id`, `text`, `kind`, `outcome`, `created_at`, `record_id`   |
 
 **Views**:
 
@@ -34,6 +35,10 @@ Quick reference for querying CMOS history using any SQLite client.
 - `active_missions` - Convenience projection for current work
 - `mission_details` - Missions joined to sprint titles and extended fields
 - `sprint_summary` - Dynamically calculated mission and decision counts
+
+`proposals` holds drafts (`Would record:` lines) until the operator answers them; it is outside
+search and sync events. A decision recorded from a draft keeps how its approval was known in
+`strategic_decisions.approval_mode`, `approval_draft` and `approval_words`.
 
 Runtime migrations may add tables such as `agent_feedback` and optional search/vector structures.
 
@@ -211,5 +216,5 @@ ORDER BY name;
 
 ---
 
-**Last Updated**: 2026-08-29
+**Last Updated**: 2026-10-08
 **Replaces**: `sqlite-db-browser-guide.md` (tool-agnostic version)

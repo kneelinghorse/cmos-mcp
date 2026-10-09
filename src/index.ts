@@ -14,7 +14,10 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { getServerVersion } from './server-version';
 import { debugEnabled, debugLog } from './debug-log';
+
+export { getServerVersion };
 
 // Load .env if present (before any other imports that read process.env).
 // Resolve project root from: env var → directory containing this script.
@@ -89,15 +92,28 @@ import {
 } from './intelligence/resolution-policy';
 import {
   assertReadOnlyAgentAllowed,
+  isReadOnlyAgentSession,
   ReadOnlyAgentGuardError,
 } from './tools/cmos/read-only-agent-guard';
 import { classifyAction } from './tools/cmos/action-taxonomy';
 import {
   captureToolCall,
   currentToolCallActionMode,
+  currentWrittenStores,
   projectIdentityDisclosuresForError,
+  recordStoreUpkeepNote,
   unwrapCapturedToolCallError,
 } from './tools/cmos/tool-call-context';
+import {
+  noteTelemetryProject,
+  noteTelemetryPresentedIds,
+  withMcpTelemetry,
+} from './tools/cmos/telemetry-call';
+import { cmosReviewPresentation } from './tools/cmos/review-presentation';
+import {
+  runFirstWriteMaintenance,
+  storeNeedsFirstWriteMaintenance,
+} from './tools/cmos/first-write-maintenance';
 import {
   CMOS_TOOL_DEFINITIONS,
   // Consolidated entity tools (Sprint 24)
@@ -132,9 +148,6 @@ import {
   // Agent utility tools
   cmosAgentOnboard,
   formatAgentOnboardForLLM,
-  // Bundled session-opener digest (Sprint 64 m03)
-  cmosReview,
-  formatReviewForLLM,
   // Utility
   resolveProjectRoot,
   CMOS_PROJECT_ROOT_ENV,
@@ -163,6 +176,7 @@ import { findWrongTypedStringParam } from './tools/cmos/param-type-guard';
 import { classifySenderResolutionError } from './tools/cmos/sender-refusal';
 import { toWireDefinition } from './tools/cmos/wire-descriptions';
 import { SERVER_INSTRUCTIONS } from './server-instructions';
+import { registerCmosPromptHandlers } from './server-prompts';
 import { closeOwnImplicitSessions } from './tools/cmos/implicit-session-lifecycle';
 import { findUnknownTopLevelParam } from './tools/cmos/unknown-param-guard';
 import { TokenCounter } from './intelligence/token-counters';
@@ -176,28 +190,6 @@ import {
   runStartupProjectKeyRecovery,
   runStartupCredentialCheck,
 } from './auth/project-key-capture';
-
-/**
- * Resolve the server version from package.json at runtime — shared by both bins.
- *
- * s77-m04: a sync fs read of the sibling package.json (dist/ sits one level below
- * package.json in both the repo and the installed tarball) with a hardcoded
- * fallback, so bumping package.json changes the announced version with NO code
- * edit (chosen over a JSON import or the build-manifest to keep the announce
- * decoupled from the build step).
- */
-export function getServerVersion(): string {
-  try {
-    const pkgPath = path.resolve(__dirname, '../package.json');
-    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8')) as { version?: string };
-    if (typeof pkg.version === 'string' && pkg.version.length > 0) {
-      return pkg.version;
-    }
-  } catch {
-    // fall through to the hardcoded fallback below
-  }
-  return '2.0.0';
-}
 
 /**
  * MCP Server Configuration — one truthful identity (s77-m04). The server NAME is
@@ -220,6 +212,7 @@ const server = new Server(
   {
     capabilities: {
       tools: {},
+      prompts: {},
     },
     // s92-m08: the loop, for every client, without a rules file.
     instructions: SERVER_INSTRUCTIONS,
@@ -390,10 +383,26 @@ async function getClientProjectRoots(): Promise<string[]> {
   if (cachedClientProjectRoots !== undefined) {
     return cachedClientProjectRoots;
   }
+  cachedClientProjectRoots = await probeClientRoots(server);
+  return cachedClientProjectRoots;
+}
+
+/**
+ * Ask the client for its roots, uncached. s93-m11 (#606 b): only a client that declared the roots
+ * capability is asked. A client that never declared it may never answer roots/list, and the first
+ * CMOS call then stalled until the request timed out (60 s).
+ */
+export async function probeClientRoots(
+  target: Pick<Server, 'listRoots' | 'getClientCapabilities'>
+): Promise<string[]> {
+  if (!target.getClientCapabilities()?.roots) {
+    debugLog('[DEBUG] Client did not declare the roots capability; roots/list not sent');
+    return [];
+  }
 
   const roots: string[] = [];
   try {
-    const rootsResult = await server.listRoots();
+    const rootsResult = await target.listRoots();
     if (rootsResult.roots && rootsResult.roots.length > 0) {
       for (const root of rootsResult.roots) {
         if (root.uri.startsWith('file://')) {
@@ -411,8 +420,7 @@ async function getClientProjectRoots(): Promise<string[]> {
     );
   }
 
-  cachedClientProjectRoots = roots;
-  return cachedClientProjectRoots;
+  return roots;
 }
 
 /**
@@ -437,11 +445,44 @@ async function resolveToolSenderContext(
   options: { requireSenderIdentity?: boolean } = {}
 ): Promise<SenderContext> {
   const mcpRoots = await getClientProjectRoots();
-  return resolveSenderContext({
+  const resolved = await resolveSenderContext({
     explicitProjectRoot: explicitRoot,
     mcpRoots,
     requireSenderIdentity: options.requireSenderIdentity ?? false,
   });
+  noteTelemetryProject(resolved.projectRoot);
+  return resolved;
+}
+
+/**
+ * s93-m11 — run a dispatched call, then this process's first-write upkeep (the staleness repair, a
+ * pending blob migration and an index rebuild; see first-write-maintenance.ts) for each store the
+ * call really wrote: a write-classified call that answered without error and changed a row there
+ * for its caller. A report that is only classified as a write (a decisions review), a lazy repair
+ * made on the way (the address heal, the identity seed, the schema label: asLazyRepair), a refusal,
+ * and every read never reach it. Onboard never does, even with feedback: it makes no status write
+ * (m11 fork 4). Its lines ride the answer.
+ */
+async function executeWithStoreUpkeep(
+  name: string,
+  args: unknown,
+  context: MissionProtocolContext
+): Promise<CallToolResult> {
+  const result = await executeMissionProtocolTool(name, args, context);
+  if (
+    result.isError !== true &&
+    name !== 'cmos_agent_onboard' &&
+    currentToolCallActionMode() === 'write' &&
+    !isReadOnlyAgentSession()
+  ) {
+    for (const dbPath of currentWrittenStores()) {
+      // <root>/cmos/db/cmos.sqlite → <root>
+      const root = path.resolve(dbPath, '..', '..', '..');
+      if (!storeNeedsFirstWriteMaintenance(root)) continue;
+      for (const note of await runFirstWriteMaintenance(root)) recordStoreUpkeepNote(note);
+    }
+  }
+  return result;
 }
 
 /**
@@ -500,15 +541,38 @@ const RESOLVED_BY_LABELS: Partial<Record<ResolvedBy, string>> = {
 };
 
 /**
+ * A project root as it may appear on the answer's first line: unchanged when it is an ordinary
+ * path; JSON-encoded, bounded and with backticks escaped when it holds a control character, a
+ * backtick or a line separator, so a crafted folder name cannot break out of the line (s93-m11).
+ */
+function inertProjectRoot(projectRoot: string): string {
+  const unsafe = [...projectRoot].some((ch) => {
+    const code = ch.codePointAt(0) ?? 0;
+    return code < 0x20 || code === 0x7f || code === 0x2028 || code === 0x2029 || ch === '`';
+  });
+  if (!unsafe) return projectRoot;
+  const bounded =
+    projectRoot.length > 320
+      ? `${projectRoot.slice(0, 320)}… [truncated; original length=${projectRoot.length}]`
+      : projectRoot;
+  return JSON.stringify(bounded)
+    .replace(/`/g, '\\u0060')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
+}
+
+/**
  * Build the MCP answer for a CMOS tool result. On success, `projectRoot` and `resolvedBy` are
- * added to `data` (a handler's own `projectRoot` is kept), and one line naming the project is
- * rendered when it was chosen by anything other than an explicit root or the cwd.
+ * added to `data` (a handler's own `projectRoot` is kept), and one line names the project. s93-m11
+ * (#606 c): the line is rendered on every answer that touched a project, as the server
+ * instructions promise; how the project was chosen is added when it was inferred rather than named.
  */
 export function buildResolvedToolResult(
   result: { success: boolean; data?: unknown },
   formatted: string,
   stamp: ResolutionStamp
 ): CallToolResult {
+  if (stamp.projectRoot) noteTelemetryProject(stamp.projectRoot);
   const structured: Record<string, unknown> = { ...result };
   let text = formatted;
   if (result.success) {
@@ -525,11 +589,14 @@ export function buildResolvedToolResult(
       structured.projectRoot = stamp.projectRoot;
       structured.resolvedBy = stamp.resolvedBy;
     }
-    const label = RESOLVED_BY_LABELS[stamp.resolvedBy];
-    const reason = stamp.note ?? (label ? `resolved by ${label}` : null);
-    if (reason && stamp.projectRoot) {
-      text = `Project: ${stamp.projectRoot} (${reason})\n\n${formatted}`;
-    }
+  }
+  // s93-m11 (#606 c): every text answer names the project it touched, an error included: a call
+  // refused after resolution still ran against that store. The structured envelope of an error is
+  // left as the handler built it.
+  const label = RESOLVED_BY_LABELS[stamp.resolvedBy];
+  const reason = stamp.note ?? (label ? `resolved by ${label}` : null);
+  if (stamp.projectRoot) {
+    text = `Project: ${inertProjectRoot(stamp.projectRoot)}${reason ? ` (${reason})` : ''}\n\n${formatted}`;
   }
   return {
     content: [{ type: 'text', text }],
@@ -589,48 +656,61 @@ export function registerToolHandlers(
   // Handle tool execution
   targetServer.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
+    const client = targetServer.getClientVersion?.();
+    return withMcpTelemetry(
+      {
+        name,
+        args,
+        mode: classifyAction(name, extractActionArg(args)),
+        client: client ? `${client.name}/${client.version}` : null,
+      },
+      async () => {
+        try {
+          if (!context) {
+            throw new McpError(ErrorCode.InternalError, 'Server context not initialized');
+          }
 
-    try {
-      if (!context) {
-        throw new McpError(ErrorCode.InternalError, 'Server context not initialized');
+          // Establish the outer request carrier here so failures retain this call's disclosures.
+          // executeMissionProtocolTool sees the active ALS context and runs its switch directly.
+          const actionMode = classifyAction(name, extractActionArg(args));
+          const captured = await captureToolCall(actionMode, () =>
+            executeWithStoreUpkeep(name, args, context)
+          );
+          return attachStoreUpkeepNotes(
+            attachProjectIdentityDisclosures(captured.value, captured.projectIdentityDisclosures),
+            captured.storeUpkeepNotes
+          );
+        } catch (error) {
+          const originalError = unwrapCapturedToolCallError(error);
+          if (originalError instanceof SenderResolutionError) {
+            return attachProjectIdentityDisclosures(
+              buildKnownToolErrorResult(
+                await classifySenderResolutionError(
+                  originalError,
+                  refusalMode(classifyAction(name, extractActionArg(args)))
+                )
+              ),
+              projectIdentityDisclosuresForError(error)
+            );
+          }
+          // Sprint 74 m03: a tool HANDLER that throws an unhandled exception (a
+          // write-path crash — e.g. cmos_sprint(complete)/cmos_session(capture)
+          // hitting a store-specific failure) is a tool-EXECUTION failure, not a
+          // protocol error. Surface it as a structured CmosToolResult error
+          // (code + real message + suggestion) returned as an isError result —
+          // never a bare JSON-RPC -32603 that swallows the cause (aquex.ai aa124685).
+          // Genuine protocol errors (McpError: unknown tool, uninitialized context)
+          // keep their JSON-RPC error shape — they already carry a clear message.
+          if (originalError instanceof McpError) {
+            throw originalError;
+          }
+          return attachProjectIdentityDisclosures(
+            buildToolExecutionErrorResult(name, args, originalError),
+            projectIdentityDisclosuresForError(error)
+          );
+        }
       }
-
-      // Establish the outer request carrier here so failures retain this call's disclosures.
-      // executeMissionProtocolTool sees the active ALS context and runs its switch directly.
-      const actionMode = classifyAction(name, extractActionArg(args));
-      const captured = await captureToolCall(actionMode, () =>
-        executeMissionProtocolTool(name, args, context)
-      );
-      return attachProjectIdentityDisclosures(captured.value, captured.projectIdentityDisclosures);
-    } catch (error) {
-      const originalError = unwrapCapturedToolCallError(error);
-      if (originalError instanceof SenderResolutionError) {
-        return attachProjectIdentityDisclosures(
-          buildKnownToolErrorResult(
-            await classifySenderResolutionError(
-              originalError,
-              refusalMode(classifyAction(name, extractActionArg(args)))
-            )
-          ),
-          projectIdentityDisclosuresForError(error)
-        );
-      }
-      // Sprint 74 m03: a tool HANDLER that throws an unhandled exception (a
-      // write-path crash — e.g. cmos_sprint(complete)/cmos_session(capture)
-      // hitting a store-specific failure) is a tool-EXECUTION failure, not a
-      // protocol error. Surface it as a structured CmosToolResult error
-      // (code + real message + suggestion) returned as an isError result —
-      // never a bare JSON-RPC -32603 that swallows the cause (aquex.ai aa124685).
-      // Genuine protocol errors (McpError: unknown tool, uninitialized context)
-      // keep their JSON-RPC error shape — they already carry a clear message.
-      if (originalError instanceof McpError) {
-        throw originalError;
-      }
-      return attachProjectIdentityDisclosures(
-        buildToolExecutionErrorResult(name, args, originalError),
-        projectIdentityDisclosuresForError(error)
-      );
-    }
+    );
   });
 }
 
@@ -760,6 +840,31 @@ function attachProjectIdentityDisclosures(
   };
 }
 
+/** s93-m11 — store upkeep this call performed, under its own heading on the answer. */
+function attachStoreUpkeepNotes(result: CallToolResult, notes: readonly string[]): CallToolResult {
+  if (notes.length === 0) return result;
+  const structured =
+    result.structuredContent && typeof result.structuredContent === 'object'
+      ? (result.structuredContent as Record<string, unknown>)
+      : {};
+  const existingWarnings = Array.isArray(structured.warnings)
+    ? structured.warnings.filter((warning): warning is string => typeof warning === 'string')
+    : [];
+  const warnings = [...new Set([...existingWarnings, ...notes])];
+  const section = `Store upkeep:\n${notes.map((note) => `- ${note}`).join('\n')}`;
+  const content = [...result.content];
+  const textIndex = content.findIndex((part) => part.type === 'text');
+  if (textIndex >= 0) {
+    const part = content[textIndex];
+    if (part.type === 'text') {
+      content[textIndex] = { ...part, text: `${part.text}\n\n${section}` };
+    }
+  } else {
+    content.push({ type: 'text', text: section });
+  }
+  return { ...result, content, structuredContent: { ...structured, warnings } };
+}
+
 export async function executeMissionProtocolTool(
   name: string,
   args: unknown,
@@ -772,9 +877,12 @@ export async function executeMissionProtocolTool(
     const actionMode = classifyAction(name, extractActionArg(args));
     try {
       const captured = await captureToolCall(actionMode, () =>
-        executeMissionProtocolTool(name, args, _context)
+        executeWithStoreUpkeep(name, args, _context)
       );
-      return attachProjectIdentityDisclosures(captured.value, captured.projectIdentityDisclosures);
+      return attachStoreUpkeepNotes(
+        attachProjectIdentityDisclosures(captured.value, captured.projectIdentityDisclosures),
+        captured.storeUpkeepNotes
+      );
     } catch (error) {
       const originalError = unwrapCapturedToolCallError(error);
       if (originalError instanceof SenderResolutionError) {
@@ -937,12 +1045,15 @@ export async function executeMissionProtocolTool(
     // Consolidated feedback tool (Sprint 56 m03)
     case 'cmos_feedback': {
       const params = args as CmosFeedbackParams;
-      const ctx = await resolveToolSenderContext(params.projectRoot);
-      const projectRoot = ctx.projectRoot;
+      const portfolioRead = params.acrossProjects === true && params.action === 'list';
+      const ctx = portfolioRead
+        ? await resolveOptionalSenderContext(params.projectRoot)
+        : await resolveToolSenderContext(params.projectRoot);
+      const projectRoot = ctx?.projectRoot;
       const result = await cmosFeedback({ ...params, projectRoot });
       const formatted = formatFeedbackForLLM(params.action, result);
 
-      return buildResolvedToolResult(result, formatted, stampOf(ctx));
+      return buildResolvedToolResult(result, formatted, portfolioRead ? NO_PROJECT : stampOf(ctx));
     }
 
     // Credential lifecycle (Sprint 57 m03)
@@ -1021,7 +1132,7 @@ export async function executeMissionProtocolTool(
       // s92-m01: the digest carries projectRoot/resolvedBy inside its own 4KB budget.
       // s92-m04: the roots and "the caller named the project" reach the nested onboard, so a
       // project the client or operator named is not reported as ambiguous (the whoami nudge).
-      const result = await cmosReview(
+      const result = await cmosReviewPresentation(
         { ...params, projectRoot },
         {
           resolvedBy: ctx.source,
@@ -1029,9 +1140,8 @@ export async function executeMissionProtocolTool(
           callerProvidedProjectRoot: callerNamedProject(params.projectRoot, ctx.source),
         }
       );
-      const formatted = formatReviewForLLM(result);
-
-      return buildResolvedToolResult(result, formatted, stampOf(ctx));
+      noteTelemetryPresentedIds(result.context?.returnedIds ?? []);
+      return buildResolvedToolResult(result.result, result.text, stampOf(ctx));
     }
 
     // Consolidated message tool (Sprint 28)
@@ -1066,10 +1176,10 @@ export async function executeMissionProtocolTool(
         });
         projectRoot = ctx.projectRoot;
         stamp = stampOf(ctx);
-      } else if (params.projectRoot !== undefined) {
+      } else if (params.projectRoot != null) {
         // s92-m01: an explicit projectRoot is final on every action. The dashboard-only actions
         // used to pass it through unchecked (and a non-CMOS folder would have been reported as
-        // the project the call used).
+        // the project the call used). Null, like omission, does not name an explicit root.
         const ctx = await resolveToolSenderContext(params.projectRoot);
         projectRoot = ctx.projectRoot;
         stamp = stampOf(ctx);
@@ -1259,8 +1369,11 @@ async function runStartupAttributionSelfTest(): Promise<StartupAttributionSelfTe
   // when the install root resolves: a cwd equal to the install root resolves by cwd when it holds a
   // store, which is the intended route for work in this repository.
   try {
+    // s93-m11: a startup diagnostic, not a call, so it never repairs the address; it resolves with
+    // the address the next write would store, as that write would (heal: 'preview').
     const resolved = await resolveSenderContext({
       requireSenderIdentity: true,
+      heal: 'preview',
     });
     return {
       projectRoot: resolved.projectRoot,
@@ -1501,7 +1614,8 @@ async function initializeServer(): Promise<MissionProtocolContext> {
  */
 async function describeStartupProject(): Promise<string> {
   try {
-    const ctx = await resolveSenderContext({ requireSenderIdentity: false });
+    // s93-m11: a startup line, not a call, so it never repairs the address (heal: 'preview').
+    const ctx = await resolveSenderContext({ requireSenderIdentity: false, heal: 'preview' });
     const how =
       ctx.source === 'cwd'
         ? 'the working directory'
@@ -1519,22 +1633,24 @@ async function describeStartupProject(): Promise<string> {
 }
 
 /**
- * Main entry point
+ * Main entry point. `argv` is the arguments after the program (`process.argv.slice(2)` when run as
+ * `node dist/index.js`; dist/bin.js passes what follows `serve`, or every argument when no CLI
+ * verb was named).
  */
-async function main(): Promise<void> {
+async function main(argv: readonly string[] = process.argv.slice(2)): Promise<void> {
   try {
     // s77-m04: --version / --help short-circuit in main() BEFORE initializeServer()
     // and server.connect() (mirror the --whoami branch) — else they would hang the
     // stdio server for every MCP host. Both print to stdout and exit 0.
-    if (process.argv.includes('--version')) {
+    if (argv.includes('--version')) {
       process.stdout.write(`cmos-mcp ${getServerVersion()}\n`);
       process.exit(0);
     }
-    if (process.argv.includes('--help')) {
+    if (argv.includes('--help')) {
       process.stdout.write(
         `cmos-mcp ${getServerVersion()} — MCP server for CMOS project management over SQLite.\n\n` +
           `Usage:\n` +
-          `  cmos-mcp              Run the MCP server over stdio (default).\n` +
+          `  cmos-mcp              Run the MCP server over stdio (default; also: cmos-mcp serve).\n` +
           `  cmos-mcp --version    Print the version and exit.\n` +
           `  cmos-mcp --help       Print this help and exit.\n` +
           `  cmos-mcp --whoami     Print sender-attribution diagnostics and exit.\n` +
@@ -1549,9 +1665,9 @@ async function main(): Promise<void> {
     }
 
     // s92-m01: record --project-root before anything resolves (whoami included).
-    setServerProjectRoot(parseProjectRootArg(process.argv));
+    setServerProjectRoot(parseProjectRootArg(argv));
 
-    if (process.argv.includes('--whoami')) {
+    if (argv.includes('--whoami')) {
       const exitCode = await whoamiCliRunner();
       if (exitCode !== 0) {
         process.exit(exitCode);
@@ -1564,6 +1680,7 @@ async function main(): Promise<void> {
 
     // Register tool handlers
     registerToolHandlers(context);
+    registerCmosPromptHandlers(server);
 
     // Create stdio transport
     const transport = new StdioServerTransport();
@@ -1674,7 +1791,7 @@ export const __test__ = {
 
 // Handle graceful shutdown
 process.on('SIGINT', async () => {
-  console.error(`[INFO] Received SIGINT, shutting down gracefully...`);
+  debugLog(`[INFO] Received SIGINT, shutting down gracefully...`);
   await closeOwnImplicitSessions().catch(() => undefined);
   try {
     await server.close();
@@ -1698,7 +1815,7 @@ process.on('SIGINT', async () => {
 });
 
 process.on('SIGTERM', async () => {
-  console.error(`[INFO] Received SIGTERM, shutting down gracefully...`);
+  debugLog(`[INFO] Received SIGTERM, shutting down gracefully...`);
   await closeOwnImplicitSessions().catch(() => undefined);
   try {
     await server.close();
@@ -1721,9 +1838,13 @@ process.on('SIGTERM', async () => {
   process.exit(0);
 });
 
-// Start the server
-if (require.main === module) {
-  main().catch((error) => {
+/**
+ * s93-m01 — start the MCP server (or answer a server flag) with these arguments. dist/bin.js, the
+ * package's bin, calls this for no verb, `serve` and the server flags; `node dist/index.js` still
+ * starts the server directly, as existing configs do.
+ */
+export function runServer(argv: readonly string[] = process.argv.slice(2)): void {
+  main(argv).catch((error) => {
     const missionError = ErrorHandler.handle(
       error,
       'server.unhandled',
@@ -1742,4 +1863,9 @@ if (require.main === module) {
     console.error(`[FATAL] Unhandled error${correlationFragment}: ${publicError.message}`);
     process.exit(1);
   });
+}
+
+// Start the server
+if (require.main === module) {
+  runServer();
 }

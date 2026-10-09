@@ -1,0 +1,38 @@
+{
+  "SessionStart": [
+    {
+      "matcher": "",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "cmos-mcp hook session-start --harness devin --hook-source cmos-devin",
+          "timeout": 3
+        }
+      ]
+    }
+  ],
+  "UserPromptSubmit": [
+    {
+      "matcher": "",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "cmos-mcp hook prompt --harness devin --hook-source cmos-devin",
+          "timeout": 1
+        }
+      ]
+    }
+  ],
+  "SessionEnd": [
+    {
+      "matcher": "",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "cmos-mcp hook session-end --harness devin --hook-source cmos-devin",
+          "timeout": 1
+        }
+      ]
+    }
+  ]
+}

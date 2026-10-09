@@ -56,6 +56,7 @@ import {
 import { repairCompletedSprintEndDates, type SprintEndDateRepair } from './sprint-end-date-repair';
 import { summarizeSessionCaptures } from './session-capture-state';
 import { findReusableSnapshot, snapshotStorage } from './snapshot-content-policy';
+import { storedTimeMs } from './stored-time';
 
 type CloseoutContextType = 'master_context' | 'project_context';
 type CloseoutCondensationStrategy = 'none' | 'conservative' | 'auto' | 'aggressive';
@@ -581,7 +582,7 @@ export async function cmosSprintComplete(
         `SELECT id, title, captures
          FROM sessions
          WHERE sprint_id = ? AND status = 'active'
-         ORDER BY started_at ASC, id ASC`,
+         ORDER BY julianday(started_at) ASC, id ASC`,
         [sprintId]
       );
       if (!activeSessionsResult.success) {
@@ -1708,8 +1709,8 @@ function computeSprintKPIs(
     let count = 0;
     for (const row of missionRows.data) {
       if (row.started_at && row.completed_at) {
-        const started = Date.parse(row.started_at);
-        const completed = Date.parse(row.completed_at);
+        const started = storedTimeMs(row.started_at);
+        const completed = storedTimeMs(row.completed_at);
         if (!Number.isNaN(started) && !Number.isNaN(completed) && completed >= started) {
           totalMs += completed - started;
           count += 1;

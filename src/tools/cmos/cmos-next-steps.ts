@@ -203,7 +203,7 @@ function listNextSteps(
   const query = `SELECT n.id, n.content, n.status, n.session_id, n.sprint_id, n.mission_id,
             n.created_at, n.resolved_at, n.carried_to_sprint, ${CLOSES_SURVIVED_SQL} AS closes_survived,
             ${LEASE_AGE_DAYS_SQL} AS age_days
-     FROM next_steps n WHERE ${conditions.join(' AND ')} ORDER BY n.created_at ASC`;
+     FROM next_steps n WHERE ${conditions.join(' AND ')} ORDER BY julianday(n.created_at) ASC`;
 
   const result = client.getMany<NextStepRow & { closes_survived: number; age_days: number | null }>(
     query,

@@ -9,7 +9,8 @@
 
 import { withClient } from './client';
 import type { CmosToolResult } from './types';
-import { createSuccess } from './errors';
+import { createError, createSuccess } from './errors';
+import { readTimeBounds } from './stored-time';
 import { loadUnifiedDecisionRecords, type DecisionSource } from './decision-memory';
 import { getProjectId } from './genesis-columns';
 import { frameForeignText } from '../../intelligence/provenance-frame';
@@ -20,6 +21,7 @@ import {
   type CrossStoreRow,
 } from '../../intelligence/cross-store-query';
 import { appendWarnings } from './format-warnings';
+import { PREVIEW_MAX_CHARS, previewText } from './text-preview';
 
 /**
  * Decision record surfaced to clients.
@@ -28,8 +30,17 @@ export interface StrategicDecision {
   /** Decision ID */
   id: number;
 
-  /** Decision text */
+  /**
+   * s93-m11 (#602): a preview of the decision, at most PREVIEW_MAX_CHARS characters; read it in
+   * full with cmos_decisions(action="show", decisionId).
+   */
   decision: string;
+
+  /** Whether `decision` was cut. */
+  truncated: boolean;
+
+  /** Characters in the full decision text. */
+  fullLength: number;
 
   /** Domain (e.g., 'ai-studio', 'general') */
   domain: string | null;
@@ -63,6 +74,14 @@ export interface StrategicDecision {
 
   /** s69-m06: source project_id — present ONLY on cross-store (acrossProjects) results. */
   projectId?: string | null;
+}
+
+/** s93-m11 (#602): the list carries a preview of each decision, never the full body. */
+function decisionPreview(
+  text: string
+): Pick<StrategicDecision, 'decision' | 'truncated' | 'fullLength'> {
+  const { preview, truncated, fullLength } = previewText(text);
+  return { decision: preview, truncated, fullLength };
 }
 
 /**
@@ -208,8 +227,14 @@ export const cmosDecisionsListToolDefinition = {
  * @returns CmosToolResult with decisions list
  */
 export async function cmosDecisionsList(
-  params: CmosDecisionsListParams = {}
+  requested: CmosDecisionsListParams = {}
 ): Promise<CmosToolResult<CmosDecisionsListResult>> {
+  // s93-m11: since/until compare as times; a year or a month covers its period, and a bound no
+  // stored time can be compared with is refused rather than matching nothing.
+  const bounds = readTimeBounds(requested);
+  if ('error' in bounds) return createError<CmosDecisionsListResult>(bounds.error);
+  const params: CmosDecisionsListParams = { ...requested, ...bounds };
+
   // s69-m06 — cross-store fan-out path: discover stores via the project-graph
   // registry and merge decisions newest-first across the whole portfolio. Bypasses
   // the single-store withClient path entirely.
@@ -238,7 +263,7 @@ export async function cmosDecisionsList(
         .slice(offset, offset + pageSize)
         .map((row) => ({
           id: row.id,
-          decision: row.decision,
+          ...decisionPreview(row.decision),
           domain: row.domain,
           sprintId: row.sprintId,
           snapshotId: row.snapshotId,
@@ -307,11 +332,11 @@ async function listAcrossProjects(
     sqlParams.push(params.missionId);
   }
   if (params.since) {
-    conditions.push('created_at >= ?');
+    conditions.push('julianday(created_at) >= julianday(?)');
     sqlParams.push(params.since);
   }
   if (params.until) {
-    conditions.push('created_at <= ?');
+    conditions.push('julianday(created_at) <= julianday(?)');
     sqlParams.push(params.until);
   }
 
@@ -327,7 +352,7 @@ async function listAcrossProjects(
 
   const decisions: StrategicDecision[] = fanout.results.map((row) => ({
     id: row.id,
-    decision: row.decision_text,
+    ...decisionPreview(row.decision_text),
     domain: row.project_domain,
     sprintId: row.sprint_id,
     snapshotId: null,
@@ -416,13 +441,31 @@ export function formatDecisionsListForLLM(result: CmosToolResult<CmosDecisionsLi
     const isForeign =
       d.projectId != null && (data.localProjectId == null || d.projectId !== data.localProjectId);
     if (isForeign) {
-      lines.push(`•${meta}`);
+      lines.push(`• #${d.id}${meta}`);
       lines.push(frameForeignText(d.decision, `proj:${d.projectId}`));
     } else {
-      lines.push(`• ${d.decision}${meta}`);
+      lines.push(`• #${d.id} ${d.decision}${meta}`);
     }
     lines.push(`  Created: ${d.createdAt}`);
     lines.push('');
+  }
+
+  // s93-m11 (#602): previews are cut at PREVIEW_MAX_CHARS; say once how to read one in full. An
+  // id from another project names a row in THAT store, so a foreign row is never offered to a
+  // local show (the contract critic: a portfolio list pointed show at another store's id).
+  const foreign = (d: StrategicDecision): boolean =>
+    d.projectId != null && (data.localProjectId == null || d.projectId !== data.localProjectId);
+  const cut = data.decisions.find((d) => d.truncated && !foreign(d));
+  if (cut) {
+    lines.push(
+      `Previews are cut at ${PREVIEW_MAX_CHARS} characters. Read one in full with ` +
+        `cmos_decisions(action="show", decisionId=${cut.id}).`
+    );
+  } else if (data.decisions.some((d) => d.truncated)) {
+    lines.push(
+      `Previews are cut at ${PREVIEW_MAX_CHARS} characters. A row tagged proj:… reads in full ` +
+        'with cmos_decisions(action="show") in that project, with its projectRoot: the id is that project\'s.'
+    );
   }
 
   // Pagination info. The cross-store path returns a single bounded top-N page (no

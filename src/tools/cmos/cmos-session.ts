@@ -52,7 +52,7 @@ export type CmosSessionAction = (typeof CMOS_SESSION_ACTIONS)[number];
 
 /** s86-m04 — which published parameter applies to which action (see action-params.ts). */
 export const CMOS_SESSION_ACTION_PARAMS: ActionParamMap<CmosSessionAction, CmosSessionParams> = {
-  list: ['action', 'status', 'type', 'sprintId', 'page', 'pageSize', 'projectRoot'],
+  list: ['action', 'status', 'type', 'sprintId', 'sessionId', 'page', 'pageSize', 'projectRoot'],
   start: [
     'action',
     'type',
@@ -147,7 +147,7 @@ export const cmosSessionSchema = z
       .string()
       .optional()
       .describe(
-        "Session ID for capture/complete actions. Omit it to use the open explicit session, or else this process's implicit session"
+        'capture/complete: the session to write; omit it for the session your writes land in (an open explicit session, else your own implicit one). list: only this session, to read its summary in full'
       ),
     category: z
       .enum(VALID_CAPTURE_CATEGORIES)
@@ -221,8 +221,8 @@ export const cmosSessionToolDefinition = {
   description:
     'Consolidated session tool with action parameter support. ' +
     'Actions: list, start, capture, complete, search. ' +
-    "Sessions are optional: a capture with no session open lands in this process's implicit " +
-    'session, opened as needed and closed when the process ends. ' +
+    "Sessions are optional: a capture with no session open lands in the caller's implicit " +
+    'session, opened as needed and closed when the conversation (without hooks, the server process) ends. ' +
     'Routes to the existing session handlers without changing session business logic.',
   inputSchema: {
     type: 'object',
@@ -281,7 +281,7 @@ export const cmosSessionToolDefinition = {
       sessionId: {
         type: 'string',
         description:
-          "Session ID for capture/complete actions. Omit it to use the open explicit session, or else this process's implicit session",
+          'capture/complete: the session to write; omit it for the session your writes land in (an open explicit session, else your own implicit one). list: only this session, to read its summary in full',
       },
       category: {
         type: 'string',
@@ -385,6 +385,7 @@ export async function cmosSession(
         status: params.status,
         type: params.type,
         sprintId: params.sprintId,
+        sessionId: params.sessionId,
         page: params.page,
         pageSize: params.pageSize,
         projectRoot: params.projectRoot,

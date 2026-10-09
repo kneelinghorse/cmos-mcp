@@ -17,6 +17,9 @@ async function loadIndexModule() {
     setNotificationHandler: jest.fn(),
     connect: jest.fn(async () => {}),
     close: jest.fn(async () => {}),
+    // s93-m11 (#606 b): a client that declared no capabilities, so roots/list is never sent.
+    getClientCapabilities: jest.fn(() => undefined),
+    listRoots: jest.fn(async () => ({ roots: [] })),
   };
   const serverCtor = jest.fn(() => mockServer);
 
@@ -47,6 +50,8 @@ async function loadIndexModule() {
   jest.doMock('@modelcontextprotocol/sdk/types.js', () => ({
     ListToolsRequestSchema: { id: 'list' },
     CallToolRequestSchema: { id: 'call' },
+    ListPromptsRequestSchema: { id: 'list-prompts' },
+    GetPromptRequestSchema: { id: 'get-prompt' },
     ErrorCode: errorCode,
     McpError,
   }));
@@ -527,6 +532,66 @@ describe('Mission Protocol entry lifecycle', () => {
     }
   });
 
+  test('the actual MCP boundary records reads, refusals and protocol failures once each', async () => {
+    const project = await createSeededCmosProject(
+      {
+        dashboardProjectId: '9d485daa-e9fc-4e8b-ae67-9a928daec94d',
+        cmosAddress: 'cmos://test/observation',
+        owner: 'test',
+      },
+      'cmos-mcp-observation-'
+    );
+    const config = await fs.mkdtemp(path.join(os.tmpdir(), 'cmos-observation-config-'));
+    const previous = process.env.CMOS_CONFIG_DIR;
+    process.env.CMOS_CONFIG_DIR = config;
+    const moduleData = await loadIndexModule();
+    try {
+      const { indexModule, mockServer } = moduleData;
+      const telemetry = await import('../src/tools/cmos/local-telemetry');
+      indexModule.__test__.registerToolHandlers(createMockContext());
+      const handler = mockServer.setRequestHandler.mock.calls[1][1] as (
+        request: any
+      ) => Promise<any>;
+      const args = { projectRoot: project.projectRoot };
+      const read = await handler({
+        params: { name: 'cmos_context', arguments: { ...args, action: 'next_steps' } },
+      });
+      expect(read.isError).toBe(false);
+      const refusal = await handler({
+        params: { name: 'cmos_decisions', arguments: { ...args, action: 'show', decisionId: -1 } },
+      });
+      expect(refusal.isError).toBe(true);
+      await expect(
+        handler({ params: { name: 'nonexistent_tool', arguments: args } })
+      ).rejects.toThrow();
+      const target = telemetry.targetForStore(
+        path.join(project.projectRoot, 'cmos/db/cmos.sqlite')
+      );
+      const records = telemetry.readTelemetry(target!);
+      expect(records).toHaveLength(3);
+      expect(records.map((row) => row.ok)).toEqual([true, false, false]);
+      expect(records[2].refused).toBe('PROTOCOL_ERROR');
+      // whoami resolves outside resolveToolSenderContext: the authoritative response stamp
+      // must still attribute the observation, with no explicit projectRoot argument.
+      const cwd = jest.spyOn(process, 'cwd').mockReturnValue(project.projectRoot);
+      try {
+        const whoami = await handler({
+          params: { name: 'cmos_message', arguments: { action: 'whoami' } },
+        });
+        expect(whoami.structuredContent?.error).toBeUndefined();
+        expect(telemetry.readTelemetry(target!)).toHaveLength(4);
+      } finally {
+        cwd.mockRestore();
+      }
+    } finally {
+      moduleData.cleanup();
+      if (previous === undefined) delete process.env.CMOS_CONFIG_DIR;
+      else process.env.CMOS_CONFIG_DIR = previous;
+      await project.cleanup();
+      await fs.rm(config, { recursive: true, force: true });
+    }
+  });
+
   test('registerToolHandlers preserves MethodNotFound for an unknown tool', async () => {
     const moduleData = await loadIndexModule();
     const { indexModule, mockServer, ErrorHandler } = moduleData;
@@ -926,11 +991,21 @@ describe('Mission Protocol entry lifecycle', () => {
       await indexModule.__test__.main();
 
       expect(mockServer.setRequestHandler).toHaveBeenCalled();
+      expect(moduleData.serverCtor.mock.calls).toContainEqual([
+        expect.anything(),
+        expect.objectContaining({ capabilities: { tools: {}, prompts: {} } }),
+      ]);
+      expect(mockServer.setRequestHandler.mock.calls.map(([schema]) => schema)).toEqual(
+        expect.arrayContaining([{ id: 'list-prompts' }, { id: 'get-prompt' }])
+      );
       expect(mockServer.connect).toHaveBeenCalled();
       expect(transportCtor).toHaveBeenCalled();
       const lines = consoleSpy.mock.calls.map((call) => String(call[0]));
+      const { version } = JSON.parse(
+        await fs.readFile(path.resolve(__dirname, '../package.json'), 'utf8')
+      ) as { version: string };
       const startup = [
-        expect.stringMatching(/^\[cmos-mcp\] v\d+\.\d+\.\d+ ready on stdio \(\d+ tools\)$/),
+        `[cmos-mcp] v${version} ready on stdio (${indexModule.getToolDefinitions().length} tools)`,
         '[cmos-mcp] project: /tmp/current-project (from the working directory)',
       ];
       if (debug) {
@@ -1058,7 +1133,8 @@ describe('Mission Protocol entry lifecycle', () => {
       expect(handler).toBeDefined();
       await expect(handler?.({} as any)).rejects.toThrow('exit:0');
       expect(mockServer.close).toHaveBeenCalled();
-      expect(consoleSpy).toHaveBeenCalledWith(
+      // s93-m11 (#606 i): a quiet shutdown, like the quiet startup — the line is CMOS_DEBUG only.
+      expect(consoleSpy).not.toHaveBeenCalledWith(
         expect.stringContaining('Received SIGINT, shutting down gracefully')
       );
     } finally {
@@ -1082,7 +1158,8 @@ describe('Mission Protocol entry lifecycle', () => {
       expect(handler).toBeDefined();
       await expect(handler?.({} as any)).rejects.toThrow('exit:0');
       expect(mockServer.close).toHaveBeenCalled();
-      expect(consoleSpy).toHaveBeenCalledWith(
+      // s93-m11 (#606 i): a quiet shutdown, like the quiet startup — the line is CMOS_DEBUG only.
+      expect(consoleSpy).not.toHaveBeenCalledWith(
         expect.stringContaining('Received SIGTERM, shutting down gracefully')
       );
     } finally {

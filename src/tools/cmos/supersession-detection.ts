@@ -1,3 +1,5 @@
+// ABOUTME: Replays supersession candidate detection using the shared production retriever.
+// ABOUTME: Preserves the historical keyword export while its pure implementation serves hooks.
 /**
  * Supersession Detection
  *
@@ -11,13 +13,15 @@
  * 9,035 offers were true, and 28-61% of real supersessions crossed sprints where it could not see
  * them (cmos/research/2026-10-strategy/retrieval-natural-labels.md §5), so capture and record stopped
  * offering candidates; a correction names its target with supersedes=[...]. The module stays for
- * `extractKeywords` (relevance surfacing and the FTS5 retriever use it) and for that replay.
+ * the historical `extractKeywords` re-export and for that replay.
  *
  * @module tools/cmos/supersession-detection
  */
 
 import type { CmosDatabaseClient } from './client';
 import { HybridRetriever } from './fts5-retriever';
+import { extractKeywords } from './keyword-extraction';
+export { extractKeywords } from './keyword-extraction';
 
 const MAX_CANDIDATES = 3;
 /**
@@ -26,7 +30,6 @@ const MAX_CANDIDATES = 3;
  * crowded out by other sprints' rows. Retriever scoring itself is untouched.
  */
 const CANDIDATE_POOL = 30;
-const MIN_KEYWORD_LENGTH = 3;
 const MIN_KEYWORDS_FOR_SEARCH = 2;
 /** Shared tokens with a non-zero weight a candidate needs before it is offered. */
 const MIN_WEIGHTED_OVERLAP = 2;
@@ -171,20 +174,6 @@ export async function detectSupersessionCandidates(
   return { candidates: limited, message };
 }
 
-/**
- * Extract meaningful keywords from decision text: whole lower-cased tokens, stop words removed.
- */
-export function extractKeywords(text: string): string[] {
-  const tokens = text
-    .toLowerCase()
-    .replace(/[^a-z0-9\s-]/g, ' ')
-    .split(/\s+/)
-    .filter((t) => t.length >= MIN_KEYWORD_LENGTH);
-
-  const unique = [...new Set(tokens)].filter((t) => !STOP_WORDS.has(t));
-  return unique;
-}
-
 /** Euclidean norm of a binary token vector under the IDF weights. */
 function vectorNorm(tokens: readonly string[], weights: (token: string) => number): number {
   return Math.sqrt(tokens.reduce((sum, t) => sum + weights(t) ** 2, 0));
@@ -245,77 +234,3 @@ function formatSuggestionMessage(
   }
   return lines.join('\n');
 }
-
-/**
- * Common English stop words to filter from keyword extraction.
- */
-const STOP_WORDS = new Set([
-  'the',
-  'and',
-  'for',
-  'are',
-  'but',
-  'not',
-  'you',
-  'all',
-  'can',
-  'had',
-  'her',
-  'was',
-  'one',
-  'our',
-  'out',
-  'has',
-  'have',
-  'been',
-  'will',
-  'from',
-  'they',
-  'each',
-  'make',
-  'like',
-  'been',
-  'this',
-  'that',
-  'with',
-  'into',
-  'then',
-  'than',
-  'them',
-  'these',
-  'some',
-  'would',
-  'other',
-  'about',
-  'which',
-  'when',
-  'what',
-  'there',
-  'their',
-  'said',
-  'use',
-  'used',
-  'using',
-  'should',
-  'also',
-  'does',
-  'did',
-  'just',
-  'more',
-  'most',
-  'very',
-  'after',
-  'before',
-  'between',
-  'could',
-  'still',
-  'over',
-  'such',
-  'only',
-  'where',
-  'while',
-  'being',
-  'same',
-  'both',
-  'way',
-]);

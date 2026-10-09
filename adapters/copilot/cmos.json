@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "type": "command",
+        "bash": "cmos-mcp hook session-start --harness copilot --hook-source cmos-copilot",
+        "powershell": "cmos-mcp hook session-start --harness copilot --hook-source cmos-copilot",
+        "timeoutSec": 3
+      }
+    ]
+  }
+}

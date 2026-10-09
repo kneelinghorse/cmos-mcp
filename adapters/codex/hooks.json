@@ -1,0 +1,59 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cmos-mcp hook session-start --harness codex --hook-source cmos-codex",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cmos-mcp hook prompt --harness codex --hook-source cmos-codex",
+            "timeout": 1
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cmos-mcp hook stop --harness codex --hook-source cmos-codex",
+            "timeout": 1
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cmos-mcp hook pre-compact --harness codex --hook-source cmos-codex",
+            "timeout": 1
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cmos-mcp hook session-end --harness codex --hook-source cmos-codex",
+            "timeout": 1
+          }
+        ]
+      }
+    ]
+  }
+}

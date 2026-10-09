@@ -32,6 +32,7 @@ import { checkWrite } from './write-guard';
 import { deriveProjectSlug } from './project-identity';
 import { sprintIdOrderSql } from './sprint-ordering';
 import { registerResolvedProjectStore } from '../../intelligence/project-resolution';
+import { compareStoredTimes, storedTimeMs } from './stored-time';
 
 /**
  * s86-m01 — write diagnostics straight to fd 2 instead of through the global
@@ -369,6 +370,9 @@ export async function cmosDbBackfill(
       // early events and the cursor can never advance past them (or worse, regresses).
       // True "replay from scratch" can be achieved by clearing the cursor first.
       const since = previousCursor;
+      // s93-m11: the cursor compares as an instant, never as text. A row whose time cannot be read
+      // is pushed again rather than skipped for good (pushes are idempotent upserts).
+      const sinceMs = storedTimeMs(since);
 
       // s81-m01: when file-based sync fails and we drop to the slower event-replay
       // path below, capture WHY so it surfaces as a structured warnings[] entry on
@@ -487,7 +491,7 @@ export async function cmosDbBackfill(
       if (sprintsResult.success && sprintsResult.data) {
         for (const sprint of sprintsResult.data) {
           const ts = sprint.start_date ?? sprint.end_date ?? new Date().toISOString();
-          if (since && ts <= since) continue;
+          if (since && storedTimeMs(ts) <= sinceMs) continue;
 
           events.push({
             type: 'sprint_added',
@@ -520,12 +524,12 @@ export async function cmosDbBackfill(
 
       // 2. Missions
       const missionsResult = db.getMany<MissionRow>(
-        `SELECT * FROM missions ORDER BY COALESCE(created_at, started_at, completed_at, id)`
+        `SELECT * FROM missions ORDER BY julianday(COALESCE(created_at, started_at, completed_at)) IS NULL, julianday(COALESCE(created_at, started_at, completed_at)), id`
       );
       if (missionsResult.success && missionsResult.data) {
         for (const mission of missionsResult.data) {
           const createdTs = mission.created_at ?? mission.started_at ?? new Date().toISOString();
-          if (since && createdTs <= since) continue;
+          if (since && storedTimeMs(createdTs) <= sinceMs) continue;
 
           // Always emit mission_added so every mission gets a PG row
           events.push({
@@ -595,10 +599,12 @@ export async function cmosDbBackfill(
       }
 
       // 3. Sessions
-      const sessionsResult = db.getMany<SessionRow>(`SELECT * FROM sessions ORDER BY started_at`);
+      const sessionsResult = db.getMany<SessionRow>(
+        `SELECT * FROM sessions ORDER BY julianday(started_at)`
+      );
       if (sessionsResult.success && sessionsResult.data) {
         for (const session of sessionsResult.data) {
-          if (since && session.started_at <= since) continue;
+          if (since && storedTimeMs(session.started_at) <= sinceMs) continue;
 
           events.push({
             type: 'session_started',
@@ -649,11 +655,11 @@ export async function cmosDbBackfill(
       const seenDecisionHashes = new Set<string>();
       let deduped = 0;
       const decisionsResult = db.getMany<DecisionRow>(
-        `SELECT * FROM strategic_decisions ORDER BY created_at`
+        `SELECT * FROM strategic_decisions ORDER BY julianday(created_at)`
       );
       if (decisionsResult.success && decisionsResult.data) {
         for (const decision of decisionsResult.data) {
-          if (since && decision.created_at <= since) continue;
+          if (since && storedTimeMs(decision.created_at) <= sinceMs) continue;
 
           // Compute or use stored content hash for dedup
           const hash =
@@ -686,11 +692,11 @@ export async function cmosDbBackfill(
       // 5. Learnings (with content hash dedup)
       const seenLearningHashes = new Set<string>();
       const learningsResult = db.getMany<LearningRow>(
-        `SELECT * FROM learnings ORDER BY created_at`
+        `SELECT * FROM learnings ORDER BY julianday(created_at)`
       );
       if (learningsResult.success && learningsResult.data) {
         for (const learning of learningsResult.data) {
-          if (since && learning.created_at <= since) continue;
+          if (since && storedTimeMs(learning.created_at) <= sinceMs) continue;
 
           // Compute or use stored content hash for dedup
           const hash =
@@ -724,12 +730,12 @@ export async function cmosDbBackfill(
         `SELECT d.from_id, d.to_id, d.type, m.created_at AS from_created_at
          FROM mission_dependencies d
          LEFT JOIN missions m ON d.from_id = m.id
-         ORDER BY COALESCE(m.created_at, d.from_id)`
+         ORDER BY julianday(m.created_at) IS NULL, julianday(m.created_at), d.from_id`
       );
       if (dependenciesResult.success && dependenciesResult.data) {
         for (const dep of dependenciesResult.data) {
           const ts = dep.from_created_at ?? new Date().toISOString();
-          if (since && ts <= since) continue;
+          if (since && storedTimeMs(ts) <= sinceMs) continue;
 
           events.push({
             type: 'dependency_added',
@@ -754,11 +760,11 @@ export async function cmosDbBackfill(
         mission_id: string | null;
         created_at: string;
       }>(
-        `SELECT id, content, status, session_id, sprint_id, mission_id, created_at FROM next_steps ORDER BY created_at`
+        `SELECT id, content, status, session_id, sprint_id, mission_id, created_at FROM next_steps ORDER BY julianday(created_at)`
       );
       if (nextStepsResult.success && nextStepsResult.data) {
         for (const step of nextStepsResult.data) {
-          if (since && step.created_at <= since) continue;
+          if (since && storedTimeMs(step.created_at) <= sinceMs) continue;
           events.push({
             type: 'next_step_created',
             timestamp: step.created_at,
@@ -785,11 +791,11 @@ export async function cmosDbBackfill(
         created_at: string;
         expires_at: string | null;
       }>(
-        `SELECT id, content, status, session_id, sprint_id, created_at, expires_at FROM constraints ORDER BY created_at`
+        `SELECT id, content, status, session_id, sprint_id, created_at, expires_at FROM constraints ORDER BY julianday(created_at)`
       );
       if (constraintsResult.success && constraintsResult.data) {
         for (const constraint of constraintsResult.data) {
-          if (since && constraint.created_at <= since) continue;
+          if (since && storedTimeMs(constraint.created_at) <= sinceMs) continue;
           events.push({
             type: 'constraint_added',
             timestamp: constraint.created_at,
@@ -814,11 +820,11 @@ export async function cmosDbBackfill(
         source: string | null;
         created_at: string;
       }>(
-        `SELECT id, context_id, session_id, source, created_at FROM context_snapshots ORDER BY created_at`
+        `SELECT id, context_id, session_id, source, created_at FROM context_snapshots ORDER BY julianday(created_at)`
       );
       if (snapshotsResult.success && snapshotsResult.data) {
         for (const snapshot of snapshotsResult.data) {
-          if (since && snapshot.created_at <= since) continue;
+          if (since && storedTimeMs(snapshot.created_at) <= sinceMs) continue;
           events.push({
             type: 'snapshot_taken',
             timestamp: snapshot.created_at,
@@ -858,8 +864,9 @@ export async function cmosDbBackfill(
         );
       }
 
-      // Sort chronologically
-      events.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+      // Sort chronologically, as instants (s93-m11): text order puts a space-spelled time before
+      // a later ISO one, and the cursor then skips rows it never pushed.
+      events.sort((a, b) => compareStoredTimes(a.timestamp, b.timestamp));
       const totalEvents = events.length;
 
       // Large-delta guard: skip push when any entity type exceeds threshold.
@@ -959,7 +966,11 @@ export async function cmosDbBackfill(
       // Update cursor — only advance, never regress.
       // A force=true run that times out early must not overwrite a previously-advanced
       // cursor with an earlier timestamp, or the next run re-processes the same events.
-      if (latestTimestamp && (!previousCursor || latestTimestamp > previousCursor)) {
+      // s93-m11: compared as instants, never as text.
+      if (
+        latestTimestamp &&
+        (!previousCursor || compareStoredTimes(latestTimestamp, previousCursor) > 0)
+      ) {
         // s86-m02b: the `cursor` field returned below is read as "resume from here". A failed
         // write means the next run resumes from the OLD cursor and replays these events —
         // the answer must not report an advance the store never took.

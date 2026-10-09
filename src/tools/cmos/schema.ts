@@ -10,6 +10,7 @@
  * @module tools/cmos/schema
  */
 
+import { PROPOSALS_TABLE_SQL } from './proposals';
 import { PARKED_MISSION_STATUSES, statusInSql, statusNotInSql } from './terminal-status';
 
 /**
@@ -267,7 +268,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   author_user_id TEXT,
   user_id TEXT,
   -- Implicit sessions: 1 for a session the server opened because a write
-  -- named none; owner_key says whose it is (NULL on explicit sessions).
+  -- named none; owner_key says whose it is (an explicit one's starter, NULL before 3.3.0).
   implicit INTEGER NOT NULL DEFAULT 0,
   owner_key TEXT
 );
@@ -283,7 +284,7 @@ CREATE TABLE IF NOT EXISTS prompt_mappings (
   behavior TEXT NOT NULL
 );
 
--- Strategic decisions index for queryable project memory
+-- Strategic decisions index for a queryable project record
 -- Keeps decisions from MASTER_CONTEXT searchable without parsing JSON
 CREATE TABLE IF NOT EXISTS strategic_decisions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -310,6 +311,10 @@ CREATE TABLE IF NOT EXISTS strategic_decisions (
   schema_version INTEGER NOT NULL DEFAULT 1,
   -- Author identity (nullable; bound when the multi-user layer lands).
   author_user_id TEXT,
+  -- How a decision recorded from a draft was approved (NULL for a direct record).
+  approval_mode TEXT,     -- approved | agent-judged | agent-attested
+  approval_draft TEXT,    -- the draft it came from (P<n>)
+  approval_words TEXT,    -- the operator's message, for approved and agent-judged
   FOREIGN KEY (context_id) REFERENCES contexts(id) ON DELETE CASCADE,
   FOREIGN KEY (sprint_id) REFERENCES sprints(id) ON DELETE SET NULL,
   FOREIGN KEY (snapshot_id) REFERENCES context_snapshots(id) ON DELETE SET NULL,
@@ -333,7 +338,7 @@ CREATE TABLE IF NOT EXISTS learnings (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   content TEXT NOT NULL,
   category TEXT,            -- technical | process | agent-behavior | tooling
-  status TEXT NOT NULL DEFAULT 'active',  -- active | archived | superseded | stale (staleness-detection.ts writes 'stale'; no CHECK constraint)
+  status TEXT NOT NULL DEFAULT 'active',  -- active | archived | superseded | stale (set only by an explicit status update; no CHECK constraint)
   sprint_id TEXT,
   author_session_id TEXT,  -- formerly session_id: the project-scoped session of origin
   mission_id TEXT,
@@ -467,6 +472,9 @@ CREATE INDEX IF NOT EXISTS idx_constraints_status ON constraints (status);
 CREATE INDEX IF NOT EXISTS idx_constraints_expires ON constraints (expires_at);
 CREATE INDEX IF NOT EXISTS idx_constraints_hash ON constraints (content_hash);
 
+-- Drafted records awaiting the operator: a carve-out outside FTS and sync events
+${PROPOSALS_TABLE_SQL}
+
 -- Project identity view for easy access to project-level metadata
 CREATE VIEW IF NOT EXISTS project_identity AS
 SELECT
@@ -508,68 +516,6 @@ SELECT m.id,
 
 -- Sprint summary view for retrospectives and analysis
 ${SPRINT_SUMMARY_VIEW_SQL}
-`;
-
-/**
- * Minimal agents.md content for MCP-focused workflows.
- * Used when initializing new projects.
- */
-export const CMOS_AGENTS_MD = `# CMOS Agent Configuration
-
-This project uses CMOS (Claude Mission Operating System) for AI-assisted project management.
-
-## Quick Start
-
-CMOS operations are performed via MCP tools. No Python CLI required.
-
-### Available Tools
-
-Every tool below selects its operation with an \`action\` parameter, except
-\`cmos_review\`, \`cmos_agent_onboard\` and \`cmos_status\`, which take only \`projectRoot\`.
-The full per-action reference is TOOL_REFERENCE.md in the cmos-mcp package.
-
-**Start here**
-- \`cmos_review\` - Bundled session-opener digest: identity, sprint, work queue, next actions
-
-**Database & Health**
-- \`cmos_db(action="health")\` - Check database connectivity and stats
-- \`cmos_db(action="snapshot")\` - Create/list database snapshots for backup safety
-- \`cmos_db(action="restore")\` - Restore database from a named snapshot (destructive)
-- \`cmos_agent_onboard\` - Get project context for cold-start
-
-**Mission Management**
-- \`cmos_mission(action="status")\` - View work queue (In Progress → Current → Queued)
-- \`cmos_mission(action="show")\` - Get full mission details
-- \`cmos_mission_transition(action="start")\` - Begin work on a mission
-- \`cmos_mission_transition(action="complete")\` - Mark mission done
-- \`cmos_mission_transition(action="block"|"unblock")\` - Handle blockers
-
-**Sprint Management**
-- \`cmos_sprint\` - Actions: list, show, add, update, complete, retro, carry_forward, analytics
-
-**Session Management**
-- \`cmos_session(action="start")\` - Start planning/review/research session
-- \`cmos_session(action="capture")\` - Capture decisions, learnings, constraints
-- \`cmos_session(action="complete")\` - Complete session with summary
-
-**Context Operations**
-- \`cmos_context(action="view")\` - View project/master context
-- \`cmos_context(action="snapshot")\` - Take strategic snapshot
-- \`cmos_context(action="history")\` - View snapshot timeline
-
-## Mission Lifecycle
-
-\`\`\`
-Queued → Current → In Progress → Completed
-                 ↘ Blocked ↗
-\`\`\`
-
-## Key Principles
-
-1. **MCP-first**: Use CMOS tools directly, no CLI required
-2. **Database is source of truth**: All state in SQLite
-3. **Session captures**: Record decisions and learnings
-4. **Context snapshots**: Preserve strategic milestones
 `;
 
 /**

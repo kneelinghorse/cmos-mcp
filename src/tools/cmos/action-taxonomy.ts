@@ -8,18 +8,20 @@ export type ActionMode = 'read' | 'write';
  * Tools that take NO `action` parameter and are entirely read-only digests /
  * diagnostics. Every call to one of these is a read.
  *
- * `cmos_agent_onboard` is deliberately NOT here (s78-m04 adversarial review): its
- * handler WRITES the CMOS store — resolveAndPersistOwner (metadata), backfillUnknownCmosAddress
- * / project-identity (contexts), and recordAgentFeedback (INSERT INTO agent_feedback when an
- * `agentFeedback` arg is passed). It is therefore write-classified and blocked under review;
- * a review agent uses `cmos_review` (a genuine read digest) for cold-start context instead.
+ * `cmos_agent_onboard` is deliberately NOT here (s78-m04 adversarial review): it records an
+ * `agentFeedback` row when one is passed (INSERT INTO agent_feedback), and as a write-classified
+ * call its sender resolution may repair a `cmos://unknown/*` address and seed a missing
+ * project_identity row (lazy repairs: asLazyRepair). It is therefore write-classified and blocked
+ * under review; a review agent uses `cmos_review` (a genuine read digest) for cold-start context
+ * instead. Onboard makes no status write and never starts first-write upkeep (s93-m11, fork 4).
  *
- * `cmos_review` and `cmos_status` are admitted as read-classified entry points. That label is a
- * narrow dispatch/identity-registration decision, NOT a promise that every composed handler is
- * physically write-free: review/onboard may perform lazy compatibility or reconciliation writes
- * in an already-open CMOS store. `cmos_review` may also touch an EXISTING per-user graph row's
- * `last_seen_at` outside the review role. The review role suppresses that graph touch, and s88-m08
- * suppresses project-identity mint/registration for every read-classified call.
+ * `cmos_review` and `cmos_status` are admitted as read-classified entry points. s93-m11: every
+ * read-classified call is write-free in the store, under any role — no status, owner, address,
+ * identity or schema-label write, and a migration a read runs is DDL plus filling what it created
+ * (decision #1182; tests/tools/cmos/reads-never-write.test.ts runs every pair below). `cmos_review`
+ * may still touch an EXISTING per-user graph row's `last_seen_at` outside the review role (#906);
+ * the review role suppresses that, and s88-m08 suppresses project-identity mint/registration for
+ * every read-classified call.
  */
 export const READ_ONLY_TOOLS: ReadonlySet<string> = new Set(['cmos_review', 'cmos_status']);
 
@@ -39,8 +41,10 @@ export const READ_ONLY_TOOLS: ReadonlySet<string> = new Set(['cmos_review', 'cmo
  *   - cmos_context next_steps / constraints — sub-dispatchers that route to a
  *     nested read-OR-write sub-action; the top-level action can't prove read-only.
  *   - cmos_db identify_orphans — a sync diagnostic that can enqueue work.
- *   - cmos_decisions review / cmos_sprint retro / analytics — report generators
- *     that may persist; promote here with per-handler proof if a reviewer needs them.
+ *   - cmos_sprint retro / analytics — report generators that may persist; promote here with
+ *     per-handler proof if a reviewer needs them. (s93-m11 promoted cmos_decisions review, the
+ *     remedy the opener names for records past the review age, with the reads-never-write oracle
+ *     as its proof.)
  *   - cmos_project validate — carries a mutating `prune` option.
  *
  * NOTE: this is the s78 read/write SECURITY gate (fail-closed dispatch guard for
@@ -52,7 +56,7 @@ export const READ_ONLY_TOOLS: ReadonlySet<string> = new Set(['cmos_review', 'cmo
 export const READ_ONLY_ACTIONS: Readonly<Record<string, readonly string[]>> = {
   cmos_context: ['view', 'history', 'search'],
   cmos_db: ['health'],
-  cmos_decisions: ['list', 'search', 'show'],
+  cmos_decisions: ['list', 'search', 'show', 'review'],
   cmos_feedback: ['list'],
   cmos_learnings: ['list', 'search', 'show'],
   cmos_mission: ['list', 'show', 'status'],

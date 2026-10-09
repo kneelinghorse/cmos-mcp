@@ -132,6 +132,7 @@ async function main(): Promise<void> {
       action: 'init',
       projectRoot: projectDir,
       projectName: 'verify-dist',
+      projectType: 'build', // The store-root tier probe below specifically edits build.md.
     });
     check(
       'cmos_project(init) writes the seed store',
@@ -526,6 +527,7 @@ async function main(): Promise<void> {
       action: 'init',
       projectRoot: m03Dir,
       projectName: 'verify-m03',
+      projectType: 'build', // This fixture verifies Builder's sprint display, not the init default.
     });
     await h.callOk('cmos_sprint', {
       action: 'add',
@@ -901,7 +903,8 @@ async function main(): Promise<void> {
     check('dist advertises cmos_session.expiresAt', sessProps.expiresAt !== undefined);
     check('dist advertises cmos_session.agentFeedback', sessProps.agentFeedback !== undefined);
     // NO ENUM on either surface — the filter spans two tables whose live status vocabularies
-    // differ, and CMOS itself writes an out-of-enum 'stale'. A closed enum would manufacture, in
+    // differ, and stores hold an out-of-enum 'stale' (set explicitly, or by servers before 3.3.0,
+    // which wrote it on their own). A closed enum would manufacture, in
     // brand-new surface, the published-enum-forbids-a-value-the-server-writes defect s86 fixes.
     check(
       'statusFilter is published WITHOUT an enum (fleet-wide status vocabularies differ)',
@@ -1082,7 +1085,7 @@ async function main(): Promise<void> {
       `got ${m04Props('cmos_context').recencyWeight?.type}`
     );
     check(
-      "dist: cmos_learnings.status publishes 'stale' — the value the server has been writing",
+      "dist: cmos_learnings.status publishes 'stale' — a value stores hold (explicit, or written by servers before 3.3.0)",
       (m04Props('cmos_learnings').status?.enum ?? []).includes('stale'),
       `got [${m04Props('cmos_learnings').status?.enum}]`
     );
@@ -1145,6 +1148,26 @@ async function main(): Promise<void> {
           Date.now(),
           999999
         );
+        // s93-m11: the copy no longer carries stale decisions of its own once the first-write
+        // repair has restored the live store's flagger-written rows, so seed one, stamped as an
+        // explicit status update stamps it (a row the repair would leave alone too).
+        const reviewColumn = (
+          db.prepare(`PRAGMA table_info('strategic_decisions')`).all() as Array<{ name: string }>
+        ).some((c) => c.name === 'last_reviewed_at');
+        db.prepare(
+          `INSERT INTO strategic_decisions (decision_text, status, created_at, project_id,
+                                            stable_event_id, occurred_at, origin_seq, event_type,
+                                            schema_version${reviewColumn ? ', last_reviewed_at' : ''})
+           VALUES (?, 'stale', ?, ?, ?, ?, ?, 'decision_captured', 1${reviewColumn ? ', ?' : ''})`
+        ).run(
+          's93-m11 zzstaleprobe decision',
+          new Date().toISOString(),
+          projectId ?? 'cmos-mcp-pro',
+          'M11STALEPROBE00000000000000'.slice(0, 26),
+          Date.now(),
+          999998,
+          ...(reviewColumn ? [new Date().toISOString()] : [])
+        );
       } finally {
         db.close();
       }
@@ -1169,9 +1192,9 @@ async function main(): Promise<void> {
         | { decisions?: unknown[] }
         | undefined;
       check(
-        "dist: cmos_decisions(list, status='stale') returns the copy's pre-existing stale decision",
-        (staleDecisionData?.decisions ?? []).length >= 1,
-        `got ${(staleDecisionData?.decisions ?? []).length}`
+        "dist: cmos_decisions(list, status='stale') returns the stale decision the copy was seeded with",
+        textOf(staleDecisions).includes('zzstaleprobe'),
+        `got ${(staleDecisionData?.decisions ?? []).length}: ${textOf(staleDecisions).slice(0, 160)}`
       );
 
       // s86-m09: this compared the live store's size to ITSELF, two stat calls apart — it could

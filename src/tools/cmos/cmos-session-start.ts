@@ -33,7 +33,7 @@ import {
 } from './implicit-session-lifecycle';
 import { ensureImplicitSessionColumns } from './schema-migrations';
 import { summarizeSessionCaptures } from './session-capture-state';
-import { insertNewSession } from './session-owner';
+import { currentSessionOwner, explicitSessionOwnerKey, insertNewSession } from './session-owner';
 
 // Re-export for convenience
 export { VALID_SESSION_TYPES };
@@ -260,13 +260,17 @@ export async function cmosSessionStart(
     (client) => {
       warnings.push(...(ensureImplicitSessionColumns(client).warnings ?? []));
 
-      // s92-m03: one active EXPLICIT session per project. Implicit sessions belong to processes
-      // and never block a start.
+      // s92-m03: one active EXPLICIT session per caller. Implicit sessions belong to processes and
+      // never block a start. s93-m01: neither does another harness session's keyed explicit
+      // session, which this caller never writes into; a keyless one, or this caller's own, does.
+      const owner = currentSessionOwner(client.path);
       const activeResult = client.getOne<
         Pick<Session, 'id' | 'type' | 'title' | 'started_at' | 'captures'>
       >(
-        'SELECT id, type, title, started_at, captures FROM sessions WHERE status = ? AND implicit = 0',
-        ['active']
+        `SELECT id, type, title, started_at, captures FROM sessions
+          WHERE status = 'active' AND implicit = 0 AND (owner_key IS NULL OR owner_key = ?)
+          ORDER BY (owner_key IS NULL), julianday(started_at) DESC LIMIT 1`,
+        [owner.key]
       );
 
       if (!activeResult.success) {
@@ -284,7 +288,8 @@ export async function cmosSessionStart(
         return createError<CmosSessionStartResult>({
           code: CMOS_ERROR_CODES.SESSION_ALREADY_ACTIVE,
           message: `Session '${active.id}' is already active`,
-          suggestion: `Complete the active session first with cmos_session(action="complete"), or use cmos_session(action="capture") to add to it`,
+          // s93-m01: by id, so the remedy closes this session and not the caller's own.
+          suggestion: `Complete it first with cmos_session(action="complete", sessionId="${active.id}", summary="..."), or keep using it: a capture that names no session lands in it`,
           currentState: {
             id: active.id,
             type: active.type,
@@ -379,7 +384,10 @@ export async function cmosSessionStart(
         agent,
         now,
         implicit: false,
-        ownerKey: null,
+        // s93-m01 (#1189): a harness session's key, so this explicit session absorbs only that
+        // conversation's writes and closes with it. A pid-keyed starter leaves it keyless, as in
+        // 3.2.0: a server restart would orphan a pid-keyed one (the m01 build critic, B1).
+        ownerKey: explicitSessionOwnerKey(owner),
       });
       if (!inserted.ok) {
         return createError<CmosSessionStartResult>(inserted.error);

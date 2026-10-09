@@ -54,8 +54,8 @@ export const LEASE_COUNTING_RULE =
 export const CLOSES_SURVIVED_SQL = `(SELECT COUNT(*) FROM sprints s
     WHERE s.status = 'Completed'
       AND s.end_date IS NOT NULL AND s.end_date <> ''
-      AND s.end_date <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-      AND s.end_date > COALESCE(n.resolved_at, n.created_at))`;
+      AND julianday(s.end_date) <= julianday('now')
+      AND julianday(s.end_date) > julianday(COALESCE(n.resolved_at, n.created_at)))`;
 
 /** s92-m02 — days since the row's lease anchor (its last carry, else its creation). */
 export const LEASE_AGE_DAYS_SQL = `(julianday('now') - julianday(COALESCE(n.resolved_at, n.created_at)))`;

@@ -11,9 +11,11 @@ import { createSuccess } from './errors';
 import {
   automaticCloseSummary,
   explicitSessionsAtStart,
+  harnessSessions,
   implicitSessionsToClose,
   markStoreReconciled,
   ownImplicitSession,
+  processSessionOwner,
   storeNeedsReconcile,
   storesUsedImplicitly,
   type CloseReason,
@@ -30,6 +32,10 @@ import {
  * NO NESTED CONNECTIONS. cmosSessionComplete opens its own client. Each function here reads its
  * candidates in one client, lets that client close, and only then calls the handler, once per
  * candidate, so no close runs inside another call's connection or transaction.
+ *
+ * NO REGISTRATION. A close nobody asked for registers nothing in the project graph: SessionEnd in a
+ * second checkout of a registered project would otherwise be refused as a collision and leave the
+ * harness session open (the m01 build critic, B3).
  */
 
 export interface ClosedSessionReceipt {
@@ -58,7 +64,8 @@ function projectRootOf(dbPath: string): string {
 
 async function closeEach(
   projectRoot: string | undefined,
-  candidates: readonly SessionToClose[]
+  candidates: readonly SessionToClose[],
+  observations?: string
 ): Promise<ClosedSessionReceipt[]> {
   const receipts: ClosedSessionReceipt[] = [];
   for (const candidate of candidates) {
@@ -81,21 +88,24 @@ async function closeEach(
           learnings: authored('learnings'),
         });
       },
-      { projectRoot }
+      { projectRoot, registerProject: false }
     );
-    const idleHours = candidate.reason === 'process-exit' ? null : candidate.idleHours;
-    const summary = automaticCloseSummary({
+    const idleHours =
+      candidate.reason === 'process-exit' || candidate.reason === 'harness-ended'
+        ? null
+        : candidate.idleHours;
+    const automaticSummary = automaticCloseSummary({
       reason: candidate.reason,
       idleHours,
       captures: facts.data?.captures ?? null,
       decisions: facts.data?.decisions ?? 0,
       learnings: facts.data?.learnings ?? 0,
     });
-    const closed = await cmosSessionComplete({
-      sessionId: candidate.sessionId,
-      summary,
-      projectRoot,
-    });
+    const summary = observations ? `${automaticSummary} ${observations}` : automaticSummary;
+    const closed = await cmosSessionComplete(
+      { sessionId: candidate.sessionId, summary, projectRoot },
+      { registerProject: false }
+    );
     receipts.push({
       sessionId: candidate.sessionId,
       title: candidate.title,
@@ -118,9 +128,7 @@ async function readThenClose(
   // Read-only: the finders never migrate, so this connection writes nothing.
   const read = await withClientAsync(
     async (client) => createSuccess({ candidates: find(client) }),
-    {
-      projectRoot,
-    }
+    { projectRoot, registerProject: false }
   );
   if (!read.success || !read.data) {
     return {
@@ -192,6 +200,10 @@ export async function reconcileStoreOnce(dbPath: string | null): Promise<Lifecyc
 /**
  * At stdin end, SIGINT or SIGTERM: close this process's own implicit session in every store it used
  * one in. Best effort. A store that cannot be opened is skipped and named in the warnings.
+ *
+ * s93-m01: only the pid-keyed one. A harness session's sessions (`ext:`) close at SessionEnd; a
+ * server restarted mid-conversation must not close the session the conversation still writes into
+ * (mechanism critic B2).
  */
 export async function closeOwnImplicitSessions(): Promise<LifecycleOutcome> {
   const outcome: LifecycleOutcome = { receipts: [], warnings: [] };
@@ -200,8 +212,8 @@ export async function closeOwnImplicitSessions(): Promise<LifecycleOutcome> {
     if (!fs.existsSync(dbPath)) continue;
     const projectRoot = projectRootOf(dbPath);
     const read = await withClientAsync(
-      async (client) => createSuccess({ own: ownImplicitSession(client) }),
-      { projectRoot }
+      async (client) => createSuccess({ own: ownImplicitSession(client, processSessionOwner()) }),
+      { projectRoot, registerProject: false }
     );
     if (!read.success || !read.data) {
       outcome.warnings.push(
@@ -224,6 +236,39 @@ export async function closeOwnImplicitSessions(): Promise<LifecycleOutcome> {
     );
   }
   return outcome;
+}
+
+/**
+ * s93-m01 — SessionEnd: close every session a harness session owns (`ownerKey`, an `ext:` key): its
+ * implicit session and an explicit one it started, which belongs to that conversation and would be
+ * orphaned by `/clear` (the m01 build critic, B1). Through the same handler as every automatic
+ * close, so deferred captures materialize and nothing is uploaded. A session already closed (by
+ * reconcile, or by hand) is not a candidate. Throws when the store cannot be read, so the hook
+ * reports it instead of leaving the session open silently.
+ */
+export async function closeHarnessSession(
+  projectRoot: string,
+  ownerKey: string,
+  observations?: string
+): Promise<ClosedSessionReceipt[]> {
+  const read = await withClientAsync(
+    async (client) => createSuccess({ owned: harnessSessions(client, ownerKey) }),
+    { projectRoot, registerProject: false }
+  );
+  if (!read.success || !read.data) {
+    throw new Error(read.error?.message ?? 'the store could not be read');
+  }
+  return closeEach(
+    projectRoot,
+    read.data.owned.map((session) => ({
+      sessionId: session.id,
+      title: session.title,
+      implicit: session.implicit,
+      reason: 'harness-ended' as const,
+      idleHours: 0,
+    })),
+    observations
+  );
 }
 
 /** One rendered line per closed (or failed) session, for a tool answer's text. */

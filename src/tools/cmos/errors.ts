@@ -76,6 +76,12 @@ export const CMOS_ERROR_CODES = {
   DEVICE_CODE_EXPIRED: 'DEVICE_CODE_EXPIRED',
   DEVICE_CODE_ACCESS_DENIED: 'DEVICE_CODE_ACCESS_DENIED',
 
+  // Drafted records (s93-m06): a fromDraft that names no draft, one already answered or expired,
+  // and a constraint, rule or profile draft recorded without the operator's words in this session.
+  DRAFT_NOT_FOUND: 'DRAFT_NOT_FOUND',
+  DRAFT_NOT_PENDING: 'DRAFT_NOT_PENDING',
+  APPROVAL_REQUIRED: 'APPROVAL_REQUIRED',
+
   // Unhandled tool-execution exception surfaced at the MCP dispatch boundary (Sprint 74 m03).
   // A handler threw instead of returning a {success:false} envelope; the boundary wraps it
   // as a structured error rather than leaking a bare JSON-RPC -32603 to the caller.
@@ -535,6 +541,18 @@ export const CmosErrors = {
       field: kind === 'decision' ? 'decisionId' : 'learningId',
       providedValue: id,
       suggestion: `Search or list the ${kind}s to find its id; an id from another project is not valid here.`,
+    };
+  },
+
+  /** s93-m11 — a since/until bound that is not a date or time stored times can be compared with. */
+  invalidTimeBound(field: 'since' | 'until', value: string): CmosToolError {
+    return {
+      code: CMOS_ERROR_CODES.INVALID_PARAMETER,
+      message: `${field} "${value}" is not a date or time CMOS can compare stored times with.`,
+      field,
+      providedValue: value,
+      suggestion:
+        'Use YYYY, YYYY-MM, YYYY-MM-DD or an ISO date-time such as 2026-10-08T14:00:00Z. A year or a month covers the whole period.',
     };
   },
 };

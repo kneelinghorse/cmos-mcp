@@ -30,6 +30,12 @@ export interface DecisionRowInput {
   readonly evidence?: ReadonlyArray<{ type: string; id: string }>;
   /** Overrides metadata.project_domain when the caller names a domain (record only). */
   readonly projectDomain?: string;
+  /** s93-m06: how the operator's approval of the draft it came from is known (record only). */
+  readonly approval?: {
+    readonly mode: string;
+    readonly draft: string;
+    readonly words: string | null;
+  };
 }
 
 export type DecisionRowOutcome =
@@ -88,6 +94,11 @@ export function insertDecisionRow(
   if (input.evidence && input.evidence.length > 0) {
     columns.push('evidence');
     insertParams.push(JSON.stringify(input.evidence));
+  }
+
+  if (input.approval) {
+    columns.push('approval_mode', 'approval_draft', 'approval_words');
+    insertParams.push(input.approval.mode, input.approval.draft, input.approval.words);
   }
 
   // s69-m03 — stamp the per-row genesis columns into the dynamic list.

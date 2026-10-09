@@ -12,7 +12,7 @@
  * `cmos_sprint(action="complete")` pushed a warning telling operators to run
  * `npm run prune:snapshots`. That script is real — in THIS repo. package.json `files` ships
  * ["dist","cmos-seed","LICENSE","NOTICE","README.md","CHANGELOG.md","SECURITY.md",
- * "TOOL_REFERENCE.md","docs/getting-started.md"] and `bin` is {"cmos-mcp":"./dist/index.js"}.
+ * "TOOL_REFERENCE.md","docs/getting-started.md"] and `bin` was {"cmos-mcp":"./dist/index.js"}.
  * `scripts/` is in neither. So no consumer of @aquex/cmos-mcp has ever been able to run the
  * command their sprint close told them to run.
  *
@@ -562,7 +562,13 @@ describe('seed templates name only paths init creates (s86-m05 Instrument 1)', (
     .sort();
 
   it('reads every shipped template, by its exact name', () => {
-    expect(templates).toEqual(['AGENTS.md', 'PROJECT-README-template.md']);
+    // s93-m12: the hook-less block and the CLAUDE.md init writes are templates too.
+    expect(templates).toEqual([
+      'AGENTS-no-hooks.md',
+      'AGENTS.md',
+      'CLAUDE-import.md',
+      'PROJECT-README-template.md',
+    ]);
   });
 
   it('names no cli.py — cmos_project(init) has never created one', () => {

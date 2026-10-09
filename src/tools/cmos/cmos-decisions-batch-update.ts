@@ -9,8 +9,9 @@
 
 import { withClientValidated } from './client';
 import type { CmosToolResult } from './types';
-import { createError, CmosErrors } from './errors';
-import { appendWarnings, appendWriteFailures } from './format-warnings';
+import { createError, CmosErrors, CMOS_ERROR_CODES } from './errors';
+import { appendWarnings, appendWriteFailures, attachWarnings } from './format-warnings';
+import { ensureReviewTimestamps } from './schema-migrations';
 import { countWrite, type WriteFailure } from './write-guard';
 
 export interface CmosDecisionsBatchUpdateResult {
@@ -68,7 +69,9 @@ export async function cmosDecisionsBatchUpdate(
     return createError(CmosErrors.invalidParameter('status', params.status ?? '', VALID_STATUSES));
   }
 
-  return withClientValidated(
+  // s93-m11: the review-timestamp migration's warnings reach the answer.
+  const warnings: string[] = [];
+  const result = await withClientValidated(
     (client) => {
       const notFound: number[] = [];
       const alreadyInStatus: number[] = [];
@@ -76,6 +79,29 @@ export async function cmosDecisionsBatchUpdate(
       const lookupFailed: number[] = [];
       const writeFailures: WriteFailure[] = [];
       let updated = 0;
+
+      // s93-m11: an explicit status update is a review, for every named row, including one already
+      // in that status (keeping decisions stale on purpose). Stamping it lets readers and the
+      // first-write staleness repair tell a status someone set from one an older CMOS wrote.
+      warnings.push(...(ensureReviewTimestamps(client).warnings ?? []));
+      const reviewColumn = client.getMany<{ name: string }>(
+        "PRAGMA table_info('strategic_decisions')",
+        []
+      );
+      const stampReview =
+        reviewColumn.success && !!reviewColumn.data?.some((c) => c.name === 'last_reviewed_at');
+      if (!stampReview && params.status === 'stale') {
+        // Without its stamp an explicit 'stale' looks like the old flagger's, and the repair would
+        // undo it at the next first write.
+        return createError<CmosDecisionsBatchUpdateResult>({
+          code: CMOS_ERROR_CODES.DB_SCHEMA_MISMATCH,
+          message:
+            'No decision was set to stale: this store cannot record when they were reviewed (no last_reviewed_at column).',
+          suggestion:
+            'The column is added on the next write that can migrate this store; retry once the migration warning above is resolved.',
+        });
+      }
+      const reviewedAt = new Date().toISOString();
 
       for (const id of params.decisionIds) {
         const existing = client.getOne<{ id: number; status: string }>(
@@ -105,13 +131,28 @@ export async function cmosDecisionsBatchUpdate(
 
         if (existing.data.status === params.status) {
           alreadyInStatus.push(id);
+          if (stampReview) {
+            countWrite(
+              client.execute('UPDATE strategic_decisions SET last_reviewed_at = ? WHERE id = ?', [
+                reviewedAt,
+                id,
+              ]),
+              { failures: writeFailures },
+              `strategic_decisions.last_reviewed_at id=${id}`
+            );
+          }
           continue;
         }
 
-        const result = client.execute('UPDATE strategic_decisions SET status = ? WHERE id = ?', [
-          params.status,
-          id,
-        ]);
+        const result = stampReview
+          ? client.execute(
+              'UPDATE strategic_decisions SET status = ?, last_reviewed_at = ? WHERE id = ?',
+              [params.status, reviewedAt, id]
+            )
+          : client.execute('UPDATE strategic_decisions SET status = ? WHERE id = ?', [
+              params.status,
+              id,
+            ]);
 
         // s86-m02b: the row was just SELECTed and is not already in the target status, so a
         // failed UPDATE is the only way this id can miss — it belongs in its own bucket, not
@@ -149,6 +190,7 @@ export async function cmosDecisionsBatchUpdate(
     },
     { projectRoot: params.projectRoot }
   );
+  return attachWarnings(result, warnings);
 }
 
 export function formatDecisionsBatchUpdateForLLM(
@@ -156,14 +198,15 @@ export function formatDecisionsBatchUpdateForLLM(
 ): string {
   if (!result.success || !result.data) {
     const error = result.error;
-    return [
+    const lines = [
       '❌ Failed to batch update decisions',
       '',
       `Error: ${error?.message ?? 'Unknown error'}`,
-      error?.suggestion ? `Suggestion: ${error.suggestion}` : '',
-    ]
-      .filter(Boolean)
-      .join('\n');
+    ];
+    if (error?.suggestion) lines.push(`Suggestion: ${error.suggestion}`);
+    // s93-m11: a refusal after the review-timestamp migration carries that migration's warnings.
+    appendWarnings(lines, result);
+    return lines.join('\n');
   }
 
   const d = result.data;

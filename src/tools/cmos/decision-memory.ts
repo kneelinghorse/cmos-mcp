@@ -8,6 +8,7 @@
  */
 
 import type { CmosDatabaseClient } from './client';
+import { compareStoredTimes, storedTimeMs } from './stored-time';
 
 export type DecisionSource = 'strategic' | 'session_capture';
 
@@ -174,11 +175,11 @@ function loadStrategicDecisionRecords(
     params.push(filters.missionId);
   }
   if (filters.since) {
-    clauses.push('sd.created_at >= ?');
+    clauses.push('julianday(sd.created_at) >= julianday(?)');
     params.push(filters.since);
   }
   if (filters.until) {
-    clauses.push('sd.created_at <= ?');
+    clauses.push('julianday(sd.created_at) <= julianday(?)');
     params.push(filters.until);
   }
 
@@ -378,24 +379,27 @@ function getMetadataValue(client: CmosDatabaseClient, key: string): string | nul
   return result.success ? (result.data?.value ?? null) : null;
 }
 
+/**
+ * s93-m11: compared as instants, the way the SQL side compares through julianday(); a time either
+ * side cannot read matches nothing, as a NULL comparison does there.
+ */
 function matchesDateFilters(timestamp: string | null, filters: DecisionQueryFilters): boolean {
   if (!timestamp) {
     return false;
   }
-  if (filters.since && timestamp < filters.since) {
+  const at = storedTimeMs(timestamp);
+  if (filters.since && !(at >= storedTimeMs(filters.since))) {
     return false;
   }
-  if (filters.until && timestamp > filters.until) {
+  if (filters.until && !(at <= storedTimeMs(filters.until))) {
     return false;
   }
   return true;
 }
 
+/** Newest first by time (s93-m11: as instants, not text), then by id. */
 function compareDecisionRecords(a: DecisionRecord, b: DecisionRecord): number {
-  if (a.createdAt !== b.createdAt) {
-    return b.createdAt.localeCompare(a.createdAt);
-  }
-  return b.id - a.id;
+  return compareStoredTimes(b.createdAt, a.createdAt) || b.id - a.id;
 }
 
 function makeSessionDecisionKey(sessionId: string, decision: string): string {

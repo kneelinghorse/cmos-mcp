@@ -179,7 +179,9 @@ describe('cmos_project_init', () => {
       expect(fs.existsSync(path.join(tempDir, 'cmos', '.gitignore'))).toBe(true);
     });
 
-    it('should create CLAUDE.md with the no-.env attribution note', async () => {
+    // s93-m12: CLAUDE.md imports the agents file and names no tool prefix, which depends on what
+    // each user calls the server; CMOS procedure stays out of rules files.
+    it('should create a CLAUDE.md that imports AGENTS.md and names no tool prefix', async () => {
       const result = await cmosProjectInit({
         projectRoot: tempDir,
       });
@@ -189,8 +191,8 @@ describe('cmos_project_init', () => {
       expect(fs.existsSync(claudePath)).toBe(true);
 
       const content = fs.readFileSync(claudePath, 'utf-8');
-      expect(content).toContain('you do not need a `.env` for CMOS attribution');
-      expect(content).toContain('shared MCP server resolves your project via MCP roots');
+      expect(content.split('\n')).toContain('@AGENTS.md');
+      expect(content).not.toMatch(/mcp__/);
     });
 
     it('should generate project ID when not provided', async () => {

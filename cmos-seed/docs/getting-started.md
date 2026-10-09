@@ -20,17 +20,21 @@
 
 ## Quick Start
 
-### 1. Initialize with cmos_project(action="init")
+### 1. Initialize the Project
 
 ```
 cmos_project({
   action: "init",
   projectRoot: "/path/to/your/project",
   projectName: "My Project",
+  projectType: "build",   // Builder: keeps sprints and missions, which this guide uses
   initialSprint: {
     id: "sprint-01",
     title: "Initial Sprint"
-  }
+  },
+  initialMissions: [
+    { id: "s01-m01", name: "First mission", sprintId: "sprint-01" }
+  ]
 })
 ```
 
@@ -96,20 +100,20 @@ yourproject/                    # Project root
 
 ## Core MCP Tools
 
-| Call                                         | Purpose                                         |
-| -------------------------------------------- | ----------------------------------------------- |
-| `cmos_review()`                              | Session-opener digest (start here)              |
-| `cmos_project(action="init")`                | Initialize new CMOS project                     |
-| `cmos_agent_onboard()`                       | Get project context for cold-start              |
-| `cmos_db(action="health")`                   | Check database status                           |
-| `cmos_mission(action="status")`              | View work queue                                 |
-| `cmos_mission_transition(action="start")`    | Begin mission                                   |
-| `cmos_mission_transition(action="complete")` | Mark mission done                               |
-| `cmos_session(action="start")`               | Start planning session                          |
-| `cmos_session(action="capture")`             | Record decisions                                |
-| `cmos_session(action="complete")`            | Complete session                                |
-| `cmos_context(action="update")`              | Recover constraint captures into master_context |
-| `cmos_context(action="view")`                | View project or master context                  |
+| Call                                                                       | Purpose                                         |
+| -------------------------------------------------------------------------- | ----------------------------------------------- |
+| `cmos_review()`                                                            | Session-opener digest (start here)              |
+| `cmos_project(action="init", projectRoot="...", projectType="build")`      | Initialize a new Builder project                |
+| `cmos_agent_onboard()`                                                     | Get project context for cold-start              |
+| `cmos_db(action="health")`                                                 | Check database status                           |
+| `cmos_mission(action="status")`                                            | View work queue                                 |
+| `cmos_mission_transition(action="start", missionId="...")`                 | Begin mission                                   |
+| `cmos_mission_transition(action="complete", missionId="...", notes="...")` | Mark mission done                               |
+| `cmos_session(action="start", type="planning", title="...")`               | Start planning session                          |
+| `cmos_session(action="capture", category="decision", content="...")`       | Record decisions                                |
+| `cmos_session(action="complete", summary="...")`                           | Complete session                                |
+| `cmos_context(action="update")`                                            | Recover constraint captures into master_context |
+| `cmos_context(action="view")`                                              | View project or master context                  |
 
 ---
 
@@ -151,10 +155,10 @@ It creates a snapshot only when it changes `master_context`; it is not a routine
 
 1. Run `cmos_review()` to open a normal work session (`cmos_agent_onboard()` is the cold-start path)
 2. Run `cmos_mission(action="status")` to see work queue
-3. Start your first mission with `cmos_mission_transition(action="start")`
+3. Start your first mission with `cmos_mission_transition(action="start", missionId="...")`
 4. See the active `cmos/tiers/{tier}.md` guide for tier-specific behavior
 
 ---
 
-**Last Updated**: 2026-10-07
+**Last Updated**: 2026-10-08
 **Schema Version**: 2.1

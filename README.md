@@ -1,9 +1,74 @@
-# cmos-mcp
+# CMOS — decisions that survive the session
 
 [![npm version](https://img.shields.io/npm/v/@aquex/cmos-mcp)](https://www.npmjs.com/package/@aquex/cmos-mcp)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](LICENSE)
 
-A local-first Model Context Protocol server for CMOS — Context, Missions, Operations, Sessions. Gives AI agents typed, SQLite-backed project operations without fragile CLI parsing.
+CMOS is the project record your agents keep: what was decided, why, what was learned,
+and what remains. The next session can pick up from that record, even in another tool.
+You make the decisions; agents handle the bookkeeping. No dashboard account is required.
+
+## Get a project digest in three steps
+
+Requires Node.js 20 or newer.
+
+1. Install the pinned CLI:
+
+   ```sh
+   npm install -g @aquex/cmos-mcp@3.3.0
+   ```
+
+   Ensure the global npm bin directory is on your PATH.
+
+2. In the project folder you want to track, start a Ledger:
+
+   ```sh
+   cd /absolute/path/to/your/project
+   cmos-mcp init --level ledger
+   ```
+
+3. Read its first digest:
+
+   ```sh
+   cmos-mcp review --format=context
+   ```
+
+The digest names this project and shows its decisions, lessons and open work. A new
+Ledger starts empty. Planner adds next steps; Builder adds sprints and missions.
+
+## Let Claude Code bring the record into each session
+
+Once the public plugin release is available, run these in your project folder:
+
+```sh
+claude plugin marketplace add kneelinghorse/cmos-mcp
+claude plugin install cmos@cmos --scope local
+```
+
+For candidate testing, replace `kneelinghorse/cmos-mcp` with this checkout's absolute
+path. Start a new Claude Code session after installation. The plugin supplies the
+MCP server, hooks and commands; its first cold session may report that CMOS is
+installing and load the record from the next session. Use `/cmos:init` for a new
+record, `/cmos:start` to read it, `/cmos:close-out` to finish work, `/cmos:plan` to plan,
+and `/cmos:build` to execute. [Plugin installation](https://code.claude.com/docs/en/discover-plugins).
+Other tools use the [harness adapters and coverage guide](docs/harnesses.md).
+
+## The method
+
+- One project, one record of decisions, lessons, constraints and next steps.
+- Start from that record; supported hooks bring it into the session automatically.
+- Record decisions deliberately, with reasons. Supersede a changed decision.
+- Make expiry and supersession visible; closing a sprint keeps records active by default.
+- Keep the record with the project so it survives a change of tools.
+
+## What leaves your machine
+
+The record stays in your project's SQLite file. With a stored user-scoped key or legacy
+environment credentials, explicit session and sprint closes attempt a background
+upload of the **whole file**, including pending and declined proposals.
+`CMOS_CHECKPOINT_SYNC=off` stops those checkpoints, not requested network actions or
+shared-collaboration pushes. Implicit process-exit closes do not upload. [Full network and data disclosure](SECURITY.md#outbound-network).
+
+## Technical reference
 
 ## What it is
 
@@ -15,8 +80,8 @@ Out of the box you get:
 - Session capture for decisions, learnings, constraints, next-steps
 - Strategic context that condenses across sprints, with FTS5 retrieval
 - Full-text search across decisions, learnings, missions, sessions
-- Database snapshots on demand, and automatically before a restore, before and after a sprint close,
-  and before a snapshot prune
+- Database snapshots on demand; backup attempts around sprint closes; required backups before
+  a restore or a snapshot prune with selected rows
 - Per-project credential store and device-code auth (RFC 8628)
 
 The dashboard at [cmos.aquex.ai](https://cmos.aquex.ai) is **optional**. You can run cmos-mcp standalone forever — sign-up unlocks sync (SQLite ↔ Postgres mirror), the project registry (`cmos://you/*` addresses), and cross-project messaging. Without it, every other tool still works locally.
@@ -27,14 +92,14 @@ Recommended: a global install of this release. The server then starts from disk,
 lookup on launch:
 
 ```bash
-npm install -g @aquex/cmos-mcp@3.2.0
+npm install -g @aquex/cmos-mcp@3.3.0
 ```
 
 Or run it on demand with `npx`. Pin the version and prefer the local cache: an unpinned `npx -y`
 can look the package up again on every launch.
 
 ```bash
-npx --prefer-offline -y @aquex/cmos-mcp@3.2.0
+npx --prefer-offline -y @aquex/cmos-mcp@3.3.0
 ```
 
 Semantic (vector) search is optional. Without it, retrieval is keyword-only, and the install is
@@ -52,7 +117,7 @@ arguments (keep `--project-root` where an example has it).
 ### Claude Code
 
 ```bash
-claude mcp add-json cmos-mcp '{"command":"npx","args":["--prefer-offline","-y","@aquex/cmos-mcp@3.2.0"]}'
+claude mcp add-json cmos-mcp '{"command":"npx","args":["--prefer-offline","-y","@aquex/cmos-mcp@3.3.0"]}'
 ```
 
 ### Claude Desktop
@@ -67,7 +132,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS)
       "args": [
         "--prefer-offline",
         "-y",
-        "@aquex/cmos-mcp@3.2.0",
+        "@aquex/cmos-mcp@3.3.0",
         "--project-root",
         "/absolute/path/to/your/project"
       ]
@@ -91,7 +156,7 @@ Add to `~/.cursor/mcp.json`:
   "mcpServers": {
     "cmos-mcp": {
       "command": "npx",
-      "args": ["--prefer-offline", "-y", "@aquex/cmos-mcp@3.2.0"]
+      "args": ["--prefer-offline", "-y", "@aquex/cmos-mcp@3.3.0"]
     }
   }
 }
@@ -104,7 +169,7 @@ Add to `~/.cursor/mcp.json`:
   "context_servers": {
     "cmos-mcp": {
       "command": "npx",
-      "args": ["--prefer-offline", "-y", "@aquex/cmos-mcp@3.2.0"]
+      "args": ["--prefer-offline", "-y", "@aquex/cmos-mcp@3.3.0"]
     }
   }
 }
@@ -112,16 +177,11 @@ Add to `~/.cursor/mcp.json`:
 
 ### VS Code (Claude extension)
 
-```json
-{
-  "mcp.servers": {
-    "cmos-mcp": {
-      "command": "npx",
-      "args": ["--prefer-offline", "-y", "@aquex/cmos-mcp@3.2.0"]
-    }
-  }
-}
-```
+Use the Claude Code command above from the integrated terminal, or add the server
+through `/mcp` in the Claude panel. The extension and CLI share MCP configuration;
+start a new conversation after changing it. The extension does not add `claude` to
+your terminal PATH, so the terminal route needs the standalone Claude CLI.
+[Claude Code in VS Code](https://code.claude.com/docs/en/vs-code#connect-to-external-tools-with-mcp)
 
 ### Windsurf
 
@@ -130,7 +190,7 @@ Add to `~/.cursor/mcp.json`:
   "mcpServers": {
     "cmos-mcp": {
       "command": "npx",
-      "args": ["--prefer-offline", "-y", "@aquex/cmos-mcp@3.2.0"]
+      "args": ["--prefer-offline", "-y", "@aquex/cmos-mcp@3.3.0"]
     }
   }
 }
@@ -155,7 +215,7 @@ later session with the session digest:
 Run cmos_review to see the project state.
 ```
 
-`cmos_review` returns a ≤4 KB digest — project identity, current sprint, work queue, recent decisions, freshness, and the top next actions — in one call.
+`cmos_review` returns the shared session digest: project identity, current sprint, open work and recent decisions. Its local text core is capped at 4,000 characters; appended portfolio context and the surrounding MCP response are outside that cap.
 
 The full walkthrough — install → config → init → first sprint/mission/session loop — lives in [docs/getting-started.md](docs/getting-started.md).
 
@@ -165,7 +225,7 @@ cmos-mcp exposes 15 consolidated tools. 12 use an `action` parameter to select t
 
 | Tool                      | Purpose                                                                       |
 | ------------------------- | ----------------------------------------------------------------------------- |
-| `cmos_review`             | ≤4 KB session-opener digest: identity, current sprint, work queue, decisions  |
+| `cmos_review`             | Session digest: identity, current sprint, work queue, decisions               |
 | `cmos_agent_onboard`      | Cold-start payload: identity, active sprint, missions, decisions, suggestions |
 | `cmos_status`             | Diagnostic snapshot: cmos_address, dashboard_url, auth_tier, sync timestamps  |
 | `cmos_mission`            | Missions — create, update, query, and link dependencies                       |
@@ -201,7 +261,7 @@ Then run `cmos_auth(action="login_init")` from your agent. It returns a one-time
 
 `CMOS_DASHBOARD_URL` defaults to `https://cmos.aquex.ai`. Until you sign in, the dashboard tools (`cmos_message`, sync, registry) return a structured `DASHBOARD_NOT_CONFIGURED` error that names `cmos_auth(action="login_init")`; a paid-tier feature on a free account returns `DASHBOARD_UPGRADE_REQUIRED`. Local tools never depend on the dashboard.
 
-Once any dashboard credential exists, every `cmos_session(action="complete")` and `cmos_sprint(action="complete")` uploads the whole SQLite file to the dashboard (see [SECURITY.md](SECURITY.md#outbound-network)). Set `CMOS_CHECKPOINT_SYNC=off` to stop that upload.
+With a stored user-scoped dashboard key or legacy environment credentials, explicit `cmos_session(action="complete")` and `cmos_sprint(action="complete")` calls attempt a background checkpoint upload of the whole SQLite file, including pending, declined and expired proposals. A failed upload does not fail the local close. Implicit process-exit closes do not upload. Set `CMOS_CHECKPOINT_SYNC=off` in the server environment to disable automatic checkpoint uploads; it does not disable explicit sync, messaging, sign-in, shared-collaboration pushes or other requested network actions. See [SECURITY.md](SECURITY.md#outbound-network).
 
 ## Project resolution
 
@@ -242,8 +302,8 @@ CMOS_CONFIG_DIR=/custom/path
 # Snapshot retention (default shown)
 CMOS_MAX_SNAPSHOTS=50
 
-# Optional — stop the whole-database upload that session and sprint closes make once you have
-# signed in to the dashboard.
+# Optional — disable best-effort checkpoint uploads triggered by explicit completion calls.
+# Shared-store propagation and explicitly requested network actions remain available.
 CMOS_CHECKPOINT_SYNC=off
 ```
 
@@ -268,7 +328,7 @@ Every tool returns a uniform envelope:
 
 - **Append-only audit.** Session events and mission transitions are append-only rows. Context snapshots keep their rows, ids and events, but `cmos_db(action="prune_snapshots")` can empty the content of copies CMOS wrote on its own.
 - **Atomic credential writes.** `credentials.json` is written via temp-file + rename with 0600 permissions.
-- **Database snapshots.** `cmos_db(action="snapshot")` copies the database on demand. CMOS also takes one before and after every `cmos_sprint(action="complete")` and before `cmos_db(action="prune_snapshots")` applies, and `cmos_db(action="restore")` first copies the live database to `cmos/db/snapshots/pre-restore/`. `CMOS_MAX_SNAPSHOTS` caps how many are kept: taking one deletes the oldest beyond it, automatic ones included. Nothing else snapshots first, and there is no soft-delete net — `cmos_db(action="purge")` deletes this project's data from the dashboard mirror. See [SECURITY.md](SECURITY.md#backups--deletion--the-honest-reality).
+- **Database snapshots.** `cmos_db(action="snapshot")` copies the database on demand. A `cmos_sprint(action="complete")` attempts a snapshot before and after the close; a snapshot failure warns without blocking completion. Applying `cmos_db(action="prune_snapshots")` to a nonempty selection requires a backup, and `cmos_db(action="restore")` first copies the live database to `cmos/db/snapshots/pre-restore/`. `CMOS_MAX_SNAPSHOTS` caps how many are kept: taking one deletes the oldest beyond it, automatic ones included. Nothing else snapshots first, and there is no soft-delete net — `cmos_db(action="purge")` deletes this project's data from the dashboard mirror. See [SECURITY.md](SECURITY.md#backups--deletion--the-honest-reality).
 - **Dry-run where it exists.** `cmos_context(action="condense")` and `cmos_db(action="backfill")` accept `dryRun` to preview without committing. It is not a general property of mutating tools.
 
 ## Known limits
@@ -279,7 +339,8 @@ Every tool returns a uniform envelope:
 
 ## Documentation
 
-- [Getting started](docs/getting-started.md) — install through first onboard, no dashboard required.
+- [Getting started](docs/getting-started.md) — client configuration and an optional Builder walkthrough.
+- [Harness coverage](docs/harnesses.md) — native adapters, MCP prompts and the fallback without hooks.
 - [Tool reference](TOOL_REFERENCE.md) — every tool, action, and parameter (generated from the tool definitions).
 - [Changelog](CHANGELOG.md) — release notes and tool-surface changes.
 

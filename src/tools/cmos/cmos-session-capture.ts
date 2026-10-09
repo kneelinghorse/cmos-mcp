@@ -286,7 +286,7 @@ export type CmosSessionCaptureParams = z.infer<typeof cmosSessionCaptureSchema>;
 export const cmosSessionCaptureToolDefinition = {
   name: 'cmos_session_capture',
   description:
-    "Capture an insight. Categories: decision (choices made), learning (what was learned), constraint (limitations discovered), context (background info), next-step (action items). No session is required: without one, the capture lands in this process's implicit session. Captures are aggregated into master context when the session completes.",
+    "Capture an insight. Categories: decision (choices made), learning (what was learned), constraint (limitations discovered), context (background info), next-step (action items). No session is required: without one, the capture lands in the caller's implicit session. Captures are aggregated into master context when the session completes.",
   inputSchema: {
     type: 'object',
     properties: {
@@ -457,9 +457,9 @@ export async function cmosSessionCapture(
       warnings.push(...(ensureImplicitSessionColumns(client).warnings ?? []));
 
       if (!sessionId) {
-        // s92-m03: the caller's session. The project's explicit session if one is open, else
-        // this process's own implicit session, opened now if it has none. A capture no longer
-        // fails for lack of a session.
+        // s92-m03: the caller's session. Its own or a keyless explicit session if one is open,
+        // else its own implicit session, opened now if it has none. A capture no longer fails for
+        // lack of a session.
         const caller = resolveCallerSession(client, { open: true, agent });
         if (!caller.ok || !caller.session) {
           return createError<CmosSessionCaptureResult>(

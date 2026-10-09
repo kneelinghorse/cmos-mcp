@@ -15,6 +15,8 @@ import { frameForeignText } from '../../intelligence/provenance-frame';
 import { loadUnifiedDecisionRecords, type DecisionSource } from './decision-memory';
 import { HybridRetriever } from './fts5-retriever';
 import { appendWarnings } from './format-warnings';
+import { compareStoredTimes } from './stored-time';
+import { PREVIEW_MAX_CHARS, previewText } from './text-preview';
 
 /**
  * Strategic decision search result.
@@ -23,8 +25,17 @@ export interface DecisionSearchResult {
   /** Decision ID */
   id: number;
 
-  /** Decision text */
+  /**
+   * s93-m11 (#602): a preview of the decision, at most PREVIEW_MAX_CHARS characters; read it in
+   * full with cmos_decisions(action="show", decisionId).
+   */
   decision: string;
+
+  /** Whether `decision` was cut. */
+  truncated: boolean;
+
+  /** Characters in the full decision text. */
+  fullLength: number;
 
   /** Domain (e.g., 'ai-studio', 'general') */
   domain: string | null;
@@ -211,7 +222,7 @@ export async function cmosDecisionsSearch(
           .sort(
             (a, b) =>
               b.relevance - a.relevance ||
-              b.row.createdAt.localeCompare(a.row.createdAt) ||
+              compareStoredTimes(b.row.createdAt, a.row.createdAt) ||
               b.row.id - a.row.id
           );
       }
@@ -219,7 +230,9 @@ export async function cmosDecisionsSearch(
       const totalMatches = matched.length;
       const results: DecisionSearchResult[] = matched.slice(0, limit).map(({ row, relevance }) => ({
         id: row.id,
-        decision: row.decision,
+        ...(({ preview, truncated, fullLength }) => ({ decision: preview, truncated, fullLength }))(
+          previewText(row.decision)
+        ),
         domain: row.domain,
         sprintId: row.sprintId,
         missionId: row.missionId,
@@ -355,14 +368,24 @@ export function formatDecisionsSearchForLLM(
     // Mirrors the ratified LIST precedent; local rows stay bare.
     const isForeign =
       r.projectId != null && (localProjectId == null || r.projectId !== localProjectId);
+    const status = r.status && r.status !== 'active' ? ` [${r.status}]` : '';
     if (isForeign) {
-      lines.push(`•${meta} [proj:${r.projectId}]`);
+      lines.push(`• #${r.id}${status}${meta} [proj:${r.projectId}]`);
       lines.push(frameForeignText(r.decision, `proj:${r.projectId}`));
     } else {
-      lines.push(`• ${r.decision}${meta}`);
+      lines.push(`• #${r.id}${status} ${r.decision}${meta}`);
     }
     lines.push(`  Created: ${r.createdAt} | Relevance: ${r.relevance}`);
     lines.push('');
+  }
+
+  // s93-m11 (#602): previews are cut at PREVIEW_MAX_CHARS; say once how to read one in full.
+  const cut = data.results.find((r) => r.truncated);
+  if (cut) {
+    lines.push(
+      `Previews are cut at ${PREVIEW_MAX_CHARS} characters. Read one in full with ` +
+        `cmos_decisions(action="show", decisionId=${cut.id}).`
+    );
   }
 
   appendWarnings(lines, result);

@@ -1,0 +1,11 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "cmos-mcp hook session-start --harness vscode --hook-source cmos-vscode",
+        "timeout": 3
+      }
+    ]
+  }
+}

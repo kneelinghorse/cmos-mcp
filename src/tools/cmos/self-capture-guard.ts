@@ -84,11 +84,11 @@ function gitActivityMs(projectRoot: string): number | null {
 function lastCaptureAt(client: CmosDatabaseClient): string | null {
   try {
     const result = client.getOne<{ max_ts: string | null }>(
-      `SELECT MAX(ts) AS max_ts FROM (
-         SELECT MAX(created_at) AS ts FROM strategic_decisions
-         UNION ALL SELECT MAX(created_at) FROM learnings
-         UNION ALL SELECT MAX(created_at) FROM missions
-         UNION ALL SELECT MAX(completed_at) FROM missions
+      `SELECT strftime('%Y-%m-%dT%H:%M:%fZ', MAX(jd)) AS max_ts FROM (
+         SELECT MAX(julianday(created_at)) AS jd FROM strategic_decisions
+         UNION ALL SELECT MAX(julianday(created_at)) FROM learnings
+         UNION ALL SELECT MAX(julianday(created_at)) FROM missions
+         UNION ALL SELECT MAX(julianday(completed_at)) FROM missions
        )`
     );
     if (!result.success || !result.data) return null;

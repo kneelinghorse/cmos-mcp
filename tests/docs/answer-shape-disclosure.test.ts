@@ -136,11 +136,44 @@ const EXPECTED_TOTALS = {
   // PruneSnapshotsContextReport and PreserveReasons add three declarations; CmosDbResult's union
   // widens with the new result. Thirty-two rows, all new: the result also reports bytesReclaimed
   // (counted row by row) and sprintCloses, and PreserveReasons counts sprintCloseState.
-  files: 136,
-  roots: 141,
-  declarations: 287,
-  compositions: 287,
-  rows: 1640,
+  // s93-m11: StalenessResult leaves with the flagger (one declaration and composition, one root,
+  // seven rows); first-write-maintenance.ts joins the closure (one file). Previews add
+  // truncated/fullLength to DecisionSearchResult, StrategicDecision and MatchedCapture, and
+  // summaryTruncated/summaryFullLength to SessionSearchResult; MissionAddResult swaps `mission` for
+  // `fields`; MissionUpdateResult gains name and status; onboard's staleness gains the two
+  // due-for-review counts; review gains staleReflagged; sprint list gains omittedPlanned; session
+  // list's filters gain sessionId; BlobMigrationResult gains rewritten. Net +5 rows.
+  // s93-m11 also: CrossStoreProbeValue (one declaration and composition) types the drift probe, and
+  // MissionAddResult keeps `mission` (identity only) beside `fields` (one row back).
+  // s93-m11 critic folds: stored-time.ts joins the folder (one file). ReviewLearningDetail and
+  // SessionListCapture add two declarations and compositions. Nineteen rows, all additive: the
+  // review's learnings and their seven fields, Learning.truncated/fullLength, MigrationResult.deferred,
+  // ProjectIdentityViewResult.stored, SessionListCapture's four fields, and SessionListItem's
+  // captures/summaryTruncated/summaryFullLength. The confirming critic: a capture comes back whole,
+  // so SessionListCapture also carries context, expiresAt and sprintId (three rows).
+  // s93-m01: harness-session.ts and sqlite-busy.ts join the folder (two files); CloseReason gains
+  // 'harness-ended' inside its existing declaration (no row).
+  // s93-m12: rules-files.ts and operator-profile.ts join the folder (two files). Init's answer
+  // gains `level` and `levelSource` (two rows, additive), typed by ProjectLevel and the new
+  // InitLevelSource (two declarations and compositions); the CHANGELOG names both fields.
+  // s93-m04: nine local telemetry/pattern/statistics modules join the folder. None adds an
+  // exported *Error/*Result root or changes an MCP answer shape; only the file census changes.
+  // s93-m05: six local presentation/recall modules plus two light canonical read helpers;
+  // the in-process RecallResult root adds
+  // RecallItem/RecallVia and fourteen property rows. MCP review's structured shape is unchanged.
+  // s93-m08: fleet feedback and presentation add two files; FeedbackFleetCoverage and
+  // FeedbackStoreCount add two declarations and six fields, with three additive entry/list fields.
+  // s93-m06: five draft modules join the folder (draft-grammar, proposals, draft-runtime,
+  // draft-approval, decision-shape). The record answer gains optional `approval`,
+  // `answeredDrafts` and `stillPendingDrafts`; CmosDraftRecordResult (a new root, the answer for
+  // constraint, rule and profile drafts) joins the CmosDecisionsResult union; ApprovalEcho,
+  // DraftKind and ApprovalMode add three more declarations. Ten rows, all additive; the
+  // CHANGELOG names the fields.
+  files: 166,
+  roots: 142,
+  declarations: 300,
+  compositions: 300,
+  rows: 1703,
 } as const;
 const EXPLICIT_OPAQUE_LEDGER = [
   'CmosToolError.providedValue = ANY',
@@ -166,6 +199,13 @@ const MIXED_KIND_LEDGER = [
     requiredChangelogToken: null,
     reason:
       'Not a tool answer: fts5-retriever.ts uses this exported *Result in process; it predates 2.7.0.',
+  },
+  {
+    row: 'CrossStoreProbe.value',
+    runtimeKinds: ['number', 'string'],
+    requiredChangelogToken: null,
+    reason:
+      "Not a tool answer: cmos-review.ts reads it in process to classify drift; 'no-history' (s93-m11) marks a store with no rows yet.",
   },
 ] as const;
 

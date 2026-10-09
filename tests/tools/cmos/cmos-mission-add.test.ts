@@ -250,23 +250,17 @@ async function callMissionAdd(
         ]
       );
 
-      // Build result
-      const mission: MissionAddResult['mission'] = {
-        id: missionId.trim(),
-        name: name.trim(),
-        sprintId: sprintId.trim(),
-        status: status as MissionStatus,
-      };
-
-      if (objective) mission.objective = objective.trim();
-      if (context) {
-        mission.context = typeof context === 'string' ? context : JSON.stringify(context);
-      }
-      if (successCriteria) mission.successCriteria = successCriteria;
-      if (deliverables) mission.deliverables = deliverables;
-      if (referenceDocs) mission.referenceDocs = referenceDocs;
-      if (domainFields) mission.domainFields = domainFields;
-      if (notes) mission.notes = notes.trim();
+      // Build result. s93-m11: this copy of the handler (next-step #592 tracks retiring it) keeps
+      // the shipped compact receipt; the real handler's receipt is pinned in
+      // mission-receipts.test.ts.
+      const fields: string[] = [];
+      if (objective) fields.push('objective');
+      if (context) fields.push('context');
+      if (successCriteria) fields.push(`successCriteria (${successCriteria.length})`);
+      if (deliverables) fields.push(`deliverables (${deliverables.length})`);
+      if (referenceDocs) fields.push(`referenceDocs (${referenceDocs.length})`);
+      if (domainFields) fields.push('domainFields');
+      if (notes) fields.push('notes');
 
       return createSuccess({
         id: missionId.trim(),
@@ -274,7 +268,13 @@ async function callMissionAdd(
         sprintId: sprintId.trim(),
         status: status as MissionStatus,
         message: `Mission '${missionId}' created successfully in sprint '${sprintId}'`,
-        mission,
+        mission: {
+          id: missionId.trim(),
+          name: name.trim(),
+          sprintId: sprintId.trim(),
+          status: status as MissionStatus,
+        },
+        fields,
       });
     },
     { dbPath }
@@ -342,7 +342,7 @@ describe('cmos_mission_add', () => {
       });
 
       expect(result.success).toBe(true);
-      expect(result.data?.mission.objective).toBe('Implement feature X');
+      expect(result.data?.fields).toEqual(['objective']);
 
       const row = testDb.db
         .prepare('SELECT objective FROM missions WHERE id = ?')
@@ -390,13 +390,15 @@ describe('cmos_mission_add', () => {
       });
 
       expect(result.success).toBe(true);
-      expect(result.data?.mission.objective).toBe('Complete objective');
-      expect(result.data?.mission.context).toBe('Important background info');
-      expect(result.data?.mission.successCriteria).toEqual(['Criterion 1', 'Criterion 2']);
-      expect(result.data?.mission.deliverables).toEqual(['file1.ts', 'file2.ts']);
-      expect(result.data?.mission.referenceDocs).toEqual(['doc1.md', 'doc2.md']);
-      expect(result.data?.mission.domainFields).toEqual({ customField: 'value' });
-      expect(result.data?.mission.notes).toBe('Some notes');
+      expect(result.data?.fields).toEqual([
+        'objective',
+        'context',
+        'successCriteria (2)',
+        'deliverables (2)',
+        'referenceDocs (2)',
+        'domainFields',
+        'notes',
+      ]);
 
       const row = testDb.db.prepare('SELECT * FROM missions WHERE id = ?').get('s14-m05') as Record<
         string,
@@ -418,7 +420,7 @@ describe('cmos_mission_add', () => {
       });
 
       expect(result.success).toBe(true);
-      expect(result.data?.mission.context).toBe(JSON.stringify(contextObj));
+      expect(result.data?.fields).toEqual(['context']);
 
       const row = testDb.db.prepare('SELECT context FROM missions WHERE id = ?').get('s14-m06') as {
         context: string;
@@ -435,7 +437,7 @@ describe('cmos_mission_add', () => {
       });
 
       expect(result.success).toBe(true);
-      expect(result.data?.mission.context).toBe('Simple string context');
+      expect(result.data?.fields).toEqual(['context']);
 
       const row = testDb.db.prepare('SELECT context FROM missions WHERE id = ?').get('s14-m07') as {
         context: string;
@@ -597,9 +599,9 @@ describe('cmos_mission_add', () => {
       expect(formatted).toContain('Sprint: sprint-14');
       expect(formatted).toContain('Name: Format Test');
       expect(formatted).toContain('Status: Queued');
-      expect(formatted).toContain('Objective: Test formatting');
-      expect(formatted).toContain('Success criteria: 2 items');
-      expect(formatted).toContain('Deliverables: 3 items');
+      expect(formatted).toContain('Stored: objective, successCriteria (2), deliverables (3)');
+      // The receipt never echoes the mission's text back.
+      expect(formatted).not.toContain('Test formatting');
     });
 
     it('should format error result', async () => {

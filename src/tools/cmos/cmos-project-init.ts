@@ -26,9 +26,27 @@ import type { CmosToolResult } from './types';
 import { createError, createSuccess, CMOS_ERROR_CODES } from './errors';
 import { CMOS_SCHEMA, CMOS_SCHEMA_VERSION } from './schema';
 import { assertJestDbPathIsolated } from './real-store-guard';
-import { ProjectGraphRegistry } from '../../intelligence/project-graph-registry';
+import { ProjectGraphRegistry, readStoreIdentity } from '../../intelligence/project-graph-registry';
 import { CmosDetector } from '../../intelligence/cmos-detector';
 import { appendWarnings } from './format-warnings';
+import {
+  AGENTS_FILE_NAME,
+  AMBIENT_METADATA_KEY,
+  asRulesAmbient,
+  describeCmosLineRefresh,
+  findAgentsFile,
+  LEVEL_TIERS,
+  levelName,
+  levelOfTier,
+  readCmosLine,
+  refreshCmosLine,
+  cmosRulesLine,
+  type CmosLineReading,
+  renderAgentsMd,
+  renderClaudeMd,
+  type ProjectLevel,
+  type RulesAmbient,
+} from './rules-files';
 
 /**
  * Resolve the path to the cmos-seed directory.
@@ -99,37 +117,39 @@ function copySeedDir(
   return created;
 }
 
-/** The agents file's name at a project root: uppercase, the cross-agent convention. */
-export const AGENTS_FILE_NAME = 'AGENTS.md';
+// s92-m06's AGENTS_FILE_NAME and findAgentsFile live in rules-files.ts since s93-m12, beside the
+// rest of the rules-file logic; re-exported here for existing importers.
+export { AGENTS_FILE_NAME, findAgentsFile };
 
 /**
- * s92-m06: the agents file already at a project root, in whatever case it was written, or null.
- * It reads a directory listing, so a case-sensitive and a case-insensitive filesystem give the same
- * answer, and it looks only at the project root, never at the CMOS layout beneath it.
+ * s92-m06: write AGENTS.md to the project root unless an agents file is already there. s93-m12: the
+ * seed's template rendered for this project (rules-files.ts): its CMOS line names the level, and the
+ * hook-less block is appended only for a harness without hooks. The write is exclusive, so it never
+ * overwrites a file, even one written since the check.
  */
-export function findAgentsFile(projectRoot: string): string | null {
-  let names: string[];
-  try {
-    names = fs.readdirSync(projectRoot);
-  } catch {
-    return null;
-  }
-  return names.find((name) => name.toLowerCase() === AGENTS_FILE_NAME.toLowerCase()) ?? null;
-}
-
-/**
- * s92-m06: write the seed's AGENTS.md to the project root unless an agents file is already there.
- * The copy is exclusive, so it never overwrites a file, even one written since the check.
- */
-function ensureAgentsMd(projectRoot: string, seedPath: string): { name: string; written: boolean } {
+function ensureAgentsMd(
+  projectRoot: string,
+  seedPath: string,
+  options: { level: ProjectLevel; hooks: boolean; ambient: RulesAmbient }
+): { name: string; written: boolean } {
   const existing = findAgentsFile(projectRoot);
   if (existing) return { name: existing, written: false };
+  const template = fs.readFileSync(path.join(seedPath, 'templates', AGENTS_FILE_NAME), 'utf8');
+  const rendered = renderAgentsMd(template, {
+    level: options.level,
+    hooks: options.hooks,
+    ambient: options.ambient,
+    ...(options.hooks
+      ? {}
+      : {
+          noHooksBlock: fs.readFileSync(
+            path.join(seedPath, 'templates', NO_HOOKS_TEMPLATE),
+            'utf8'
+          ),
+        }),
+  });
   try {
-    fs.copyFileSync(
-      path.join(seedPath, 'templates', AGENTS_FILE_NAME),
-      path.join(projectRoot, AGENTS_FILE_NAME),
-      fs.constants.COPYFILE_EXCL
-    );
+    fs.writeFileSync(path.join(projectRoot, AGENTS_FILE_NAME), rendered, { flag: 'wx' });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
       return { name: findAgentsFile(projectRoot) ?? AGENTS_FILE_NAME, written: false };
@@ -139,42 +159,140 @@ function ensureAgentsMd(projectRoot: string, seedPath: string): { name: string; 
   return { name: AGENTS_FILE_NAME, written: true };
 }
 
-function buildClaudeMd(projectName: string, agents: { name: string; written: boolean }): string {
-  const title = projectName.trim().length > 0 ? projectName.trim() : 'This Project';
-
-  return [
-    '# CLAUDE.md',
-    '',
-    `## ${title}`,
-    '',
-    // s92-m06: init writes AGENTS.md at the root (or finds the project's own agents file), so
-    // point at the file that is there.
-    agents.written
-      ? `- Read \`${agents.name}\` first and fill in its bracketed placeholders — it holds the repository-specific rules.`
-      : `- Read \`${agents.name}\` first — it holds the repository-specific rules.`,
-    '- Use the shared `mcp__cmos-mcp__*` tools for CMOS operations.',
-    '- If sender attribution looks wrong, run `cmos_message(action="whoami")` before sending messages.',
-    '',
-    '## CMOS Attribution',
-    '',
-    'Note: you do not need a `.env` for CMOS attribution. The shared MCP server resolves your project via MCP roots.',
-    'Only set `CMOS_PROJECT_ROOT` when the server itself needs help locating its own `.env` during bootstrap.',
-    '',
-  ].join('\n');
+/**
+ * s93-m12: on a re-init that passes a name or a level, the identity row and the master context's
+ * project section take it too (only when they exist; a missing one is seeded from metadata later).
+ */
+function syncIdentityContexts(
+  db: Database.Database,
+  change: { readonly name?: string; readonly tier?: string },
+  now: string
+): void {
+  const read = db.prepare('SELECT content FROM contexts WHERE id = ?');
+  const write = db.prepare('UPDATE contexts SET content = ?, updated_at = ? WHERE id = ?');
+  // Read and write under one write lock, so a concurrent identity write is never lost. Raw
+  // better-sqlite3 statements throw on failure, so the rollback runs on any error.
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    applyIdentityChange(read, write, change, now);
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
 }
 
-function ensureClaudeMd(
-  projectRoot: string,
-  projectName: string,
-  agents: { name: string; written: boolean }
-): boolean {
+function applyIdentityChange(
+  read: Database.Statement,
+  write: Database.Statement,
+  change: { readonly name?: string; readonly tier?: string },
+  now: string
+): void {
+  const patch = (id: string, apply: (content: Record<string, unknown>) => boolean): void => {
+    const row = read.get(id) as { content: string } | undefined;
+    let content: unknown;
+    try {
+      content = row ? JSON.parse(row.content) : null;
+    } catch {
+      return;
+    }
+    if (!content || typeof content !== 'object' || Array.isArray(content)) return;
+    if (apply(content as Record<string, unknown>)) write.run(JSON.stringify(content), now, id);
+  };
+  patch('project_identity', (identity) => {
+    const before = JSON.stringify(identity);
+    if (change.name !== undefined) identity.project_name = change.name;
+    if (change.tier !== undefined) identity.tier = change.tier;
+    if (JSON.stringify(identity) === before) return false;
+    identity.updated_at = now;
+    return true;
+  });
+  if (change.name === undefined) return;
+  patch('master_context', (master) => {
+    const section = master.project_identity;
+    if (!section || typeof section !== 'object' || Array.isArray(section)) return false;
+    const project = section as Record<string, unknown>;
+    if (project.name === change.name) return false;
+    project.name = change.name;
+    return true;
+  });
+}
+
+/** How a CMOS line or a store describes the hooks. */
+function hooksText(ambient: RulesAmbient): string {
+  return ambient === 'on' ? 'on' : ambient === 'off' ? 'off' : 'on without the session digest';
+}
+
+/**
+ * s93-m12 (the confirming critics): the warning for an agents file whose CMOS line says another
+ * level or hooks setting than the store holds, with a remedy that works either way: re-render the
+ * line to match the project, or set the project as the line says. A line edited by hand cannot be
+ * re-rendered, so the warning gives the line to write instead.
+ */
+function cmosLineMismatch(
+  reading: CmosLineReading,
+  level: ProjectLevel,
+  ambient: RulesAmbient,
+  projectRoot: string
+): string {
+  const says =
+    `${reading.level ? `the ${levelName(reading.level)} level` : 'no level'}` +
+    (reading.hooks ? ` with the hooks ${hooksText(reading.ambient)}` : '');
+  const is = `the ${levelName(level)} level with the hooks ${hooksText(ambient)}`;
+  const toLine = reading.rendered
+    ? `cmos_project(action="update", projectRoot="${projectRoot}", projectType="${LEVEL_TIERS[level]}") re-renders the line to match the project`
+    : `the line was edited by hand, so write it as: ${cmosRulesLine(level, { hooks: reading.hooks, ambient })}`;
+  const toProject = [
+    ...(reading.level && reading.level !== level
+      ? [`init with projectType="${LEVEL_TIERS[reading.level]}" sets the level the line names`]
+      : []),
+    ...(reading.hooks && reading.ambient !== ambient
+      ? [`\`cmos-mcp ambient ${reading.ambient}\` sets the hooks as the line says`]
+      : []),
+  ];
+  return `${reading.name}'s CMOS line says ${says}, but this project is at ${is}. ${toLine}${toProject.length > 0 ? `; or ${toProject.join(', and ')}` : ''}.`;
+}
+
+/** s93-m12: the template the root CLAUDE.md is rendered from. */
+const CLAUDE_TEMPLATE = 'CLAUDE-import.md';
+
+/** s93-m12: the hook-less block `cmos-mcp init --no-hooks` appends to AGENTS.md. */
+const NO_HOOKS_TEMPLATE = 'AGENTS-no-hooks.md';
+
+/**
+ * s93-m12: CLAUDE.md imports the agents file under the name it has at the root, and names no tool
+ * prefix. Written only when the root has no CLAUDE.md.
+ */
+function ensureClaudeMd(projectRoot: string, seedPath: string, agentsFileName: string): boolean {
   const claudePath = path.join(projectRoot, 'CLAUDE.md');
   if (fs.existsSync(claudePath)) {
     return false;
   }
-
-  fs.writeFileSync(claudePath, buildClaudeMd(projectName, agents), 'utf-8');
+  // Not named CLAUDE.md: the seed's templates are copied into every project's cmos/templates/, and
+  // Claude Code loads a nested CLAUDE.md, which would import the unrendered template.
+  const template = fs.readFileSync(path.join(seedPath, 'templates', CLAUDE_TEMPLATE), 'utf8');
+  try {
+    fs.writeFileSync(claudePath, renderClaudeMd(template, agentsFileName), {
+      encoding: 'utf-8',
+      flag: 'wx',
+    });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false;
+    throw error;
+  }
   return true;
+}
+
+/** Whether the root's CLAUDE.md imports the agents file (a line `@<name>`). */
+function claudeMdImports(projectRoot: string, agentsFileName: string): boolean {
+  try {
+    return fs
+      .readFileSync(path.join(projectRoot, 'CLAUDE.md'), 'utf8')
+      .split('\n')
+      .some((line) => [`@${agentsFileName}`, `@./${agentsFileName}`].includes(line.trim()));
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -249,13 +367,17 @@ export const cmosProjectInitSchema = z.object({
     .optional()
     .describe('Optional initial missions to create'),
 
-  /** Project tier/type written to metadata at init (FORK-E6 default: build) */
+  /**
+   * Project tier/type written to metadata at init (s93-m12: a new project defaults to general, or
+   * to the level its folder's agents file already names)
+   */
   projectType: z
     .enum(['general', 'managed', 'build'])
     .optional()
     .describe(
-      'Project tier/type (general | managed | build). Written to metadata so onboarding ' +
-        'surfaces the matching tier prompt. Defaults to build for new projects.'
+      'The level of record: general (decisions and lessons), managed (also next steps, as tasks ' +
+        'in cycles) or build (sprints and missions). Written to metadata so onboarding surfaces ' +
+        'the matching tier guide. Defaults to general for new projects.'
     ),
 });
 
@@ -272,6 +394,20 @@ export type CmosProjectInitParams = z.infer<typeof cmosProjectInitSchema>;
 /**
  * Result of project initialization.
  */
+/**
+ * s93-m12: where init took the level from: passed (projectType, `--level`), kept from the store, the
+ * CMOS line of the folder's agents file (a store recreated beside it, a team's committed
+ * AGENTS.md), or the default for a new project (Ledger).
+ */
+export type InitLevelSource = 'passed' | 'stored' | 'agents-file' | 'default';
+
+const LEVEL_SOURCE_TEXT: Readonly<Record<InitLevelSource, string>> = {
+  passed: 'as asked',
+  stored: 'kept from the store',
+  'agents-file': "from the agents file's CMOS line",
+  default: 'the default for a new project',
+};
+
 export interface CmosProjectInitResult {
   /** Path to the created cmos/ directory */
   cmosDirectory: string;
@@ -287,6 +423,10 @@ export interface CmosProjectInitResult {
 
   /** Project name */
   projectName: string;
+
+  /** s93-m12: the project's level after init, and where it came from. */
+  level: ProjectLevel;
+  levelSource: InitLevelSource;
 
   /** Schema version applied */
   schemaVersion: string;
@@ -383,8 +523,23 @@ export const cmosProjectInitToolDefinition = {
  * a fresh SQLite database with project metadata.
  */
 export async function cmosProjectInit(
-  input: CmosProjectInitInput
+  input: CmosProjectInitInput,
+  // s93-m12: `cmos-mcp init --no-hooks` (a harness without hooks) appends the hook-less block to
+  // AGENTS.md. Internal and non-schema: the MCP tool always writes the hooked form.
+  internalOpts: { hooks?: boolean } = {}
 ): Promise<CmosToolResult<CmosProjectInitResult>> {
+  // s93-m11 (#606 f): init takes its path literally and never infers one, so a missing projectRoot
+  // gets a remedy instead of a raw schema message.
+  if (typeof input.projectRoot !== 'string' || input.projectRoot.trim().length === 0) {
+    return createError({
+      code: CMOS_ERROR_CODES.MISSING_PARAMETER,
+      message: 'cmos_project(action="init") needs projectRoot: the folder that will hold cmos/.',
+      suggestion:
+        'Create the project folder first if it does not exist, then pass it as an absolute path: cmos_project(action="init", projectRoot="/path/to/project"). Init never guesses the folder.',
+      field: 'projectRoot',
+    });
+  }
+
   // Parse input to apply defaults and validate
   const parseResult = cmosProjectInitSchema.safeParse(input);
   if (!parseResult.success) {
@@ -445,10 +600,62 @@ export async function cmosProjectInit(
 
   const cmosDir = path.join(projectRoot, 'cmos');
   const dbPath = path.join(cmosDir, 'db', 'cmos.sqlite');
-  let isNewProject = !fs.existsSync(cmosDir);
+  // Whether the folder already held a CMOS layout; isNewProject also turns true below when only the
+  // database is missing.
+  const cmosExisted = fs.existsSync(cmosDir);
+  let isNewProject = !cmosExisted;
 
-  // Generate project ID if not provided
-  const projectId = providedProjectId || crypto.randomUUID();
+  // s93-m12 (the build critics' B1): a re-init keeps the identity the project already has, and
+  // nothing is written before that is settled. The registry and the dashboard know a project by its
+  // id, so an init that minted a new one refused every later write as an identity conflict. The id
+  // is the store's own, else the one the registry holds for this folder when the folder already
+  // holds its cmos/ layout (a store deleted and recreated through the DB_NOT_FOUND remedy, an id row
+  // lost; a repository that tracks cmos/ without its database also counts), else the one passed,
+  // else a new one. A folder with no cmos/ is a new project even at a registered project's old
+  // path: that project moved or was deleted, and taking its id would leave two stores sharing one
+  // (the second confirming critic), so its stale row is dropped at registration instead. A passed
+  // id that differs from the project's is refused before the seed is copied or the schema runs.
+  let graph: ProjectGraphRegistry | null = null;
+  try {
+    graph = await ProjectGraphRegistry.create();
+  } catch {
+    // Without the registry, the store's own id is all init can keep; the answer says so.
+  }
+  // What the folder's agents file says, read before anything is written.
+  const lineReading = readCmosLine(projectRoot);
+  let registryProjectId: string | null = null;
+  try {
+    registryProjectId = graph?.getByStorePath(projectRoot) ?? null;
+  } catch {
+    registryProjectId = null;
+  }
+  const storeProjectId = readStoreIdentity(projectRoot)?.project_id ?? null;
+  const reusableRegistryId = cmosExisted ? registryProjectId : null;
+  const knownProjectId = storeProjectId ?? reusableRegistryId;
+  // A store with no name takes the one the registry keeps for this project (a recreated store, a
+  // name given only at registration), unless that is only the folder's name; never the name of a
+  // registry row that holds another project's id.
+  let registryName: string | undefined;
+  try {
+    registryName =
+      reusableRegistryId && knownProjectId === reusableRegistryId
+        ? graph?.get(reusableRegistryId)?.name
+        : undefined;
+  } catch {
+    registryName = undefined;
+  }
+  const restoredName =
+    registryName && registryName !== path.basename(path.resolve(projectRoot)) ? registryName : '';
+  if (knownProjectId && providedProjectId && providedProjectId !== knownProjectId) {
+    return createError({
+      code: CMOS_ERROR_CODES.INVALID_PARAMETER,
+      message: `This project's id is '${knownProjectId}'; init does not change it to '${providedProjectId}'.`,
+      suggestion:
+        'Re-run init without projectId (or with that id). A project keeps its id for life: the project registry and the dashboard know it by that id.',
+      field: 'projectId',
+      providedValue: providedProjectId,
+    });
+  }
 
   try {
     // Copy full seed directory to <projectRoot>/cmos/
@@ -458,11 +665,6 @@ export async function cmosProjectInit(
       cmosDir,
       cmosDir
     );
-    const agents = ensureAgentsMd(projectRoot, seedPath);
-    if (agents.written) createdFiles.push(path.join('..', AGENTS_FILE_NAME));
-    if (ensureClaudeMd(projectRoot, projectName, agents)) {
-      createdFiles.push(path.join('..', 'CLAUDE.md'));
-    }
 
     // Create fresh SQLite database if it doesn't exist
     const dbExisted = fs.existsSync(dbPath);
@@ -493,10 +695,22 @@ export async function cmosProjectInit(
         'INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)'
       );
 
-      updateMetadata.run('project_id', projectId);
-      updateMetadata.run('project_name', projectName);
-      updateMetadata.run('tracelab_project_id', tracelabProjectId);
       const readMetadata = db.prepare('SELECT value FROM metadata WHERE key = ?');
+      const stored = (key: string): string | undefined =>
+        (readMetadata.get(key) as { value: string } | undefined)?.value;
+
+      // s93-m12: the id settled above, re-read here in case a concurrent init stored one since.
+      // An existing store's name and TraceLab link change only when the caller passes them.
+      const storedProjectId = stored('project_id')?.trim() || null;
+      const projectId =
+        storedProjectId ?? knownProjectId ?? (providedProjectId || crypto.randomUUID());
+      if (!storedProjectId) updateMetadata.run('project_id', projectId);
+      if (projectName || !stored('project_name')?.trim()) {
+        updateMetadata.run('project_name', projectName || restoredName);
+      }
+      if (tracelabProjectId || stored('tracelab_project_id') === undefined) {
+        updateMetadata.run('tracelab_project_id', tracelabProjectId);
+      }
       const currentSchemaVersion = (
         readMetadata.get('schema_version') as { value: string } | undefined
       )?.value;
@@ -534,18 +748,49 @@ export async function cmosProjectInit(
 
       // s83-m05: persist the tier/type so onboard's tierSelectionPrompt and
       // getProjectType read the operator's choice. An explicit projectType always
-      // wins; a brand-new project with no explicit choice gets the 'build' default
-      // (FORK-E6, kept in lockstep with getProjectType's fallback). An idempotent
+      // wins. s93-m12 (#1185): a brand-new project with no explicit choice is a Ledger
+      // ('general'), a stranger's default; getProjectType still reads a store with no
+      // row at all as 'build', the tier such a store has always had. An idempotent
       // re-init WITHOUT projectType leaves any existing project_type row untouched
       // so a later cmos_project(update) is not clobbered.
+      // s93-m12 (the confirming critics): with no level passed, a new store takes the level its
+      // folder's agents file names in its CMOS line (a store recreated beside the file, or a team's
+      // committed AGENTS.md), so the store and the file agree; with no such line a new project is a
+      // Ledger. The hooks' setting the line names comes back with it. The answer says which.
+      const lineLevel = dbExisted ? null : (lineReading?.level ?? null);
+      let levelSource: InitLevelSource = 'stored';
       if (projectType) {
         updateMetadata.run('project_type', projectType);
+        levelSource = 'passed';
+      } else if (lineLevel) {
+        updateMetadata.run('project_type', LEVEL_TIERS[lineLevel]);
+        levelSource = 'agents-file';
       } else if (isNewProject) {
-        updateMetadata.run('project_type', 'build');
+        updateMetadata.run('project_type', 'general');
+        levelSource = 'default';
       }
+      // The hooks' setting is the operator's own choice for this checkout, so it comes back from
+      // the line only for this machine's own store recreated in place (the registry's id taken
+      // back). A team's committed or a copied AGENTS.md never turns this operator's hooks off: the
+      // line is pointed out below instead (the fourth confirming critic).
+      const ambientRestored =
+        !dbExisted &&
+        !storeProjectId &&
+        reusableRegistryId !== null &&
+        knownProjectId === reusableRegistryId &&
+        lineReading?.hooks === true &&
+        lineReading.ambient !== 'on'
+          ? lineReading.ambient
+          : null;
+      if (ambientRestored) updateMetadata.run(AMBIENT_METADATA_KEY, ambientRestored);
 
       if (isNewProject) {
         updateMetadata.run('created_at', now);
+      }
+      // s93-m12 (the confirming critic): a re-init that renames the project or changes its level
+      // says so wherever the identity is kept, not only in metadata.
+      if (dbExisted && (projectName || projectType)) {
+        syncIdentityContexts(db, { name: projectName || undefined, tier: projectType }, now);
       }
 
       // Initialize contexts if they don't exist
@@ -583,7 +828,7 @@ export async function cmosProjectInit(
         }
         // Set project identity
         masterObj.project_identity = {
-          name: projectName || '',
+          name: projectName || restoredName,
           description: '',
           status: 'active_development',
         };
@@ -648,14 +893,80 @@ export async function cmosProjectInit(
       const storedSchemaVersion = (
         readMetadata.get('schema_version') as { value: string } | undefined
       )?.value;
+      // s93-m12: the rules files name the project's level, so they are written once the tier is
+      // stored: the one asked for, or the one an existing store already has.
+      const storedTier = (readMetadata.get('project_type') as { value: string } | undefined)?.value;
+      const storedName = stored('project_name');
+      const storedAmbient = asRulesAmbient(stored(AMBIENT_METADATA_KEY));
       db.close();
+
+      const agents = ensureAgentsMd(projectRoot, seedPath, {
+        level: levelOfTier(storedTier),
+        hooks: internalOpts.hooks !== false,
+        ambient: storedAmbient,
+      });
+      if (agents.written) createdFiles.push(path.join('..', AGENTS_FILE_NAME));
+      // s93-m12 (the build critic): what init leaves undone is said, never silently skipped.
+      const rulesWarnings: string[] = [];
+      // s93-m12 (the confirming critics): a re-init that passes a level moves an existing agents
+      // file's CMOS line with it, as cmos_project(action="update") does, and says so, or says what
+      // it left (a line edited by hand, a read-only file). Without a level, a line that names
+      // another level or hooks setting than the store holds is pointed out, not changed.
+      const storedLevel = levelOfTier(storedTier);
+      if (!agents.written && projectType) {
+        const note = describeCmosLineRefresh(
+          refreshCmosLine(projectRoot, { level: storedLevel, ambient: storedAmbient })
+        );
+        if (note) rulesWarnings.push(note);
+      } else if (
+        !agents.written &&
+        lineReading &&
+        (lineReading.level !== storedLevel ||
+          (lineReading.hooks && lineReading.ambient !== storedAmbient))
+      ) {
+        rulesWarnings.push(cmosLineMismatch(lineReading, storedLevel, storedAmbient, projectRoot));
+      }
+      if (ambientRestored) {
+        rulesWarnings.push(
+          `The hooks ${ambientRestored === 'off' ? 'are off' : 'run without the session digest'} here, as ${lineReading?.name ?? AGENTS_FILE_NAME}'s CMOS line says: this store was recreated in place. \`cmos-mcp ambient on\` turns them back on.`
+        );
+      }
+      if (!storeProjectId && reusableRegistryId && projectId === reusableRegistryId) {
+        rulesWarnings.push(
+          `This folder had no stored id, so init took back the id the project registry holds for it ('${projectId}'), as for a store that was deleted and recreated. If a project that moved elsewhere still uses that id, its writes will now be refused: to give this folder its own id instead, delete cmos/db/cmos.sqlite here, run cmos_project(action="unregister", projectRoot="${projectRoot}"), and init again.`
+        );
+      }
+      if (!graph) {
+        rulesWarnings.push(
+          `The project registry could not be read, so init neither checked the id it holds for this folder nor registered the project. Once it can be read, cmos_project(action="register", projectRoot="${projectRoot}") registers it; if the registry holds another id for this folder, that register is refused, and cmos_project(action="unregister", projectRoot="${projectRoot}") must come first.`
+        );
+      }
+      if (storeProjectId && registryProjectId && storeProjectId !== registryProjectId) {
+        rulesWarnings.push(
+          `This store's project id is '${storeProjectId}', but the project registry holds '${registryProjectId}' for this folder, so writes here are refused as an identity conflict until they agree. If '${registryProjectId}' belonged to a project that has moved away, cmos_project(action="unregister", projectRoot="${projectRoot}") and then cmos_project(action="register", projectRoot="${projectRoot}") register this folder under '${storeProjectId}'.`
+        );
+      }
+      if (!agents.written && internalOpts.hooks === false) {
+        rulesWarnings.push(
+          `${agents.name} already exists, so the hook-less block was not added; append cmos/templates/${NO_HOOKS_TEMPLATE} to it by hand.`
+        );
+      }
+      if (ensureClaudeMd(projectRoot, seedPath, agents.name)) {
+        createdFiles.push(path.join('..', 'CLAUDE.md'));
+      } else if (!claudeMdImports(projectRoot, agents.name)) {
+        rulesWarnings.push(
+          `CLAUDE.md does not import ${agents.name}, so Claude Code does not read it; add the line "@${agents.name}" to CLAUDE.md.`
+        );
+      }
 
       const result: CmosProjectInitResult = {
         cmosDirectory: cmosDir,
         databasePath: dbPath,
         isNewProject,
         projectId,
-        projectName: projectName || '(not set)',
+        projectName: projectName || storedName || '(not set)',
+        level: storedLevel,
+        levelSource,
         schemaVersion: storedSchemaVersion ?? CMOS_SCHEMA_VERSION,
         created: {
           directories: createdDirs,
@@ -670,15 +981,44 @@ export async function cmosProjectInit(
       // result (from any pre-init tool call on this path) doesn't cause registration
       // to fail. The store was just created with a UUID project_id, so registerStore
       // reuses that id. (s80-m02: no JSON mirror to re-derive — graph is the source.)
-      try {
-        CmosDetector.getInstance().clearCache(projectRoot);
-        const graph = await ProjectGraphRegistry.create();
-        graph.registerStore(projectRoot, { name: projectName || undefined });
-      } catch {
-        // Non-critical — init succeeded; user can run cmos_project register manually
+      const warnings: string[] = [...rulesWarnings];
+      if (graph) {
+        try {
+          CmosDetector.getInstance().clearCache(projectRoot);
+          // A new project at a registered project's old path: that project moved or was deleted,
+          // so its row goes. By id, not by path: the registry's default, if it was that project,
+          // points at it again when it registers at its new path on its next write.
+          if (!cmosExisted && registryProjectId && registryProjectId !== projectId) {
+            graph.unregister(registryProjectId);
+            warnings.push(
+              `The project registry held '${registryProjectId}' for this folder, a project that has since moved or been deleted; that entry was dropped, and the project registers again wherever it is on its next write.`
+            );
+          }
+          graph.registerStore(projectRoot, { name: projectName || undefined });
+          // s93-m11 (#606 f): the same warning register gives for a temporary folder.
+          if (graph.isEphemeral(path.resolve(projectRoot))) {
+            warnings.push(
+              `${path.resolve(projectRoot)} is in an ephemeral location; cmos_project(action="validate", prune=true) archives it even while the store exists.`
+            );
+          }
+        } catch (registrationError) {
+          // Init succeeded; registration did not, and the answer says so, with a remedy only where
+          // one works: a store copied from another project carries that project's id, which the
+          // registry keeps at one place (the fourth confirming critic).
+          const message =
+            registrationError instanceof Error
+              ? registrationError.message
+              : String(registrationError);
+          const collision = /already registered to '([^']+)'/.exec(message);
+          warnings.push(
+            collision
+              ? `This store holds the id '${projectId}' of the project at ${collision[1]}: it is a copy of that project, so it was not registered here, and writes here are refused while that project stays registered. ${fs.existsSync(collision[1]) ? 'CMOS keeps one place per project, so a copy of a live project cannot be registered beside it.' : `That folder no longer exists: cmos_project(action="unregister", projectRoot="${collision[1]}") and then cmos_project(action="register", projectRoot="${projectRoot}") register the project here.`}`
+              : `The project was not registered (${message}); cmos_project(action="register", projectRoot="${projectRoot}") registers it.`
+          );
+        }
       }
 
-      return createSuccess(result);
+      return createSuccess(result, warnings);
     } catch (dbError) {
       db.close();
       throw dbError;
@@ -719,6 +1059,7 @@ export function formatProjectInitForLLM(result: CmosToolResult<CmosProjectInitRe
     '',
     `**Project ID**: ${data.projectId}`,
     `**Project Name**: ${data.projectName}`,
+    `**Level**: ${levelName(data.level)} (${LEVEL_SOURCE_TEXT[data.levelSource]})`,
     `**Schema Version**: ${data.schemaVersion}`,
     '',
     `**Database**: ${data.databasePath}`,

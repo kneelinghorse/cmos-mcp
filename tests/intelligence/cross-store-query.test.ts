@@ -1,3 +1,6 @@
+// ABOUTME: Cross-store reads merge bounded source rows and isolate store failures without permitting writes.
+// ABOUTME: Legacy callbacks and explicit discovery snapshots preserve attribution and hook deadlines.
+
 /**
  * Sprint 69 m06 — cross-store fan-out read API tests.
  *
@@ -26,7 +29,10 @@ import {
   learningsTaggedAcrossProjects,
   citationGraphAcrossProjects,
 } from '../../src/intelligence/cross-store-queries';
-import { ProjectGraphRegistry } from '../../src/intelligence/project-graph-registry';
+import {
+  ProjectGraphRegistry,
+  type ProjectGraphEntry,
+} from '../../src/intelligence/project-graph-registry';
 import { cmosDecisionsList } from '../../src/tools/cmos/cmos-decisions-list';
 
 interface DecisionSeed {
@@ -483,6 +489,102 @@ describe('cross-store fan-out read API (Sprint 69 m06)', () => {
   });
 
   // ── tool integration: cmos_decisions(acrossProjects) ────────────────────────
+  it('an explicit empty discovery snapshot never creates or backfills a registry', async () => {
+    const options = { sql: '', stores: [] };
+    const result = await queryAcrossStores(options);
+    expect(result.metadata.storesQueried).toBe(0);
+    expect(fs.existsSync(configDir)).toBe(false);
+  });
+
+  it('custom legacy reads receive trusted store identity and a sentinel limit on a readonly connection', async () => {
+    const root = makeStore('legacy');
+    const writable = new Database(storeDbPath(root));
+    writable.exec('CREATE TABLE legacy_rows (id INTEGER, project_id TEXT)');
+    writable.prepare('INSERT INTO legacy_rows VALUES (?, NULL)').run(1);
+    writable.prepare('INSERT INTO legacy_rows VALUES (?, NULL)').run(2);
+    writable.close();
+    const registry = await registryWith([{ projectId: 'trusted-source', root }]);
+    const stores = registry.list();
+    const options = {
+      sql: '',
+      stores,
+      limit: 1,
+      timeoutMs: 0,
+      perStoreQuery: (db: Database.Database, store: ProjectGraphEntry, limit: number) => {
+        expect(db.readonly).toBe(true);
+        expect(db.pragma('busy_timeout', { simple: true })).toBe(0);
+        expect(limit).toBe(2);
+        return db
+          .prepare(
+            'SELECT id AS occurred_at, id AS origin_seq, ? AS project_id FROM legacy_rows ORDER BY id DESC LIMIT ?'
+          )
+          .all(store.project_id, limit) as CrossStoreRow[];
+      },
+    };
+    const result = await queryAcrossStores(options);
+    expect(result.errors).toEqual([]);
+    expect(result.results).toEqual([
+      { occurred_at: 2, origin_seq: 2, project_id: 'trusted-source' },
+    ]);
+    expect(result.metadata.truncated).toBe(true);
+  });
+
+  it('a custom callback cannot write any source store', async () => {
+    const root = makeStore('immutable');
+    const registry = await registryWith([{ projectId: 'immutable', root }]);
+    const options = {
+      sql: '',
+      stores: registry.list(),
+      perStoreQuery: (db: Database.Database): CrossStoreRow[] => {
+        db.exec('CREATE TABLE forbidden (id INTEGER)');
+        return [];
+      },
+    };
+    const result = await queryAcrossStores(options);
+    expect(result.errors).toEqual([
+      expect.objectContaining({
+        projectId: 'immutable',
+        error: expect.stringMatching(/readonly/i),
+      }),
+    ]);
+    const verify = openStoreReadOnly(root);
+    expect(
+      verify.prepare("SELECT name FROM sqlite_master WHERE name='forbidden'").get()
+    ).toBeUndefined();
+    verify.close();
+  });
+
+  it('names an overrun and every unvisited store without returning late rows or running probes', async () => {
+    const roots = ['first', 'later'].map((projectId) => ({
+      projectId,
+      root: makeStore(projectId),
+    }));
+    const registry = await registryWith(roots);
+    const stores = registry.list().sort((a, b) => a.project_id.localeCompare(b.project_id));
+    let now = Date.now();
+    const deadlineAtMs = now + 100;
+    const callback = jest.fn((_db: Database.Database, store: ProjectGraphEntry) => {
+      now = deadlineAtMs + 1;
+      return [{ occurred_at: now, origin_seq: 1, project_id: store.project_id }];
+    });
+    const probe = jest.fn(() => 1);
+    const options = {
+      sql: '',
+      stores,
+      deadlineAtMs,
+      perStoreQuery: callback,
+      perStoreProbe: probe,
+    };
+    const result = await queryAcrossStores(options, () => now);
+    expect(callback).toHaveBeenCalledTimes(1);
+    expect(probe).not.toHaveBeenCalled();
+    expect(result.results).toEqual([]);
+    expect(result.metadata.storesSucceeded).toBe(0);
+    expect(result.metadata.perStoreMs).toEqual([]);
+    expect(result.errors.map((error) => error.projectId)).toEqual(['first', 'later']);
+    expect(result.errors.every((error) => /deadline/.test(error.error))).toBe(true);
+  });
+
   it('cmos_decisions list acrossProjects fans out via the project-graph registry', async () => {
     const a = makeStore('proj-a', {
       decisions: [

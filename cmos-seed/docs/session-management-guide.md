@@ -30,7 +30,7 @@ cmos_session({
   action: "start",
   type: "planning",
   title: "Sprint 17 Planning",
-  sprintId: "sprint-17"  // optional
+  sprintId: "..."  // optional: an existing sprint's id
 })
 ```
 
@@ -161,4 +161,4 @@ cmos_context(action="view", contextType="master_context")
 
 ---
 
-**Last Updated**: 2026-10-07
+**Last Updated**: 2026-10-08

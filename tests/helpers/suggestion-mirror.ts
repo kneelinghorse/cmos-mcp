@@ -250,6 +250,11 @@ export function buildSuggestionMirror(): SuggestionMirrorResult {
   fs.mkdirSync(MIRROR_ROOT, { recursive: true });
   // Node resolves `<mirror>/**` as CommonJS regardless of the repo's own package type.
   fs.writeFileSync(path.join(MIRROR_ROOT, 'package.json'), '{"type":"commonjs"}\n');
+  // s93-m12: the shipped code finds its seed beside the package root (resolveSeedPath), and so must
+  // the mirror, or every init past the seed lookup refuses with the missing-seed FAULT and its later
+  // refusals (a re-init naming another project's id) can never be driven. A link, never a copy: the
+  // seed is read, and init writes only into the case's own temp project.
+  fs.symlinkSync(path.join(REPO_ROOT, 'cmos-seed'), path.join(MIRROR_ROOT, 'cmos-seed'), 'dir');
 
   const sites: MirrorSite[] = [];
   const changedFiles: string[] = [];

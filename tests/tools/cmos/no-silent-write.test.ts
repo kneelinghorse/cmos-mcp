@@ -5,7 +5,7 @@
 /**
  * Sprint 86 m02b — "say only what you know", enforced on the write side.
  *
- * THE RULE. `.execute(...)`, `.raw(...)`, and `.transaction(...)` return a `CmosToolResult`
+ * THE RULE. The client's `.execute(...)`, `.raw(...)`, and `.transaction(...)` return a `CmosToolResult`
  * envelope. Its `success` flag is the only evidence that the statement or atomic unit ran. Code
  * that discards it, or folds it into a counter/object list with no negative arm, produces an
  * ANSWER THAT ASSERTS SOMETHING NOT SO — before s90-m05 that included
@@ -65,7 +65,13 @@
  *     call and is never walked. That is OUT OF SCOPE BY CONSTRUCTION, not by oversight: `.run()`
  *     THROWS on failure rather than returning a result envelope, so it is a different failure
  *     mode with a different remedy (try/catch). `CmosDatabaseClient.raw(...)` DOES return an
- *     envelope and is covered by the same rule as `.execute(...)`.
+ *     envelope and is covered by the same rule as `.execute(...)`. Similarly, an immediately
+ *     invoked `db.transaction(callback)()` is a throwing SQLite transaction factory, not an
+ *     envelope; the census names it separately and still walks writes inside its callback.
+ *     This is a syntax distinction, not type resolution: an incorrectly invoked client envelope
+ *     would throw a TypeError rather than silently discard failure (and fail typed compilation).
+ *     Stored or indirectly invoked SQLite factories remain conservative candidates; this gate
+ *     cannot prove that a returned factory is eventually run or its exceptions are reported.
  *  3. THE CONSOLE-ONLY TIGHTENING IS A HEURISTIC OVER ARM CONTENT. An arm whose entire body is a
  *     `console.*` call does not count as inspection — that rule is what catches the six
  *     session_events sites, and without it this gate is green while durable provenance is lost.
@@ -141,6 +147,7 @@ const GUARD_HELPERS = new Set(['checkWrite', 'countWrite']);
 
 type Bucket =
   | 'exempt-transaction-verb'
+  | 'invoked-transaction-factory'
   | 'inspected'
   | 'discarded'
   | 'delegated'
@@ -498,6 +505,24 @@ function collectWriteSites(relPath: string, text: string): WriteSite[] {
     const parent = effectiveParent(node);
     const line = lineOf(node, sf);
 
+    // SQLite returns a transaction FUNCTION: its immediate invocation throws on failure.
+    // A client transaction instead returns the result envelope this gate protects. Restrict the
+    // distinction to callee position, so `ignore(client.transaction(...))` stays a violation.
+    if (
+      ts.isPropertyAccessExpression(node.expression) &&
+      node.expression.name.text === 'transaction' &&
+      ts.isCallExpression(node.parent) &&
+      node.parent.expression === node
+    ) {
+      sites.push({
+        file: relPath,
+        line,
+        bucket: 'invoked-transaction-factory',
+        detail: 'transaction factory invoked immediately; errors throw, no result envelope',
+      });
+      return;
+    }
+
     if (parent && ts.isExpressionStatement(parent)) {
       push({ file: relPath, line, bucket: 'discarded', detail: 'result discarded outright' }, sql);
       return;
@@ -687,6 +712,7 @@ function sweep(): { sites: WriteSite[]; violations: WriteSite[] } {
 function census(sites: readonly WriteSite[]): Record<Bucket, number> {
   const counts = {
     'exempt-transaction-verb': 0,
+    'invoked-transaction-factory': 0,
     inspected: 0,
     discarded: 0,
     delegated: 0,
@@ -758,14 +784,55 @@ describe('no-silent-write: every execute(), raw(), and transaction() result is i
   // failed re-read, tombstone UPDATE or COMMIT) through one bare ROLLBACK, the exempt shape
   // exactly: the original failure is already in the answer, and inspecting the ROLLBACK would only
   // risk masking it.
-  it('derives the transaction-verb exemption from the SQL and selects exactly the 4 known ROLLBACKs', () => {
+  // s93-m11: 4 -> 5. staleness-detection.ts's repair unwinds the same way (a failed restore, ledger
+  // write or COMMIT), and the failure it rolls back is already in the repair's warnings.
+  it('derives the transaction-verb exemption from the SQL and selects exactly the 5 known ROLLBACKs', () => {
     const exempt = sites.filter((site) => site.bucket === 'exempt-transaction-verb');
-    expect({ count: exempt.length, sites: render(exempt) }).toMatchObject({ count: 4 });
+    expect({ count: exempt.length, sites: render(exempt) }).toMatchObject({ count: 5 });
     expect(exempt.every((site) => site.detail.startsWith('transaction verb: ROLLBACK'))).toBe(true);
   });
 });
 
 describe('no-silent-write: the rule bites on synthetic shapes', () => {
+  it('distinguishes an immediately invoked SQLite transaction factory from a result envelope', () => {
+    const source = `
+      export function f(db: any) {
+        return db.transaction(() => db.prepare('SELECT 1').get())();
+      }
+    `;
+    expect(collectWriteSites('fixture.ts', source).map((site) => site.bucket)).toEqual([
+      'invoked-transaction-factory',
+    ]);
+  });
+
+  it('still guards client write envelopes inside an invoked transaction factory', () => {
+    const source = `
+      export function f(db: any, client: any) {
+        db.transaction(() => {
+          client.execute('UPDATE missions SET status = ?', ['Done']);
+        })();
+      }
+    `;
+    expect(collectWriteSites('fixture.ts', source).map((site) => site.bucket)).toEqual([
+      'invoked-transaction-factory',
+      'discarded',
+    ]);
+  });
+
+  it('does not treat a transaction passed to an unchecked caller as an invoked factory', () => {
+    const source = `
+      export function f(client: any) {
+        ignore(client.transaction(() => true));
+        const result = client.transaction(() => true);
+        return 'all writes landed';
+      }
+    `;
+    expect(collectWriteSites('fixture.ts', source).map((site) => site.bucket)).toEqual([
+      'unclassified',
+      'no-negative-arm',
+    ]);
+  });
+
   it('rejects a discarded transaction envelope even when its inner write is inspected', () => {
     const source = `
       export function f(client: any) {

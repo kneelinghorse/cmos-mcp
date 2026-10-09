@@ -310,9 +310,16 @@ describe('router param forwarding gate (s86-m03)', () => {
         'advertisedRoots',
         'callerProvidedProjectRoot',
         'client',
+        // s93-m12: init's internal `hooks` (`cmos-mcp init --no-hooks` adds the hook-less block).
+        'hooks',
+        // s93-m01: onboard's @internal `offline` (the hook CLI's session start skips the dashboard).
+        'offline',
         'overallTimeoutMs',
         'perRequestTimeoutMs',
         'preserveNextStepProse',
+        // s93-m01: cmosSessionComplete's internal `registerProject` (an automatic close registers
+        // nothing, so a second checkout closes without a registry collision).
+        'registerProject',
         'registry',
       ]);
       // All FOUR rules are exercised. If any stops firing, the rule set is no longer what the

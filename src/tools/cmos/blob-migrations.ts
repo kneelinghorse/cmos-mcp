@@ -1,14 +1,15 @@
 /**
  * Versioned blob migration system for master_context.
  *
- * Migrations are registered once in BLOB_MIGRATIONS and applied lazily on the
- * first cmos_context_view call after an upgrade. Each project self-heals on
- * first touch — no manual script, no per-project memory required.
+ * Migrations are registered once in BLOB_MIGRATIONS. A read applies them in memory only
+ * (migrateBlobForRead); the stored blob is migrated at the store's first write in each server
+ * process (first-write-maintenance.ts, s93-m11), because reads never write the record. Each
+ * project self-heals — no manual script, no per-project bookkeeping required.
  *
  * To add a future migration:
  *   1. Append a new entry to BLOB_MIGRATIONS with the next version number.
  *   2. Bump BLOB_SCHEMA_VERSION to match.
- *   Done. Existing projects migrate automatically on next read.
+ *   Done. Reads show the new shape at once; the stored blob migrates at the next write.
  *
  * Old migration entries are never removed — they are the changelog.
  * The version gate (`currentVersion >= migration.version`) makes them free
@@ -62,6 +63,11 @@ export interface BlobMigrationResult {
    * being inferred from `migrated: true`, which reports intent, not a persisted row.
    */
   warnings: string[];
+  /**
+   * s93-m11 — whether the stored blob was rewritten. False when the pending migrations left the
+   * blob unchanged: only the version is stamped then, with no snapshot and no rewrite.
+   */
+  rewritten?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -241,9 +247,7 @@ export function applyPendingBlobMigrations(
   // is disclosed rather than reported as a clean `migrated: true`.
   const warnings: string[] = [];
 
-  // Snapshot before any writes (using the highest pending version as the label)
   const targetVersion = Math.max(...pending.map((m) => m.version));
-  takePreMigrationSnapshot(client, contextId, rawContent, targetVersion, warnings);
 
   // Apply each pending migration in version order
   let result = parsedBlob;
@@ -252,6 +256,17 @@ export function applyPendingBlobMigrations(
     result = migration.up(result);
     applied.push(migration.version);
   }
+
+  // s93-m11: a blob the migrations leave unchanged needs no snapshot and no rewrite; only the
+  // version is stamped. This now runs at a store's first write (first-write-maintenance.ts), so a
+  // fresh store pays one metadata row for it instead of a snapshot.
+  if (JSON.stringify(result) === JSON.stringify(parsedBlob)) {
+    setBlobSchemaVersion(client, targetVersion, warnings);
+    return { migrated: true, migrationsApplied: applied, blob: result, warnings, rewritten: false };
+  }
+
+  // Snapshot before any writes (using the highest pending version as the label)
+  takePreMigrationSnapshot(client, contextId, rawContent, targetVersion, warnings);
 
   // Write pruned blob back to contexts table
   const newContent = JSON.stringify(result);
@@ -269,5 +284,25 @@ export function applyPendingBlobMigrations(
   // Bump version in metadata
   setBlobSchemaVersion(client, targetVersion, warnings);
 
-  return { migrated: true, migrationsApplied: applied, blob: result, warnings };
+  return { migrated: true, migrationsApplied: applied, blob: result, warnings, rewritten: true };
+}
+
+/**
+ * s93-m11 — the pending migrations applied in memory only, for a read. Reads never write the
+ * record (Q10, decision #1182), so a read shows the migrated shape and the stored blob is migrated
+ * at the store's next first write (first-write-maintenance.ts). Every `up` is pure, so the shape
+ * shown is the shape that will be stored.
+ */
+export function migrateBlobForRead(
+  client: CmosDatabaseClient,
+  contextId: string,
+  parsedBlob: Record<string, unknown>
+): Record<string, unknown> {
+  if (contextId !== 'master_context') return parsedBlob;
+  const currentVersion = getBlobSchemaVersion(client);
+  let result = parsedBlob;
+  for (const migration of BLOB_MIGRATIONS) {
+    if (migration.version > currentVersion) result = migration.up(result);
+  }
+  return result;
 }

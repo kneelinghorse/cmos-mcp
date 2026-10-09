@@ -7,8 +7,8 @@ import * as os from 'os';
 import * as path from 'path';
 import { CmosDatabaseClient } from '../../../src/tools/cmos/client';
 import {
-  detectAndFlagStaleness,
-  getStaleCounts,
+  readStaleness,
+  repairFlaggerStaleness,
   DEFAULT_STALENESS_THRESHOLD,
 } from '../../../src/tools/cmos/staleness-detection';
 import { ensureReviewTimestamps } from '../../../src/tools/cmos/schema-migrations';
@@ -97,12 +97,12 @@ describe('ensureReviewTimestamps migration', () => {
   });
 });
 
-describe('flagStaleLearnings respects last_reviewed_at', () => {
-  it('does NOT re-flag a learning whose last_reviewed_at is recent', async () => {
+describe('staleness respects last_reviewed_at', () => {
+  it('does not count a learning whose last_reviewed_at is recent as due for review', async () => {
     const { tempDir, dbPath } = makeTempDb();
     const client = await openClient(dbPath);
     try {
-      // (threshold + 5) sprints, last is active. Learning in sprint-2 is stale-eligible.
+      // (threshold + 5) sprints, last is active. Learning in sprint-2 is past the review age.
       const totalSprints = DEFAULT_STALENESS_THRESHOLD + 5;
       const db = new Database(dbPath);
       for (let i = 1; i <= totalSprints; i++) {
@@ -115,7 +115,7 @@ describe('flagStaleLearnings respects last_reviewed_at', () => {
       const oldCreated = new Date(Date.now() - 365 * 86400_000).toISOString();
       db.prepare(
         `INSERT INTO learnings (content, created_at, sprint_id, status) VALUES (?, ?, ?, 'active')`
-      ).run('Evergreen learning', oldCreated, 'sprint-2');
+      ).run('Reaffirmed learning', oldCreated, 'sprint-2');
       db.prepare(
         `INSERT INTO learnings (content, created_at, sprint_id, status) VALUES (?, ?, ?, 'active')`
       ).run('Never-reviewed old learning', oldCreated, 'sprint-2');
@@ -126,11 +126,10 @@ describe('flagStaleLearnings respects last_reviewed_at', () => {
       const nowIso = new Date().toISOString();
       client.execute(`UPDATE learnings SET last_reviewed_at = ? WHERE id = 1`, [nowIso]);
 
-      const result = detectAndFlagStaleness(client, { threshold: DEFAULT_STALENESS_THRESHOLD });
+      const result = readStaleness(client, { threshold: DEFAULT_STALENESS_THRESHOLD });
 
-      // Only the never-reviewed one should be flagged. The reaffirmed (id=1) stays active.
-      expect(result.learningsFlagged).toBe(1);
-
+      // Only the never-reviewed one is due; s93-m11: no row is written either way.
+      expect(result.dueLearnings).toBe(1);
       const db2 = new Database(dbPath);
       const rows = db2.prepare('SELECT id, status FROM learnings ORDER BY id').all() as Array<{
         id: number;
@@ -139,17 +138,17 @@ describe('flagStaleLearnings respects last_reviewed_at', () => {
       db2.close();
       expect(rows).toEqual([
         { id: 1, status: 'active' },
-        { id: 2, status: 'stale' },
+        { id: 2, status: 'active' },
       ]);
     } finally {
       cleanup(tempDir, client);
     }
   });
 
-  it('does NOT re-flag the same learning on a subsequent staleness run after archive', async () => {
-    // Regression scenario from the reporter: count stuck at 11 after archiving 2.
-    // With the review-timestamp fix, an archived learning is NOT reactivated as stale,
-    // and no NEW sprint-id candidate flips 'active' → 'stale' if it has been touched.
+  // The reporter's scenario (a stale count stuck at 11 after archiving 2) under the 3.3.0 rules:
+  // archiving is an explicit status update that stamps the review, so the repair never restores an
+  // archived row, and the rows an older flagger left are restored instead of re-flagged.
+  it('an archive stamps the review, and the repair restores only the flagger-written rows', async () => {
     const { tempDir, dbPath } = makeTempDb();
     const client = await openClient(dbPath);
     try {
@@ -163,27 +162,29 @@ describe('flagStaleLearnings respects last_reviewed_at', () => {
         );
       }
       const oldCreated = new Date(Date.now() - 365 * 86400_000).toISOString();
-      // 11 learnings in sprint-2 (old, stale-eligible), all active
+      // 11 learnings in sprint-2 that an older opener marked stale on its own.
       for (let i = 0; i < 11; i++) {
         db.prepare(
-          `INSERT INTO learnings (content, created_at, sprint_id, status) VALUES (?, ?, ?, 'active')`
+          `INSERT INTO learnings (content, created_at, sprint_id, status) VALUES (?, ?, ?, 'stale')`
         ).run(`Learning ${i}`, oldCreated, 'sprint-2');
       }
       db.close();
-
-      // First pass: all 11 flagged stale.
-      const first = detectAndFlagStaleness(client, { threshold: DEFAULT_STALENESS_THRESHOLD });
-      expect(first.learningsFlagged).toBe(11);
-      expect(getStaleCounts(client).staleLearnings).toBe(11);
+      expect(readStaleness(client).storedStaleLearnings).toBe(11);
 
       // Operator archives 2 (this bumps last_reviewed_at via cmosLearningsUpdate).
       await cmosLearningsUpdate({ learningId: 1, status: 'archived', projectRoot: tempDir });
       await cmosLearningsUpdate({ learningId: 2, status: 'archived', projectRoot: tempDir });
 
-      // Second pass: 2 archived, 9 stale — no re-flagging, no churn.
-      const second = detectAndFlagStaleness(client, { threshold: DEFAULT_STALENESS_THRESHOLD });
-      expect(second.learningsFlagged).toBe(0);
-      expect(getStaleCounts(client).staleLearnings).toBe(9);
+      const receipt = repairFlaggerStaleness(client);
+      expect(receipt.restoredLearningIds).toHaveLength(9);
+      expect(readStaleness(client).storedStaleLearnings).toBe(0);
+
+      const db2 = new Database(dbPath);
+      const archived = db2
+        .prepare("SELECT COUNT(*) AS n FROM learnings WHERE status = 'archived'")
+        .get() as { n: number };
+      db2.close();
+      expect(archived.n).toBe(2);
     } finally {
       cleanup(tempDir, client);
     }

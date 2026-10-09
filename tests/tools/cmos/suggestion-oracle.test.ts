@@ -18,6 +18,8 @@
  * whole universe, exactly equals the action-applicability contract, and still covers every pinned
  * historically-crashing triple. The driven T6 arms separately send number, object, array and
  * boolean values through all 15 in-process routers and assert every applicable value is refused.
+ * The static one-guard arm excludes only telemetry-call.ts/projectRoot: that post-call observation
+ * chooses an anonymous measurement destination and cannot validate or refuse a tool request.
  *
  * D-5's REFUSAL (#1024) STANDS AND IS REINFORCED, NOT OVERTURNED. D-5 refused a general
  * class-(b) semantic gate at any budget, on a figure ("75 of 176") whose predicate was never
@@ -53,7 +55,7 @@
  *     ledger below: a real loopback HTTP server plus synthetic credential/config state reaches 21,
  *     while 3 are named construction-masked residuals. UNTYPED 1 remains at
  *     `sprint-summary-read.ts:45`, whose helper has zero production callers and inherits an
- *     arbitrary error code. `errors.ts:378` is consumer-resolved to SENDER_UNRESOLVABLE and its
+ *     arbitrary error code. `errors.ts:384` is consumer-resolved to SENDER_UNRESOLVABLE and its
  *     explicit-projectRoot remedy is exercised over stdio. The EXTERNAL arm uses mirrored routers,
  *     no operator credential and no MCP stdio wire; it therefore takes no credit for the first-run
  *     wire matrix in `tests/e2e/wire-preflight.e2e.ts`.
@@ -82,6 +84,10 @@
  *     so neither surface detects an over-broad guard. A red scope arm can therefore mean either a
  *     widened guard or an under-declared applicability table. None of this establishes the correct
  *     `src/index.ts` pre-dispatch scope: the wire consumes `projectRoot` independently of routers.
+ *     The static arm also excludes exactly one projectRoot type check in telemetry-call.ts; its
+ *     post-call observation is not a handler guard. telemetry-call.test.ts drives number, object,
+ *     array and boolean roots and proves the operation runs once, its exact response survives, and
+ *     one anonymous event is emitted. Other checks in that file remain inside the static census.
  *
  * THE MIRROR IS NOT A BUILD. Provenance comes from an AST source transform into a gitignored
  * CommonJS mirror under `node_modules/.cache/` — ZERO `src/` edits — and it proves itself faithful
@@ -117,6 +123,7 @@ import { cmosAgentOnboard } from '../../../src/tools/cmos/cmos-agent-onboard';
 import { cmosStatus } from '../../../src/tools/cmos/cmos-status';
 import { cmosReview } from '../../../src/tools/cmos/cmos-review';
 import { processOwnerKey } from '../../../src/tools/cmos/session-owner';
+import { PROPOSALS_TABLE_SQL } from '../../../src/tools/cmos/proposals';
 
 import {
   buildSuggestionMirror,
@@ -192,6 +199,53 @@ const SITES_BY_MISSION = {
     'src/tools/cmos/cmos-db-prune-snapshots.ts:445',
     'src/tools/cmos/cmos-db-prune-snapshots.ts:468',
   ],
+  // s93-m11: init without its folder names the call to make, and list asked to prune names the
+  // actions that prune (a read never does); both driven in axis 5. An explicit 'stale' a store
+  // cannot stamp with its review time is refused, in update and batch update (DB_SCHEMA_MISMATCH,
+  // FAULT: the column migration failed); both driven in tests/tools/cmos/first-write-upkeep.test.ts.
+  's93-m11': [
+    'src/tools/cmos/cmos-project-init.ts:395',
+    'src/tools/cmos/cmos-project.ts:350',
+    'src/tools/cmos/cmos-decisions-update.ts:137',
+    'src/tools/cmos/cmos-decisions-batch-update.ts:101',
+    // A since/until no stored time can be compared with is refused (it used to match nothing);
+    // driven in axis 5.
+    'src/tools/cmos/errors.ts:549',
+  ],
+  // s93-m12: a re-init naming a project id the project does not have is refused (a re-init keeps
+  // the stored identity); driven in axis 2.
+  's93-m12': ['src/tools/cmos/cmos-project-init.ts:654'],
+  // s93-m05: a failed local v2 digest read is explicit, with a health-check remedy; driven in
+  // review-v2-presentation.test.ts rather than returning an apparently empty successful digest.
+  's93-m05': ['src/tools/cmos/review-presentation.ts:73'],
+  // s93-m08: count each authored suggestion PropertyAssignment, not each branch value: five
+  // standalone CLI refusals and two fleet refusals. The CLI's write-failure and sanitized-empty
+  // branches share one site. Portable cases drive every non-fault site and execute CLI remedies.
+  's93-m08': [
+    'src/cli/feedback.ts:57',
+    'src/cli/feedback.ts:66',
+    'src/cli/feedback.ts:83',
+    'src/cli/feedback.ts:94',
+    'src/cli/feedback.ts:126',
+    'src/tools/cmos/cmos-feedback.ts:229',
+    'src/tools/cmos/cmos-feedback.ts:238',
+  ],
+  // s93-m06: recording a draft. Six refusals are driven in axis 2 below (an id that is not a draft
+  // id, no such draft, an answered draft, an expired one, content that does not state the draft, a
+  // constraint draft with no operator words in this session); four need a harness session or a
+  // race and are named residuals, each driven in tests/tools/cmos/draft-approval.test.ts.
+  's93-m06': [
+    'src/tools/cmos/draft-approval.ts:75',
+    'src/tools/cmos/draft-approval.ts:117',
+    'src/tools/cmos/draft-approval.ts:129',
+    'src/tools/cmos/draft-approval.ts:143',
+    'src/tools/cmos/draft-approval.ts:153',
+    'src/tools/cmos/draft-approval.ts:164',
+    'src/tools/cmos/draft-approval.ts:94',
+    'src/tools/cmos/draft-approval.ts:309',
+    'src/tools/cmos/draft-approval.ts:379',
+    'src/tools/cmos/cmos-decisions-record.ts:309',
+  ],
 } as const satisfies Readonly<Record<string, readonly string[]>>;
 const RATIFIED_SITE_ADDS = Object.values(SITES_BY_MISSION).flat();
 
@@ -236,22 +290,22 @@ const EXTERNAL_PREFIXES = ['DASHBOARD_', 'DEVICE_CODE_', 'CREDENTIAL_'];
  * VALUE rather than the error itself. The bucket is resolved from the SINGLE consumer that turns
  * that return value into an error — the code a caller actually sees on the wire.
  *
- * `cmos-context-update.ts:775/785/794/813` are the four returns of `applyNestedFieldUpdate`, whose
+ * `cmos-context-update.ts:780/790/799/818` are the four returns of `applyNestedFieldUpdate`, whose
  * ONLY consumer (`cmos-context-update.ts:543-549`) stamps `CMOS_ERROR_CODES.INVALID_PARAMETER` and
  * forwards `updateResult.suggestion` verbatim. The census arm PROVES that single-consumer premise
  * rather than trusting this comment.
  *
- * `errors.ts:378` is produced by `senderUnresolvable`. Its only production error source is
+ * `errors.ts:384` is produced by `senderUnresolvable`. Its only production error source is
  * `SenderResolutionError`, whose sole production construction uses the SENDER_UNRESOLVABLE
  * default; the proof below makes that premise executable. `sprint-summary-read.ts:45` remains
  * absent: `withViewContext` spreads `...error`, so its code is arbitrary, and it has ZERO callers.
  */
 const CONSUMER_RESOLVED_CODES: Readonly<Record<string, string>> = {
-  'src/tools/cmos/cmos-context-update.ts:775': 'INVALID_PARAMETER',
-  'src/tools/cmos/cmos-context-update.ts:785': 'INVALID_PARAMETER',
-  'src/tools/cmos/cmos-context-update.ts:794': 'INVALID_PARAMETER',
-  'src/tools/cmos/cmos-context-update.ts:813': 'INVALID_PARAMETER',
-  'src/tools/cmos/errors.ts:378': 'SENDER_UNRESOLVABLE',
+  'src/tools/cmos/cmos-context-update.ts:780': 'INVALID_PARAMETER',
+  'src/tools/cmos/cmos-context-update.ts:790': 'INVALID_PARAMETER',
+  'src/tools/cmos/cmos-context-update.ts:799': 'INVALID_PARAMETER',
+  'src/tools/cmos/cmos-context-update.ts:818': 'INVALID_PARAMETER',
+  'src/tools/cmos/errors.ts:384': 'SENDER_UNRESOLVABLE',
 };
 
 type TriggerClass = 'VALIDATION' | 'STATE' | 'FAULT' | 'EXTERNAL' | 'UNTYPED';
@@ -491,6 +545,33 @@ function loadMirrorRouters(): MirrorRouters {
   ): ((p: Record<string, unknown>) => Promise<unknown>) =>
     require(`${mirror.root}/tools/cmos/${file}.js`)[exportName];
   return {
+    // The shipped CLI owns the refusal; this adapter only decodes its JSON receipt for the
+    // same driver used by MCP routers. It neither constructs nor intercepts suggestions.
+    cli_feedback: async (params) => {
+      const { runFeedback } = require(`${mirror.root}/cli/feedback.js`) as {
+        runFeedback(
+          argv: readonly string[],
+          io: import('../../../src/cli/core').CliIo
+        ): Promise<number>;
+      };
+      let stdout = '';
+      const stderr: string[] = [];
+      const code = await runFeedback([...(params.argv as string[]), '--format=json'], {
+        cwd: String(params.projectRoot),
+        env: { ...process.env, CLAUDE_PROJECT_DIR: '', ...(params.env as NodeJS.ProcessEnv) },
+        readStdin: async () => '',
+        stdout: (text) => {
+          stdout += text;
+        },
+        stderr: (text) => {
+          stderr.push(text);
+        },
+      });
+      const result = JSON.parse(stdout) as { success: boolean };
+      if (code !== (result.success ? 0 : 1) || stderr.length > 0)
+        throw new Error(`Feedback CLI receipt disagrees with exit ${code}: ${stderr.join(' ')}`);
+      return result;
+    },
     cmos_mission: load('cmos-mission', 'cmosMission'),
     cmos_mission_transition: load('cmos-mission-transition', 'cmosMissionTransition'),
     cmos_sprint: load('cmos-sprint', 'cmosSprint'),
@@ -630,6 +711,41 @@ function publishedProbePoints(): Array<{ tool: string; action: string | undefine
     else for (const action of actions) out.push({ tool: tool.name, action });
   }
   return out;
+}
+
+/** s93-m06 draft probes: the texts of the drafts each setup seeds, found again by text. */
+const S93_M06_DECLINED = 's93-m06 probe: keep one JSON file per decision, a declined draft.';
+const S93_M06_EXPIRED = 's93-m06 probe: keep one JSON file per decision, a draft past its lease.';
+const S93_M06_PENDING = 's93-m06 probe: keep one JSON file per decision, a pending draft.';
+const S93_M06_CONSTRAINT = 's93-m06 probe: never push to main without a green CI run first.';
+
+function seedDraft(
+  dbPath: string,
+  text: string,
+  kind: string,
+  ageDays: number,
+  outcome: string
+): void {
+  withDb(dbPath, (db) => {
+    db.exec(PROPOSALS_TABLE_SQL);
+    if (db.prepare('SELECT 1 FROM proposals WHERE text = ?').get(text)) return;
+    db.prepare('INSERT INTO proposals (text, kind, created_at, outcome) VALUES (?, ?, ?, ?)').run(
+      text,
+      kind,
+      new Date(Date.now() - ageDays * 86_400_000).toISOString(),
+      outcome
+    );
+  });
+}
+
+function draftIdOf(dbPath: string, text: string): number {
+  return withDb(dbPath, (db) => {
+    const row = db.prepare('SELECT id FROM proposals WHERE text = ?').get(text) as
+      | { id: number }
+      | undefined;
+    if (!row) throw new Error(`precondition not established: no draft "${text}"`);
+    return row.id;
+  });
 }
 
 /** s91-m04 self-supersede probe: the seeded row's text and its id, re-read by every setup. */
@@ -872,12 +988,36 @@ const MATRIX: MatrixCase[] = [
       "returned; SQL-forced here because a matrix call cannot read a previous call's id",
     setup: (ctx) => {
       withDb(ctx.dbPath, (db) => {
-        const session = db
+        // Establish, never inherit (#547). The record call authors under the newest active
+        // EXPLICIT session, else its own implicit one, so the seeded row must carry that author.
+        // Borrowing whatever the live store had open passed only while a session was open there.
+        const sessionColumns = new Set(
+          (db.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>).map(
+            (column) => column.name
+          )
+        );
+        const explicitOnly = sessionColumns.has('implicit') ? 'AND implicit = 0' : '';
+        let session = db
           .prepare(
-            `SELECT id FROM sessions WHERE status = 'active' ORDER BY started_at DESC LIMIT 1`
+            `SELECT id FROM sessions WHERE status = 'active' ${explicitOnly}
+              ORDER BY started_at DESC LIMIT 1`
           )
           .get() as { id: string } | undefined;
-        const author = session?.id ?? null;
+        if (!session) {
+          session = { id: 'PS-S91M04-SELF-SUPERSEDE' };
+          const sessionSeq = (
+            db.prepare('SELECT COALESCE(MAX(origin_seq), 0) + 1 AS n FROM sessions').get() as {
+              n: number;
+            }
+          ).n;
+          db.prepare(
+            `INSERT INTO sessions (id, type, title, status, started_at, project_id,
+               stable_event_id, occurred_at, origin_seq, event_type, schema_version)
+             VALUES (?, 'custom', 's91-m04 self-supersede probe', 'active', ?, 'cmos-mcp-pro',
+               '01S91M04SELFSUPERSESSION00', ?, ?, 'session_started', 1)`
+          ).run(session.id, new Date().toISOString(), Date.now(), sessionSeq);
+        }
+        const author = session.id;
         const existing = db
           .prepare(
             'SELECT id FROM strategic_decisions WHERE decision_text = ? AND author_session_id IS ?'
@@ -914,6 +1054,119 @@ const MATRIX: MatrixCase[] = [
           supersedes: [s91M04SelfId],
           projectRoot: ctx.projectRoot,
         },
+      },
+    ],
+  },
+  {
+    axis: '2 row-presence',
+    name: 's93-m06: fromDraft is not a draft id',
+    reachable: 'ordinary: an agent passes an id of another kind (a decision number with a prefix)',
+    calls: (ctx) => [
+      {
+        tool: 'cmos_decisions',
+        params: {
+          action: 'record',
+          content: 'Use one JSON file per decision because diffs stay readable.',
+          fromDraft: 'D1',
+          projectRoot: ctx.projectRoot,
+        },
+      },
+    ],
+  },
+  {
+    axis: '2 row-presence',
+    name: 's93-m06: fromDraft names no draft in this store',
+    reachable: 'ordinary: an agent names a draft id from another project, or a stale id',
+    calls: (ctx) => [
+      {
+        tool: 'cmos_decisions',
+        params: {
+          action: 'record',
+          content: 'Use one JSON file per decision because diffs stay readable.',
+          fromDraft: 'P987654',
+          projectRoot: ctx.projectRoot,
+        },
+      },
+    ],
+  },
+  {
+    axis: '2 row-presence',
+    name: 's93-m06: the draft was already answered (declined)',
+    reachable: 'ordinary: the operator declined the draft, then an agent records it anyway',
+    setup: (ctx) => seedDraft(ctx.dbPath, S93_M06_DECLINED, 'decision', 0, 'declined'),
+    calls: (ctx) => [
+      {
+        tool: 'cmos_decisions',
+        params: {
+          action: 'record',
+          content: S93_M06_DECLINED,
+          fromDraft: `P${draftIdOf(ctx.dbPath, S93_M06_DECLINED)}`,
+          projectRoot: ctx.projectRoot,
+        },
+      },
+    ],
+  },
+  {
+    axis: '2 row-presence',
+    name: 's93-m06: the draft expired unanswered',
+    reachable: 'ordinary: nobody answered a draft for over a week, then an agent records it',
+    setup: (ctx) => seedDraft(ctx.dbPath, S93_M06_EXPIRED, 'decision', 8, 'pending'),
+    calls: (ctx) => [
+      {
+        tool: 'cmos_decisions',
+        params: {
+          action: 'record',
+          content: S93_M06_EXPIRED,
+          fromDraft: `P${draftIdOf(ctx.dbPath, S93_M06_EXPIRED)}`,
+          projectRoot: ctx.projectRoot,
+        },
+      },
+    ],
+  },
+  {
+    axis: '2 row-presence',
+    name: 's93-m06: the content does not state the draft',
+    reachable: 'ordinary: an agent records a different decision under an approved draft id',
+    setup: (ctx) => seedDraft(ctx.dbPath, S93_M06_PENDING, 'decision', 0, 'pending'),
+    calls: (ctx) => [
+      {
+        tool: 'cmos_decisions',
+        params: {
+          action: 'record',
+          content: 'Adopt Postgres for the analytics warehouse, the team already runs it.',
+          fromDraft: `P${draftIdOf(ctx.dbPath, S93_M06_PENDING)}`,
+          projectRoot: ctx.projectRoot,
+        },
+      },
+    ],
+  },
+  {
+    axis: '2 row-presence',
+    name: 's93-m06: a constraint draft with no operator words in this session',
+    reachable:
+      'ordinary: a harness without CMOS hooks (or another session) records a constraint draft',
+    setup: (ctx) => seedDraft(ctx.dbPath, S93_M06_CONSTRAINT, 'constraint', 0, 'pending'),
+    calls: (ctx) => [
+      {
+        tool: 'cmos_decisions',
+        params: {
+          action: 'record',
+          content: S93_M06_CONSTRAINT,
+          fromDraft: `P${draftIdOf(ctx.dbPath, S93_M06_CONSTRAINT)}`,
+          projectRoot: ctx.projectRoot,
+        },
+      },
+    ],
+  },
+  {
+    axis: '2 row-presence',
+    name: 's93-m12: a re-init names a project id the project does not have',
+    reachable:
+      'ordinary: an agent re-runs init on an existing project and passes a project id of its own',
+    calls: (ctx) => [
+      {
+        tool: 'cmos_project',
+        params: { action: 'init', projectRoot: ctx.projectRoot, projectId: 'not-this-project' },
       },
     ],
   },
@@ -986,11 +1239,13 @@ const MATRIX: MatrixCase[] = [
           | undefined;
         if (!row) throw new Error('frozen source has no sessions row to activate');
         // s92-m03: started NOW. A start closes an explicit blocker idle past 12 h, so only a live
-        // blocker still reaches the SESSION_ALREADY_ACTIVE refusal.
-        db.prepare(`UPDATE sessions SET status = 'active', started_at = ? WHERE id = ?`).run(
-          new Date().toISOString(),
-          row.id
-        );
+        // blocker still reaches the SESSION_ALREADY_ACTIVE refusal. Do not inherit the most
+        // recent real session's ownership: this case is an explicit, keyless session.
+        db.prepare(`UPDATE sessions SET status = 'completed' WHERE status = 'active'`).run();
+        db.prepare(
+          `UPDATE sessions SET status = 'active', implicit = 0, owner_key = NULL,
+          started_at = ?, completed_at = NULL WHERE id = ?`
+        ).run(new Date().toISOString(), row.id);
       });
     },
     calls: (ctx) => [
@@ -1018,7 +1273,13 @@ const MATRIX: MatrixCase[] = [
           | { id: string }
           | undefined;
         if (!row) throw new Error('frozen source has no sessions row to activate');
-        db.prepare(`UPDATE sessions SET status = 'active' WHERE id = ?`).run(row.id);
+        // The retry without sessionId must find this explicit session, not inherit another
+        // process's implicit owner from whichever live row happened to be newest at freeze time.
+        db.prepare(`UPDATE sessions SET status = 'completed' WHERE status = 'active'`).run();
+        db.prepare(
+          `UPDATE sessions SET status = 'active', implicit = 0, owner_key = NULL,
+          started_at = ?, completed_at = NULL WHERE id = ?`
+        ).run(new Date().toISOString(), row.id);
       });
     },
     calls: (ctx) => [
@@ -1214,6 +1475,27 @@ const MATRIX: MatrixCase[] = [
             ? { projectRoot: ctx.projectRoot }
             : { action, projectRoot: ctx.projectRoot },
       })),
+  },
+  {
+    axis: '5 parameter-omission',
+    name: 's93-m11: init without its folder, and list asked to prune',
+    reachable:
+      'ordinary: an agent calls init before choosing a folder, or asks list to tidy the registry',
+    calls: () => [
+      { tool: 'cmos_project', params: { action: 'init' } },
+      { tool: 'cmos_project', params: { action: 'list', validate: true, prune: true } },
+    ],
+  },
+  {
+    axis: '5 parameter-omission',
+    name: 's93-m11: a since an agent wrote in words',
+    reachable: 'ordinary: an agent asks for decisions "since last week"',
+    calls: (ctx) => [
+      {
+        tool: 'cmos_decisions',
+        params: { action: 'list', since: 'last week', projectRoot: ctx.projectRoot },
+      },
+    ],
   },
   {
     axis: '5 parameter-omission',
@@ -1684,9 +1966,9 @@ const FIRST_RUN_SITES = new Set(FIRST_RUN.map((row) => row.site));
  * fired/non-universe site is stale bookkeeping.
  */
 const EXTERNAL_RESIDUAL_REASONS: Readonly<Record<string, string>> = {
-  'src/tools/cmos/client.ts:748':
-    '`validateProjectId()` has zero production callers; only direct unit tests invoke the method.',
   'src/tools/cmos/client.ts:756':
+    '`validateProjectId()` has zero production callers; only direct unit tests invoke the method.',
+  'src/tools/cmos/client.ts:764':
     'The second PROJECT_ID_MISMATCH arm is in the same production-unreachable `validateProjectId()` method.',
   'src/tools/cmos/sync-mutable-push.ts:166':
     '`maybePropagateMutableStatus` returns before `pushMutableStatus` unless `isCollabStore` is true; ' +
@@ -1698,13 +1980,13 @@ const HTTP_EXTERNAL_SITES = new Set([
   'src/tools/cmos/cmos-auth.ts:1183',
   'src/tools/cmos/cmos-auth.ts:1192',
   'src/tools/cmos/cmos-auth.ts:1200',
-  'src/tools/cmos/cmos-message.ts:1067',
-  'src/tools/cmos/errors.ts:422',
-  'src/tools/cmos/errors.ts:438',
-  'src/tools/cmos/errors.ts:457',
-  'src/tools/cmos/errors.ts:469',
-  'src/tools/cmos/errors.ts:477',
-  'src/tools/cmos/errors.ts:497',
+  'src/tools/cmos/cmos-message.ts:1078',
+  'src/tools/cmos/errors.ts:428',
+  'src/tools/cmos/errors.ts:444',
+  'src/tools/cmos/errors.ts:463',
+  'src/tools/cmos/errors.ts:475',
+  'src/tools/cmos/errors.ts:483',
+  'src/tools/cmos/errors.ts:503',
 ]);
 const SYNTHETIC_EXTERNAL_SITES = new Set([
   'src/tools/cmos/cmos-auth.ts:572',
@@ -1716,7 +1998,7 @@ const SYNTHETIC_EXTERNAL_SITES = new Set([
   'src/tools/cmos/cmos-auth.ts:1124',
   'src/tools/cmos/cmos-auth.ts:1133',
   'src/tools/cmos/dashboard-client.ts:270',
-  'src/tools/cmos/errors.ts:487',
+  'src/tools/cmos/errors.ts:493',
 ]);
 
 /** Shared with the private T7 ledger; the replay fence remains private and unchanged. */
@@ -1808,7 +2090,7 @@ describe('s89-m08 CENSUS — the universe re-derives at build time, never from a
     // real working folder with no store, a contextless call with no default) and passes each one's
     // outcome as a fourth argument. The premise is unchanged and still proven here: NO
     // construction supplies the code argument, so every error carries the SENDER_UNRESOLVABLE
-    // default that `errors.ts:378` is bucketed by.
+    // default that `errors.ts:384` is bucketed by.
     expect(constructions.length).toBeGreaterThan(0);
     for (const construction of constructions) {
       const codeArgument = construction.arguments?.[2];
@@ -2383,6 +2665,8 @@ async function runPortableCase(options: {
   tool: string;
   params: (state: ExternalCaseState) => Record<string, unknown>;
   setup?: (state: ExternalCaseState) => void;
+  /** Additional CLI efficacy probe: correct the named input from the same established state. */
+  remedyParams?: (state: ExternalCaseState) => Record<string, unknown>;
 }): Promise<void> {
   const state = seedPortableState(options.name, options.seed);
   options.setup?.(state);
@@ -2415,6 +2699,18 @@ async function runPortableCase(options: {
     requests: [...externalDouble.requests],
   });
   await replayPortableExternalRemedies(state, call);
+  if (options.remedyParams) {
+    const remedy = await driveMirrored(
+      `${options.name} remedy`,
+      options.family,
+      options.tool,
+      options.remedyParams(state)
+    );
+    expect({ caseName: options.name, outcome: remedy.outcome }).toEqual({
+      caseName: options.name,
+      outcome: 'SUCCEEDS',
+    });
+  }
 }
 
 /**
@@ -2992,6 +3288,71 @@ describe('s90-m07 PORTABLE EXTERNAL + FIRST-RUN LEDGER — loopback, never live 
         params: ({ projectRoot }) => ({ action, projectRoot }),
       });
     }
+
+    for (const testCase of [
+      { name: 'feedback needs content', argv: [], code: 'INVALID_PARAMETER' },
+      {
+        name: 'feedback refuses the review role',
+        argv: ['--content', 'Report friction.'],
+        code: 'READ_ONLY_AGENT',
+        env: { CMOS_AGENT_ROLE: 'review' },
+      },
+      {
+        name: 'feedback preview has no usable text',
+        argv: ['--content', '<parameter name="notes">artifact', '--dry-run'],
+        code: 'INVALID_PARAMETER',
+      },
+      {
+        name: 'feedback write has no usable text',
+        argv: ['--content', '<parameter name="notes">artifact'],
+        code: 'INVALID_PARAMETER',
+      },
+    ]) {
+      await runPortableCase({
+        name: testCase.name,
+        family: 'driveable',
+        expectedCode: testCase.code,
+        expectsHttp: false,
+        scenario: noHttpScenario,
+        tool: 'cli_feedback',
+        params: ({ projectRoot }) => ({ projectRoot, argv: testCase.argv, env: testCase.env }),
+        remedyParams: ({ projectRoot }) => ({
+          projectRoot,
+          argv: ['--content', 'Report friction.'],
+          env: { CMOS_AGENT_ROLE: '' },
+        }),
+      });
+    }
+    await runPortableCase({
+      name: 'feedback points at a missing project',
+      family: 'first-run',
+      expectedCode: 'CMOS_NOT_DETECTED',
+      expectsHttp: false,
+      scenario: noHttpScenario,
+      tool: 'cli_feedback',
+      params: ({ projectRoot, caseRoot }) => ({
+        projectRoot,
+        argv: ['--content', 'Report friction.', '--project-root', path.join(caseRoot, 'missing')],
+      }),
+      remedyParams: ({ projectRoot }) => ({
+        projectRoot,
+        argv: ['--content', 'Report friction.', '--project-root', projectRoot],
+      }),
+    });
+    await runPortableCase({
+      name: 'fleet feedback cannot mutate a sibling',
+      family: 'driveable',
+      expectedCode: 'INVALID_PARAMETER',
+      expectsHttp: false,
+      scenario: noHttpScenario,
+      tool: 'cmos_feedback',
+      params: ({ projectRoot }) => ({
+        action: 'triage',
+        feedbackId: 1,
+        acrossProjects: true,
+        projectRoot,
+      }),
+    });
 
     await runPortableCase({
       name: 'register on an empty first-run root',
@@ -3610,13 +3971,17 @@ PRIVATE.describe(
     });
 
     it('no per-handler `typeof params.X === "string"` guard exists — the class is fixed ONCE', () => {
-      // Criterion 2's grep, stated as a RULE rather than as a count: every string-typeof guard on a
-      // params field in src/tools/cmos must be the ACTION normalisation. Fixing this class as N
-      // per-handler instance checks is sprint-88's central failure, and with 186 `.trim()` call
-      // sites in src/ the instance list would regrow (learning #364).
+      // Criterion 2's grep, stated as a RULE rather than as a count: handler parameter validation
+      // remains centralized; action normalization and one post-call telemetry destination check
+      // are not handler guards. The latter cannot refuse or alter the operation's result (the
+      // four wrong-type regression cases in telemetry-call.test.ts prove that behavior). Exempt
+      // only that file/field occurrence, never the file wholesale. Fixing this class as N handler
+      // checks is sprint-88's central failure (learning #364).
       const PARAM_TYPEOF =
         /typeof\s+(?:\(\s*params[^)]*\)|params)\s*\.([A-Za-z_]+)\s*===\s*'string'/g;
       const offenders: string[] = [];
+      const destinationObservations: string[] = [];
+      const observer = path.join(SRC_ROOT, 'tools', 'cmos', 'telemetry-call.ts');
       let actionGuards = 0;
       for (const file of walkTsFiles(path.join(SRC_ROOT, 'tools', 'cmos'))) {
         const content = fs.readFileSync(file, 'utf8');
@@ -3624,15 +3989,19 @@ PRIVATE.describe(
         let match: RegExpExecArray | null;
         while ((match = PARAM_TYPEOF.exec(content)) !== null) {
           if (match[1] === 'action') actionGuards += 1;
+          else if (file === observer && match[1] === 'projectRoot')
+            destinationObservations.push(`${path.relative(REPO_ROOT, file)}: ${match[1]}`);
           else offenders.push(`${path.relative(REPO_ROOT, file)}: ${match[1]}`);
         }
       }
       // eslint-disable-next-line no-console
       console.log(
-        `[s89-m08 T6 one-guard] action-normalisation guards=${actionGuards} other-param typeof guards=${offenders.length}`
+        `[s89-m08 T6 one-guard] action-normalisation guards=${actionGuards} ` +
+          `post-call destination observations=${destinationObservations.length} other-param typeof guards=${offenders.length}`
       );
       // Non-vacuity: the regex must actually be finding the action idiom it is written for.
       expect(actionGuards).toBeGreaterThanOrEqual(11);
+      expect(destinationObservations).toEqual(['src/tools/cmos/telemetry-call.ts: projectRoot']);
       expect(offenders).toEqual([]);
     });
   }
@@ -3769,23 +4138,42 @@ interface Replay {
  * The shape is `migration-warning-reachability.test.ts`'s.
  */
 const RESIDUAL_REASONS: Readonly<Record<string, string>> = {
+  // ── s93-m06: draft refusals that need a harness session or a race ────────────────────────────
+  // The matrix drives routers in process with no harness link, so the server writes as a process
+  // and no operator words can be bound to it; these are driven by name in draft-approval.test.ts.
+  'src/tools/cmos/draft-approval.ts:164':
+    'The operator plainly declined but the prompt hook could not write the decline, so only the ' +
+    'runtime words say so. Needs a harness-linked server and hook runtime words; driven in ' +
+    'draft-approval.test.ts ("refuses a decline the hook could not write to the store").',
+  'src/tools/cmos/draft-approval.ts:309':
+    'Two records of one constraint, rule or profile draft at once: the guarded claim lets one ' +
+    'through. A race needs the operator words bound in a harness session; driven in ' +
+    'draft-approval.test.ts ("claims a constraint draft once when two records race").',
+  'src/tools/cmos/draft-approval.ts:379':
+    'An approved profile draft whose line cannot be written (past the profile cap) releases its ' +
+    'claim. Needs the operator words bound in a harness session; driven in draft-approval.test.ts ' +
+    '("releases the claim when an approved profile line cannot be written").',
+  'src/tools/cmos/cmos-decisions-record.ts:309':
+    'Two records of one decision draft at once: the in-transaction guard approves it once and ' +
+    'rolls the other back. Driven in draft-approval.test.ts ("records a draft once").',
   // ── FAULT-SHAPED PRECONDITIONS inside a VALIDATION/STATE-coded site ──────────────────────────
   // These carry a driveable CODE but their trigger is a database fault, so the successor
   // fault-injection instrument (read-only DB file, dropped table, corrupt content) reaches them —
   // not an axis matrix that drives supported calls against a healthy store.
-  'src/tools/cmos/client.ts:671':
+  'src/tools/cmos/client.ts:679':
     'UNIQUE-constraint mapping inside CmosDatabaseClient. Reaching it needs a write that violates a ' +
     'UNIQUE index THROUGH a supported call; every duplicate this matrix can create is refused earlier ' +
     'by a handler check (MISSION_ID_EXISTS, SPRINT_ID_EXISTS). Needs the fault-injection instrument.',
-  'src/tools/cmos/client.ts:682':
-    'FOREIGN-KEY-constraint mapping inside CmosDatabaseClient. Same shape as :671 — no supported call ' +
+  'src/tools/cmos/client.ts:690':
+    'FOREIGN-KEY-constraint mapping inside CmosDatabaseClient. Same shape as :679 — no supported call ' +
     'sequence against a healthy store reaches an FK violation. Needs the fault-injection instrument.',
-  'src/tools/cmos/cmos-context-project-identity.ts:57':
-    'MEASURED: unreachable by deleting the row. `ensureProjectIdentityRow(client)` runs first and ' +
-    'RECREATES it, so the null-identity branch needs the row to be both uncreatable and unreadable — ' +
-    'a database fault, not a state this matrix can establish.',
-  'src/tools/cmos/cmos-context-project-identity.ts:116':
-    'Same fault-shaped precondition as :57, one frame later: `getProjectIdentity` returning null ' +
+  'src/tools/cmos/cmos-context-project-identity.ts:64':
+    'MEASURED: unreachable by deleting the row. On a write `ensureProjectIdentityRow(client)` runs ' +
+    'first and RECREATES it, and on a read (s93-m11) the identity is derived in memory, so the ' +
+    'null-identity branch needs the row to be both uncreatable and unreadable — a database fault, ' +
+    'not a state this matrix can establish.',
+  'src/tools/cmos/cmos-context-project-identity.ts:124':
+    'Same fault-shaped precondition as :64, one frame later: `getProjectIdentity` returning null ' +
     'AFTER a write that already succeeded.',
 
   // ── DISPATCHER-PREFLIGHT SITES (false-negative item 7: this matrix drives routers, not stdio) ──
@@ -3798,7 +4186,7 @@ const RESIDUAL_REASONS: Readonly<Record<string, string>> = {
   // ── CONSTRUCTION-MASKED PRECONDITIONS inside a VALIDATION/STATE-coded site ───────────────────
   // Driveable by CODE, but dispatcher and collab gates mask the triggers from every supported
   // construction the portable m07 instrument can establish. Four former entries moved to E.
-  'src/tools/cmos/cmos-message.ts:1044':
+  'src/tools/cmos/cmos-message.ts:1055':
     'A defensive branch whose own message says the dispatcher should have caught the condition via ' +
     'resolveSenderContext. Reaching it means reaching a state the dispatcher forbids.',
   'src/tools/cmos/sync-mutable-push.ts:111':
@@ -3810,18 +4198,18 @@ const RESIDUAL_REASONS: Readonly<Record<string, string>> = {
   // ── MASKED BY AN EARLIER REFUSAL ON EVERY PATH THIS MATRIX CAN DRIVE ─────────────────────────
   // s92-m02, s92-m05 and s92-m03 moved these two down (planned-end-date receipt fields; the
   // archive param; a comment on implicit sessions); same branches.
-  'src/tools/cmos/cmos-sprint-complete.ts:656':
+  'src/tools/cmos/cmos-sprint-complete.ts:657':
     'MEASURED: masked. With master_context deleted and the sprint made closable, closeout refuses at ' +
-    'the shared errors.ts contextNotFound BEFORE reaching this sprint-local branch, so :656 is ' +
+    'the shared errors.ts contextNotFound BEFORE reaching this sprint-local branch, so :657 is ' +
     'unreachable while that earlier guard stands.',
-  'src/tools/cmos/cmos-sprint-complete.ts:667': 'Same masking as :656, for project_context.',
+  'src/tools/cmos/cmos-sprint-complete.ts:668': 'Same masking as :657, for project_context.',
 };
 
 const FAULT_SHAPED_DRIVEABLE_RESIDUALS = new Set([
-  'src/tools/cmos/client.ts:671',
-  'src/tools/cmos/client.ts:682',
-  'src/tools/cmos/cmos-context-project-identity.ts:57',
-  'src/tools/cmos/cmos-context-project-identity.ts:116',
+  'src/tools/cmos/client.ts:679',
+  'src/tools/cmos/client.ts:690',
+  'src/tools/cmos/cmos-context-project-identity.ts:64',
+  'src/tools/cmos/cmos-context-project-identity.ts:124',
 ]);
 const INTERNAL_FAULT_RESUME_TRIGGER =
   'any one of these codes reported from the field by an external adopter, or any in-repo incident that reaches one on a healthy store.';

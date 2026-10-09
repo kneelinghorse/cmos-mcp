@@ -22,6 +22,10 @@ import {
 } from '../../../src/tools/cmos/blob-migrations';
 import { CmosDatabaseClient } from '../../../src/tools/cmos/client';
 import { cmosContextView } from '../../../src/tools/cmos/cmos-context-view';
+import {
+  resetFirstWriteMaintenance,
+  runFirstWriteMaintenance,
+} from '../../../src/tools/cmos/first-write-maintenance';
 import { CmosDetector } from '../../../src/intelligence/cmos-detector';
 
 // ---------------------------------------------------------------------------
@@ -352,63 +356,84 @@ describe('cmos_context_view — auto-migration integration', () => {
     expect(content).toHaveProperty('technical_context');
   });
 
-  it('persists blob_schema_version in metadata after view call', async () => {
-    tempDir = makeTempDb({ completed_missions: [], technical_context: {} });
-    await cmosContextView({ projectRoot: tempDir });
-
-    const db = new Database(path.join(tempDir, 'cmos', 'db', 'cmos.sqlite'));
-    const row = db
-      .prepare(`SELECT value FROM metadata WHERE key = '${BLOB_SCHEMA_VERSION_KEY}'`)
-      .get() as { value: string } | undefined;
-    db.close();
-
-    expect(row?.value).toBe(String(BLOB_SCHEMA_VERSION));
-  });
-
-  it('writes pruned blob to the contexts table', async () => {
+  // s93-m11: the view is a read and never writes the record (decision #1182). It shows the
+  // migrated shape and leaves the stored blob, the version and the snapshot table alone.
+  it('writes nothing: no version stamp, no rewritten blob, no snapshot', async () => {
     tempDir = makeTempDb({
       completed_missions: [{ id: 'm01' }],
       technical_context: { stack: 'Node.js' },
     });
-    await cmosContextView({ projectRoot: tempDir });
+    const dbPath = path.join(tempDir, 'cmos', 'db', 'cmos.sqlite');
+    const result = await cmosContextView({ projectRoot: tempDir });
 
-    const db = new Database(path.join(tempDir, 'cmos', 'db', 'cmos.sqlite'));
-    const row = db.prepare("SELECT content FROM contexts WHERE id = 'master_context'").get() as
-      | { content: string }
-      | undefined;
+    expect(result.data?.masterContext?.content).not.toHaveProperty('completed_missions');
+    const db = new Database(dbPath);
+    const version = db
+      .prepare(`SELECT value FROM metadata WHERE key = '${BLOB_SCHEMA_VERSION_KEY}'`)
+      .get() as { value: string } | undefined;
+    const stored = JSON.parse(
+      (
+        db.prepare("SELECT content FROM contexts WHERE id = 'master_context'").get() as {
+          content: string;
+        }
+      ).content
+    ) as Record<string, unknown>;
+    const snapshots = db
+      .prepare("SELECT COUNT(*) AS n FROM context_snapshots WHERE source LIKE 'pre-migration%'")
+      .get() as { n: number };
     db.close();
-
-    const stored = JSON.parse(row?.content ?? '{}') as Record<string, unknown>;
-    expect(stored).not.toHaveProperty('completed_missions');
-    expect(stored).toHaveProperty('technical_context');
+    expect(version).toBeUndefined();
+    expect(stored).toHaveProperty('completed_missions');
+    expect(snapshots.n).toBe(0);
   });
 
-  it('takes a pre-migration snapshot in context_snapshots table', async () => {
-    tempDir = makeTempDb({ completed_missions: [{ id: 'm01' }], technical_context: {} });
-    await cmosContextView({ projectRoot: tempDir });
+  it('the first write persists the migration: version, pruned blob and a snapshot, once', async () => {
+    tempDir = makeTempDb({
+      completed_missions: [{ id: 'm01' }],
+      technical_context: { stack: 'Node.js' },
+    });
+    resetFirstWriteMaintenance();
+    await runFirstWriteMaintenance(tempDir);
+    resetFirstWriteMaintenance();
+    await runFirstWriteMaintenance(tempDir); // a later process's first write: nothing left to do
 
     const db = new Database(path.join(tempDir, 'cmos', 'db', 'cmos.sqlite'));
+    const version = db
+      .prepare(`SELECT value FROM metadata WHERE key = '${BLOB_SCHEMA_VERSION_KEY}'`)
+      .get() as { value: string } | undefined;
+    const stored = JSON.parse(
+      (
+        db.prepare("SELECT content FROM contexts WHERE id = 'master_context'").get() as {
+          content: string;
+        }
+      ).content
+    ) as Record<string, unknown>;
     const snapshots = db
       .prepare("SELECT source FROM context_snapshots WHERE source LIKE 'pre-migration%'")
       .all() as { source: string }[];
     db.close();
 
-    expect(snapshots.length).toBeGreaterThan(0);
+    expect(version?.value).toBe(String(BLOB_SCHEMA_VERSION));
+    expect(stored).not.toHaveProperty('completed_missions');
+    expect(stored).toHaveProperty('technical_context');
+    expect(snapshots).toHaveLength(1);
   });
 
-  it('is idempotent — second view call does not re-migrate', async () => {
-    tempDir = makeTempDb({ completed_missions: [], technical_context: {} });
-    await cmosContextView({ projectRoot: tempDir });
-    CmosDetector.resetInstance();
-    await cmosContextView({ projectRoot: tempDir });
+  it('a blob the migrations leave unchanged gets only its version stamp', async () => {
+    tempDir = makeTempDb({ technical_context: { stack: 'Node.js' } });
+    resetFirstWriteMaintenance();
+    await runFirstWriteMaintenance(tempDir);
 
     const db = new Database(path.join(tempDir, 'cmos', 'db', 'cmos.sqlite'));
-    const snapshots = db
-      .prepare("SELECT id FROM context_snapshots WHERE source LIKE 'pre-migration%'")
-      .all() as { id: number }[];
+    const version = db
+      .prepare(`SELECT value FROM metadata WHERE key = '${BLOB_SCHEMA_VERSION_KEY}'`)
+      .get() as { value: string } | undefined;
+    const snapshots = db.prepare('SELECT COUNT(*) AS n FROM context_snapshots').get() as {
+      n: number;
+    };
     db.close();
-
-    expect(snapshots.length).toBe(1);
+    expect(version?.value).toBe(String(BLOB_SCHEMA_VERSION));
+    expect(snapshots.n).toBe(0);
   });
 
   it('is a no-op for projects already at current schema version', async () => {

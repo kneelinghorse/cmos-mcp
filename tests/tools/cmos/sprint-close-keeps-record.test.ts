@@ -53,8 +53,8 @@ const PRIVATE = requiresPrivateEvidence({
     'and sessions, and two of the documents it checks are private.',
   paths: {
     liveDb: 'cmos/db/cmos.sqlite',
-    agents: 'agents.md',
     prompt: 'cmos/docs/build-session-prompt.md',
+    architecture: 'cmos/docs/architecture.md',
   },
 });
 
@@ -441,10 +441,18 @@ PRIVATE.describe('s92-m05 on a copy of the live store', () => {
     );
     expect(run.after.activeLearnings).toContain(run.planted.evergreenLearning);
 
-    // The rendered line is the itemized 3.1.0 line.
-    expect(formatSprintCompleteForLLM(run.result)).toMatch(
-      new RegExp(`Archived: ${lifecycle.decisionsArchived} decisions.*#${run.planted.decision}\\b`)
+    // The rendered line is the itemized 3.1.0 line. It lists the first ids and counts the rest
+    // ("+N more"), so on a live store whose sprint keeps gaining decisions the planted one may be
+    // counted rather than listed; either way the line accounts for every archived decision.
+    const line = /Archived: (\d+) decisions \(([^)]*)\)/.exec(
+      formatSprintCompleteForLLM(run.result)
     );
+    expect(line).not.toBeNull();
+    expect(Number(line![1])).toBe(lifecycle.decisionsArchived);
+    const listed = [...line![2].matchAll(/#(\d+)/g)].map((match) => Number(match[1]));
+    const more = Number(/\+(\d+) more/.exec(line![2])?.[1] ?? 0);
+    expect(listed.length + more).toBe(lifecycle.decisionsArchived);
+    if (more === 0) expect(listed).toContain(run.planted.decision);
   });
 });
 
@@ -464,17 +472,20 @@ describe('s92-m05 — the shipped documents state the close', () => {
   );
 });
 
-PRIVATE.describe('s92-m05 — agents.md and the build-session prompt state the close', () => {
-  it('carry the opt-in in practice 10, and agents.md in its Automated Behaviors line', () => {
-    for (const file of [PRIVATE.paths.agents, PRIVATE.paths.prompt]) {
+PRIVATE.describe('s92-m05 — the process and architecture references state the close', () => {
+  it('carry the opt-in in practice 10, and the architecture reference in its Automated Behaviors line', () => {
+    for (const file of [PRIVATE.paths.prompt]) {
       const text = fs.readFileSync(file, 'utf8');
       expect(text).not.toMatch(OLD_CLAIM);
       expect(text).toMatch(
         /archived at their sprint's close only when that close is called with `archive: true`/
       );
     }
-    const agents = fs.readFileSync(PRIVATE.paths.agents, 'utf8');
-    const automated = agents.split('\n').find((line) => line.startsWith('- **Sprint lifecycle**'));
+    // s93-m12: the Automated Behaviors list moved with agents.md's architecture reference.
+    const reference = fs.readFileSync(PRIVATE.paths.architecture, 'utf8');
+    const automated = reference
+      .split('\n')
+      .find((line) => line.startsWith('- **Sprint lifecycle**'));
     expect(automated).toContain('unless it is called with `archive: true`');
   });
 });

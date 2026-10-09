@@ -357,6 +357,26 @@ describe('cmos_feedback(action=list|triage|resolve|archive)', () => {
     expect((listTriaged.data as CmosFeedbackListResult).entries.length).toBe(1);
   });
 
+  it('keeps the triage disposition on the feedback row for the next reviewer', async () => {
+    const list = await cmosFeedback({ action: 'list', projectRoot: t.tempDir });
+    const feedbackId = (list.data as CmosFeedbackListResult).entries[0].id;
+    const result = await cmosFeedback({
+      action: 'triage',
+      feedbackId,
+      resolutionNote: 'Confirmed; the next build owns the fix.',
+      projectRoot: t.tempDir,
+    });
+    expect(result.success).toBe(true);
+    expect((result.data as CmosFeedbackMutationResult).resolutionNote).toBe(
+      'Confirmed; the next build owns the fix.'
+    );
+    expect(
+      t.db
+        .prepare('SELECT resolution_note, resolved_at FROM agent_feedback WHERE id=?')
+        .get(feedbackId)
+    ).toEqual({ resolution_note: 'Confirmed; the next build owns the fix.', resolved_at: null });
+  });
+
   it('resolve stamps resolved_at + resolution_note', async () => {
     const list = await cmosFeedback({ action: 'list', projectRoot: t.tempDir });
     const firstId = (list.data as CmosFeedbackListResult).entries[0].id;

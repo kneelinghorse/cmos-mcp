@@ -17,7 +17,6 @@ const PRE_M02_PARENT = '7843dfcc9aaebe7eeb482b5dbf9566eab425e4e8';
 const PRIVATE = requiresPrivateEvidence({
   reason: 'private closeout instructions and private source-history boundary',
   paths: {
-    agents: 'agents.md',
     buildSessionPrompt: 'cmos/docs/build-session-prompt.md',
   },
   revisions: {
@@ -57,8 +56,8 @@ function assertAuditableSprintCloseReceipt(receipt: unknown): asserts receipt is
     if (!Array.isArray(lifecycle?.[field])) {
       throw new Error(
         `Unauditable sprint close: lifecycle.${field} must be an array. ` +
-          'This receipt may come from a pre-m02 running process; start a new host session ' +
-          'or reconnect before claiming the sprint close is audited.'
+          'This receipt may come from a pre-m02 running process; use session-owned runtime ' +
+          'recovery only for subsequent calls and never retry the successful close.'
       );
     }
   }
@@ -81,8 +80,8 @@ function closeoutProtocolIssues(section: string): string[] {
   }
   if (!/pre-m02/i.test(section)) issues.push('missing pre-m02 process diagnosis');
   if (!/fail loudly|stop|unauditable/i.test(section)) issues.push('missing fail-loud instruction');
-  if (!/new host session|reconnect/i.test(section)) {
-    issues.push('missing available new-host-session/reconnect lever');
+  if (!/do not retry the close/i.test(section)) {
+    issues.push('missing prohibition on repeating an already-successful close');
   }
   if (
     /\bmay restart\b|\brestarting\b[^.\n]*\boptimization\b|\brestart (?:the )?MCP\b[^.\n]*(?:pick up|load fresh|recommended)/i.test(
@@ -113,7 +112,8 @@ describe('sprint-close caller protocol', () => {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       expect(message).toMatch(/pre-m02/i);
-      expect(message).toMatch(/new host session|reconnect/i);
+      expect(message).toMatch(/session-owned runtime/i);
+      expect(message).toMatch(/never retry the successful close/i);
       expect(message).not.toMatch(/restart/i);
     }
   });
@@ -121,6 +121,17 @@ describe('sprint-close caller protocol', () => {
   it('accepts a current receipt only when both lifecycle id arrays are present', () => {
     const receipt = frozenReceipt({ archivedDecisionIds: [41, 42], learningIds: [] });
     expect(() => assertAuditableSprintCloseReceipt(receipt)).not.toThrow();
+  });
+
+  it('ships the array audit and no-repeat rule in the close-out skill', () => {
+    const skill = fs.readFileSync(
+      path.join(ROOT, 'plugins/cmos/skills/close-out/SKILL.md'),
+      'utf8'
+    );
+    expect(skill).toContain('data.lifecycle.archivedDecisionIds');
+    expect(skill).toContain('data.lifecycle.learningIds');
+    expect(skill).toMatch(/must be arrays/);
+    expect(skill).toMatch(/do not repeat the mutation/);
   });
 });
 
@@ -145,14 +156,15 @@ PRIVATE.describe('private sprint-close caller protocol evidence', () => {
     expect(currentSource).toMatch(/\blearningIds\b/);
   });
 
-  it.each([
-    [PRIVATE.paths.agents, '### Sprint Closeout Discipline (advisory build-freshness)'],
-    [PRIVATE.paths.buildSessionPrompt, '### Sprint Closeout (advisory build-freshness)'],
-  ])('documents fail-loud pre-m02 receipt handling in %s', (documentPath, heading) => {
-    const document = fs.readFileSync(documentPath, 'utf8');
-    const section = extractSection(document, heading);
+  it('keeps project receipt handling and current-runtime recovery in the declared process carrier', () => {
+    const document = fs.readFileSync(PRIVATE.paths.buildSessionPrompt, 'utf8');
+    const section = extractSection(document, '### Sprint Closeout (advisory build-freshness)');
 
     expect(section).not.toBe('');
     expect(closeoutProtocolIssues(section)).toStrictEqual([]);
+    expect(section).toMatch(/release runbook §7/);
+    expect(document).toContain('scripts/restart-session-server.sh --pid <serverHealth.pid>');
+    expect(document).toContain('node scripts/cmos-call-current.js');
+    expect(section).not.toMatch(/Start a new IDE\/host session or reconnect/);
   });
 });

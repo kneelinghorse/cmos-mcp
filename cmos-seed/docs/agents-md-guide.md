@@ -10,11 +10,14 @@ CMOS projects use **two complementary layers** of AI configuration:
 
 ### 1. Project Root AGENTS.md (REPOSITORY-WIDE CONTRACT)
 
-**Location**: `project-root/AGENTS.md`, which `cmos_project(action="init")` writes from the
+**Location**: `project-root/AGENTS.md`, which `cmos_project(action="init", projectRoot="...")` writes from the
 template when the root has none (an existing lowercase `agents.md` works too)
 
-**Purpose**: Hard operating rules, code/build/test conventions, and project-specific workflow for
-every task in the repository.
+**Purpose**: Hard operating rules, learned practices, code/build/test conventions, and
+project-specific workflow for every task in the repository. It carries one CMOS line, naming the
+project's level and how to turn CMOS's hooks off; how to use CMOS arrives through its tools, hooks
+and tier guides, not through this file. Init also writes a `CLAUDE.md` that imports it
+(`@AGENTS.md`), so Claude Code reads the same rules as every other agent.
 
 **Contains**:
 
@@ -32,7 +35,7 @@ project documentation while CMOS records their state.
 **Example**:
 
 ```markdown
-# AI Agent Configuration
+# Agent Rules
 
 ## Project Overview
 
@@ -60,11 +63,11 @@ pytest tests/ -v
 
 **Available tiers**:
 
-| Tier        | File                    | Description                                        |
-| ----------- | ----------------------- | -------------------------------------------------- |
-| **Build**   | `cmos/tiers/build.md`   | Full mission/sprint workflow for structured builds |
-| **Managed** | `cmos/tiers/managed.md` | Mission tracking without sprint overhead           |
-| **General** | `cmos/tiers/general.md` | Sessions, context, notes, decisions; no missions   |
+| Level (tier)            | File                    | Description                                            |
+| ----------------------- | ----------------------- | ------------------------------------------------------ |
+| **Ledger** (`general`)  | `cmos/tiers/general.md` | Decisions, lessons and notes; no tasks (the default)   |
+| **Planner** (`managed`) | `cmos/tiers/managed.md` | Also next steps, as tasks in cycles; no sprints        |
+| **Builder** (`build`)   | `cmos/tiers/build.md`   | Full mission and sprint workflow for structured builds |
 
 **Tier selection**: Set via `cmos_project(action="update", projectType="general|managed|build")`.
 
@@ -90,7 +93,7 @@ Agent never puts application code in: cmos/
 Agent opens normal work with: cmos_review()
 Agent reads tier detail from: cmos/tiers/{tier}.md
 Agent changes database-backed CMOS state: through MCP tools only
-Agent does not edit cmos/db/cmos.sqlite or generated exports directly
+Agent does not edit cmos/db/cmos.sqlite directly
 ```
 
 **NEVER**:
@@ -105,56 +108,48 @@ Agent does not edit cmos/db/cmos.sqlite or generated exports directly
 
 ### Structure
 
-Use this template structure:
+The template init writes keeps to about 150 lines, in this structure:
 
 ```markdown
-# AI Agent Configuration
+# Agent Rules
+
+(one CMOS line: the project's level and how to turn the hooks off)
+
+## Hard Operating Rules
+
+- Universal rules for every task; keep them
+
+## Learned Practices
+
+- About a dozen one-line practices learned from real failures; keep them
 
 ## Project Overview
 
-- Project name, type, tech stack
-- Brief description
+- Project name, what it is, stack
 
-## Build & Development Commands
+## Commands
 
-- Installation
-- Development server
-- Build process
-- Testing
+- Install, run, test, lint, build
 
-## Project Structure & Navigation
+## Structure
 
-- Directory layout
-- Key files and their purposes
+- Directory layout and the files to read first
 
-## Coding Standards & Style
+## Conventions
 
-- Language-specific guidelines
-- Naming conventions
-- Code organization patterns
+- Code, comments, tests, commits
 
-## Testing Preferences
+## Security
 
-- Framework to use
-- Coverage requirements
-- Test structure
+- Secrets, auth, forbidden patterns
 
-## Security & Quality Guardrails
+## Outward Actions
 
-- Security rules
-- Code review requirements
-- Quality gates
+- Who runs deploys, pushes to the main branch and releases
 
-## Architecture Patterns
+## Communication
 
-- Preferred design patterns
-- Integration approaches
-
-## Project-Specific Configuration
-
-- Environment variables
-- External services
-- Special requirements
+- How the operator likes options presented
 ```
 
 ### Best Practices
@@ -222,12 +217,21 @@ The markdown body below the frontmatter provides the behavioral guide text inclu
 output. `tools_use` is human-readable documentation, not a permission list; tiers never disable
 tools. `tools_skip` filters suggested actions, and the onboard field lists shape presentation.
 
-### Choosing a Tier
+### Choosing a Level
 
-- **Build** (default): Full CMOS workflow with sprints, missions, sessions, and decisions. Best for structured engineering projects.
-- **Managed**: Mission tracking without sprint overhead. Good for ongoing work without sprint cadence.
-- **General**: Sessions, context, note-taking, decisions, and messaging without mission tracking.
-  Best for exploration, research, or lightweight projects.
+The init question is: should CMOS keep just the decisions and lessons for this project, also a
+list of next steps, or full sprints and missions? `cmos-mcp init --level ledger|planner|builder`
+and `cmos_project(action="init", projectRoot="...", projectType="general")` take the answer.
+The answer sets the level, stored as the tier:
+
+- **Ledger** (`general`, the default for a new project, unless its folder's AGENTS.md already
+  names a level, which init keeps): decisions, lessons and notes, without task tracking. Best
+  for exploration, research, or lightweight projects.
+- **Planner** (`managed`): also next steps, as tasks in cycles, without sprint ceremony.
+- **Builder** (`build`): the full workflow with sprints, missions, sessions, and decisions. Best
+  for structured engineering projects.
+
+Step up later with `cmos_project(action="update", projectType="managed")` (or `"build"`).
 
 ---
 
@@ -236,6 +240,7 @@ tools. `tools_skip` filters suggested actions, and the onboard field lists shape
 ```
 project/
 ├── AGENTS.md              # Repository-wide operating and application rules
+├── CLAUDE.md              # Imports AGENTS.md for Claude Code
 └── cmos/
     ├── db/
     │   └── cmos.sqlite    # All CMOS state
@@ -258,5 +263,5 @@ project/
 
 ---
 
-**Last Updated**: 2026-10-07
+**Last Updated**: 2026-10-08
 **See Also**: `cmos/docs/getting-started.md` for full setup flow

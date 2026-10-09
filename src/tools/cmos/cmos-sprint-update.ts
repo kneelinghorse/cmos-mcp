@@ -15,6 +15,7 @@ import { isOpenStatus } from './terminal-status';
 import { buildDemotionWarning, writeSingleCurrentSprint } from './sprint-current-invariant';
 import { appendWarnings, attachWarnings } from './format-warnings';
 import { syncSprintTracking } from './sprint-tracking';
+import { storedTimeMs } from './stored-time';
 
 /**
  * Fields that can be updated on a sprint.
@@ -225,8 +226,8 @@ export async function cmosSprintUpdate(
       const futureEndDateWarning =
         closing &&
         explicitEndDate &&
-        !Number.isNaN(Date.parse(explicitEndDate)) &&
-        Date.parse(explicitEndDate) > Date.now()
+        !Number.isNaN(storedTimeMs(explicitEndDate)) &&
+        storedTimeMs(explicitEndDate) > Date.now()
           ? `endDate '${explicitEndDate}' is in the future: the next-step lease does not count this close until that date. Omit endDate to stamp the actual close time.`
           : undefined;
 

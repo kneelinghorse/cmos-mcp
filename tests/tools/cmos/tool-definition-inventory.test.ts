@@ -31,6 +31,8 @@ const PRIVATE = requiresPrivateEvidence({
   reason: 'private agent playbook and legacy-definition inventory artifact',
   paths: {
     agents: 'agents.md',
+    // s93-m12: agents.md's architecture reference moved here; the gate follows its text.
+    architecture: 'cmos/docs/architecture.md',
     inventory: 'cmos/reports/tool-definition-inventory.json',
   },
 });
@@ -430,6 +432,10 @@ describe('s88-m05 legacy tool-definition inventory', () => {
 PRIVATE.describe('s88-m05 agents.md registered-tool-name gate', () => {
   it('agents.md names only registered CMOS tools', () => {
     expect(invalidAgentToolNames(fs.readFileSync(PRIVATE.paths.agents, 'utf8'))).toEqual([]);
+  });
+
+  it('the architecture reference moved out of agents.md names only registered CMOS tools too', () => {
+    expect(invalidAgentToolNames(fs.readFileSync(PRIVATE.paths.architecture, 'utf8'))).toEqual([]);
   });
 
   it('the gate positively fires on the pre-consolidation cmos_sprint_complete name', () => {

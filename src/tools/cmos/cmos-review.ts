@@ -45,6 +45,7 @@
  */
 
 import { isOpenStatus } from './terminal-status';
+import { countReflaggedSinceRepair } from './staleness-detection';
 import type Database from 'better-sqlite3';
 import { statSync } from 'fs';
 import * as path from 'path';
@@ -238,6 +239,12 @@ export interface CmosReviewResult {
   /** s80-m07 — self-capture gap, present ONLY when it fires (commits ahead of the last CMOS write). */
   selfCapture?: SelfCaptureGap;
 
+  /**
+   * s93-m11 — present only when rows the first-write staleness repair restored are marked stale
+   * again. Only an older CMOS server writes 'stale' on its own, so one is still running. Read-only.
+   */
+  staleReflagged?: { count: number; lastRepair: string };
+
   /** Master-context freshness signal. */
   freshness: {
     lagDays: number;
@@ -402,6 +409,8 @@ export async function cmosReview(
     resolvedBy?: ResolvedBy;
     advertisedRoots?: readonly string[];
     callerProvidedProjectRoot?: boolean;
+    /** s93-m01: no dashboard calls (the hook CLI's session start). Internal and non-schema. */
+    offline?: boolean;
   } = {}
 ): Promise<CmosToolResult<CmosReviewResult>> {
   // s89-m08 — ONE schema-driven boundary guard, placed at the router entry so no handler can be
@@ -434,6 +443,7 @@ export async function cmosReview(
     ,
     registryDefault,
     recentLearningsRead,
+    reflagged,
   ] = await Promise.all([
     cmosAgentOnboard({
       ...(projectRoot ? { projectRoot } : {}),
@@ -441,6 +451,7 @@ export async function cmosReview(
       ...(internalOpts.callerProvidedProjectRoot !== undefined
         ? { callerProvidedProjectRoot: internalOpts.callerProvidedProjectRoot }
         : {}),
+      ...(internalOpts.offline ? { offline: true } : {}),
     }),
     cmosMissionStatus(
       projectRoot ? { projectRoot, includeBlocked: true } : { includeBlocked: true }
@@ -459,6 +470,8 @@ export async function cmosReview(
     readUnappliedDefaultNotice(internalOpts.registry),
     // s92-m04 — the learnings line. Never throws; a failed read leaves it empty.
     readRecentLearnings(projectRoot),
+    // s93-m11 — rows the staleness repair restored that are stale again. Never throws.
+    readReflaggedSinceRepair(projectRoot),
   ]);
 
   if (!onboardResult.success || !onboardResult.data) {
@@ -485,6 +498,7 @@ export async function cmosReview(
   const digest = buildDigest(onboard, missionStatus, gatedBuildFreshness, portfolio, {
     registryDefault,
     recentLearnings: recentLearningsRead,
+    reflagged,
     resolution: internalOpts.resolvedBy
       ? { projectRoot: projectRoot ?? null, resolvedBy: internalOpts.resolvedBy }
       : null,
@@ -515,6 +529,7 @@ function buildDigest(
       projectId: string | null;
     }>;
     resolution: { projectRoot: string | null; resolvedBy: ResolvedBy } | null;
+    reflagged?: { count: number; lastRestoredAt: string } | null;
   } = { registryDefault: null, resolution: null }
 ): CmosReviewResult {
   const sprintFocus = onboard.currentSprint?.focus
@@ -654,6 +669,12 @@ function buildDigest(
   if (extras.registryDefault) {
     draft.registryDefault = extras.registryDefault;
   }
+  if (extras.reflagged && extras.reflagged.count > 0) {
+    draft.staleReflagged = {
+      count: extras.reflagged.count,
+      lastRepair: extras.reflagged.lastRestoredAt.slice(0, 10),
+    };
+  }
   if (extras.resolution) {
     draft.projectRoot = extras.resolution.projectRoot;
     draft.resolvedBy = extras.resolution.resolvedBy;
@@ -721,7 +742,7 @@ async function readRecentLearnings(
           project_id: string | null;
         }>(
           `SELECT id, content, created_at, ${projExpr} AS project_id FROM learnings
-            WHERE status = 'active' ORDER BY created_at DESC, id DESC LIMIT ?`,
+            WHERE status = 'active' ORDER BY julianday(created_at) DESC, id DESC LIMIT ?`,
           [RECENT_LEARNINGS_MAX]
         );
         return createSuccess(
@@ -740,6 +761,24 @@ async function readRecentLearnings(
     return read.success && read.data ? read.data : [];
   } catch {
     return [];
+  }
+}
+
+/**
+ * s93-m11 — how many rows the first-write staleness repair restored are marked stale again, from
+ * the repair's ledger. Read-only; null when no repair ever ran or the read failed.
+ */
+async function readReflaggedSinceRepair(
+  projectRoot: string | undefined
+): Promise<{ count: number; lastRestoredAt: string } | null> {
+  try {
+    const read = await withClientAsync(
+      async (client) => createSuccess(countReflaggedSinceRepair(client)),
+      projectRoot ? { projectRoot } : {}
+    );
+    return read.success && read.data ? read.data : null;
+  } catch {
+    return null;
   }
 }
 
@@ -890,6 +929,24 @@ export function newestRowStampMs(db: Database.Database): number | null {
   return newest;
 }
 
+/**
+ * s93-m11 (#606 e) — the drift probe: the newest row stamp, or `'no-history'` when none of the six
+ * domain tables holds a row yet. A brand-new project has nothing that could have gone quiet, so
+ * it is neither silent nor of unknown freshness; it used to show as drifting the moment a second
+ * project was registered.
+ */
+export function driftContentProbe(db: Database.Database): number | null | 'no-history' {
+  const newest = newestRowStampMs(db);
+  if (newest !== null) return newest;
+  for (const table of DRIFT_PROBE_TABLES) {
+    const exists = db
+      .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
+      .get(table);
+    if (exists && db.prepare(`SELECT 1 FROM ${table} LIMIT 1`).get()) return null;
+  }
+  return 'no-history';
+}
+
 /** s80-m06 — the strict reachability partition + the drift list. */
 export interface DriftPartition {
   reachable: number;
@@ -942,7 +999,7 @@ export function deriveDrift(
    * produce it, which is precisely the defect this mission exists to close, reintroduced inside
    * the fix for it. There is one mechanism here, so there is one sentence.
    */
-  contentStamps: ReadonlyMap<string, number | null>
+  contentStamps: ReadonlyMap<string, number | null | 'no-history'>
 ): DriftPartition {
   const errorById = new Map(errors.map((e) => [e.projectId, e.error]));
   let reachable = 0;
@@ -977,7 +1034,13 @@ export function deriveDrift(
     // s87-m03 — FRESHNESS FROM CONTENT, and from nothing else. The fan-out that would perturb
     // the mtime is the same call that produced this stamp, and a row stamp is not perturbed by
     // being read.
-    const contentMs = contentStamps.get(store.project_id) ?? null;
+    const probed = contentStamps.get(store.project_id) ?? null;
+    if (probed === 'no-history') {
+      // s93-m11 (#606 e): a project with no rows yet has not drifted; it is simply reachable.
+      reachable++;
+      continue;
+    }
+    const contentMs = probed;
     const age = contentMs === null ? null : (nowMs - contentMs) / MS_PER_DAY;
 
     if (contentMs === null) {
@@ -1057,7 +1120,7 @@ async function buildPortfolioSection(
       registry,
       // s87-m03 (#529) — read the CONTENT on the connection the fan-out already opens. This is
       // the whole fix: the drift signal stops being a file mtime that this very call creates.
-      perStoreProbe: newestRowStampMs,
+      perStoreProbe: driftContentProbe,
     });
     const meta = fanout.metadata;
     // s80-m06: strict partition + drift over the SAME store set the fan-out queried.
@@ -1464,6 +1527,15 @@ export function formatReviewForLLM(result: CmosToolResult<CmosReviewResult>): st
   if (d.registryDefault) {
     lines.push('');
     lines.push(`⚙ ${d.registryDefault}`);
+  }
+
+  if (d.staleReflagged) {
+    lines.push('');
+    lines.push(
+      `⚠ ${d.staleReflagged.count} record(s) restored on ${d.staleReflagged.lastRepair} are marked stale again: ` +
+        'an older CMOS server still runs the opener that flagged them. Restarting those sessions ends it, ' +
+        'and the next CMOS server process to write here restores them.'
+    );
   }
 
   // s80-m07 — self-capture advisory (present only when it fires). Rendered here, not

@@ -209,8 +209,9 @@ describe('server-health', () => {
 
       const health = getServerHealth();
       expect(health.codeIsCurrent).toBe(false);
-      expect(health.stalenessMessage).toMatch(/new .*host session|reconnect/i);
-      expect(health.stalenessMessage).not.toMatch(/restart/i);
+      // s93-m11: the fact only; the opener's action names the remedy for where the session runs.
+      expect(health.stalenessMessage).toMatch(/a build has since occurred/i);
+      expect(health.stalenessMessage).not.toMatch(/restart|new .*host session|reconnect/i);
     });
 
     it('handles no manifest at all (both startup and current)', () => {

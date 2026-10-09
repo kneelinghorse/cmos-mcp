@@ -11,6 +11,8 @@ import {
 import type { CmosDatabaseClient } from './client';
 import { ensureDecisionsFts5, ensureVectorStorage } from './schema-migrations';
 import { extractKeywords } from './supersession-detection';
+import { recordStoreUpkeepNote } from './tool-call-context';
+import { storedTimeMs } from './stored-time';
 
 // ─── Public Interface ─────────────────────────────────────────────────────────
 
@@ -251,7 +253,7 @@ export function computeRecencyFactor(ageDays: number): number {
  */
 export function computeAgeDays(createdAt: string | null): number {
   if (!createdAt) return 0;
-  const created = new Date(createdAt).getTime();
+  const created = storedTimeMs(createdAt);
   if (isNaN(created)) return 0;
   const nowMs = Date.now();
   return Math.max(0, (nowMs - created) / (1000 * 60 * 60 * 24));
@@ -330,9 +332,14 @@ export class HybridRetriever implements IAsyncRetriever {
       graphWeight = DEFAULT_GRAPH_WEIGHT,
     } = options;
 
-    // Ensure the FTS5 + vec0 substrate exists. Idempotent at the migration layer.
-    ensureDecisionsFts5(this.client);
-    ensureVectorStorage(this.client);
+    // Ensure the FTS5 + vec0 substrate exists. Idempotent at the migration layer. s93-m11: a read
+    // creates what is missing but rebuilds no index that was already there; how far one is out of
+    // step rides the answer, and the first write rebuilds it.
+    const deferred = [
+      ...(ensureDecisionsFts5(this.client).deferred ?? []),
+      ...(ensureVectorStorage(this.client).deferred ?? []),
+    ];
+    for (const note of deferred) recordStoreUpkeepNote(note);
 
     const queryVec = await this.embedQuery(query);
     const candidateLimit = Math.max(1, limit * CANDIDATE_POOL_MULTIPLIER);

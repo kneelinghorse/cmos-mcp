@@ -55,6 +55,8 @@ const EXPECTED_PRODUCERS = [
   'ensureConstraintReviewTimestamp',
   'ensureConstraintsTable',
   'ensureContentPrunedColumn',
+  // s93-m06: the approval columns, run only when a draft is recorded; it reaches attachWarnings.
+  'ensureDecisionApprovalColumns',
   'ensureDecisionsFts5',
   'ensureFirehoseEventColumns',
   // s92-m03: the implicit-session columns; every call runs at an answer boundary.
@@ -76,8 +78,9 @@ const EXPECTED_PRODUCERS = [
  * The only shipped callers with no answer warning carrier to splice into.
  *
  * These are residuals, not exemptions from a reachable-answer rule. Each key includes the
- * enclosing function so the two ensureLearningsTable calls in staleness-detection cannot hide
- * behind one filename/producer pair.
+ * enclosing function so two calls of one producer in one file cannot hide behind one
+ * filename/producer pair. s93-m11 removed the three staleness residuals: the staleness read runs
+ * no migration at all now, because reads never write the record.
  */
 const STRUCTURAL_RESIDUALS: readonly ResidualReason[] = [
   {
@@ -96,18 +99,6 @@ const STRUCTURAL_RESIDUALS: readonly ResidualReason[] = [
     key: 'tools/cmos/genesis-columns.ts:genesisColumns:ensureAuthorNamespaceColumns',
     reason: 'GenesisStamp is spliced into SQL writes and carries no warnings channel',
   },
-  {
-    key: 'tools/cmos/staleness-detection.ts:detectAndFlagStaleness:ensureReviewTimestamps',
-    reason: 'StalenessResult is shared by read answers and carries no warnings channel',
-  },
-  {
-    key: 'tools/cmos/staleness-detection.ts:detectAndFlagStaleness:ensureLearningsTable',
-    reason: 'StalenessResult is shared by read answers and carries no warnings channel',
-  },
-  {
-    key: 'tools/cmos/staleness-detection.ts:getStaleCounts:ensureLearningsTable',
-    reason: 'the bare staleness count result carries no warnings channel',
-  },
 ] as const;
 
 /**
@@ -117,7 +108,8 @@ const STRUCTURAL_RESIDUALS: readonly ResidualReason[] = [
 const FORWARDING_CARRIERS: readonly ForwardingCarrier[] = [
   {
     key: 'tools/cmos/agent-feedback.ts:recordAgentFeedback:ensureAgentFeedbackTable',
-    reason: 'RecordAgentFeedbackResult.warnings is spliced by all three answer callers',
+    reason:
+      'RecordAgentFeedbackResult.warnings is spliced by all four answer callers, including the standalone CLI',
   },
   {
     key: 'tools/cmos/learning-reaffirm.ts:reaffirmLearningsByIds:ensureReviewTimestamps',
@@ -135,6 +127,14 @@ const FORWARDING_CARRIERS: readonly ForwardingCarrier[] = [
   {
     key: 'tools/cmos/cmos-sprint-complete.ts:archiveSprintDecisionsAndLearnings:ensureLearningsTable',
     reason: 'ArchiveOutcome.warnings is spliced into the sprint-complete answer sink',
+  },
+  {
+    key: 'tools/cmos/first-write-maintenance.ts:repairSearchIndexes:ensureDecisionsFts5',
+    reason: "the upkeep's notes are recorded on the call's Store upkeep section (s93-m11)",
+  },
+  {
+    key: 'tools/cmos/first-write-maintenance.ts:repairSearchIndexes:ensureVectorStorage',
+    reason: "the upkeep's notes are recorded on the call's Store upkeep section (s93-m11)",
   },
 ] as const;
 
@@ -648,7 +648,9 @@ function verifyAgentFeedbackCarrier(
   );
   const calls = callsToFunction(program, helper, checker);
   return (
-    calls.length === 3 &&
+    // Count every symbol-resolved call in shipped src/: onboard, mission close, session close,
+    // and the standalone feedback CLI. Every caller must prove its exact warning boundary.
+    calls.length === 4 &&
     calls.every((call) => {
       const callerSink = warningSinkForCall(call, checker);
       return Boolean(
@@ -746,6 +748,72 @@ function verifyArchiveCarrier(
   return Boolean(callerSink && mutableSinkReachesAnswers(calls[0], callerSink, program, checker));
 }
 
+/**
+ * s93-m11 — first-write upkeep's index repair. Each migration's warnings are pushed into the
+ * helper's notes, which every later return hands back; the helper's one caller pushes them into
+ * runFirstWriteMaintenance's notes, which every return after that declaration hands back; and the
+ * one shipped caller of that iterates its result into recordStoreUpkeepNote, the call's
+ * "Store upkeep:" carrier (rendered by attachStoreUpkeepNotes, shown in first-write-upkeep.test.ts).
+ */
+function verifyStoreUpkeepCarrier(
+  site: MigrationCallSite,
+  program: ts.Program,
+  checker: ts.TypeChecker
+): boolean {
+  const returnsSinkAfter = (
+    fn: ts.FunctionLikeDeclaration,
+    sink: ts.Symbol,
+    after: number
+  ): boolean => {
+    const returns = directReturns(fn).filter((statement) => statement.getStart() > after);
+    return (
+      returns.length > 0 &&
+      returns.every((statement) => identifierSymbol(statement.expression, checker) === sink)
+    );
+  };
+
+  const helper = enclosingFunction(site.call);
+  const helperSink = warningSinkForCall(site.call, checker);
+  if (!helper || !ts.isFunctionDeclaration(helper) || !helperSink) return false;
+  if (!returnsSinkAfter(helper, helperSink, site.call.end)) return false;
+
+  const helperCalls = callsToFunction(program, helper, checker);
+  if (helperCalls.length !== 1) return false;
+  const upkeepSink = warningSinkForCall(helperCalls[0], checker);
+  const sinkDeclaration = upkeepSink?.valueDeclaration;
+  if (!upkeepSink || !sinkDeclaration || !ts.isVariableDeclaration(sinkDeclaration)) return false;
+  const upkeep = enclosingFunction(sinkDeclaration);
+  if (!upkeep || !ts.isFunctionDeclaration(upkeep)) return false;
+  if (!returnsSinkAfter(upkeep, upkeepSink, sinkDeclaration.end)) return false;
+
+  const dispatchCalls = callsToFunction(program, upkeep, checker);
+  return (
+    dispatchCalls.length === 1 &&
+    dispatchCalls.every((call) => {
+      const awaited = call.parent;
+      const loop = awaited?.parent;
+      if (!ts.isAwaitExpression(awaited) || !loop || !ts.isForOfStatement(loop)) return false;
+      const declarations = loop.initializer;
+      if (!ts.isVariableDeclarationList(declarations)) return false;
+      const note = declarations.declarations[0]?.name;
+      const noteSymbol = note && ts.isIdentifier(note) ? resolvedSymbol(note, checker) : undefined;
+      let recorded = false;
+      const visit = (node: ts.Node): void => {
+        if (
+          ts.isCallExpression(node) &&
+          callNameIs(node, 'recordStoreUpkeepNote', checker) &&
+          identifierSymbol(node.arguments[0], checker) === noteSymbol
+        ) {
+          recorded = true;
+        }
+        if (!recorded) ts.forEachChild(node, visit);
+      };
+      visit(loop.statement);
+      return Boolean(noteSymbol) && recorded;
+    })
+  );
+}
+
 function forwardingCarrierIsVerified(
   site: MigrationCallSite,
   program: ts.Program,
@@ -761,6 +829,9 @@ function forwardingCarrierIsVerified(
     case 'tools/cmos/cmos-sprint-complete.ts:archiveSprintDecisionsAndLearnings:ensureArchivalColumns':
     case 'tools/cmos/cmos-sprint-complete.ts:archiveSprintDecisionsAndLearnings:ensureLearningsTable':
       return verifyArchiveCarrier(site, program, checker);
+    case 'tools/cmos/first-write-maintenance.ts:repairSearchIndexes:ensureDecisionsFts5':
+    case 'tools/cmos/first-write-maintenance.ts:repairSearchIndexes:ensureVectorStorage':
+      return verifyStoreUpkeepCarrier(site, program, checker);
     default:
       return false;
   }
@@ -800,7 +871,14 @@ describe('s88-m09 MigrationResult warning reachability census', () => {
     // s92-m09: 55 -> 58 — ensureContentPrunedColumn runs in session complete and mission complete
     // (their persist copies go content-less) and in cmos_db(prune_snapshots) before it applies;
     // all three reach the handler's answer, refusals included.
-    expect(census.sites.length).toBe(58);
+    // s93-m11: 58 -> 57 — the staleness read runs no migration (-3: two ensureLearningsTable, one
+    // ensureReviewTimestamps), and an explicit decision status update stamps its review (+2:
+    // ensureReviewTimestamps in decisions update and batch update; both reach attachWarnings).
+    // s93-m11 critic fold: 57 -> 59 — first-write upkeep rebuilds an index a read left out of step
+    // (ensureDecisionsFts5, ensureVectorStorage); both forward to the Store upkeep section.
+    // s93-m06: 59 -> 60 — decisions record runs ensureDecisionApprovalColumns before a draft's
+    // transaction; it reaches attachWarnings.
+    expect(census.sites.length).toBe(60);
   });
 
   it('carries every reachable producer through its exact answer boundary', () => {
@@ -824,7 +902,9 @@ describe('s88-m09 MigrationResult warning reachability census', () => {
     // s91-m04: +2 in cmos-decisions-record.ts; s92-m03: +5 (the implicit-session columns).
     // s92-m09: +3 (the content tombstone column in session complete, mission complete and the
     // snapshot prune).
-    expect(directlyBounded).toHaveLength(46);
+    // s93-m11: +2 (the review-timestamp migration in decisions update and batch update).
+    // s93-m06: +1 (the approval columns in decisions record).
+    expect(directlyBounded).toHaveLength(49);
     expect(forwarded.map(siteKey).sort()).toEqual([...expectedForwarders.keys()].sort());
   });
 
@@ -859,7 +939,9 @@ describe('s88-m09 MigrationResult warning reachability census', () => {
     );
 
     expect(actual.map((row) => row.key).sort()).toEqual([...expected.keys()].sort());
-    expect(consumed).toHaveLength(51); // s92-m03: +5, s92-m09: +3, every one directly bounded
+    // s92-m03: +5, s92-m09: +3, s93-m11: +2 directly bounded and +2 forwarded (the upkeep).
+    // s93-m06: +1 (ensureDecisionApprovalColumns in decisions record).
+    expect(consumed).toHaveLength(56);
     expect(unconsumed).toHaveLength(STRUCTURAL_RESIDUALS.length);
   });
 });

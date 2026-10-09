@@ -13,6 +13,7 @@ import * as crypto from 'crypto';
 import type { CmosDatabaseClient } from './client';
 import { genesisColumns, getProjectId } from './genesis-columns';
 import { findReusableSnapshot, snapshotStorage } from './snapshot-content-policy';
+import { storedTimeMs } from './stored-time';
 
 const MILLIS_PER_DAY = 24 * 60 * 60 * 1000;
 
@@ -104,7 +105,7 @@ export function calculateContextFreshness(
   const contextUpdatedAt = contextResult.success ? (contextResult.data?.updated_at ?? null) : null;
 
   const missionResult = client.getOne<MaxTimestampRow>(
-    `SELECT MAX(completed_at) AS ts
+    `SELECT strftime('%Y-%m-%dT%H:%M:%fZ', MAX(julianday(completed_at))) AS ts
        FROM missions
       WHERE completed_at IS NOT NULL`,
     []
@@ -117,7 +118,7 @@ export function calculateContextFreshness(
   const latestMissionCompletionAt = missionResult.success ? (missionResult.data?.ts ?? null) : null;
 
   const sessionResult = client.getOne<MaxTimestampRow>(
-    `SELECT MAX(completed_at) AS ts
+    `SELECT strftime('%Y-%m-%dT%H:%M:%fZ', MAX(julianday(completed_at))) AS ts
        FROM sessions
       WHERE completed_at IS NOT NULL`,
     []
@@ -252,8 +253,8 @@ export function refreshMasterContextFromRecentActivity(
        FROM missions
       WHERE status = 'Completed'
         AND completed_at IS NOT NULL` +
-    (cutoff ? ' AND completed_at > ?' : '') +
-    ' ORDER BY completed_at ASC';
+    (cutoff ? ' AND julianday(completed_at) > julianday(?)' : '') +
+    ' ORDER BY julianday(completed_at) ASC';
 
   const missionResult = client.getMany<CompletedMissionRow>(
     missionQuery,
@@ -296,15 +297,15 @@ export function refreshMasterContextFromRecentActivity(
        s.status,
        COUNT(m.id) AS total_missions,
        SUM(CASE WHEN m.status = 'Completed' THEN 1 ELSE 0 END) AS completed_missions,
-       MAX(m.completed_at) AS last_completed_at
+       strftime('%Y-%m-%dT%H:%M:%fZ', MAX(julianday(m.completed_at))) AS last_completed_at
      FROM sprints s
      JOIN missions m ON m.sprint_id = s.id
      GROUP BY s.id, s.title, s.focus, s.status
      HAVING COUNT(m.id) > 0
        AND SUM(CASE WHEN m.status != 'Completed' THEN 1 ELSE 0 END) = 0
-       AND MAX(m.completed_at) IS NOT NULL` +
-    (cutoff ? ' AND MAX(m.completed_at) > ?' : '') +
-    ' ORDER BY MAX(m.completed_at) ASC';
+       AND MAX(julianday(m.completed_at)) IS NOT NULL` +
+    (cutoff ? ' AND MAX(julianday(m.completed_at)) > julianday(?)' : '') +
+    ' ORDER BY MAX(julianday(m.completed_at)) ASC';
 
   const sprintResult = client.getMany<CompletedSprintRow>(
     sprintQuery,
@@ -478,8 +479,8 @@ export function calculateLagDays(
     return null;
   }
 
-  const contextTs = Date.parse(contextUpdatedAt);
-  const latestTs = Date.parse(latestActivityAt);
+  const contextTs = storedTimeMs(contextUpdatedAt);
+  const latestTs = storedTimeMs(latestActivityAt);
   if (!Number.isFinite(contextTs) || !Number.isFinite(latestTs)) {
     return null;
   }
@@ -496,7 +497,7 @@ function maxIsoTimestamp(...timestamps: Array<string | null | undefined>): strin
 
   for (const ts of timestamps) {
     if (!ts) continue;
-    const parsed = Date.parse(ts);
+    const parsed = storedTimeMs(ts);
     if (!Number.isFinite(parsed)) continue;
 
     if (!max || parsed > max.parsed) {

@@ -16,6 +16,7 @@ import { createError, createSuccess, CmosErrors } from './errors';
 import { buildUntaggedSessionAdvisory } from './untagged-advisory';
 import { appendWarnings } from './format-warnings';
 import { isParkedMissionStatus } from './terminal-status';
+import { storedTimeMs } from './stored-time';
 
 /**
  * Mission summary in the retrospective.
@@ -187,8 +188,8 @@ export async function cmosSprintRetro(
       const cycleTimes = completedMissions
         .filter((m) => m.startedAt && m.completedAt)
         .map((m) => {
-          const start = new Date(m.startedAt!).getTime();
-          const end = new Date(m.completedAt!).getTime();
+          const start = storedTimeMs(m.startedAt);
+          const end = storedTimeMs(m.completedAt);
           return (end - start) / (1000 * 60 * 60 * 24);
         });
 
@@ -281,8 +282,8 @@ function getMissions(client: CmosDatabaseClient, sprintId: string): RetroMission
   return result.data.map((m) => {
     let cycleTimeDays: number | null = null;
     if (m.started_at && m.completed_at) {
-      const start = new Date(m.started_at).getTime();
-      const end = new Date(m.completed_at).getTime();
+      const start = storedTimeMs(m.started_at);
+      const end = storedTimeMs(m.completed_at);
       cycleTimeDays = Math.round(((end - start) / (1000 * 60 * 60 * 24)) * 100) / 100;
     }
 
@@ -308,7 +309,7 @@ function getDecisions(client: CmosDatabaseClient, sprintId: string): RetroDecisi
     `SELECT id, decision_text, category, status
      FROM strategic_decisions
      WHERE sprint_id = ?
-     ORDER BY created_at ASC`,
+     ORDER BY julianday(created_at) ASC`,
     [sprintId]
   );
 
@@ -337,7 +338,7 @@ function getLearnings(client: CmosDatabaseClient, sprintId: string): RetroLearni
     `SELECT id, content, category
      FROM learnings
      WHERE sprint_id = ?
-     ORDER BY created_at ASC`,
+     ORDER BY julianday(created_at) ASC`,
     [sprintId]
   );
 
@@ -356,9 +357,10 @@ function getSessions(client: CmosDatabaseClient, sprintId: string): RetroSession
     type: string;
     title: string;
     status: string;
-  }>(`SELECT id, type, title, status FROM sessions WHERE sprint_id = ? ORDER BY started_at ASC`, [
-    sprintId,
-  ]);
+  }>(
+    `SELECT id, type, title, status FROM sessions WHERE sprint_id = ? ORDER BY julianday(started_at) ASC`,
+    [sprintId]
+  );
 
   if (!result.success || !result.data) return [];
 

@@ -32,9 +32,15 @@
 
 import path from 'path';
 
-import { backfillUnknownCmosAddress, getProjectIdentity } from '../tools/cmos/project-identity';
+import {
+  backfillUnknownCmosAddress,
+  getProjectIdentity,
+  previewUnknownCmosAddressHeal,
+  readProjectIdentity,
+} from '../tools/cmos/project-identity';
 import type { CmosDatabaseClient } from '../tools/cmos/client';
 import { withClientAsync } from '../tools/cmos/client';
+import { asLazyRepair, callMayWrite } from '../tools/cmos/tool-call-context';
 import { CmosDetector } from './cmos-detector';
 import { ProjectGraphRegistry } from './project-graph-registry';
 import {
@@ -93,9 +99,20 @@ export interface ValidateProjectResult {
   readonly hasDatabase: boolean;
   readonly dashboardProjectId: string | null;
   readonly cmosAddress: string | null;
-  readonly healed?: { previous: string; next: string };
+  readonly healed?: AddressHeal;
   readonly hasValidSenderIdentity: boolean;
   readonly rejectReason?: string;
+}
+
+/**
+ * A cmos://unknown/* address repaired for this resolution. s93-m11: `preview` marks one computed
+ * without writing (heal: 'preview'): the address the next write will store, which a diagnostic
+ * resolves with so that it predicts what that write does.
+ */
+export interface AddressHeal {
+  readonly previous: string;
+  readonly next: string;
+  readonly preview?: true;
 }
 
 /** Resolved sender identity plus the full audit trail. */
@@ -104,7 +121,7 @@ export interface SenderContext {
   readonly source: SenderResolutionSource;
   readonly dashboardProjectId: string | null;
   readonly cmosAddress: string | null;
-  readonly healed?: { previous: string; next: string };
+  readonly healed?: AddressHeal;
   readonly candidates: ReadonlyArray<ResolutionCandidate>;
 }
 
@@ -136,6 +153,13 @@ export interface ResolveSenderContextOptions {
    * reads the value `src/index.ts` recorded at startup.
    */
   readonly serverProjectRootOverride?: string | null;
+  /**
+   * s93-m11 — whether the selected store's cmos://unknown/* address may be repaired. Omitted:
+   * only when the call may write (a read-classified call never writes the record, decision
+   * #1182). `'preview'` resolves with the address the next write would store and writes nothing:
+   * a diagnostic (whoami, the startup lines) predicts what a write-classified call would do.
+   */
+  readonly heal?: boolean | 'preview';
 }
 
 /**
@@ -207,9 +231,10 @@ export class SenderResolutionError extends Error {
  */
 export async function validateProject(
   projectRoot: string,
-  options: { heal?: boolean } = {}
+  options: { heal?: boolean | 'preview' } = {}
 ): Promise<ValidateProjectResult> {
-  const { heal = true } = options;
+  // s93-m11: the repair is a write, so a read-classified call (or the review role) never runs it.
+  const heal = options.heal ?? callMayWrite();
   const resolved = path.resolve(projectRoot);
 
   const detector = CmosDetector.getInstance();
@@ -233,13 +258,23 @@ export async function validateProject(
         const rawProjectId = pidRow.success && pidRow.data?.value ? pidRow.data.value.trim() : '';
         const dashboardProjectId = rawProjectId.length > 0 ? rawProjectId : null;
 
-        let identity = getProjectIdentity(db);
+        // s93-m11: only a call that may heal may seed a missing identity row; a read, a preview and
+        // an explicit heal:false derive it in memory and write nothing, even outside a dispatched
+        // call (whoami from the CLI, the startup lines).
+        let identity = heal === true ? getProjectIdentity(db) : readProjectIdentity(db);
         let cmosAddress = identity?.cmos_address?.trim() ?? '';
         const initialStale = !cmosAddress || cmosAddress.startsWith('cmos://unknown/');
 
-        let healed: { previous: string; next: string } | undefined;
-        if (initialStale && heal) {
-          const outcome = backfillUnknownCmosAddress(db);
+        let healed: AddressHeal | undefined;
+        if (initialStale && heal === 'preview') {
+          const preview = previewUnknownCmosAddressHeal(db);
+          if (preview.next) {
+            healed = { previous: preview.previous ?? '', next: preview.next, preview: true };
+            cmosAddress = preview.next;
+          }
+        } else if (initialStale && heal) {
+          // A lazy repair, not the caller's write: it never starts first-write upkeep.
+          const outcome = asLazyRepair(() => backfillUnknownCmosAddress(db));
           if (outcome.rewritten && outcome.next && outcome.next !== outcome.previous) {
             healed = {
               previous: outcome.previous ?? '',
@@ -344,7 +379,10 @@ export async function resolveSenderContext(
     source: SenderResolutionSource,
     projectRoot: string
   ): Promise<SenderContext> => {
-    const validation = await validateProject(projectRoot);
+    const validation = await validateProject(
+      projectRoot,
+      opts.heal === undefined ? {} : { heal: opts.heal }
+    );
     if (isAcceptable(validation)) return accept(source, projectRoot, validation);
     candidates.push({
       source,

@@ -23,8 +23,10 @@ and we will follow up. There is no bug-bounty program.
 
 ## What listens on the network
 
-**Nothing.** CMOS-MCP is a stdio MCP server (`bin: cmos-mcp` → `dist/index.js`, `package.json`). It
-speaks JSON-RPC over stdin/stdout to its MCP host and opens **no** listening socket.
+**Nothing.** CMOS-MCP is a stdio MCP server (`bin: cmos-mcp` → `dist/bin.js`, `package.json`, which
+starts the server from `dist/index.js` when given no verb). It speaks JSON-RPC over stdin/stdout to its
+MCP host and opens **no** listening socket. The same bin's CLI verbs (`cmos-mcp hook …`) run once and
+exit; they open no socket either.
 
 A previous release also shipped an HTTP transport bin (`cmos-mcp-http`) that bound a port with
 `Access-Control-Allow-Origin: *`, no authentication, and full read-write access to every registered
@@ -42,18 +44,27 @@ CMOS makes outbound requests in exactly two situations, both optional:
    - **Sign-in.** `cmos_auth(action="login")` or `login_init` contacts that host even when no URL
      variable or credential exists. `login_complete` polls only when given a `deviceCode`; without
      one it returns a local `MISSING_PARAMETER` and sends nothing.
-   - **Every close uploads the whole database.** Once any dashboard credential exists — a stored
-     device-code key, `CMOS_DASHBOARD_API_KEY`, or the `CMOS_DASHBOARD_USER` and
-     `CMOS_DASHBOARD_PASSWORD` pair — every `cmos_session(action="complete")` and
-     `cmos_sprint(action="complete")` uploads the **entire SQLite file** of the project to the
-     dashboard in the background. The first upload also registers the project there and stores its
-     project-scoped key. A close made by an implicit session, when the server process ends, uploads
-     nothing. Set **`CMOS_CHECKPOINT_SYNC=off`** to stop the upload
+   - **Successful explicit completion calls start a background checkpoint.**
+     `cmos_session(action="complete")` and `cmos_sprint(action="complete")` start this best-effort
+     work when a nonempty stored user-scoped key, `CMOS_DASHBOARD_API_KEY`, or the complete
+     `CMOS_DASHBOARD_USER` / `CMOS_DASHBOARD_PASSWORD` pair exists. A project key alone does not
+     open that gate. The primary path uploads the **entire SQLite file**, including pending
+     proposal drafts and any approval words already copied into decision records. It may first
+     register the project and save its project key. Completion success does not confirm upload
+     success: this work is asynchronous. Without a project slug it can fall back to event replay;
+     a registered project's failed file upload has no replay fallback in that cycle, and a later
+     checkpoint retries. Automatic implicit-session or harness shutdown does not trigger a
+     checkpoint; explicitly completing an implicit session through the tool does. Set
+     **`CMOS_CHECKPOINT_SYNC=off`** to disable this checkpoint path
      (`triggerCheckpointBackfill` in [checkpoint-backfill.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/checkpoint-backfill.ts)).
    - **Calls you make.** Messaging, status and sync health, `cmos_db` sync actions (backfill, pull,
      clone, purge), sprint carry-forward, and the onboard and review summaries of messages.
    - **Startup key recovery**, when a registered project and a usable user-scoped credential exist
      but the project's key is missing.
+   - **Shared-store propagation.** Credentialed collab stores lock, pull and push around mission
+     transitions, sprint status changes/completion, and project-identity name changes
+     ([sync-locks.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/sync-locks.ts)).
+     `CMOS_CHECKPOINT_SYNC=off` does not disable this propagation or explicit sync calls.
 
    Without a credential, ordinary local work sends nothing: the baked address alone does not make
    any tool upload project data.
@@ -110,10 +121,11 @@ surfaced as an `authTier` (the `AuthTier` type and `deriveAuthTier` in
 ## Backups & deletion — the honest reality
 
 - **Database snapshots** are copies of the SQLite file under `cmos/db/snapshots/`.
-  `cmos_db(action="snapshot")` takes one on demand. CMOS takes one itself in three places: before
-  and after every `cmos_sprint(action="complete")`, and before `cmos_db(action="prune_snapshots")`
-  applies. `cmos_db(action="restore")` copies the live database to `cmos/db/snapshots/pre-restore/`
-  before replacing it. Nothing else snapshots first.
+  `cmos_db(action="snapshot")` takes one on demand. `cmos_sprint(action="complete")` attempts
+  snapshots before and after closing; a snapshot failure warns without blocking the close.
+  `cmos_db(action="prune_snapshots")` requires a backup before applying a nonempty selection.
+  `cmos_db(action="restore")` requires a copy of the live database under
+  `cmos/db/snapshots/pre-restore/` before replacing it. These are the automatic backup paths.
 - **Retention deletes.** `CMOS_MAX_SNAPSHOTS` (default 50, `resolveMaxSnapshots` in
   [cmos-db-snapshot.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/cmos-db-snapshot.ts)) caps how many snapshots are kept:
   taking one deletes the oldest beyond the cap, automatic ones included.
@@ -121,8 +133,11 @@ surfaced as an `authTier` (the `AuthTier` type and `deriveAuthTier` in
   appear in older docs but are **vestigial — no code reads them.** Do not rely on them.
 - There is **no `deleted_at` soft-delete net** on the main store. Decisions and learnings carry a
   status (`active`/`superseded`/`archived`/`stale`), but `cmos_db(action="restore")` replaces the
-  whole database (its pre-restore copy is the way back), and `cmos_db(action="purge")` deletes this
-  project's data from the dashboard mirror.
+  whole database, and `cmos_db(action="purge")` deletes this project's data from the dashboard
+  mirror. A restore's pre-restore copy is **not listed or accepted by restore-by-ID**: keep its
+  returned path for manual filesystem recovery with all writers stopped. That subdirectory is
+  also outside the top-level snapshot retention count
+  ([cmos-db-restore.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/cmos-db-restore.ts)).
 - **Snapshot content can be emptied.** `cmos_db(action="prune_snapshots")` is a dry run unless
   `confirm=true`; applied, it empties the content of context-snapshot copies CMOS wrote on its own
   (rows, ids, references and events stay) after taking a database snapshot.
@@ -190,7 +205,9 @@ onboarding, directory, and cross-store/pull-merged decision & learning renders. 
 Since 3.2.0 a consumer install carries no embedding stack. Measured on packed tarballs installed with
 `npm install --omit=dev` into an empty project: 3.1.0's install was 305.7 MB and `npm audit` reported
 1 critical and 5 high advisories, all through `@xenova/transformers` (`protobufjs`, `onnx-proto`,
-`onnxruntime-web`, `sharp`); the 3.2.0 install is 44.7 MB and reports none. `@xenova/transformers` is an
+`onnxruntime-web`, `sharp`); the 3.2.0 release audit reported none. A fresh macOS arm64 install checked on 2026-10-09
+uses 45,972 KiB under `node_modules` by `du -sk` (44.9 MiB); allocation varies by platform
+and dependency resolution. `@xenova/transformers` is an
 optional peer dependency. If you install it for semantic search, its chain carries those advisories
 into your tree, and this package's `overrides` cannot reach a dependent's tree: pin `protobufjs` to
 `^7` in your own `overrides`. In this repository the override still pins it for the development tree
@@ -237,6 +254,91 @@ that rejects destructive git commands. It is **role-gated**: a strict no-op unle
 instance's `.claude/settings.json`) — it sets `CMOS_AGENT_ROLE=review` and wires the hook, activating
 both guards together.
 
+**Reads never write the record, under any role.** Since 3.3.0 a read-classified call (the
+`READ_ONLY_ACTIONS` list in [src/tools/cmos/action-taxonomy.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/action-taxonomy.ts))
+changes no row: no record status, no owner or address, no seeded identity, no schema label, no rebuilt
+search index. Each repair that rewrites a value asks `callMayWrite()` in
+[src/tools/cmos/tool-call-context.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/tool-call-context.ts) first. Through 3.2.0 the
+session opener marked old decisions and learnings `stale` on every review, the review role included. A
+migration may still run on a read when it is DDL, the filling of a table or column that same call
+added, and the new completion marker it writes under its own key when it ran that DDL
+(`ensureExternalFts` and `ensureVectorStorage` in
+[src/tools/cmos/schema-migrations.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/schema-migrations.ts)). Store upkeep that
+rewrites existing values (restoring rows an older CMOS marked stale, a pending master_context
+migration, rebuilding a search index out of step with its table) runs only at a write, at a server
+process's first write to a store (`runFirstWriteMaintenance` in
+[src/tools/cmos/first-write-maintenance.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/first-write-maintenance.ts)), and the
+write's answer says what it did. A read that meets an index out of step says so on its answer, and the
+server that read it rebuilds it at its next write. Repairs made on a write's way (an address heal, a
+seeded identity row) are not that write (`asLazyRepair`): onboard, which makes no status write, never
+starts the upkeep. Whoami and the startup lines write nothing at all; they resolve with the address the
+next write would store. [tests/tools/cmos/reads-never-write.test.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/tests/tools/cmos/reads-never-write.test.ts)
+calls every read-classified action against stores seeded so each old write was possible, in both
+roles, and fails on any committed row change.
+
+**Hook runtime files.** The hook CLI keeps per-machine state under the config directory, never in a
+project or the store ([src/tools/cmos/harness-session.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/harness-session.ts)):
+`<configDir>/runtime/harness/<pid>.json` links a harness process to its sessions, each by a
+16-character SHA-256 prefix of the session id (`harnessSessionHash`), and holds the path of the
+folder the conversation works in; `<pid>.ended` holds the prefix of the session that ended;
+`runtime/declined.json` lists repositories whose user declined the init offer;
+and `runtime/fail-open.jsonl` records hook verbs that gave up (the verb and a cause, never content;
+`recordFailOpen` in [src/cli/core.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/cli/core.ts)). No raw harness session id is written to the store, the
+runtime files or a log. The hook verbs read the record without writing it (the digest is
+`cmos_review`'s read), except that session end closes the sessions the conversation opened, and that
+drafts are kept in the store's `proposals` table (below). No hook verb registers a project in the
+project graph or writes its identity.
+
+**Drafted records (3.3.0).** When an agent ends a reply with a `Would record:` line, the Stop hook
+stores it in the store's `proposals` table: the line, its kind, the hashed session, up to 600
+characters of the reply before it, the links it named, and whether the session had read outside
+content. The prompt hook writes only a decline or a draft's first-offer time there. Neither is a
+record: the table is outside search, embeddings and sync events, and nothing in it becomes a
+decision, constraint, learning or profile line without a `cmos_decisions(action="record",
+fromDraft=...)` call. The table is in `cmos.sqlite`, so a signed-in checkpoint upload carries it with
+the rest of the store. The operator's reply to a draft is never written to the store by a hook.
+The runtime uses one SQLite file per store under `<configDir>/runtime/drafts/`, keyed by a hash of
+the project id and the store's native real path. It keeps:
+
+- the newest 200 counted session-start times and each session's start time;
+- offer counts per session and draft;
+- the operator's reply, at most 1,000 characters, its class, the number of drafts it answered and
+  the time it was received;
+- the draft ids shown by the last reply, with their time;
+- the draft ids in an approval window, its open/closed state and its time;
+- transcript scan offsets and outside-content flags, keyed by hashes of transcript paths.
+
+Session keys are 16-character hashes; raw session ids and transcript paths are not stored there
+([src/tools/cmos/draft-runtime.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/draft-runtime.ts)).
+Replies, shown sets and windows stop being usable after two hours. That is an expiry check, not a
+background deletion timer: cross-store pruning runs only at a session start inside a CMOS project
+with a harness session id, visits at most 50 runtime files, and skips files it cannot open. Binding
+a new reply also prunes expired replies in that store. A successful session-end cleanup deletes
+that session's runtime rows; the bounded start-time history remains. A crash followed by no such
+start or cleanup can leave expired data on disk. Only a `fromDraft` record copies a reply into the
+decision it approves, as that decision's `approval_words`. Under `CMOS_AGENT_ROLE=review` session
+starts do not prune or count toward draft expiry, and the hooks store, bind and decline nothing
+([src/cli/drafts-hook.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/cli/drafts-hook.ts)).
+
+The plugin also keeps hashed source-election and turn receipts under `runtime/hooks/`, and
+completed first-prompt receipts plus delivered typed IDs under `runtime/recall/`. These receipts
+survive session end so duplicate adapters or resumed conversations do not replay completed work.
+Transient `runtime/lifecycle/` files hold the initial Git commit, dirty paths and compact marker;
+successful session end removes only that conversation's transient files. Git summaries describe
+repository observations, not agent authorship. The installer stores an exact runtime/version
+marker with its package in `CLAUDE_PLUGIN_DATA` and an installation pointer under the config
+directory. `pluginServer: off` is checked before package discovery or installation and exposes
+no tools or instructions. None of this external runtime state is uploaded with the project store.
+
+**The operator profile.** `<configDir>/profile.md` holds the operator's working preferences, for
+every project. It lives outside every repository and every store, so it is never committed and never
+uploaded with the store. `cmos-mcp profile show` prints it. CMOS's own write path (`addProfileLine` in
+[src/tools/cmos/operator-profile.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/operator-profile.ts))
+adds a line only on an approved draft of kind `profile`, refuses a line past the 1,100-character cap,
+and never cuts the profile to fit. That is a rule CMOS keeps, not a sandbox: it checks the approval
+it is handed, not where the approval came from, and the profile is an ordinary file in the user's
+config folder, which anything running as the user, an agent with file access included, can edit.
+
 **Honesty caveat (important).** The machine-enforced read-only guarantee holds under this
 **separate-read-only-server** deployment, where the review agent's MCP server is launched with
 `CMOS_AGENT_ROLE=review`. It does **not** automatically extend to in-session subagents spawned by a
@@ -246,4 +348,4 @@ subagent type (e.g. the `Explore` agent) — that is a mitigation, not the machi
 
 ---
 
-_Last verified against the source for release 3.2.0._
+_Last verified against the source for release 3.3.0._

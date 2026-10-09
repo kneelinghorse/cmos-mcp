@@ -617,7 +617,13 @@ function buildWhoamiWarnings(
     );
   }
 
-  if (resolvedContext?.healed) {
+  if (resolvedContext?.healed?.preview) {
+    warnings.push(
+      `Stale cmos_address ${resolvedContext.healed.previous || '(empty)'}: the next write repairs it ` +
+        `to ${resolvedContext.healed.next} before it resolves, so a send would resolve as shown. ` +
+        'whoami reports it without writing.'
+    );
+  } else if (resolvedContext?.healed) {
     warnings.push(
       `Healed stale cmos_address from ${resolvedContext.healed.previous} to ${resolvedContext.healed.next}.`
     );
@@ -648,12 +654,16 @@ export async function getWhoamiDiagnostics(
   let strictContext: SenderContext | undefined;
   let strictError: SenderResolutionError | undefined;
   try {
+    // s93-m11: whoami is a diagnostic, from a call or from `cmos-mcp --whoami`, so it never repairs
+    // the address. It resolves with the address the next write would store (heal: 'preview'), so
+    // its verdict on a send matches what the send, which repairs it first, will do.
     strictContext = await resolveSenderContext({
       explicitProjectRoot: options.explicitProjectRoot,
       mcpRoots: options.mcpRoots,
       requireSenderIdentity: true,
       cwdOverride: options.cwdOverride,
       serverInstallRootOverride: options.serverInstallRootOverride,
+      heal: 'preview',
     });
   } catch (err) {
     if (err instanceof SenderResolutionError) {
@@ -673,6 +683,7 @@ export async function getWhoamiDiagnostics(
         requireSenderIdentity: false,
         cwdOverride: options.cwdOverride,
         serverInstallRootOverride: options.serverInstallRootOverride,
+        heal: 'preview',
       });
     } catch (err) {
       if (err instanceof SenderResolutionError) {

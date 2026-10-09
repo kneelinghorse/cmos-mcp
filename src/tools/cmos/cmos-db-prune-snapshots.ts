@@ -42,9 +42,9 @@ import {
   PRUNED_HASH_PREFIX,
   snapshotTimeMs,
 } from './snapshot-content-policy';
-import { normalizeCloseTimestamp } from './sprint-end-date-repair';
 import type { CmosToolResult } from './types';
 import { checkWrite } from './write-guard';
+import { storedTimeMs } from './stored-time';
 
 export interface CmosDbPruneSnapshotsParams {
   /** true applies the prune; anything else is a dry run. */
@@ -282,8 +282,7 @@ export function readSprintCloses(
       milestoneMs.set(sprintId, at);
     }
   }
-  const parse = (value: string | null): number =>
-    value ? Date.parse(normalizeCloseTimestamp(value)) : NaN;
+  const parse = (value: string | null): number => storedTimeMs(value);
 
   const events = columnPresence(client, 'session_events', 'action');
   if (events.state === 'unreadable') {
@@ -395,7 +394,7 @@ export async function cmosDbPruneSnapshots(
   }
   let keepSinceMs: number | null = null;
   if (params.keepSince !== undefined) {
-    keepSinceMs = Date.parse(params.keepSince);
+    keepSinceMs = storedTimeMs(params.keepSince);
     if (Number.isNaN(keepSinceMs)) {
       return invalid('keepSince', `keepSince "${params.keepSince}" is not a date.`);
     }

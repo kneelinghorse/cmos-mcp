@@ -9,16 +9,27 @@
  * §4.3) counted 6 such references in TOOL_REFERENCE.md, 5 in SECURITY.md and 22 in the seed schema
  * every project receives.
  *
- * THE PREDICATE is the audit's own: `Sprint N`, a mission id `sNN-mNN`, `decision #N`, `#NNN`.
+ * THE PREDICATE is the audit's own: `Sprint N`, a mission id `sN-mN`, `decision #N`, `#N`,
+ * case-insensitive and with no digit-width limit.
  * Worked examples use the same shapes on purpose (`missionId="s01-m01"`), so a match is an example
  * when it sits inside a fenced code block or an `e.g.` / "for example" parenthetical. The few
  * examples written in prose are named in ALLOWLIST below, each with its reason; an entry that no
  * longer matches anything fails the gate, so the list cannot rot into a blanket exemption.
  *
- * WHAT IS CHECKED: every description string in the tool definitions the server publishes, both
+ * WHAT IS CHECKED: every string value and property name in the tool definitions the server publishes, both
  * the full definitions (which generate TOOL_REFERENCE.md) and the tools/list definitions, and the
- * shipped prose: README.md, SECURITY.md, docs/getting-started.md, TOOL_REFERENCE.md, and the seed's
- * README, docs, templates, tiers and schema.
+ * shipped prose: README.md, SECURITY.md, docs/getting-started.md, docs/harnesses.md,
+ * TOOL_REFERENCE.md, and the seed's README and schema plus Markdown/JSON at every depth of docs,
+ * templates, tiers, context and foundational-docs; the marketplace and plugin manifests, skills,
+ * adapter Markdown/JSON and static string/template spans in every plugin hook module and root-level
+ * src/cli implementation module.
+ * Static hook strings are a deliberate
+ * superset of output: comments are excluded, but private references in a string fail even if a
+ * branch currently never emits it. Runtime data and references assembled across separate string
+ * spans, Markdown references split across lines, helper output outside the named source directories,
+ * other extensions, and symlinked directories are outside this syntax-only gate; behavioral output
+ * tests must cover those paths. Matching does not resolve which project's record an id names, so
+ * worked examples remain explicit exemptions rather than guessed external references.
  *
  * NOT CHECKED, by rule: CHANGELOG.md (an immutable record of what each release did, sprint ids
  * included) and comments compiled into dist/ (maintainer commentary no answer carries).
@@ -26,7 +37,9 @@
 
 import { describe, expect, it } from '@jest/globals';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
+import * as ts from 'typescript';
 
 import { CMOS_TOOL_DEFINITIONS } from '../../src/tools/cmos';
 import { toWireDefinition } from '../../src/tools/cmos/wire-descriptions';
@@ -34,29 +47,73 @@ import { toWireDefinition } from '../../src/tools/cmos/wire-descriptions';
 const REPO_ROOT = path.resolve(__dirname, '../..');
 
 const INTERNAL_REFERENCE =
-  /Sprint [0-9]+|\bs[0-9]{1,3}-m[0-9]{2}[a-z]?\b|decision #[0-9]+|#[0-9]{3,4}\b/g;
+  /\bSprint [0-9]+\b|\bs[0-9]+-m[0-9]+[a-z]?\b|\bdecision #[0-9]+\b|#[0-9]+\b/gi;
 
 /** Worked examples written in prose, where neither rule can see them as examples. */
-const ALLOWLIST: ReadonlyArray<{ file: string; match: string; reason: string }> = [
+const ALLOWLIST: ReadonlyArray<{ file: string; match: string; text: string; reason: string }> = [
   {
     file: 'cmos-seed/tiers/managed.md',
     match: 's42-m01',
+    text: 'Don\'t show mission IDs to the user unless they ask. Use task names: "The venue task is done" not "s42-m01 is complete."',
     reason: 'the guide quotes the mission id an agent should NOT show a managed-tier user',
   },
+  ...[1, 2, 3, 4].map((sprint) => ({
+    file: 'cmos-seed/foundational-docs/roadmap_template.md',
+    match: `Sprint ${sprint}`,
+    text: `### Sprint ${sprint}: [Sprint Name]`,
+    reason: "a blank roadmap heading for the adopting project, not this repository's sprint",
+  })),
+  {
+    file: 'cmos-seed/foundational-docs/roadmap_template.md',
+    match: 'Sprint 5',
+    text: '### Medium Term (Sprint 5-8)',
+    reason: 'a planning-horizon example in the blank roadmap',
+  },
+  {
+    file: 'cmos-seed/foundational-docs/tech_arch_template.md',
+    match: 'Sprint 1',
+    text: '### MVP (Sprint 1-2)',
+    reason: 'an example MVP phase in the blank architecture template',
+  },
+  {
+    file: 'cmos-seed/foundational-docs/tech_arch_template.md',
+    match: 'Sprint 3',
+    text: '### Sprint 3-4',
+    reason: 'an example follow-on phase in the blank architecture template',
+  },
 ];
+
+function publishedFiles(directory: string): string[] {
+  return fs
+    .readdirSync(path.join(REPO_ROOT, directory), { withFileTypes: true })
+    .flatMap((entry) => {
+      const relative = `${directory}/${entry.name}`;
+      return entry.isDirectory()
+        ? publishedFiles(relative)
+        : /\.(md|json|mjs)$/.test(entry.name)
+          ? [relative]
+          : [];
+    });
+}
 
 const SHIPPED_FILES = [
   'README.md',
   'SECURITY.md',
   'docs/getting-started.md',
+  'docs/harnesses.md',
   'TOOL_REFERENCE.md',
   'cmos-seed/README.md',
   'cmos-seed/db/schema.sql',
-  ...['docs', 'templates', 'tiers'].flatMap((dir) =>
-    fs
-      .readdirSync(path.join(REPO_ROOT, 'cmos-seed', dir))
-      .filter((name) => name.endsWith('.md'))
-      .map((name) => `cmos-seed/${dir}/${name}`)
+  '.claude-plugin/marketplace.json',
+  ...publishedFiles('plugins/cmos'),
+  ...publishedFiles('adapters'),
+  'src/cli.ts',
+  ...fs
+    .readdirSync(path.join(REPO_ROOT, 'src/cli'))
+    .filter((name) => name.endsWith('.ts'))
+    .map((name) => `src/cli/${name}`),
+  ...['docs', 'templates', 'tiers', 'context', 'foundational-docs'].flatMap((dir) =>
+    publishedFiles(`cmos-seed/${dir}`)
   ),
 ];
 
@@ -88,17 +145,24 @@ function findingsIn(where: string, text: string): Finding[] {
   return found;
 }
 
-/** Every description string in a definition, with a dotted path to it. */
-function descriptions(value: unknown, at: string, out: Array<{ at: string; text: string }>): void {
+/** Every published string value and property name, with its path for an actionable failure. */
+function definitionStrings(
+  value: unknown,
+  at: string,
+  out: Array<{ at: string; text: string }>
+): void {
+  if (typeof value === 'string') {
+    out.push({ at, text: value });
+    return;
+  }
   if (Array.isArray(value)) {
-    value.forEach((item, i) => descriptions(item, `${at}[${i}]`, out));
+    value.forEach((item, i) => definitionStrings(item, `${at}[${i}]`, out));
     return;
   }
   if (!value || typeof value !== 'object') return;
   for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-    if (key === 'description' && typeof child === 'string')
-      out.push({ at: `${at}.${key}`, text: child });
-    else descriptions(child, `${at}.${key}`, out);
+    out.push({ at: `${at}.${key} (property name)`, text: key });
+    definitionStrings(child, `${at}.${key}`, out);
   }
 }
 
@@ -106,14 +170,45 @@ function definitionFindings(definitions: readonly unknown[], label: string): Fin
   const strings: Array<{ at: string; text: string }> = [];
   for (const definition of definitions) {
     const name = (definition as { name: string }).name;
-    descriptions(definition, `${label}:${name}`, strings);
+    definitionStrings(definition, `${label}:${name}`, strings);
   }
   return strings.flatMap((s) => findingsIn(s.at, s.text));
 }
 
-/** A shipped file's lines outside fenced code blocks, with their line numbers. */
-function proseLines(rel: string): Array<{ line: number; text: string }> {
-  const lines = fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8').split('\n');
+/** A shipped file's published text, retaining source locations for useful failures. */
+function publishedLines(rel: string, content: string): Array<{ line: number; text: string }> {
+  if (/\.(mjs|json|ts)$/.test(rel)) {
+    if (rel.endsWith('.json')) JSON.parse(content);
+    const source = ts.createSourceFile(
+      rel,
+      content,
+      ts.ScriptTarget.Latest,
+      true,
+      rel.endsWith('.json')
+        ? ts.ScriptKind.JSON
+        : rel.endsWith('.ts')
+          ? ts.ScriptKind.TS
+          : ts.ScriptKind.JS
+    );
+    const strings: Array<{ line: number; text: string }> = [];
+    const visit = (node: ts.Node): void => {
+      if (
+        ts.isStringLiteralLike(node) ||
+        ts.isTemplateHead(node) ||
+        ts.isTemplateMiddle(node) ||
+        ts.isTemplateTail(node)
+      ) {
+        strings.push({
+          line: source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1,
+          text: node.text,
+        });
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+    return strings;
+  }
+  const lines = content.split('\n');
   if (!rel.endsWith('.md')) return lines.map((text, i) => ({ line: i + 1, text }));
   const out: Array<{ line: number; text: string }> = [];
   let fenced = false;
@@ -129,17 +224,135 @@ function proseLines(rel: string): Array<{ line: number; text: string }> {
 
 function fileFindings(): Finding[] {
   return SHIPPED_FILES.flatMap((rel) =>
-    proseLines(rel).flatMap(({ line, text }) => findingsIn(`${rel}:${line}`, text))
+    publishedLines(rel, fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8')).flatMap(
+      ({ line, text }) => findingsIn(`${rel}:${line}`, text)
+    )
   );
 }
 
 function allowed(finding: Finding): boolean {
   return ALLOWLIST.some(
-    (entry) => finding.where.startsWith(`${entry.file}:`) && finding.match === entry.match
+    (entry) =>
+      finding.where.startsWith(`${entry.file}:`) &&
+      finding.match === entry.match &&
+      finding.text === entry.text
   );
 }
 
 describe('s92-m06 — no internal sprint, mission, decision or issue references in published text', () => {
+  it.each([
+    'sprint 7',
+    'SPRINT 12000',
+    'Decision #2',
+    'DECISION #12345',
+    '#1',
+    '#12',
+    '#12345',
+    'S12000-M12345',
+  ])('does not let capitalization or identifier width hide %s', (reference) => {
+    expect(
+      findingsIn('control', `See ${reference} for why.`).map((finding) => finding.match)
+    ).toEqual([reference]);
+  });
+
+  it.each(['full', 'tools/list'])('checks every schema string on the %s surface', (surface) => {
+    const definition = {
+      name: 'cmos_context',
+      description: 'A public tool.',
+      inputSchema: {
+        type: 'object',
+        title: 'Sprint 7',
+        properties: {
+          projectRoot: {
+            type: 'string',
+            enum: ['#1'],
+            default: 'decision #2',
+            examples: [{ explanation: '#12345' }],
+            properties: { '#6': { type: 'boolean' } },
+          },
+        },
+      },
+    };
+    const published = surface === 'full' ? definition : toWireDefinition(definition as never);
+    expect(definitionFindings([published], surface).map((finding) => finding.match)).toEqual([
+      'Sprint 7',
+      '#1',
+      'decision #2',
+      '#12345',
+      '#6',
+    ]);
+  });
+
+  it('includes the seed context and foundational documents in the published surface', () => {
+    expect(SHIPPED_FILES).toEqual(
+      expect.arrayContaining([
+        'docs/harnesses.md',
+        'adapters/codex/hooks.json',
+        'cmos-seed/context/master_context.json',
+        'cmos-seed/context/project_context.json',
+        'cmos-seed/foundational-docs/roadmap_template.md',
+        'cmos-seed/foundational-docs/tech_arch_template.md',
+      ])
+    );
+  });
+
+  it('an example allowlist entry does not exempt a private claim with the same id', () => {
+    const finding = findingsIn('cmos-seed/tiers/managed.md:1', 'See s42-m01 for the rationale.')[0];
+    expect(allowed(finding)).toBe(false);
+  });
+
+  it('finds nested seed Markdown and JSON rather than only immediate guide files', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-reference-seed-'));
+    try {
+      for (const file of ['context/nested/context.json', 'foundational-docs/nested/plan.md']) {
+        fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
+        fs.writeFileSync(
+          path.join(root, file),
+          file.endsWith('.json') ? '{"note":"#1"}' : 'See #2.'
+        );
+      }
+      const files = publishedFiles(path.relative(REPO_ROOT, root));
+      expect(files.map((file) => path.relative(root, path.join(REPO_ROOT, file))).sort()).toEqual([
+        'context/nested/context.json',
+        'foundational-docs/nested/plan.md',
+      ]);
+      expect(
+        files.flatMap((file) =>
+          publishedLines(file, fs.readFileSync(path.join(REPO_ROOT, file), 'utf8')).flatMap(
+            ({ text }) => findingsIn(file, text).map((finding) => finding.match)
+          )
+        )
+      ).toEqual(['#1', '#2']);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each(['hooks/run.mjs', 'src/cli/session-start.ts'])(
+    'checks %s output literals while excluding maintainer comments',
+    (filename) => {
+      const source = [
+        '// Sprint 56 was the historical reason for this implementation.',
+        '/* decision #841 stays in a maintainer comment. */',
+        'const constant = "s84-m05";',
+        'process.stderr.write(`Before Sprint 77 ${constant} after #487`);',
+        'process.stdout.write("See decision #926");',
+      ].join('\n');
+      const findings = publishedLines(filename, source).flatMap(({ text }) =>
+        findingsIn('control', text).map((finding) => finding.match)
+      );
+      expect(findings).toEqual(['s84-m05', 'Sprint 77', '#487', 'decision #926']);
+    }
+  );
+
+  it('decodes nested manifest strings instead of treating serialized JSON as prose', () => {
+    const findings = publishedLines(
+      'marketplace.json',
+      '{"plugins":[{"description":"See decision \\u0023841"}]}'
+    ).flatMap(({ text }) => findingsIn('control', text).map((finding) => finding.match));
+    expect(findings).toEqual(['decision #841']);
+  });
+
   it('the predicate and the example rules behave as stated (positive and negative controls)', () => {
     const hits = (text: string): string[] => findingsIn('control', text).map((f) => f.match);
     expect(hits('Optional free-text UX feedback (Sprint 56 m03).')).toEqual(['Sprint 56']);
@@ -177,7 +390,8 @@ describe('s92-m06 — no internal sprint, mission, decision or issue references 
       expect({
         entry: entry.match,
         found: findings.some(
-          (f) => f.where.startsWith(`${entry.file}:`) && f.match === entry.match
+          (f) =>
+            f.where.startsWith(`${entry.file}:`) && f.match === entry.match && f.text === entry.text
         ),
       }).toEqual({ entry: entry.match, found: true });
     }

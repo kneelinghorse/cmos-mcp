@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": "cmos-mcp hook session-start --harness cursor --hook-source cmos-cursor",
+        "timeout": 3
+      }
+    ]
+  }
+}

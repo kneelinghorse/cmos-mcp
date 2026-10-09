@@ -112,11 +112,12 @@ export const cmosLearningsSchema = z
     sprintId: z.string().optional().describe('Filter by sprint ID for list/search actions'),
     missionId: z.string().optional().describe('Only rows recorded for this mission'),
     status: z
-      // s86-m04 (fork f04, fleet-resolved): four members, not three. CMOS ITSELF writes 'stale'
-      // at staleness-detection.ts:494-499, and 246 such rows exist across 7 of 18 registered
-      // stores — so the published 3-member enum forbade callers from naming a value the server
-      // had been writing for sprints. cmos_decisions never had this bug; that asymmetry is the
-      // evidence the enum was wrong, not the data.
+      // s86-m04 (fork f04, fleet-resolved): four members, not three. CMOS through 3.2.0 wrote
+      // 'stale' on its own (the old staleness flagger), and 246 such rows existed across 7 of 18
+      // registered stores — so the published 3-member enum forbade callers from naming a value
+      // the server had been writing for sprints. cmos_decisions never had this bug; that asymmetry
+      // is the evidence the enum was wrong, not the data. s93-m11: CMOS no longer sets 'stale'
+      // unasked (decision #1182); it stays a status a caller may set and filter on.
       .enum(['active', 'archived', 'superseded', 'stale'])
       .optional()
       .describe(

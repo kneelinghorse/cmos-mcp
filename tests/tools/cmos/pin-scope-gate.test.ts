@@ -11,10 +11,11 @@
  * `ProjectGraphRegistry`) — which is how a read would fan out across projects — EXCEPT
  * the explicitly ratified portfolio surfaces:
  *
- *   Ratified `acrossProjects` reads (the 3 named §5.4 portfolio queries):
+ *   Ratified `acrossProjects` reads (the 3 named §5.4 queries plus s93-m08 feedback):
  *     - cmos-decisions-list.ts   (cmos_decisions list, acrossProjects)
  *     - cmos-learnings-list.ts   (cmos_learnings list, acrossProjects)
  *     - cmos-mission-status.ts   (cmos_mission status, acrossProjects)
+ *     - feedback-fleet.ts        (cmos_feedback list, acrossProjects; digest count)
  *   Ratified always-on portfolio digests:
  *     - cmos-review.ts           (≤4KB portfolio section, s79-m06 / decision #672)
  *     - cmos-agent-onboard.ts    (portfolio rollup; write-classified, not a pin-only read)
@@ -23,8 +24,8 @@
  *
  * Any OTHER handler importing the machinery is an offender: a pin-only read (session
  * list/search, sprint list/show, mission list/show, decisions/learnings search, context
- * view/history/search, db health, feedback list) must never fan out. The FENCE holds:
- * no `acrossProjects` on a pin-only read (none maps to a §5.4 named query).
+ * view/history/search, db health) must never fan out. Feedback's default list stays local;
+ * its explicit acrossProjects arm and bounded digest count use the ratified fleet helper.
  *
  * @module tests/tools/cmos/pin-scope-gate
  */
@@ -36,10 +37,11 @@ const HANDLER_DIR = path.resolve(__dirname, '../../../src/tools/cmos');
 
 /** Handler files ALLOWED to import the cross-store machinery (repo-relative basename). */
 const ALLOWLIST = new Set<string>([
-  // Ratified acrossProjects reads (the 3 named §5.4 portfolio queries).
+  // Ratified acrossProjects reads (the 3 named §5.4 queries plus s93-m08 feedback).
   'cmos-decisions-list.ts',
   'cmos-learnings-list.ts',
   'cmos-mission-status.ts',
+  'feedback-fleet.ts',
   // Ratified always-on portfolio digests.
   'cmos-review.ts',
   'cmos-agent-onboard.ts',
@@ -72,11 +74,12 @@ const ALLOWLIST = new Set<string>([
 const CROSS_STORE_IMPORT =
   /from\s+['"][^'"]*\/(cross-store-query|cross-store-queries|project-graph-registry)['"]/;
 
-/** The 3 ratified acrossProjects handlers must genuinely import a §5.4 named query. */
+/** The ratified acrossProjects handlers must genuinely import the canonical query machinery. */
 const RATIFIED_ACROSS_PROJECTS = [
   'cmos-decisions-list.ts',
   'cmos-learnings-list.ts',
   'cmos-mission-status.ts',
+  'feedback-fleet.ts',
 ];
 
 function listHandlerFiles(): string[] {
@@ -99,7 +102,7 @@ describe('pin-scope convergence gate (Sprint 80 m04)', () => {
     expect(offenders).toEqual([]);
   });
 
-  it('the 3 ratified acrossProjects handlers still import a cross-store query (keeps the list honest)', () => {
+  it('the ratified acrossProjects handlers still import a cross-store query (keeps the list honest)', () => {
     for (const name of RATIFIED_ACROSS_PROJECTS) {
       const content = fs.readFileSync(path.join(HANDLER_DIR, name), 'utf8');
       const importsCrossStore =

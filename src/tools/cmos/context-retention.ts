@@ -250,7 +250,7 @@ function getCompletedSprintIds(client: CmosDatabaseClient): string[] {
     `SELECT id
        FROM sprints
       WHERE status = 'Completed'
-      ORDER BY COALESCE(end_date, start_date, '') DESC, rowid DESC`,
+      ORDER BY julianday(COALESCE(end_date, start_date)) DESC, rowid DESC`,
     []
   );
 

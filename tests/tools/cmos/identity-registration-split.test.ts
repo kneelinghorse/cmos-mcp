@@ -206,7 +206,7 @@ describe('s88-m08 — identity registration is split from read resolution', () =
   });
 
   it('statically fences getProjectId from registration and SQL mutation primitives', () => {
-    const sourcePath = path.resolve('src/tools/cmos/genesis-columns.ts');
+    const sourcePath = path.resolve('src/tools/cmos/project-id.ts');
     const source = ts.createSourceFile(
       sourcePath,
       fs.readFileSync(sourcePath, 'utf8'),

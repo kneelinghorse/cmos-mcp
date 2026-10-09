@@ -70,6 +70,12 @@ export interface MissionUpdateResult {
   /** The mission ID that was updated */
   missionId: string;
 
+  /** s93-m11 (#602): the mission's name after the update. */
+  name: string;
+
+  /** s93-m11 (#602): the mission's status after the update. */
+  status: MissionStatus;
+
   /** Fields that were updated */
   updatedFields: string[];
 
@@ -490,6 +496,8 @@ export async function cmosMissionUpdate(
       // Build result
       const result: MissionUpdateResult = {
         missionId,
+        name: refreshed.success && refreshed.data ? refreshed.data.name : mission.name,
+        status: (newStatus ?? mission.status) as MissionStatus,
         updatedFields: fieldKeys,
         message: `Mission '${missionId}' updated successfully (${fieldKeys.length} field${fieldKeys.length === 1 ? '' : 's'})`,
       };
@@ -534,7 +542,7 @@ export function formatMissionUpdateForLLM(result: CmosToolResult<MissionUpdateRe
 
   const data = result.data;
   const lines: string[] = [
-    `Mission '${data.missionId}' updated`,
+    `Mission '${data.missionId}' updated: ${data.name} [${data.status}]`,
     '',
     `Updated fields: ${data.updatedFields.join(', ')}`,
   ];

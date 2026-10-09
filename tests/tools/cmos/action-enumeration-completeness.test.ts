@@ -250,8 +250,10 @@ describe('action enumerations are complete (s86-m04 Part B)', () => {
     const projectTypeDescribe = (
       resolveSchema('cmos_project').shape.projectType?._def as { description?: string } | undefined
     )?.description;
+    // s93-m12 reworded it ("The level of record for init and update: …"), so the live describe no
+    // longer says "action"; the trap is kept below as a literal, which the parser does read.
     expect(projectTypeDescribe).toBe(
-      'Project type/tier for update action: general | managed | build'
+      'The level of record for init and update: general | managed | build'
     );
     // THE POSITION RULE IS WHAT EXCLUDES IT, and this is the assertion that matters: the string is
     // never offered to the parser at all.

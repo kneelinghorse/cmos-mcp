@@ -288,8 +288,18 @@ describe('ProjectGraphRegistry (Sprint 69 m05)', () => {
   // ── readStoreIdentity ───────────────────────────────────────────────────────
   it('readStoreIdentity reads project_id + name, and returns null for absent/idless stores', () => {
     const root = makeStore('alpha', 'alpha-id');
-    expect(readStoreIdentity(root)).toEqual({ project_id: 'alpha-id', name: 'alpha' });
+    expect(readStoreIdentity(root)).toEqual({
+      project_id: 'alpha-id',
+      name: 'alpha',
+      storedName: 'alpha',
+    });
     expect(readStoreIdentity(path.join(tmpDir, 'does-not-exist'))).toBeNull();
+
+    // s93-m12: a store with no name reads as its folder's name, and says it stores none, so a
+    // re-registration can keep the name the registry already has.
+    const unnamed = path.join(tmpDir, 'projects', 'unnamed');
+    seedCmosDb(unnamed, { projectId: 'unnamed-id', projectName: '' });
+    expect(readStoreIdentity(unnamed)).toEqual({ project_id: 'unnamed-id', name: 'unnamed' });
 
     // A store whose metadata.project_id is empty → null (nothing to key on).
     const idless = path.join(tmpDir, 'projects', 'idless');

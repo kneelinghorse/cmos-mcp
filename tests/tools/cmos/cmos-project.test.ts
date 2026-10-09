@@ -91,16 +91,25 @@ describe('cmos_project', () => {
     expect(result).toBe(expected);
   });
 
-  it('routes list with validate flag to validate handler', async () => {
+  it('routes list with validate flag to a validate that never prunes', async () => {
     const expected = { success: true, data: { valid: true } } as any;
     (cmosProjectValidate as jest.MockedFunction<typeof cmosProjectValidate>).mockResolvedValueOnce(
       expected
     );
 
-    const result = await cmosProject({ action: 'list', validate: true, prune: true });
-    expect(cmosProjectValidate).toHaveBeenCalledWith({ prune: true });
+    const result = await cmosProject({ action: 'list', validate: true });
+    expect(cmosProjectValidate).toHaveBeenCalledWith({});
     expect(cmosProjectList).not.toHaveBeenCalled();
     expect(result).toBe(expected);
+  });
+
+  // s93-m11 (#606 g): list is read-classified, and a prune archives registry rows.
+  it('refuses list with prune and names the actions that prune', async () => {
+    const result = await cmosProject({ action: 'list', validate: true, prune: true });
+    expect(cmosProjectValidate).not.toHaveBeenCalled();
+    expect(cmosProjectList).not.toHaveBeenCalled();
+    expect(result.success).toBe(false);
+    expect(result.error?.suggestion).toContain('cmos_project(action="prune")');
   });
 
   it('routes unregister action', async () => {

@@ -17,6 +17,7 @@ import { withClient } from './client';
 import type { CmosToolResult } from './types';
 import { createError, createSuccess } from './errors';
 import { appendWarnings } from './format-warnings';
+import { compareStoredTimes } from './stored-time';
 
 const SNAPSHOT_FILE_PREFIX = 'snapshot-';
 const SNAPSHOT_FILE_EXTENSION = '.sqlite';
@@ -407,7 +408,7 @@ function listSnapshots(snapshotDirectory: string): DbSnapshotMetadata[] {
   });
 
   snapshots.sort((a, b) => {
-    const dateDiff = Date.parse(b.createdAt) - Date.parse(a.createdAt);
+    const dateDiff = compareStoredTimes(b.createdAt, a.createdAt);
     if (dateDiff !== 0) {
       return dateDiff;
     }

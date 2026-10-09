@@ -10,7 +10,8 @@
 import { withClientValidated } from './client';
 import type { CmosToolResult } from './types';
 import { createError, createSuccess, CmosErrors, CMOS_ERROR_CODES } from './errors';
-import { appendWarnings } from './format-warnings';
+import { appendWarnings, attachWarnings } from './format-warnings';
+import { ensureReviewTimestamps } from './schema-migrations';
 
 export interface CmosDecisionsUpdateResult {
   /** ID of the updated decision */
@@ -56,7 +57,9 @@ export async function cmosDecisionsUpdate(
     return createError(CmosErrors.invalidParameter('status', params.status, VALID_STATUSES));
   }
 
-  return withClientValidated(
+  // s93-m11: the review-timestamp migration's warnings reach every answer this call gives.
+  const warnings: string[] = [];
+  const result = await withClientValidated(
     (client) => {
       // Fetch the existing decision
       const existing = client.getOne<{
@@ -116,6 +119,26 @@ export async function cmosDecisionsUpdate(
         updateParams.push(newStatus);
       }
 
+      // s93-m11: an explicit status update is a review, even when it leaves the status as it was
+      // (keeping a decision stale on purpose). Stamping it lets every reader, and the first-write
+      // staleness repair, tell a status someone set from one an older CMOS wrote on its own.
+      if (newStatus !== previousStatus || params.status !== undefined) {
+        warnings.push(...(ensureReviewTimestamps(client).warnings ?? []));
+        if (hasReviewColumn(client)) {
+          sets.push('last_reviewed_at = ?');
+          updateParams.push(new Date().toISOString());
+        } else if (newStatus === 'stale') {
+          // Without its stamp an explicit 'stale' looks like the old flagger's, and the repair
+          // would undo it at the next first write.
+          return createError<CmosDecisionsUpdateResult>({
+            code: CMOS_ERROR_CODES.DB_SCHEMA_MISMATCH,
+            message: `Decision #${params.decisionId} was not set to stale: this store cannot record when it was reviewed (no last_reviewed_at column).`,
+            suggestion:
+              'The column is added on the next write that can migrate this store; retry once the migration warning above is resolved.',
+          });
+        }
+      }
+
       if (params.supersededBy !== undefined) {
         sets.push('superseded_by = ?');
         updateParams.push(params.supersededBy);
@@ -130,6 +153,7 @@ export async function cmosDecisionsUpdate(
           message: 'No changes needed',
         });
       }
+      const reviewOnly = newStatus === previousStatus && params.supersededBy === undefined;
 
       updateParams.push(params.decisionId);
       const updateResult = client.execute(
@@ -151,13 +175,16 @@ export async function cmosDecisionsUpdate(
         previousStatus,
         newStatus,
         supersededBy: finalSupersededBy,
-        message: `Decision #${params.decisionId} updated: status ${previousStatus} → ${newStatus}${
-          params.supersededBy !== undefined ? `, superseded by #${params.supersededBy}` : ''
-        }`,
+        message: reviewOnly
+          ? `Decision #${params.decisionId} kept as ${newStatus}; its review time is recorded`
+          : `Decision #${params.decisionId} updated: status ${previousStatus} → ${newStatus}${
+              params.supersededBy !== undefined ? `, superseded by #${params.supersededBy}` : ''
+            }`,
       });
     },
     { projectRoot: params.projectRoot }
   );
+  return attachWarnings(result, warnings);
 }
 
 export function formatDecisionsUpdateForLLM(
@@ -165,14 +192,15 @@ export function formatDecisionsUpdateForLLM(
 ): string {
   if (!result.success || !result.data) {
     const error = result.error;
-    return [
+    const lines = [
       '❌ Failed to update decision',
       '',
       `Error: ${error?.message ?? 'Unknown error'}`,
-      error?.suggestion ? `Suggestion: ${error.suggestion}` : '',
-    ]
-      .filter(Boolean)
-      .join('\n');
+    ];
+    if (error?.suggestion) lines.push(`Suggestion: ${error.suggestion}`);
+    // s93-m11: a refusal after the review-timestamp migration carries that migration's warnings.
+    appendWarnings(lines, result);
+    return lines.join('\n');
   }
 
   const d = result.data;
@@ -180,7 +208,10 @@ export function formatDecisionsUpdateForLLM(
     '✓ **Decision Updated**',
     '',
     `**Decision**: #${d.decisionId}`,
-    `**Status**: ${d.previousStatus} → ${d.newStatus}`,
+    // s93-m11: an explicit status equal to the current one is recorded as a review.
+    d.previousStatus === d.newStatus
+      ? `**Status**: ${d.newStatus} (kept; its review time is recorded)`
+      : `**Status**: ${d.previousStatus} → ${d.newStatus}`,
   ];
 
   if (d.supersededBy !== null) {
@@ -190,4 +221,10 @@ export function formatDecisionsUpdateForLLM(
   appendWarnings(lines, result);
 
   return lines.join('\n');
+}
+
+/** Whether strategic_decisions carries last_reviewed_at (the ensure above may have failed). */
+function hasReviewColumn(client: Parameters<typeof ensureReviewTimestamps>[0]): boolean {
+  const columns = client.getMany<{ name: string }>("PRAGMA table_info('strategic_decisions')", []);
+  return columns.success && !!columns.data?.some((c) => c.name === 'last_reviewed_at');
 }
