@@ -110,11 +110,14 @@ describe('s86-m01 detached-log gate', () => {
    */
   const ARM_A_MODULES = [
     path.join(CMOS_TOOLS_ROOT, 'checkpoint-backfill.ts'),
+    path.join(CMOS_TOOLS_ROOT, 'checkpoint-registration.ts'),
+    path.join(CMOS_TOOLS_ROOT, 'dashboard-upload.ts'),
+    path.join(CMOS_TOOLS_ROOT, 'dashboard-upload-scheduler.ts'),
     path.join(CMOS_TOOLS_ROOT, 'cmos-db-backfill.ts'),
     path.join(SRC_ROOT, 'intelligence', 'project-graph-registry.ts'),
   ];
 
-  it('ARM A: the three detached-path modules contain zero console usages', () => {
+  it('ARM A: the named detached-path modules contain zero console usages', () => {
     const offenders: string[] = [];
 
     for (const file of ARM_A_MODULES) {
@@ -141,11 +144,10 @@ describe('s86-m01 detached-log gate', () => {
    *
    * MEASURED, not assumed:
    *   - triggerCheckpointBackfill  — the detached checkpoint sync itself.
-   *   - __drainCheckpointBackfill  — s86-m01's test-only drain handle. It returns the parked
-   *     in-flight promise WITHOUT being async, so it matches the same shape. It is safe: it only
-   *     hands back a promise that already exists, and never starts work.
+   *   - __drainCheckpointBackfill is now async: it drains all projects' pending attempts,
+   *     including attempts started while the drain was awaiting an earlier one.
    */
-  const ARM_B_EXPECTED = ['__drainCheckpointBackfill', 'triggerCheckpointBackfill'];
+  const ARM_B_EXPECTED = ['triggerCheckpointBackfill'];
 
   it('ARM B: the exported non-async Promise-returning declarations under src/tools/cmos are exactly the known set', () => {
     const found: string[] = [];
@@ -244,7 +246,8 @@ describe('s86-m01 detached-log gate', () => {
       visit(sf);
     }
 
-    expect(references).toHaveLength(5);
+    // The scheduler adds one import and one awaited call, tracked by its drainable job set.
+    expect(references).toHaveLength(7);
 
     // ASSERTED BY FILE, NOT BY LINE (s86-m04). This assertion pinned `file:line` and false-fired
     // TWICE on edits that never touched a call site — s86-m03 declaring two params on

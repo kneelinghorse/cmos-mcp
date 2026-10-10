@@ -84,6 +84,34 @@ function stubDashboardClient(opts: {
 }
 
 describe('resolveAndPersistOwner', () => {
+  it('reconciles a registered owner repeatedly without dirtying unchanged metadata', async () => {
+    const { tempDir, client } = await makeTempClient();
+    try {
+      const dashboard = stubDashboardClient({
+        username: 'derek',
+        projectsOwner: 'derek',
+        projectsId: 'registered-project',
+        projectsSlug: 'owner-test',
+      });
+      // Seed through the same reconciliation that a first checkpoint performs. The presence of
+      // dashboard_project_id deliberately prevents the owner's early-return path on later calls.
+      await resolveAndPersistOwner(client, dashboard);
+      const changes = () =>
+        client.getOne<{ count: number }>('SELECT total_changes() AS count').data!.count;
+      const before = changes();
+      for (let pass = 0; pass < 2; pass += 1) {
+        const result = await resolveAndPersistOwner(client, dashboard);
+        expect(result.incumbentConfirmed).toBe(true);
+        expect(result.owner).toBe('derek');
+        expect(result.warnings).toBeUndefined();
+      }
+      // Frequent background uploads must not manufacture store writes and dirty a tracked DB.
+      expect(changes()).toBe(before);
+    } finally {
+      cleanup(tempDir, client);
+    }
+  });
+
   it('short-circuits on existing metadata.owner', async () => {
     const { tempDir, client } = await makeTempClient();
     try {

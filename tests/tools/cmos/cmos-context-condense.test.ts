@@ -697,6 +697,7 @@ describe('cmos_context_condense', () => {
           targetSizeKb: 60,
           targetSizePercent: 60,
           targetMet: true,
+          remainingSectionBytes: {},
           sectionsCondensed: [
             {
               section: 'decisions_made',
@@ -748,6 +749,7 @@ describe('cmos_context_condense', () => {
           targetSizeKb: 60,
           targetSizePercent: 60,
           targetMet: true,
+          remainingSectionBytes: {},
           sectionsCondensed: [],
           snapshotId: null,
           strategy: 'conservative',

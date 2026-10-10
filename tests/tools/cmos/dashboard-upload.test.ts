@@ -1,0 +1,118 @@
+// SPDX-License-Identifier: Apache-2.0
+// ABOUTME: Snapshot uploads include committed WAL writes without changing their source store.
+// ABOUTME: Explicit and automatic attempts share durable leases and surface real failures locally.
+
+import Database from 'better-sqlite3';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { createHash } from 'crypto';
+import { ProjectGraphRegistry } from '../../../src/intelligence/project-graph-registry';
+import {
+  readUploadProject,
+  withUploadLease,
+  withUploadSnapshot,
+} from '../../../src/tools/cmos/dashboard-upload';
+
+let root: string;
+let config: string;
+let database: string;
+let graph: ProjectGraphRegistry;
+let writer: Database.Database;
+const digest = (file: string) => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+beforeEach(async () => {
+  root = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-upload-'));
+  config = path.join(root, 'config');
+  fs.mkdirSync(path.join(root, 'cmos', 'db'), { recursive: true });
+  database = path.join(root, 'cmos', 'db', 'cmos.sqlite');
+  writer = new Database(database);
+  writer.pragma('journal_mode = WAL');
+  writer.exec(
+    'CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT); CREATE TABLE witness(value TEXT)'
+  );
+  const add = writer.prepare('INSERT INTO metadata VALUES (?,?)');
+  add.run('project_id', 'upload-test');
+  add.run('project_name', 'Upload Test');
+  add.run('dashboard_registered', 'true');
+  writer.prepare('INSERT INTO witness VALUES (?)').run('committed in WAL');
+  ProjectGraphRegistry.resetInstance();
+  graph = await ProjectGraphRegistry.create({ configDir: config, ephemeralRoots: [] });
+  graph.register({ project_id: 'upload-test', store_path: root, name: 'Upload Test' });
+});
+afterEach(() => {
+  writer.close();
+  ProjectGraphRegistry.resetInstance();
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+it('uploads a consistent WAL-inclusive backup twice and never changes the source bytes', async () => {
+  const before = [digest(database), digest(database + '-wal')];
+  let temp = '';
+  for (let n = 0; n < 2; n++) {
+    await withUploadSnapshot(database, async (file) => {
+      temp = file;
+      expect(file).not.toBe(database);
+      const snapshot = new Database(file, { readonly: true });
+      try {
+        expect(snapshot.prepare('SELECT value FROM witness').pluck().get()).toBe(
+          'committed in WAL'
+        );
+      } finally {
+        snapshot.close();
+      }
+    });
+    expect(fs.existsSync(temp)).toBe(false);
+    expect([digest(database), digest(database + '-wal')]).toEqual(before);
+  }
+});
+
+it('only registered stores qualify for automatic work, without inventing registration', () => {
+  expect(readUploadProject(root)?.registered).toBe(true);
+  writer.prepare("DELETE FROM metadata WHERE key='dashboard_registered'").run();
+  expect(readUploadProject(root)?.registered).toBe(false);
+});
+
+it('a foreign store and NULL registration remain inactive, and later table creation is noticed', () => {
+  writer.exec('DROP TABLE metadata');
+  expect(readUploadProject(root)).toBeNull();
+  writer.exec('CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT)');
+  writer.prepare('INSERT INTO metadata VALUES (?,?)').run('project_id', 'upload-test');
+  writer.prepare('INSERT INTO metadata VALUES (?,?)').run('dashboard_registered', null);
+  expect(readUploadProject(root)?.registered).toBe(false);
+  writer.prepare("UPDATE metadata SET value='true' WHERE key='dashboard_registered'").run();
+  expect(readUploadProject(root)?.registered).toBe(true);
+});
+
+it('an explicit attempt leaves durable debt on failure and reports a capped error', async () => {
+  await withUploadLease(root, true, async () => ({
+    success: false,
+    error: 'denied',
+    blocked: true,
+  }));
+  expect(graph.readUploadState('upload-test')).toMatchObject({
+    blocked: true,
+    lastOutcome: 'failed',
+    lastError: 'denied',
+  });
+  expect(graph.readUploadState('upload-test')?.firstOwedAt).not.toBeNull();
+  let ran = false;
+  await withUploadLease(root, false, async () => {
+    ran = true;
+    return { success: true };
+  });
+  expect(ran).toBe(false);
+  await withUploadLease(root, true, async () => ({ success: true }));
+  expect(graph.readUploadState('upload-test')).toMatchObject({
+    blocked: false,
+    firstOwedAt: null,
+    lastOutcome: 'success',
+  });
+});
+
+it('a racing mark stays owed after a successful snapshot upload', async () => {
+  await withUploadLease(root, true, async () => {
+    graph.markUploadOwed('upload-test');
+    return { success: true };
+  });
+  expect(graph.readUploadState('upload-test')?.firstOwedAt).not.toBeNull();
+});

@@ -21,6 +21,20 @@ beforeEach(() => {
 });
 afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
 
+it.each([null, 'scalar', 42, ['array']])(
+  'preserves SDK v2 structured content %p without assuming an object',
+  async (payload) => {
+    const result = { structuredContent: payload };
+    expect(
+      await withMcpTelemetry(
+        { name: 'cmos_review', args: { projectRoot: project }, mode: 'read', client: null, env },
+        async () => result
+      )
+    ).toBe(result);
+    expect(readTelemetry(targetForStore(dbPath)!, env)).toHaveLength(1);
+  }
+);
+
 it('records one successful read, including returned typed IDs, without changing the store', async () => {
   const before = fs.readFileSync(dbPath);
   const result = { structuredContent: { success: true, data: { id: 7 } }, isError: false };

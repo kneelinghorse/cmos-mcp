@@ -1,3 +1,6 @@
+// ABOUTME: Condenses stored context while reporting the remaining UTF-8 size of every top-level value.
+// ABOUTME: Dry runs and unchanged results expose the same size report without modifying stored content.
+
 /**
  * cmos_context_condense Tool
  *
@@ -13,6 +16,7 @@
  * @module tools/cmos/cmos-context-condense
  */
 
+import { missionCompletedSql } from './terminal-status';
 import { z } from 'zod';
 import * as crypto from 'crypto';
 import { withClientValidated, type CmosDatabaseClient } from './client';
@@ -62,6 +66,9 @@ export interface CmosContextCondenseResult {
 
   /** Per-section breakdown */
   sectionsCondensed: SectionCondensation[];
+
+  /** UTF-8 bytes of each top-level JSON value; excludes key names and root punctuation. */
+  remainingSectionBytes: Record<string, number>;
 
   /** Snapshot ID from auto-snapshot (null in dryRun) */
   snapshotId: number | null;
@@ -356,6 +363,12 @@ export async function cmosContextCondense(
         return serializationError;
       }
 
+      const remainingSectionBytes = Object.fromEntries(
+        Object.entries(content).map(([key, value]) => [
+          key,
+          Buffer.byteLength(JSON.stringify(value), 'utf8'),
+        ])
+      );
       const afterSize = calculateContextSizeMetrics(updatedSerialized, sizeSettings);
       const targetMet = afterSize.sizeKb <= targetSizeKb;
       const reductionPercent =
@@ -382,6 +395,7 @@ export async function cmosContextCondense(
             targetSizePercent,
             targetMet,
             sectionsCondensed,
+            remainingSectionBytes,
             snapshotId: null,
             strategy,
             dryRun: true,
@@ -412,6 +426,7 @@ export async function cmosContextCondense(
             targetSizePercent,
             targetMet: beforeSize.sizeKb <= targetSizeKb,
             sectionsCondensed: [],
+            remainingSectionBytes,
             snapshotId: null,
             strategy,
             dryRun: false,
@@ -454,6 +469,7 @@ export async function cmosContextCondense(
           targetSizePercent,
           targetMet,
           sectionsCondensed,
+          remainingSectionBytes,
           snapshotId,
           strategy,
           dryRun: false,
@@ -530,13 +546,13 @@ function pruneSessionHistory(
 
   const history = wm['session_history'] as unknown[];
   if (history.length > AUTO_SESSION_HISTORY_LIMIT) {
-    const before = JSON.stringify(history).length;
+    const before = Buffer.byteLength(JSON.stringify(history), 'utf8');
     const preview = history
       .slice(0, history.length - AUTO_SESSION_HISTORY_LIMIT)
       .map((entry) => truncatePreview(describeSessionHistoryEntry(entry)))
       .slice(0, 3);
     wm['session_history'] = history.slice(-AUTO_SESSION_HISTORY_LIMIT);
-    const after = JSON.stringify(wm['session_history']).length;
+    const after = Buffer.byteLength(JSON.stringify(wm['session_history']), 'utf8');
     sections.push({
       section: 'working_memory.session_history',
       beforeBytes: before,
@@ -556,7 +572,7 @@ function removeStaleNextSteps(
 ): void {
   if (!Array.isArray(content['next_steps'])) return;
 
-  const before = JSON.stringify(content['next_steps']).length;
+  const before = Buffer.byteLength(JSON.stringify(content['next_steps']), 'utf8');
   const steps = content['next_steps'] as unknown[];
   content['next_steps'] = steps.filter((step) => {
     const str = typeof step === 'string' ? step : null;
@@ -567,7 +583,7 @@ function removeStaleNextSteps(
     }
     return true;
   });
-  const after = JSON.stringify(content['next_steps']).length;
+  const after = Buffer.byteLength(JSON.stringify(content['next_steps']), 'utf8');
   if (before !== after) {
     sections.push({
       section: 'next_steps',
@@ -587,7 +603,7 @@ function removeStaleNextStepsFromArray(
 ): void {
   if (!Array.isArray(parent[key])) return;
 
-  const before = JSON.stringify(parent[key]).length;
+  const before = Buffer.byteLength(JSON.stringify(parent[key]), 'utf8');
   const steps = parent[key] as unknown[];
   parent[key] = steps.filter((step) => {
     const str = typeof step === 'string' ? step : null;
@@ -597,7 +613,7 @@ function removeStaleNextStepsFromArray(
     }
     return true;
   });
-  const after = JSON.stringify(parent[key]).length;
+  const after = Buffer.byteLength(JSON.stringify(parent[key]), 'utf8');
   if (before !== after) {
     sections.push({
       section: sectionLabel,
@@ -610,7 +626,7 @@ function removeStaleNextStepsFromArray(
 
 function getCompletedMissionIds(client: CmosDatabaseClient): Set<string> {
   const result = client.getMany<{ id: string }>(
-    `SELECT id FROM missions WHERE status = 'Completed'`,
+    `SELECT id FROM missions WHERE ${missionCompletedSql('status')}`,
     []
   );
   return new Set(result.success && result.data ? result.data.map((r) => r.id) : []);
@@ -750,9 +766,9 @@ function limitArraySection(
   const arr = content[key] as unknown[];
   if (arr.length <= maxEntries) return;
 
-  const before = JSON.stringify(arr).length;
+  const before = Buffer.byteLength(JSON.stringify(arr), 'utf8');
   content[key] = arr.slice(-maxEntries);
-  const after = JSON.stringify(content[key]).length;
+  const after = Buffer.byteLength(JSON.stringify(content[key]), 'utf8');
   sections.push({
     section: key,
     beforeBytes: before,
@@ -791,7 +807,7 @@ function removeTableBackedConstraints(
 
   // If the table has constraints, we can safely remove the JSON copy
   if (tableCount > 0) {
-    const before = JSON.stringify(arr).length;
+    const before = Buffer.byteLength(JSON.stringify(arr), 'utf8');
     content['constraints'] = [];
     const after = 2; // '[]'
     sections.push({
@@ -912,6 +928,12 @@ export function formatContextCondenseForLLM(
     }
   }
 
+  lines.push(
+    '',
+    '**Remaining sections** (JSON value UTF-8 bytes; excludes keys and root punctuation):'
+  );
+  for (const [section, bytes] of Object.entries(data.remainingSectionBytes ?? {}))
+    lines.push(`  - ${section}: ${bytes} bytes`);
   lines.push('');
   lines.push(data.message);
 

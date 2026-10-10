@@ -11,6 +11,8 @@
  * @module tools/cmos/cmos-agent-onboard
  */
 
+import { prepareSpinOutRead } from './spin-out-read';
+import { missionCompletedSql } from './terminal-status';
 import { z } from 'zod';
 import * as fs from 'fs';
 import path from 'path';
@@ -1160,7 +1162,7 @@ function getPendingMissions(
     ? `SELECT id, name, status, sprint_id, ${projExpr}
          FROM missions
         WHERE status IN ('In Progress', 'Current')
-           OR (status = 'Queued' AND sprint_id = ?)
+           OR (status = 'Queued' AND (sprint_id = ? OR sprint_id IS NULL))
         ORDER BY CASE status
           WHEN 'In Progress' THEN 0
           WHEN 'Current' THEN 1
@@ -1246,13 +1248,14 @@ function getRecentDecisions(client: CmosDatabaseClient): RecentDecisionSummary[]
     columns.has('status') ? "COALESCE(status, 'active') <> 'superseded'" : '1=1',
     columns.has('superseded_by') ? 'superseded_by IS NULL' : '1=1',
   ].join(' AND ');
+  const visible = prepareSpinOutRead(client).predicate('decision', 'strategic_decisions.id');
   const result = client.getMany<StrategicDecisionRow & { id: number }>(
     `SELECT id, decision_text, project_domain, created_at, ${projExpr} AS project_id
        FROM strategic_decisions
-      WHERE ${eligible}
+      WHERE ${eligible} AND ${visible.sql}
       ORDER BY julianday(created_at) DESC
       LIMIT 10`,
-    []
+    visible.params
   );
 
   if (!result.success || !result.data) {
@@ -1361,7 +1364,7 @@ function loadCompletedMissionIds(client: CmosDatabaseClient): Set<string> {
   const result = client.getMany<{ id: string }>(
     `SELECT id
        FROM missions
-      WHERE status = 'Completed'`,
+      WHERE ${missionCompletedSql('status')}`,
     []
   );
 
@@ -1372,7 +1375,7 @@ function loadCompletedSprintIds(client: CmosDatabaseClient): Set<string> {
   const result = client.getMany<{ id: string }>(
     `SELECT id
        FROM sprints
-      WHERE status = 'Completed'`,
+      WHERE ${missionCompletedSql('status')}`,
     []
   );
 

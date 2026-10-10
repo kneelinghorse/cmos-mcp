@@ -9,7 +9,7 @@ import {
   getServerVersion,
 } from '../src/index';
 import * as fs from 'fs';
-import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
+import { ProtocolError, ProtocolErrorCode } from '@modelcontextprotocol/server';
 
 const DEPRECATED_TOOL_NAMES = [
   'get_available_domains',
@@ -105,16 +105,16 @@ describe('Mission Protocol entry point', () => {
 
     test.each(DEPRECATED_TOOL_NAMES)('rejects deprecated public tool %s', async (toolName) => {
       await expect(executeMissionProtocolTool(toolName, {}, context)).rejects.toMatchObject({
-        code: ErrorCode.MethodNotFound,
+        code: ProtocolErrorCode.MethodNotFound,
       });
     });
 
     test('throws MCP error for unknown tool names', async () => {
       await expect(executeMissionProtocolTool('unknown_tool', {}, context)).rejects.toMatchObject({
-        code: ErrorCode.MethodNotFound,
+        code: ProtocolErrorCode.MethodNotFound,
       });
       await expect(executeMissionProtocolTool('unknown_tool', {}, context)).rejects.toBeInstanceOf(
-        McpError
+        ProtocolError
       );
     });
 

@@ -31,7 +31,7 @@ interface Observation {
   readonly env?: NodeJS.ProcessEnv;
 }
 
-type McpResult = { isError?: boolean; structuredContent?: Record<string, unknown> };
+type McpResult = { isError?: boolean; structuredContent?: unknown };
 
 /** Never changes the tool's result or exception, including when observation itself fails. */
 export async function withMcpTelemetry<T extends McpResult>(
@@ -71,7 +71,11 @@ export async function withMcpTelemetry<T extends McpResult>(
           projectId: 'unattributed',
           dbPath: path.join(cmosConfigDir(env), 'unattributed.sqlite'),
         };
-        const structured = result?.structuredContent;
+        const payload = result?.structuredContent;
+        const structured =
+          payload !== null && typeof payload === 'object' && !Array.isArray(payload)
+            ? (payload as Record<string, unknown>)
+            : undefined;
         const ok = !failed && result?.isError !== true && structured?.success !== false;
         const error = structured?.error as { code?: string } | undefined;
         appendTelemetry(

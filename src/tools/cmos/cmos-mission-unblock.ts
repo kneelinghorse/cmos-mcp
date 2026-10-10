@@ -7,6 +7,7 @@
  * @module tools/cmos/cmos-mission-unblock
  */
 
+import { normalizeMissionStatus } from './terminal-status';
 import { z } from 'zod';
 import { withClientValidated } from './client';
 import type { CmosToolResult, Mission, MissionStatus } from './types';
@@ -186,7 +187,7 @@ export async function cmosMissionUnblock(
       }
 
       const mission = missionResult.data;
-      const currentStatus = mission.status;
+      const currentStatus = normalizeMissionStatus(mission.status);
 
       // Check if mission is blocked
       if (currentStatus !== 'Blocked') {

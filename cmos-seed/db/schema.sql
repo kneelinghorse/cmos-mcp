@@ -211,8 +211,13 @@ CREATE TABLE IF NOT EXISTS strategic_decisions (
   schema_version INTEGER NOT NULL DEFAULT 1,
   -- Author identity (nullable; bound when the multi-user layer lands).
   author_user_id TEXT,
-  -- How a decision recorded from a draft was approved (NULL for a direct record).
-  approval_mode TEXT,     -- approved | agent-judged | agent-attested
+  -- Decision reasoning and effects; omitted legacy fields remain NULL.
+  context_text TEXT,
+  alternatives TEXT,     -- JSON array of strings
+  consequences TEXT,
+  deciders TEXT,         -- JSON array of strings
+  -- Approval or declared execution mode (NULL means not recorded).
+  approval_mode TEXT,     -- approved | agent-judged | agent-attested | autonomous
   approval_draft TEXT,    -- the draft it came from (P<n>)
   approval_words TEXT,    -- the operator's message, for approved and agent-judged
   FOREIGN KEY (context_id) REFERENCES contexts(id) ON DELETE CASCADE,
@@ -266,25 +271,44 @@ CREATE INDEX IF NOT EXISTS idx_learnings_category ON learnings (category);
 CREATE INDEX IF NOT EXISTS idx_learnings_mission ON learnings (mission_id);
 CREATE INDEX IF NOT EXISTS idx_learnings_hash ON learnings (content_hash);
 
+-- Derived local citation links; the write migration backfills and stamps its version.
+CREATE TABLE IF NOT EXISTS record_links (
+  from_kind TEXT NOT NULL CHECK (from_kind IN ('decision', 'learning')),
+  from_id INTEGER NOT NULL CHECK (from_id > 0),
+  to_kind TEXT NOT NULL CHECK (to_kind IN ('decision', 'learning')),
+  to_id INTEGER NOT NULL CHECK (to_id > 0),
+  resolution TEXT NOT NULL CHECK (resolution IN ('typed', 'bare')),
+  PRIMARY KEY (from_kind, from_id, to_kind, to_id)
+);
+CREATE INDEX IF NOT EXISTS idx_record_links_target ON record_links (to_kind, to_id);
+
 -- FTS5 full-text search index for strategic decisions
 CREATE VIRTUAL TABLE IF NOT EXISTS decisions_fts USING fts5(
   decision_text,
+  context_text,
+  alternatives,
+  consequences,
+  deciders,
   content='strategic_decisions',
   content_rowid='id'
 );
 
 -- Auto-sync triggers for FTS5 index
 CREATE TRIGGER IF NOT EXISTS decisions_fts_insert AFTER INSERT ON strategic_decisions BEGIN
-  INSERT INTO decisions_fts(rowid, decision_text) VALUES (new.id, new.decision_text);
+  INSERT INTO decisions_fts(rowid, decision_text, context_text, alternatives, consequences, deciders)
+  VALUES (new.id, new.decision_text, new.context_text, new.alternatives, new.consequences, new.deciders);
 END;
 
 CREATE TRIGGER IF NOT EXISTS decisions_fts_delete AFTER DELETE ON strategic_decisions BEGIN
-  INSERT INTO decisions_fts(decisions_fts, rowid, decision_text) VALUES('delete', old.id, old.decision_text);
+  INSERT INTO decisions_fts(decisions_fts, rowid, decision_text, context_text, alternatives, consequences, deciders)
+  VALUES('delete', old.id, old.decision_text, old.context_text, old.alternatives, old.consequences, old.deciders);
 END;
 
-CREATE TRIGGER IF NOT EXISTS decisions_fts_update AFTER UPDATE OF decision_text ON strategic_decisions BEGIN
-  INSERT INTO decisions_fts(decisions_fts, rowid, decision_text) VALUES('delete', old.id, old.decision_text);
-  INSERT INTO decisions_fts(rowid, decision_text) VALUES (new.id, new.decision_text);
+CREATE TRIGGER IF NOT EXISTS decisions_fts_update AFTER UPDATE OF decision_text, context_text, alternatives, consequences, deciders ON strategic_decisions BEGIN
+  INSERT INTO decisions_fts(decisions_fts, rowid, decision_text, context_text, alternatives, consequences, deciders)
+  VALUES('delete', old.id, old.decision_text, old.context_text, old.alternatives, old.consequences, old.deciders);
+  INSERT INTO decisions_fts(rowid, decision_text, context_text, alternatives, consequences, deciders)
+  VALUES (new.id, new.decision_text, new.context_text, new.alternatives, new.consequences, new.deciders);
 END;
 
 -- Persistent sync event queue for WAL-backed event delivery
@@ -440,7 +464,7 @@ SELECT
   s.start_date,
   s.end_date,
   COUNT(CASE WHEN m.id IS NOT NULL AND UPPER(COALESCE(m.status, '')) NOT IN ('DEFERRED', 'DROPPED') THEN 1 END) AS total_missions,
-  COUNT(CASE WHEN m.status = 'Completed' THEN 1 END) AS completed_missions,
+  COUNT(CASE WHEN UPPER(m.status) IN ('COMPLETED', 'COMPLETE') THEN 1 END) AS completed_missions,
   COUNT(CASE WHEN m.status = 'Blocked' THEN 1 END) AS blocked_missions,
   COUNT(CASE WHEN m.status IN ('Current', 'In Progress') THEN 1 END) AS active_missions,
   COUNT(CASE WHEN m.id IS NOT NULL AND UPPER(COALESCE(m.status, '')) IN ('DEFERRED', 'DROPPED') THEN 1 END) AS parked_missions,

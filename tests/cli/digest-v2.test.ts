@@ -333,3 +333,40 @@ describe('pending drafts in the digest', () => {
     expect(full(drafts).text).toBe(full(drafts).text);
   });
 });
+
+describe('s94-m11 — a compact draft remedy carries its selected project', () => {
+  it.each(['explicit', 'mcp-roots', 'cwd', 'server-project-root', 'registry-default'] as const)(
+    'formats the %s root on the fallback without growing past the digest cap',
+    async (resolvedBy) => {
+      const model = await readDigestV2(root, env);
+      const text = renderDigestV2(
+        {
+          ...model,
+          // A label that consumes the draft row's allowance forces the documented count fallback.
+          drafts: [{ id: 1, kind: 'd'.repeat(400), text: 'Retain the selected project.' }],
+        },
+        { projectRoot: root, resolvedBy }
+      ).text;
+      expect(text).toContain(
+        resolvedBy === 'cwd'
+          ? '`cmos-mcp drafts list`'
+          : `cmos-mcp drafts list --project-root '${root}'`
+      );
+      expect(text.length).toBeLessThanOrEqual(4000);
+    }
+  );
+});
+
+it('ranks rules from decision reasoning citations without counting foreign decision fields', async () => {
+  learning(1, 'Recent uncited rule.', 1, 1);
+  learning(2, 'Older cited rule.', 1, 30);
+  decision(1, 'A concise headline.', 20);
+  write(
+    'UPDATE strategic_decisions SET context_text=? WHERE id=1',
+    'Use learning #2 and learning #2.'
+  );
+  decision(2, 'Foreign headline.', 20, 'active', 'foreign');
+  write('UPDATE strategic_decisions SET consequences=? WHERE id=2', 'Use learning #1.');
+  const model = await readDigestV2(root, env);
+  expect(model.rules.map((row) => row.id)).toEqual(['l:2', 'l:1']);
+});

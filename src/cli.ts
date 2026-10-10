@@ -284,6 +284,7 @@ const USAGE =
   '       [--harness claude|codex|cursor|devin|copilot|vscode]\n' +
   '  review --format=context        the record digest, for an agent\n' +
   '  relevant --query <text>        decisions and learnings that match, as previews\n' +
+  '  decisions record --session-id <id> --content <headline> [--context <why>] [--mode autonomous]\n' +
   '  capture --session-id <id> --category <c> --content <text>\n' +
   '  feedback --content <text> [--dry-run] [--format json]\n' +
   '                                 file friction now, without a session or mission\n' +
@@ -291,12 +292,14 @@ const USAGE =
   '  ambient [on|off|digest-off]    how present CMOS is in this project\n' +
   '  init [--level ledger|planner|builder] [--no-hooks] [--name <n>]\n' +
   '                                 start a CMOS record here: AGENTS.md, CLAUDE.md and the store\n' +
+  '  spin-out --from <root> --to <folder> (--sprint <id>|--missions <ids>) [--apply]\n' +
+  '                                 preview or copy selected work into its own project\n' +
   '  profile show                   the operator profile every project reads\n' +
   '  stats [--export]               local usage measurements, as counts\n' +
   '  drafts list [--all] [--format json]\n' +
   '                                 drafted records awaiting the operator\n' +
   '  serve                          run the MCP server (the default with no verb)\n' +
-  'Every verb takes --project-root <dir>; otherwise the project encloses the working directory.\n';
+  'Other verbs take --project-root <dir>; spin-out requires --from and --to explicitly.\n';
 
 /**
  * Run a CLI command line (everything after `cmos-mcp`). Returns the exit code. An unknown verb is a
@@ -306,6 +309,7 @@ const USAGE =
 export async function runCli(argv: readonly string[], io: CliIo = processIo()): Promise<number> {
   const [verb, ...rest] = argv;
   if (verb === 'hook') return runHook(rest, io);
+  if (verb === 'spin-out') return (await import('./cli/spin-out')).runSpinOut(rest, io);
   const telemetry = new CliTelemetry(io, verb ?? 'unknown', rest);
   let code = 1;
   try {
@@ -342,6 +346,7 @@ async function dispatchCli(
       return (await import('./cli/drafts')).runDrafts(rest, io);
     case 'review':
     case 'relevant':
+    case 'decisions':
     case 'capture':
     case 'session':
     case 'ambient':

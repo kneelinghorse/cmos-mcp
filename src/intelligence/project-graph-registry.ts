@@ -44,6 +44,7 @@ import { ensureDir } from '../utils/fs';
 import { isReadOnlyAgentSession } from '../tools/cmos/read-only-agent-guard';
 import { currentToolCallActionMode } from '../tools/cmos/tool-call-context';
 import { defaultEphemeralRoots, isEphemeralStorePath } from './resolution-policy';
+import * as uploads from './project-upload-state';
 
 /**
  * s86-m01 — write the one diagnostic this module emits (the registration-collision
@@ -97,8 +98,10 @@ export const CMOS_CONFIG_DIR_ENV = 'CMOS_CONFIG_DIR';
  * (see {@link ProjectGraphRegistry.ensureLastSyncedColumn}) — safe when older 2.1.0
  * sibling dists share the WAL file (the column is nullable, so their column-listed
  * register() INSERT that omits it still works).
+ * v3 (s94-m10): additive upload debt, lease and outcome columns. New non-null counters have
+ * defaults, so older processes' column-listed inserts remain compatible.
  */
-export const PROJECT_GRAPH_SCHEMA_VERSION = 2;
+export const PROJECT_GRAPH_SCHEMA_VERSION = 3;
 
 /** Busy timeout (ms) so concurrent writers from sibling MCP processes wait. */
 const BUSY_TIMEOUT_MS = 5000;
@@ -304,6 +307,7 @@ export class ProjectGraphRegistry {
     // v1→v2 migration for registries created before s81-m03 (the CREATE above no-ops on
     // an existing table, so a v1 registry would never gain the column without this).
     this.ensureLastSyncedColumn();
+    uploads.ensureUploadColumns(db);
   }
 
   /**
@@ -523,6 +527,36 @@ export class ProjectGraphRegistry {
       .prepare('UPDATE projects SET last_synced_at = ? WHERE project_id = ?')
       .run(syncedAt, projectId);
     return info.changes > 0;
+  }
+
+  /** Dashboard state lives only in this per-user registry, never the project store. */
+  readUploadState(projectId: string): uploads.UploadState | null {
+    return uploads.readUploadState(this.connection(), projectId);
+  }
+
+  markUploadOwed(projectId: string, now: number = this.now()): boolean {
+    return uploads.markUploadOwed(this.connection(), projectId, now);
+  }
+
+  claimUpload(
+    projectId: string,
+    explicit = false,
+    now: number = this.now()
+  ): uploads.UploadLease | null {
+    return uploads.claimUpload(this.connection(), projectId, now, explicit);
+  }
+
+  renewUploadLease(projectId: string, token: string, now: number = this.now()): boolean {
+    return uploads.renewUploadLease(this.connection(), projectId, token, now);
+  }
+
+  finishUpload(
+    projectId: string,
+    lease: uploads.UploadLease,
+    outcome: uploads.UploadOutcome,
+    now: number = this.now()
+  ): boolean {
+    return uploads.finishUpload(this.connection(), projectId, lease, now, outcome);
   }
 
   /**

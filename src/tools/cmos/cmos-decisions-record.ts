@@ -2,14 +2,23 @@
 // ABOUTME: cmos_decisions(action="record") — write a decision with no session required, and supersede
 // ABOUTME: the rows it corrects in the same transaction so the pointer exists when the correction does.
 
+import * as path from 'path';
+import { formatCliRemedy } from '../../utils/cli-remedy';
+import {
+  prepareDecisionFields,
+  storedDecisionFields,
+  type DecisionFieldsParams,
+} from './decision-fields';
+
 import { withClientAsync } from './client';
+import { prepareRecordLinkWrite, requireRecordLinks } from './record-link-write';
 import { createError, createSuccess, CmosErrors, CMOS_ERROR_CODES } from './errors';
 import { sanitizeContentField, type SanitizedField } from '../../intelligence/content-sanitizer';
 import { ensureMissionIdColumn } from './cmos-mission-complete';
 import { resolveOpenSprintIdForWrite } from './current-sprint';
 import {
   ensureAuthorNamespaceColumns,
-  ensureDecisionApprovalColumns,
+  ensureDecisionShapeColumns,
   ensureFirehoseEventColumns,
   ensureImplicitSessionColumns,
 } from './schema-migrations';
@@ -54,7 +63,7 @@ import {
  * from the same process returns the row it already wrote instead of writing a second one.
  */
 
-export interface CmosDecisionsRecordParams {
+export interface CmosDecisionsRecordParams extends DecisionFieldsParams {
   content: string;
   /** s93-m06: the draft (P<n>) the operator answered; its kind decides what is written. */
   fromDraft?: string;
@@ -115,13 +124,16 @@ export async function cmosDecisionsRecord(
 export async function cmosDecisionsRecord(
   params: CmosDecisionsRecordParams
 ): Promise<CmosToolResult<CmosDecisionsRecordResult | CmosDraftRecordResult>> {
+  const prepared = prepareDecisionFields(params);
+  if (!prepared.success || !prepared.data) return createError(prepared.error!);
+  const fields = prepared.data.fields;
   // A wrong-typed `content` is refused by the router's boundary guard (param-type-guard.ts).
   const rawContent = (params.content ?? '').trim();
   if (rawContent === '') {
     return createError(CmosErrors.missingParameter('content'));
   }
 
-  const sanitizedFields: SanitizedField[] = [];
+  const sanitizedFields: SanitizedField[] = [...prepared.data.sanitizedFields];
   const sanitized = sanitizeContentField(rawContent);
   if (sanitized.wasModified) {
     sanitizedFields.push({ field: 'content', reason: sanitized.reason ?? '' });
@@ -164,8 +176,16 @@ export async function cmosDecisionsRecord(
 
   // s92-m03: the store this call wrote to, for its once-per-store reconcile after the connection.
   let storePath: string | null = null;
-  const result = await withClientAsync(
+  const result = await withClientAsync<CmosDecisionsRecordResult>(
     async (client) => {
+      const shape = ensureDecisionShapeColumns(client);
+      warnings.push(...(shape.warnings ?? []));
+      if (!shape.ready)
+        return createError<CmosDecisionsRecordResult>({
+          code: CMOS_ERROR_CODES.DB_QUERY_FAILED,
+          message: 'Decision schema migration failed; no decision was recorded.',
+          suggestion: 'Resolve the reported schema or lock problem, then retry this record.',
+        });
       storePath = client.path;
       // Sprint resolution, in the order the module docblock publishes.
       let sprintId: string | null;
@@ -193,8 +213,8 @@ export async function cmosDecisionsRecord(
       }
       if (sprintId === null) {
         warnings.push(
-          'Recorded with sprint_id NULL: no missionId or sprintId was given and there is no open ' +
-            'sprint to tag. Pass missionId or sprintId to tag it.'
+          'Recorded with sprint_id NULL (unscheduled); mission attribution is retained when supplied. ' +
+            'Assign a sprint only if scheduling is intended.'
         );
       }
 
@@ -231,8 +251,10 @@ export async function cmosDecisionsRecord(
       // Migrations that toggle foreign_keys are no-ops inside a transaction: run them first.
       warnings.push(...(ensureFirehoseEventColumns(client).warnings ?? []));
       warnings.push(...(ensureAuthorNamespaceColumns(client).warnings ?? []));
-      if (draft) warnings.push(...(ensureDecisionApprovalColumns(client).warnings ?? []));
+
       // s93-m06 (B12): a direct record inside the operator's turn answers the drafts it covers.
+      const linkReady = prepareRecordLinkWrite(client, warnings);
+      if (!linkReady.success) return createError<CmosDecisionsRecordResult>(linkReady.error!);
       const direct = draft ? null : directRecordAnswers(client, content, process.env, Date.now());
 
       const existingId = findExistingDecisionId(client, content, authorSessionId);
@@ -246,6 +268,43 @@ export async function cmosDecisionsRecord(
         });
       }
 
+      if (!draft && content.length > 600)
+        warnings.push(
+          `Decision headline is ${content.length} UTF-16 units (budget 600). Split it, move reasons and effects into context/consequences, or cite evidence for supporting detail. To change an existing decision, supersede it.`
+        );
+      if (existingId !== undefined) {
+        const supplied = storedDecisionFields(fields);
+        const names = Object.keys(supplied);
+        if (names.length) {
+          const stored = client.getOne<Record<string, unknown>>(
+            `SELECT ${names.join(', ')} FROM strategic_decisions WHERE id = ?`,
+            [existingId]
+          );
+          if (!stored.success || !stored.data)
+            return createError(
+              stored.error ?? {
+                code: CMOS_ERROR_CODES.DB_QUERY_FAILED,
+                message: 'Could not compare the existing decision fields.',
+                suggestion: 'Retry after resolving the database error.',
+              }
+            );
+          const changed = names.filter((name) => {
+            let original = stored.data![name];
+            if ((name === 'alternatives' || name === 'deciders') && typeof original === 'string') {
+              try {
+                original = JSON.stringify(JSON.parse(original));
+              } catch {
+                /* Malformed legacy data differs from a supplied valid array. */
+              }
+            }
+            return original !== supplied[name];
+          });
+          if (changed.length)
+            warnings.push(
+              `Decision #${existingId} already exists; changed fields ${changed.join(', ')} were not written. Record a superseding decision to change its reasoning or mode.`
+            );
+        }
+      }
       const now = new Date().toISOString();
       let draftRaced = false;
       const committed = client.transaction(() => {
@@ -255,6 +314,7 @@ export async function cmosDecisionsRecord(
             client,
             {
               content,
+              ...fields,
               now,
               sprintId,
               authorSessionId,
@@ -282,10 +342,13 @@ export async function cmosDecisionsRecord(
               throw new RecordRollback('proposals.approve');
             }
           }
-        } else if (draft) {
-          // Already recorded directly with this text (the plan critic, N2): the draft is answered
-          // by that row, which keeps no approval it never had.
-          markAnswered(clientRunner(client), [draft.draft.id], `d:${decisionId}`, now);
+        } else {
+          requireRecordLinks(client, 'decision', decisionId);
+          if (draft) {
+            // Already recorded directly with this text (the plan critic, N2): the draft is answered
+            // by that row, which keeps no approval it never had.
+            markAnswered(clientRunner(client), [draft.draft.id], `d:${decisionId}`, now);
+          }
         }
         if (direct?.answered.length) {
           markAnswered(clientRunner(client), direct.answered, `d:${decisionId}`, now);
@@ -298,6 +361,7 @@ export async function cmosDecisionsRecord(
           if (!checkWrite(updated, writeSink, `strategic_decisions.supersede#${id}`)) {
             throw new RecordRollback(`strategic_decisions.supersede#${id}`);
           }
+          requireRecordLinks(client, 'decision', id);
         }
         return decisionId;
       });
@@ -306,7 +370,7 @@ export async function cmosDecisionsRecord(
         return createError<CmosDecisionsRecordResult>({
           code: CMOS_ERROR_CODES.DRAFT_NOT_PENDING,
           message: `Draft ${draft.label} was answered by another call first; nothing was recorded.`,
-          suggestion: 'Read the drafts with `cmos-mcp drafts list` before recording again.',
+          suggestion: `Read the drafts with ${formatCliRemedy('drafts list', { projectRoot: path.resolve(client.path, '../../..') })} before recording again.`,
         });
       }
       if (!committed.success || committed.data === undefined) {
@@ -315,6 +379,8 @@ export async function cmosDecisionsRecord(
           message:
             'The decision was not recorded and no supersedes pointer was written; the ' +
             `transaction rolled back (${writeSink.failures.map((f) => `${f.op}: ${f.message}`).join('; ') || committed.error?.message || 'unknown'}).`,
+          suggestion:
+            'Resolve the reported database or citation-link error, then retry the record.',
         });
       }
 
@@ -347,7 +413,12 @@ export async function cmosDecisionsRecord(
 
       if (existingId === undefined) {
         // s92-m04: embedding only; the automatic supersession offer is retired.
-        await followDecisionInsert(client, content, decisionId, warnings);
+        await followDecisionInsert(
+          client,
+          { decision_text: content, ...storedDecisionFields(prepared.data!.fields) },
+          decisionId,
+          warnings
+        );
       }
 
       if (cited.cleaned.length > 0) {

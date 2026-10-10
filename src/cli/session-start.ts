@@ -6,6 +6,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
+import { cliCommand, formatCliRemedy, type CliRemedyTarget } from '../utils/cli-remedy';
 import type { HookDelivery, HookVerbContext } from '../cli';
 import { isSameDirectory } from '../intelligence/resolution-policy';
 import { isDeclined, linkHarness } from '../tools/cmos/harness-session';
@@ -16,23 +17,17 @@ import { preparedRenderedContext } from './telemetry';
 import { processBusyTimeout } from '../tools/cmos/sqlite-busy';
 import { assertStoreReadable, hookStore, resolutionDir } from './core';
 
-/**
- * The command that runs this CLI, as the user's shell would type it: `cmos-mcp` when that is how
- * it was started (a global install or a PATH shim), else node and the bin's path (a plugin's
- * private install, a checkout), so the remedy works however the hook reached it.
- */
-export function cliCommand(argv: readonly string[] = process.argv): string {
-  const script = argv[1] ?? '';
-  if (path.basename(script) === 'cmos-mcp') return 'cmos-mcp';
-  const quote = (text: string): string => (/^[\w@%+=:,./-]+$/.test(text) ? text : `"${text}"`);
-  return `${quote(argv[0] ?? 'node')} ${quote(script)}`;
-}
+export { cliCommand } from '../utils/cli-remedy';
 
 /** The one line offered in a git repository that has no CMOS record. */
-export function initOffer(command: string = cliCommand(), portable = false): string {
+export function initOffer(
+  command: string = cliCommand(),
+  portable = false,
+  target: CliRemedyTarget = { projectRoot: process.cwd(), resolvedBy: 'cwd' }
+): string {
   return (
     'No CMOS record in this repository. If the user wants decisions, learnings and next steps ' +
-    `kept across sessions, ${portable ? `run \`${command} init\` with their agreement to start one` : '/cmos:init starts one'}; if they decline, run \`${command} ambient off\` ` +
+    `kept across sessions, ${portable ? `run ${formatCliRemedy('init', target, command)} with their agreement to start one` : '/cmos:init starts one'}; if they decline, run ${formatCliRemedy('ambient off', target, command)} ` +
     'here and this offer stops.'
   );
 }
@@ -73,7 +68,11 @@ export async function run(ctx: HookVerbContext): Promise<string | HookDelivery |
     if (resolution.kind !== 'none' || resolution.contextless) return null;
     const repo = gitWorkTreeRoot(resolution.workingDir);
     return repo && !isDeclined(repo, io.env)
-      ? initOffer(undefined, Boolean(ctx.harness && ctx.harness !== 'claude'))
+      ? initOffer(undefined, Boolean(ctx.harness && ctx.harness !== 'claude'), {
+          projectRoot: repo,
+          // A hook's folder may come from its payload or environment, outside the shell cwd.
+          resolvedBy: 'explicit',
+        })
       : null;
   }
   // s93-m06: a session start counts toward a draft's expiry, outside the store, before any digest
@@ -84,7 +83,7 @@ export async function run(ctx: HookVerbContext): Promise<string | HookDelivery |
   assertStoreReadable(store.dbPath, processBusyTimeout() ?? 250);
   const text = await (
     await import('./digest')
-  ).buildDigest(store.projectRoot, io, ctx.deadlineAtMs);
+  ).buildDigest(store.projectRoot, io, ctx.deadlineAtMs, 'explicit');
   const context = preparedRenderedContext(io);
   return {
     deliver: (emit) => {

@@ -1,0 +1,237 @@
+{
+  "schemaVersion": 1,
+  "mission": "s92-m09",
+  "defectClass": "Unclassified context snapshot INSERT sites",
+  "scopeSentence": "Every tracked UTF-8 source line under src/, across all extensions, evaluated against the published ordered JavaScript predicates.",
+  "falseNegativeProfile": [
+    "Only tracked UTF-8 text under src/ across all extensions; untracked files, non-src files (including these artifacts), binary NUL bytes and invalid UTF-8 are outside this universe and encoding exclusions are reported.",
+    "This checks line syntax, current occurrence coverage, required replacement witnesses and historical count consistency; whole-tree coverage, pre-edit chronology, semantic classification and runtime dataflow remain reviewer judgment.",
+    "Historical source text is public src-only evidence; original whole-tree provenance remains private. Recorded SHAs are labels, never runtime Git lookups.",
+    "storage.columns is a syntax witness, not proof of policy kind/value wiring or live execution. snapshot-diet.test.ts retains its wider recursive untracked-file census and independent policy/behavior checks."
+  ],
+  "universe": "tracked-src-utf8-lines",
+  "recordedAt": {
+    "sha": "10de1d1a9415c94fb0d233e8647bb6ec6571182d"
+  },
+  "arms": [
+    {
+      "id": "inserts",
+      "unit": "files",
+      "predicate": [
+        {
+          "op": "include",
+          "pattern": "INSERT INTO context_snapshots",
+          "flags": ""
+        }
+      ],
+      "historical": {
+        "count": 9,
+        "matches": [
+          {
+            "id": "historical-1",
+            "file": "src/tools/cmos/blob-migrations.ts",
+            "line": 181,
+            "text": "`INSERT INTO context_snapshots (context_id, session_id, source, content_hash, content, created_at, ${g.columns.join(', ')})",
+            "occurrence": 1,
+            "class": "changed",
+            "reason": "Snapshot INSERT consults the pre-mutation storage policy; preserve recovery content or close-copy tombstone as appropriate.",
+            "resolution": {
+              "witnessIds": ["current-1"]
+            }
+          },
+          {
+            "id": "historical-2",
+            "file": "src/tools/cmos/cmos-context-condense.ts",
+            "line": 640,
+            "text": "`INSERT INTO context_snapshots (context_id, source, content_hash, content, created_at, ${g.columns.join(', ')})",
+            "occurrence": 1,
+            "class": "changed",
+            "reason": "Snapshot INSERT consults the pre-mutation storage policy; preserve recovery content or close-copy tombstone as appropriate.",
+            "resolution": {
+              "witnessIds": ["current-2"]
+            }
+          },
+          {
+            "id": "historical-3",
+            "file": "src/tools/cmos/cmos-context-snapshot.ts",
+            "line": 189,
+            "text": "`INSERT INTO context_snapshots (context_id, session_id, source, content_hash, content, created_at, ${g.columns.join(', ')})",
+            "occurrence": 1,
+            "class": "changed",
+            "reason": "Snapshot INSERT consults the explicit storage policy; preserve recovery content or close-copy tombstone as appropriate.",
+            "resolution": {
+              "witnessIds": ["current-3"]
+            }
+          },
+          {
+            "id": "historical-4",
+            "file": "src/tools/cmos/cmos-context-update.ts",
+            "line": 908,
+            "text": "`INSERT INTO context_snapshots (context_id, source, content_hash, content, created_at, ${g.columns.join(', ')})",
+            "occurrence": 1,
+            "class": "changed",
+            "reason": "Snapshot INSERT consults the post-write storage policy; preserve recovery content or close-copy tombstone as appropriate.",
+            "resolution": {
+              "witnessIds": ["current-4"]
+            }
+          },
+          {
+            "id": "historical-5",
+            "file": "src/tools/cmos/cmos-mission-complete.ts",
+            "line": 794,
+            "text": "`INSERT INTO context_snapshots (context_id, source, content_hash, content, created_at, ${g.columns.join(', ')})",
+            "occurrence": 1,
+            "class": "changed",
+            "reason": "Snapshot INSERT consults the close-persist storage policy; preserve recovery content or close-copy tombstone as appropriate.",
+            "resolution": {
+              "witnessIds": ["current-5"]
+            }
+          },
+          {
+            "id": "historical-6",
+            "file": "src/tools/cmos/cmos-session-complete.ts",
+            "line": 1417,
+            "text": "`INSERT INTO context_snapshots (context_id, session_id, source, content_hash, content, created_at, ${g.columns.join(', ')})",
+            "occurrence": 1,
+            "class": "changed",
+            "reason": "Snapshot INSERT consults the close-persist storage policy; preserve recovery content or close-copy tombstone as appropriate.",
+            "resolution": {
+              "witnessIds": ["current-6"]
+            }
+          },
+          {
+            "id": "historical-7",
+            "file": "src/tools/cmos/cmos-sprint-complete.ts",
+            "line": 1159,
+            "text": "`INSERT INTO context_snapshots (context_id, source, content_hash, content, created_at, ${g.columns.join(', ')})",
+            "occurrence": 1,
+            "class": "changed",
+            "reason": "Snapshot INSERT consults the milestone storage policy; preserve recovery content or close-copy tombstone as appropriate.",
+            "resolution": {
+              "witnessIds": ["current-7"]
+            }
+          },
+          {
+            "id": "historical-8",
+            "file": "src/tools/cmos/context-freshness.ts",
+            "line": 453,
+            "text": "`INSERT INTO context_snapshots (context_id, source, content_hash, content, created_at, ${g.columns.join(', ')})",
+            "occurrence": 1,
+            "class": "changed",
+            "reason": "Snapshot INSERT consults the post-write storage policy; preserve recovery content or close-copy tombstone as appropriate.",
+            "resolution": {
+              "witnessIds": ["current-8"]
+            }
+          },
+          {
+            "id": "historical-9",
+            "file": "src/tools/cmos/context-retention.ts",
+            "line": 632,
+            "text": "`INSERT INTO context_snapshots (context_id, source, content_hash, content, created_at, ${g.columns.join(', ')})",
+            "occurrence": 1,
+            "class": "changed",
+            "reason": "Snapshot INSERT consults the pre-mutation storage policy; preserve recovery content or close-copy tombstone as appropriate.",
+            "resolution": {
+              "witnessIds": ["current-9"]
+            }
+          }
+        ]
+      },
+      "witnesses": [
+        {
+          "id": "current-1",
+          "file": "src/tools/cmos/blob-migrations.ts",
+          "line": 187,
+          "text": "`INSERT INTO context_snapshots (context_id, session_id, source, content_hash, content, created_at, ${[...storage.columns, ...g.columns].join(', ')})",
+          "occurrence": 1,
+          "class": "fixed",
+          "reason": "Required storage.columns INSERT form; pre-mutation policy kind/content wiring is independently checked by snapshot-diet.test.ts."
+        },
+        {
+          "id": "current-2",
+          "file": "src/tools/cmos/cmos-context-condense.ts",
+          "line": 655,
+          "text": "`INSERT INTO context_snapshots (context_id, source, content_hash, content, created_at, ${[...storage.columns, ...g.columns].join(', ')})",
+          "occurrence": 1,
+          "class": "fixed",
+          "reason": "Required storage.columns INSERT form; pre-mutation policy kind/content wiring is independently checked by snapshot-diet.test.ts."
+        },
+        {
+          "id": "current-3",
+          "file": "src/tools/cmos/cmos-context-snapshot.ts",
+          "line": 210,
+          "text": "`INSERT INTO context_snapshots (context_id, session_id, source, content_hash, content, created_at, ${[...storage.columns, ...g.columns].join(', ')})",
+          "occurrence": 1,
+          "class": "fixed",
+          "reason": "Required storage.columns INSERT form; explicit policy kind/content wiring is independently checked by snapshot-diet.test.ts."
+        },
+        {
+          "id": "current-4",
+          "file": "src/tools/cmos/cmos-context-update.ts",
+          "line": 911,
+          "text": "`INSERT INTO context_snapshots (context_id, source, content_hash, content, created_at, ${[...storage.columns, ...g.columns].join(', ')})",
+          "occurrence": 1,
+          "class": "fixed",
+          "reason": "Required storage.columns INSERT form; post-write policy kind/content wiring is independently checked by snapshot-diet.test.ts."
+        },
+        {
+          "id": "current-5",
+          "file": "src/tools/cmos/cmos-mission-complete.ts",
+          "line": 894,
+          "text": "`INSERT INTO context_snapshots (context_id, source, content_hash, content, created_at, ${[...storage.columns, ...g.columns].join(', ')})",
+          "occurrence": 1,
+          "class": "fixed",
+          "reason": "Required storage.columns INSERT form; close-persist policy kind/content wiring is independently checked by snapshot-diet.test.ts."
+        },
+        {
+          "id": "current-6",
+          "file": "src/tools/cmos/cmos-session-complete.ts",
+          "line": 1492,
+          "text": "`INSERT INTO context_snapshots (context_id, session_id, source, content_hash, content, created_at, ${[...storage.columns, ...g.columns].join(', ')})",
+          "occurrence": 1,
+          "class": "fixed",
+          "reason": "Required storage.columns INSERT form; close-persist policy kind/content wiring is independently checked by snapshot-diet.test.ts."
+        },
+        {
+          "id": "current-7",
+          "file": "src/tools/cmos/cmos-sprint-complete.ts",
+          "line": 1253,
+          "text": "`INSERT INTO context_snapshots (context_id, source, content_hash, content, created_at, ${[...storage.columns, ...g.columns].join(', ')})",
+          "occurrence": 1,
+          "class": "fixed",
+          "reason": "Required storage.columns INSERT form; milestone policy kind/content wiring is independently checked by snapshot-diet.test.ts."
+        },
+        {
+          "id": "current-8",
+          "file": "src/tools/cmos/context-freshness.ts",
+          "line": 455,
+          "text": "`INSERT INTO context_snapshots (context_id, source, content_hash, content, created_at, ${[...storage.columns, ...g.columns].join(', ')})",
+          "occurrence": 1,
+          "class": "fixed",
+          "reason": "Required storage.columns INSERT form; post-write policy kind/content wiring is independently checked by snapshot-diet.test.ts."
+        },
+        {
+          "id": "current-9",
+          "file": "src/tools/cmos/context-retention.ts",
+          "line": 638,
+          "text": "`INSERT INTO context_snapshots (context_id, source, content_hash, content, created_at, ${[...storage.columns, ...g.columns].join(', ')})",
+          "occurrence": 1,
+          "class": "fixed",
+          "reason": "Required storage.columns INSERT form; pre-mutation policy kind/content wiring is independently checked by snapshot-diet.test.ts."
+        }
+      ],
+      "residual": [
+        {
+          "op": "include",
+          "pattern": "INSERT INTO context_snapshots",
+          "flags": ""
+        },
+        {
+          "op": "exclude",
+          "pattern": "\\bstorage\\.columns\\b",
+          "flags": ""
+        }
+      ]
+    }
+  ]
+}

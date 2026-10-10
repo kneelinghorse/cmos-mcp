@@ -172,24 +172,24 @@ const PRIVATE = requiresPrivateEvidence({
  */
 const RATIFIED_AUTHORED_BASE = 181;
 const SITES_BY_MISSION = {
-  's90-m05': ['src/tools/cmos/cmos-next-steps.ts:315'],
+  's90-m05': ['src/tools/cmos/cmos-next-steps.ts:318'],
   's90-m07': [],
   's91-m02': ['src/tools/cmos/unknown-param-guard.ts:80'],
   's91-m03': [
-    'src/tools/cmos/cmos-mission-complete.ts:229',
-    'src/tools/cmos/cmos-session-complete.ts:330',
+    'src/tools/cmos/cmos-mission-complete.ts:232',
+    'src/tools/cmos/cmos-session-complete.ts:332',
   ],
   's91-m04': [
-    'src/tools/cmos/cmos-decisions-record.ts:142',
-    'src/tools/cmos/cmos-decisions-record.ts:168',
+    'src/tools/cmos/cmos-decisions-record.ts:153',
+    'src/tools/cmos/cmos-decisions-record.ts:179',
   ],
   // s92-m01: the no-project refusal (one site, three situations), driven below in the first-run
   // instrument through the mirrored resolver and refusal classifier.
-  's92-m01': ['src/tools/cmos/errors.ts:511'],
+  's92-m01': ['src/tools/cmos/errors.ts:513'],
   // s92-m03: completing another live process's implicit session is refused; driven in axis 3.
-  's92-m03': ['src/tools/cmos/errors.ts:526'],
+  's92-m03': ['src/tools/cmos/errors.ts:528'],
   // s92-m08: show names a decision or learning id the project does not hold; driven in axis 2.
-  's92-m08': ['src/tools/cmos/errors.ts:537'],
+  's92-m08': ['src/tools/cmos/errors.ts:539'],
   // s92-m09: an explicit snapshot named like one of CMOS's automatic copies is refused
   // (INVALID_PARAMETER; driven in axis 6). prune_snapshots refuses to apply while a reference or
   // sprint-close source is unreadable (DB_QUERY_FAILED) and when the database snapshot fails
@@ -204,17 +204,17 @@ const SITES_BY_MISSION = {
   // cannot stamp with its review time is refused, in update and batch update (DB_SCHEMA_MISMATCH,
   // FAULT: the column migration failed); both driven in tests/tools/cmos/first-write-upkeep.test.ts.
   's93-m11': [
-    'src/tools/cmos/cmos-project-init.ts:395',
+    'src/tools/cmos/cmos-project-init.ts:402',
     'src/tools/cmos/cmos-project.ts:350',
     'src/tools/cmos/cmos-decisions-update.ts:137',
     'src/tools/cmos/cmos-decisions-batch-update.ts:101',
     // A since/until no stored time can be compared with is refused (it used to match nothing);
     // driven in axis 5.
-    'src/tools/cmos/errors.ts:549',
+    'src/tools/cmos/errors.ts:551',
   ],
   // s93-m12: a re-init naming a project id the project does not have is refused (a re-init keeps
   // the stored identity); driven in axis 2.
-  's93-m12': ['src/tools/cmos/cmos-project-init.ts:654'],
+  's93-m12': ['src/tools/cmos/cmos-project-init.ts:665'],
   // s93-m05: a failed local v2 digest read is explicit, with a health-check remedy; driven in
   // review-v2-presentation.test.ts rather than returning an apparently empty successful digest.
   's93-m05': ['src/tools/cmos/review-presentation.ts:73'],
@@ -235,16 +235,57 @@ const SITES_BY_MISSION = {
   // constraint draft with no operator words in this session); four need a harness session or a
   // race and are named residuals, each driven in tests/tools/cmos/draft-approval.test.ts.
   's93-m06': [
-    'src/tools/cmos/draft-approval.ts:75',
-    'src/tools/cmos/draft-approval.ts:117',
-    'src/tools/cmos/draft-approval.ts:129',
-    'src/tools/cmos/draft-approval.ts:143',
-    'src/tools/cmos/draft-approval.ts:153',
-    'src/tools/cmos/draft-approval.ts:164',
-    'src/tools/cmos/draft-approval.ts:94',
-    'src/tools/cmos/draft-approval.ts:309',
-    'src/tools/cmos/draft-approval.ts:379',
-    'src/tools/cmos/cmos-decisions-record.ts:309',
+    'src/tools/cmos/draft-approval.ts:77',
+    'src/tools/cmos/draft-approval.ts:119',
+    'src/tools/cmos/draft-approval.ts:131',
+    'src/tools/cmos/draft-approval.ts:144',
+    'src/tools/cmos/draft-approval.ts:154',
+    'src/tools/cmos/draft-approval.ts:165',
+    'src/tools/cmos/draft-approval.ts:96',
+    'src/tools/cmos/draft-approval.ts:312',
+    'src/tools/cmos/draft-approval.ts:382',
+    'src/tools/cmos/cmos-decisions-record.ts:366',
+  ],
+  // s94-m04: shape preflight at six writer boundaries, immutable retry comparison and draft-field conflict.
+  's94-m04': [
+    'src/tools/cmos/cmos-decisions-record.ts:186',
+    'src/tools/cmos/cmos-decisions-record.ts:285',
+    'src/tools/cmos/cmos-mission-complete.ts:346',
+    'src/tools/cmos/cmos-session-capture.ts:516',
+    'src/tools/cmos/cmos-session-complete.ts:452',
+    'src/tools/cmos/sync-bootstrap.ts:149',
+    'src/tools/cmos/sync-pull.ts:219',
+    'src/tools/cmos/decision-fields.ts:48',
+  ],
+  // s94-m05: eight explicit remedies replace one retired pre-lock parent-inspection fallback.
+  's94-m05': [
+    'src/tools/cmos/cmos-mission-add.ts:286',
+    'src/tools/cmos/cmos-mission-add.ts:302',
+    'src/tools/cmos/cmos-mission-start.ts:254',
+    'src/tools/cmos/cmos-mission-start.ts:268',
+    'src/tools/cmos/cmos-mission-status.ts:261',
+    'src/tools/cmos/cmos-mission-update.ts:326',
+    'src/tools/cmos/cmos-mission-update.ts:466',
+    'src/tools/cmos/cmos-mission-update.ts:478',
+  ],
+  // s94-m06: six authored fault remedies cover required citation preflight/materialization and
+  // rollback. The inline capture-permissions suggestion retires into shared failure handling.
+  's94-m06': [
+    'src/tools/cmos/cmos-decisions-record.ts:383',
+    'src/tools/cmos/record-link-write.ts:25',
+    'src/tools/cmos/record-link-write.ts:72',
+    'src/tools/cmos/record-links.ts:22',
+    'src/tools/cmos/sync-bootstrap.ts:192',
+    'src/tools/cmos/sync-pull.ts:230',
+  ],
+  // s94-m08: four mandatory mission-drop fault remedies and two CLI spin-out refusals.
+  's94-m08': [
+    'src/tools/cmos/cmos-mission-drop.ts:69',
+    'src/tools/cmos/cmos-mission-drop.ts:92',
+    'src/tools/cmos/cmos-mission-drop.ts:219',
+    'src/tools/cmos/cmos-mission-drop.ts:258',
+    'src/tools/cmos/spin-out-mapping.ts:31',
+    'src/tools/cmos/spin-out.ts:352',
   ],
 } as const satisfies Readonly<Record<string, readonly string[]>>;
 const RATIFIED_SITE_ADDS = Object.values(SITES_BY_MISSION).flat();
@@ -255,7 +296,9 @@ const RATIFIED_SITE_ADDS = Object.values(SITES_BY_MISSION).flat();
  * the caller's implicit session.
  */
 const SITES_REMOVED_BY_MISSION = {
-  's92-m03': ['src/tools/cmos/cmos-session-capture.ts:424'],
+  's94-m06': ['src/tools/cmos/cmos-session-capture.ts:590'],
+  's94-m05': ['src/tools/cmos/cmos-mission-start.ts:198'],
+  's92-m03': ['src/tools/cmos/cmos-session-capture.ts:425'],
 } as const satisfies Readonly<Record<string, readonly string[]>>;
 const RATIFIED_SITE_REMOVALS = Object.values(SITES_REMOVED_BY_MISSION).flat();
 
@@ -305,7 +348,7 @@ const CONSUMER_RESOLVED_CODES: Readonly<Record<string, string>> = {
   'src/tools/cmos/cmos-context-update.ts:790': 'INVALID_PARAMETER',
   'src/tools/cmos/cmos-context-update.ts:799': 'INVALID_PARAMETER',
   'src/tools/cmos/cmos-context-update.ts:818': 'INVALID_PARAMETER',
-  'src/tools/cmos/errors.ts:384': 'SENDER_UNRESOLVABLE',
+  'src/tools/cmos/errors.ts:386': 'SENDER_UNRESOLVABLE',
 };
 
 type TriggerClass = 'VALIDATION' | 'STATE' | 'FAULT' | 'EXTERNAL' | 'UNTYPED';
@@ -1052,6 +1095,23 @@ const MATRIX: MatrixCase[] = [
           action: 'record',
           content: S91_M04_SELF_TEXT,
           supersedes: [s91M04SelfId],
+          projectRoot: ctx.projectRoot,
+        },
+      },
+    ],
+  },
+  {
+    axis: '2 row-presence',
+    name: 's94-m04: a draft cannot approve extra caller fields',
+    reachable: 'ordinary: a record combines fromDraft with new context',
+    calls: (ctx) => [
+      {
+        tool: 'cmos_decisions',
+        params: {
+          action: 'record',
+          content: 'Preserve the approved scope.',
+          fromDraft: 'P999',
+          context: 'Unapproved addition.',
           projectRoot: ctx.projectRoot,
         },
       },
@@ -1981,12 +2041,12 @@ const HTTP_EXTERNAL_SITES = new Set([
   'src/tools/cmos/cmos-auth.ts:1192',
   'src/tools/cmos/cmos-auth.ts:1200',
   'src/tools/cmos/cmos-message.ts:1078',
-  'src/tools/cmos/errors.ts:428',
-  'src/tools/cmos/errors.ts:444',
-  'src/tools/cmos/errors.ts:463',
-  'src/tools/cmos/errors.ts:475',
-  'src/tools/cmos/errors.ts:483',
-  'src/tools/cmos/errors.ts:503',
+  'src/tools/cmos/errors.ts:430',
+  'src/tools/cmos/errors.ts:446',
+  'src/tools/cmos/errors.ts:465',
+  'src/tools/cmos/errors.ts:477',
+  'src/tools/cmos/errors.ts:485',
+  'src/tools/cmos/errors.ts:505',
 ]);
 const SYNTHETIC_EXTERNAL_SITES = new Set([
   'src/tools/cmos/cmos-auth.ts:572',
@@ -1998,7 +2058,7 @@ const SYNTHETIC_EXTERNAL_SITES = new Set([
   'src/tools/cmos/cmos-auth.ts:1124',
   'src/tools/cmos/cmos-auth.ts:1133',
   'src/tools/cmos/dashboard-client.ts:270',
-  'src/tools/cmos/errors.ts:493',
+  'src/tools/cmos/errors.ts:495',
 ]);
 
 /** Shared with the private T7 ledger; the replay fence remains private and unchanged. */
@@ -3687,7 +3747,13 @@ function enumerateStringTriples(): Triple[] {
     const actions: (string | undefined)[] =
       actionProp && Array.isArray(actionProp.enum) ? actionProp.enum.map(String) : [undefined];
     const fields = Object.entries(properties)
-      .filter(([name, p]) => name !== 'action' && p && p.type === 'string')
+      .filter(
+        ([name, p]) =>
+          name !== 'action' &&
+          p &&
+          (p.type === 'string' ||
+            (Array.isArray(p.type) && p.type.includes('string') && p.type.includes('null')))
+      )
       .map(([name]) => name);
     for (const action of actions)
       for (const field of fields) triples.push({ tool: tool.name, action, field });
@@ -3903,7 +3969,7 @@ PRIVATE.describe(
       expect(uncoveredHistorical).toEqual([]);
     });
 
-    it('PINS the null decision — the guard treats JSON null as ABSENT, for every published string field', () => {
+    it('PINS null pass-through — handlers retain their own omitted-versus-null semantics', () => {
       // The fold-5 measurement (decision #1117): `null` CRASHES at 0 of the 714 triples while it
       // SUCCEEDS at 238 and REFUSES at 476. It is not a member of the defect class, and refusing it
       // would convert 238 working calls into errors while breaking every client whose serializer
@@ -4138,28 +4204,66 @@ interface Replay {
  * The shape is `migration-warning-reachability.test.ts`'s.
  */
 const RESIDUAL_REASONS: Readonly<Record<string, string>> = {
+  // These spread the underlying database error; their nonliteral code is classified STATE by
+  // the syntax census, but the trigger is a database fault, exercised in lifecycle-decoupling.
+  'src/tools/cmos/cmos-mission-add.ts:286':
+    'Database read/write/transaction failure branch; the healthy-store axis cannot cause it. Fault cases live in lifecycle-decoupling.test.ts and the integration failure suites.',
+  'src/tools/cmos/cmos-mission-add.ts:302':
+    'Database read/write/transaction failure branch; the healthy-store axis cannot cause it. Fault cases live in lifecycle-decoupling.test.ts and the integration failure suites.',
+  'src/tools/cmos/cmos-mission-start.ts:254':
+    'Database read/write/transaction failure branch; the healthy-store axis cannot cause it. Fault cases live in lifecycle-decoupling.test.ts and the integration failure suites.',
+  'src/tools/cmos/cmos-mission-start.ts:268':
+    'Database read/write/transaction failure branch; the healthy-store axis cannot cause it. Fault cases live in lifecycle-decoupling.test.ts and the integration failure suites.',
+  'src/tools/cmos/cmos-mission-status.ts:261':
+    'Database read/write/transaction failure branch; the healthy-store axis cannot cause it. Fault cases live in lifecycle-decoupling.test.ts and the integration failure suites.',
+  'src/tools/cmos/cmos-mission-update.ts:326':
+    'Database read/write/transaction failure branch; the healthy-store axis cannot cause it. Fault cases live in lifecycle-decoupling.test.ts and the integration failure suites.',
+  'src/tools/cmos/cmos-mission-update.ts:466':
+    'Database read/write/transaction failure branch; the healthy-store axis cannot cause it. Fault cases live in lifecycle-decoupling.test.ts and the integration failure suites.',
+  'src/tools/cmos/cmos-mission-update.ts:478':
+    'Database read/write/transaction failure branch; the healthy-store axis cannot cause it. Fault cases live in lifecycle-decoupling.test.ts and the integration failure suites.',
+
+  // s94-m08: mandatory drop schema/audit/postcondition failures require fault injection.
+  'src/tools/cmos/cmos-mission-drop.ts:69':
+    'Required mission timestamp preparation failed; healthy-store router calls cannot establish this fault. The drop schema preflight refuses before mutation.',
+  'src/tools/cmos/cmos-mission-drop.ts:92':
+    'The drop transaction threw or rollback failed; a healthy-store state sequence cannot cause this. Transaction/audit fault fixtures live in spin-out-durability.test.ts.',
+  'src/tools/cmos/cmos-mission-drop.ts:219':
+    'Mandatory drop audit insertion failed or changed no row. Trigger faults are exercised in spin-out.test.ts and spin-out-durability.test.ts.',
+  'src/tools/cmos/cmos-mission-drop.ts:258':
+    'A trigger or database fault violated the verified drop/audit postcondition. cmos-mission-drop.test.ts deletes the audit event after insertion and proves rollback.',
+  'src/tools/cmos/spin-out-mapping.ts:31':
+    'CLI-only mapping helper, outside every MCP router in this matrix. spin-out-mapping.test.ts drives unknown-column, malformed-ID and missing-mapping refusals; no cmos_* prescription.',
+  'src/tools/cmos/spin-out.ts:352':
+    'CLI-only spin-out core, dispatched directly by src/cli.ts before ambient routing. Explicit-root, conflict, trigger and retry refusals are driven in the spin-out API/process/durability suites; no cmos_* prescription.',
+
   // ── s93-m06: draft refusals that need a harness session or a race ────────────────────────────
   // The matrix drives routers in process with no harness link, so the server writes as a process
   // and no operator words can be bound to it; these are driven by name in draft-approval.test.ts.
-  'src/tools/cmos/draft-approval.ts:164':
+  'src/tools/cmos/draft-approval.ts:165':
     'The operator plainly declined but the prompt hook could not write the decline, so only the ' +
     'runtime words say so. Needs a harness-linked server and hook runtime words; driven in ' +
     'draft-approval.test.ts ("refuses a decline the hook could not write to the store").',
-  'src/tools/cmos/draft-approval.ts:309':
+  'src/tools/cmos/draft-approval.ts:312':
     'Two records of one constraint, rule or profile draft at once: the guarded claim lets one ' +
     'through. A race needs the operator words bound in a harness session; driven in ' +
     'draft-approval.test.ts ("claims a constraint draft once when two records race").',
-  'src/tools/cmos/draft-approval.ts:379':
+  'src/tools/cmos/draft-approval.ts:382':
     'An approved profile draft whose line cannot be written (past the profile cap) releases its ' +
     'claim. Needs the operator words bound in a harness session; driven in draft-approval.test.ts ' +
     '("releases the claim when an approved profile line cannot be written").',
-  'src/tools/cmos/cmos-decisions-record.ts:309':
+  'src/tools/cmos/cmos-decisions-record.ts:373':
     'Two records of one decision draft at once: the in-transaction guard approves it once and ' +
     'rolls the other back. Driven in draft-approval.test.ts ("records a draft once").',
   // ── FAULT-SHAPED PRECONDITIONS inside a VALIDATION/STATE-coded site ──────────────────────────
   // These carry a driveable CODE but their trigger is a database fault, so the successor
   // fault-injection instrument (read-only DB file, dropped table, corrupt content) reaches them —
   // not an axis matrix that drives supported calls against a healthy store.
+  'src/tools/cmos/record-links.ts:22':
+    'Internal materializer/batch failure after schema preparation and persisted-record selection. ' +
+    'The healthy router matrix cannot create its schema/query/write fault or absent required row. ' +
+    'Driven in record-links.test.ts and record-links-writers.test.ts through missing-source, ' +
+    'foreign-schema and required-link rollback fixtures.',
   'src/tools/cmos/client.ts:679':
     'UNIQUE-constraint mapping inside CmosDatabaseClient. Reaching it needs a write that violates a ' +
     'UNIQUE index THROUGH a supported call; every duplicate this matrix can create is refused earlier ' +
@@ -4198,14 +4302,27 @@ const RESIDUAL_REASONS: Readonly<Record<string, string>> = {
   // ── MASKED BY AN EARLIER REFUSAL ON EVERY PATH THIS MATRIX CAN DRIVE ─────────────────────────
   // s92-m02, s92-m05 and s92-m03 moved these two down (planned-end-date receipt fields; the
   // archive param; a comment on implicit sessions); same branches.
-  'src/tools/cmos/cmos-sprint-complete.ts:657':
+  'src/tools/cmos/cmos-sprint-complete.ts:666':
     'MEASURED: masked. With master_context deleted and the sprint made closable, closeout refuses at ' +
-    'the shared errors.ts contextNotFound BEFORE reaching this sprint-local branch, so :657 is ' +
+    'the shared errors.ts contextNotFound BEFORE reaching this sprint-local branch, so :666 is ' +
     'unreachable while that earlier guard stands.',
-  'src/tools/cmos/cmos-sprint-complete.ts:668': 'Same masking as :657, for project_context.',
+  'src/tools/cmos/cmos-sprint-complete.ts:677': 'Same masking as :666, for project_context.',
 };
 
 const FAULT_SHAPED_DRIVEABLE_RESIDUALS = new Set([
+  'src/tools/cmos/cmos-mission-drop.ts:69',
+  'src/tools/cmos/cmos-mission-drop.ts:92',
+  'src/tools/cmos/cmos-mission-drop.ts:219',
+  'src/tools/cmos/cmos-mission-drop.ts:258',
+  'src/tools/cmos/cmos-mission-add.ts:286',
+  'src/tools/cmos/cmos-mission-add.ts:302',
+  'src/tools/cmos/cmos-mission-start.ts:254',
+  'src/tools/cmos/cmos-mission-start.ts:268',
+  'src/tools/cmos/cmos-mission-status.ts:261',
+  'src/tools/cmos/cmos-mission-update.ts:326',
+  'src/tools/cmos/cmos-mission-update.ts:466',
+  'src/tools/cmos/cmos-mission-update.ts:478',
+
   'src/tools/cmos/client.ts:679',
   'src/tools/cmos/client.ts:690',
   'src/tools/cmos/cmos-context-project-identity.ts:64',

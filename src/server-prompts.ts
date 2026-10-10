@@ -5,13 +5,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { parse as parseYaml } from 'yaml';
-import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import {
-  ErrorCode,
-  GetPromptRequestSchema,
-  ListPromptsRequestSchema,
-  McpError,
-} from '@modelcontextprotocol/sdk/types.js';
+import { ProtocolError, ProtocolErrorCode } from '@modelcontextprotocol/server';
+import type { Server } from '@modelcontextprotocol/server';
 
 const COMMANDS = ['start', 'close-out', 'plan', 'build'] as const;
 const SKILL_ROOT = path.resolve(__dirname, '../plugins/cmos/skills');
@@ -37,8 +32,8 @@ function readSkill(command: (typeof COMMANDS)[number], skillRoot: string) {
     }
     return { name: `cmos-${command}`, description: metadata.description, body };
   } catch (error) {
-    throw new McpError(
-      ErrorCode.InternalError,
+    throw new ProtocolError(
+      ProtocolErrorCode.InternalError,
       `Cannot load cmos-${command}: ${error instanceof Error ? error.message : String(error)}. ` +
         'Reinstall @aquex/cmos-mcp to restore its shared skill sources.'
     );
@@ -46,24 +41,24 @@ function readSkill(command: (typeof COMMANDS)[number], skillRoot: string) {
 }
 
 export function registerCmosPromptHandlers(server: Server, skillRoot = SKILL_ROOT): void {
-  server.setRequestHandler(ListPromptsRequestSchema, async () => ({
+  server.setRequestHandler('prompts/list', async () => ({
     prompts: COMMANDS.map((command) => {
       const { name, description } = readSkill(command, skillRoot);
       return { name, description };
     }),
   }));
 
-  server.setRequestHandler(GetPromptRequestSchema, async (request) => {
+  server.setRequestHandler('prompts/get', async (request) => {
     const command = COMMANDS.find((candidate) => `cmos-${candidate}` === request.params.name);
     if (!command) {
-      throw new McpError(
-        ErrorCode.InvalidParams,
+      throw new ProtocolError(
+        ProtocolErrorCode.InvalidParams,
         `Unknown prompt '${request.params.name}'. Use ${COMMANDS.map((name) => `cmos-${name}`).join(', ')}.`
       );
     }
     if (Object.keys(request.params.arguments ?? {}).length > 0) {
-      throw new McpError(
-        ErrorCode.InvalidParams,
+      throw new ProtocolError(
+        ProtocolErrorCode.InvalidParams,
         `${request.params.name} does not accept arguments. Invoke it without arguments and describe the scope in the conversation.`
       );
     }

@@ -11,6 +11,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 import Database from 'better-sqlite3';
+import { CmosDatabaseClient } from '../../../src/tools/cmos/client';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -646,7 +647,173 @@ describe('syncPull (Sprint 71 m02)', () => {
     expect(result.success).toBe(false);
   });
 
+  it.each([false, true])(
+    'repairs older learning endpoints arriving after their decision (later page=%s)',
+    async (laterPage) => {
+      createStore();
+      const now = Date.now();
+      const decision = ev(
+        1,
+        'decision_captured',
+        withProv(
+          { decisionId: 31, content: 'Use l:41 from the imported history.' },
+          { stableEventId: 'linked-decision', occurredAt: now - 1000, originSeq: 1 }
+        ),
+        { timestamp: new Date(now - 1000).toISOString() }
+      );
+      const learning = ev(
+        2,
+        'learning_captured',
+        withProv(
+          { learningId: 41, content: 'Earlier imported learning.' },
+          { stableEventId: 'linked-learning', occurredAt: now - 2000, originSeq: 2 }
+        ),
+        { timestamp: new Date(now - 2000).toISOString() }
+      );
+      if (laterPage)
+        queuePages(
+          { events: [decision], nextCursor: 1, hasMore: true },
+          { events: [learning], nextCursor: 2, hasMore: false }
+        );
+      else queuePages({ events: [decision, learning], nextCursor: 2, hasMore: false });
+      const result = await syncPull({ projectRoot: tempDir });
+      expect(result.success).toBe(true);
+      expect(result.data?.inserted).toBe(2);
+      const db = openDb();
+      try {
+        expect(
+          db.prepare('SELECT from_kind,from_id,to_kind,to_id FROM record_links').all()
+        ).toEqual([{ from_kind: 'decision', from_id: 31, to_kind: 'learning', to_id: 41 }]);
+      } finally {
+        db.close();
+      }
+    }
+  );
+
+  it('rolls back a required-link page and publishes no committed insert count while retaining cursor semantics', async () => {
+    createStore();
+    queuePages({ events: [], nextCursor: 0, hasMore: false });
+    expect((await syncPull({ projectRoot: tempDir })).success).toBe(true);
+    const db = openDb();
+    db.exec(
+      "CREATE TRIGGER reject_pull_links BEFORE INSERT ON record_links BEGIN SELECT RAISE(FAIL,'pull link rejected'); END"
+    );
+    db.close();
+    const now = Date.now();
+    queuePages({
+      events: [
+        ev(
+          1,
+          'decision_captured',
+          withProv(
+            { decisionId: 31, content: 'Use l:41.' },
+            { stableEventId: 'failed-d', occurredAt: now - 1000, originSeq: 1 }
+          ),
+          { timestamp: new Date(now - 1000).toISOString() }
+        ),
+        ev(
+          2,
+          'learning_captured',
+          withProv(
+            { learningId: 41, content: 'Older learning.' },
+            { stableEventId: 'failed-l', occurredAt: now - 2000, originSeq: 2 }
+          ),
+          { timestamp: new Date(now - 2000).toISOString() }
+        ),
+      ],
+      nextCursor: 2,
+      hasMore: false,
+    });
+    const result = await syncPull({ projectRoot: tempDir });
+    expect(result.success).toBe(true);
+    expect(result.data).toMatchObject({
+      inserted: 0,
+      duplicates: 0,
+      failed: 2,
+      toCursor: 2,
+      insertedByType: {},
+    });
+    expect(result.warnings?.join(' ')).toContain('pull link rejected');
+    expect(result.warnings?.join(' ')).toContain('reset the pull cursor');
+    const after = openDb();
+    try {
+      expect(after.prepare('SELECT COUNT(*) AS n FROM strategic_decisions').get()).toEqual({
+        n: 0,
+      });
+      expect(after.prepare('SELECT COUNT(*) AS n FROM learnings').get()).toEqual({ n: 0 });
+      expect(after.prepare('SELECT COUNT(*) AS n FROM record_links').get()).toEqual({ n: 0 });
+    } finally {
+      after.close();
+    }
+    expect(cursorValue()).toBe('2');
+  });
+
+  it('counts an uncommitted page even when the transaction refuses before entering its callback', async () => {
+    createStore();
+    const now = Date.now();
+    queuePages({
+      events: [
+        ev(
+          1,
+          'decision_captured',
+          withProv(
+            { decisionId: 31, content: 'A deferred record.' },
+            { stableEventId: 'never-entered', occurredAt: now, originSeq: 1 }
+          )
+        ),
+        ev(2, 'session_completed', {}),
+        ev(3, 'unknown_event', {}),
+        ev(4, 'decision_captured', {}),
+      ],
+      nextCursor: 4,
+      hasMore: false,
+    });
+    const transaction = jest
+      .spyOn(CmosDatabaseClient.prototype, 'transaction')
+      .mockReturnValueOnce({
+        success: false,
+        error: { code: 'DB_QUERY_FAILED', message: 'BEGIN refused before callback' },
+      });
+    try {
+      const result = await syncPull({ projectRoot: tempDir });
+      expect(result.success).toBe(true);
+      expect(result.data).toMatchObject({
+        inserted: 0,
+        duplicates: 0,
+        failed: 1,
+        transitionsDeferred: 1,
+        skippedUnknownType: 1,
+        skippedMissingProvenance: 1,
+        toCursor: 4,
+      });
+      expect(result.warnings?.join(' ')).toContain('BEGIN refused before callback');
+      const db = openDb();
+      try {
+        expect(db.prepare('SELECT COUNT(*) AS n FROM strategic_decisions').get()).toEqual({ n: 0 });
+      } finally {
+        db.close();
+      }
+    } finally {
+      transaction.mockRestore();
+    }
+  });
+
   // ─── Formatter ──────────────────────────────────────────────────────────────────
+
+  it('shows migration warnings and the recovery suggestion when pull refuses', () => {
+    const formatted = formatSyncPullForLLM({
+      success: false,
+      error: {
+        code: 'DB_QUERY_FAILED',
+        message: 'Migration refused',
+        suggestion: 'Inspect schema',
+      },
+      warnings: ['Foreign FTS definition is preserved'],
+    });
+    expect(formatted).toContain('Migration refused');
+    expect(formatted).toContain('Foreign FTS definition is preserved');
+    expect(formatted).toContain('Inspect schema');
+  });
 
   it('formats a successful pull for the LLM', () => {
     const formatted = formatSyncPullForLLM({

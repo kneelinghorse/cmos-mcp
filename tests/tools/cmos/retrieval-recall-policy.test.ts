@@ -286,3 +286,39 @@ describe('R1 on the published surfaces', () => {
     client = reopened.data!;
   });
 });
+
+describe('spin-out vector pools', () => {
+  it.each([undefined, []])(
+    'widens past hidden rows even with status filter %p',
+    async (statusFilter) => {
+      for (let i = 0; i < 30; i++) {
+        const id = decision(`Nearest transferred source ${i}`, 'archived');
+        storeVector(id, axis(0));
+        client.execute('INSERT INTO metadata(key,value) VALUES(?,?)', [
+          `spin_out_row:decision:${id}`,
+          JSON.stringify({
+            operationId: 'fork',
+            sourceProjectId: 'source',
+            sourceRoot: '/source',
+            sourceId: id,
+            targetProjectId: 'target',
+            targetRoot: '/target',
+            targetId: id,
+          }),
+        ]);
+      }
+      const id = decision('Visible semantic result');
+      storeVector(id, axis(1));
+      const retriever = new HybridRetriever(client, {
+        embedder: async () => axis(0),
+        backend: 'vector',
+      });
+      const result = await retriever.search('semantic query', {
+        types: ['decision'],
+        limit: 1,
+        statusFilter,
+      });
+      expect(result.map((row) => row.id)).toEqual([id]);
+    }
+  );
+});

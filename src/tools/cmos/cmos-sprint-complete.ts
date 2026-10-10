@@ -8,6 +8,8 @@
  * @module tools/cmos/cmos-sprint-complete
  */
 
+import { prepareSpinOutRead, spinOutHistoryLines } from './spin-out-read';
+import { normalizeMissionStatus } from './terminal-status';
 import * as crypto from 'crypto';
 import { z } from 'zod';
 import { withClientAsync, type CmosDatabaseClient } from './client';
@@ -519,6 +521,7 @@ export async function cmosSprintComplete(
         );
       }
 
+      const spinOutRead = prepareSpinOutRead(client);
       const beginResult = client.execute('BEGIN IMMEDIATE', []);
 
       if (!beginResult.success) {
@@ -627,6 +630,12 @@ export async function cmosSprintComplete(
         );
       }
 
+      warnings.push(
+        ...spinOutHistoryLines(
+          spinOutRead,
+          (missionsResult.data ?? []).map((mission) => mission.id)
+        )
+      );
       const readiness = summarizeSprintReadiness(missionsResult.data ?? []);
       if (readiness.openMissionIds.length > 0) {
         return fail({
@@ -1114,13 +1123,16 @@ function buildStaleAdvisory(report: BuildFreshnessReport): string {
 
 function summarizeSprintReadiness(missions: SprintMissionRow[]): SprintCloseoutReadiness {
   const completedMissionIds = missions
-    .filter((mission) => mission.status === 'Completed')
+    .filter((mission) => normalizeMissionStatus(mission.status) === 'Completed')
     .map((mission) => mission.id);
   const blockedMissionIds = missions
     .filter((mission) => mission.status === 'Blocked')
     .map((mission) => mission.id);
   const skippedMissionIds = missions
-    .filter((mission) => mission.status === 'Completed' && isSkippedMission(mission.notes))
+    .filter(
+      (mission) =>
+        normalizeMissionStatus(mission.status) === 'Completed' && isSkippedMission(mission.notes)
+    )
     .map((mission) => mission.id);
   // Terminal states for sprint close: Completed, Blocked, Dropped, Deferred.
   // Dropped = soft-parked and intentionally removed — sprint can close.

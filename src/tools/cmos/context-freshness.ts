@@ -9,6 +9,7 @@
  * @module tools/cmos/context-freshness
  */
 
+import { missionCompletedSql } from './terminal-status';
 import * as crypto from 'crypto';
 import type { CmosDatabaseClient } from './client';
 import { genesisColumns, getProjectId } from './genesis-columns';
@@ -251,7 +252,7 @@ export function refreshMasterContextFromRecentActivity(
   const missionQuery =
     `SELECT id, name, objective, notes, sprint_id, completed_at
        FROM missions
-      WHERE status = 'Completed'
+      WHERE ${missionCompletedSql('status')}
         AND completed_at IS NOT NULL` +
     (cutoff ? ' AND julianday(completed_at) > julianday(?)' : '') +
     ' ORDER BY julianday(completed_at) ASC';
@@ -296,13 +297,13 @@ export function refreshMasterContextFromRecentActivity(
        s.focus,
        s.status,
        COUNT(m.id) AS total_missions,
-       SUM(CASE WHEN m.status = 'Completed' THEN 1 ELSE 0 END) AS completed_missions,
+       SUM(CASE WHEN ${missionCompletedSql('m.status')} THEN 1 ELSE 0 END) AS completed_missions,
        strftime('%Y-%m-%dT%H:%M:%fZ', MAX(julianday(m.completed_at))) AS last_completed_at
      FROM sprints s
      JOIN missions m ON m.sprint_id = s.id
      GROUP BY s.id, s.title, s.focus, s.status
      HAVING COUNT(m.id) > 0
-       AND SUM(CASE WHEN m.status != 'Completed' THEN 1 ELSE 0 END) = 0
+       AND SUM(CASE WHEN NOT (${missionCompletedSql('m.status')}) THEN 1 ELSE 0 END) = 0
        AND MAX(julianday(m.completed_at)) IS NOT NULL` +
     (cutoff ? ' AND MAX(julianday(m.completed_at)) > julianday(?)' : '') +
     ' ORDER BY MAX(julianday(m.completed_at)) ASC';

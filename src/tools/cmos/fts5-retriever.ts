@@ -2,6 +2,7 @@
 // recency applied after fusion) is the Sprint 66 m04 backend covering decisions, learnings, and missions
 // per cmos/planning/adr/s66-vector-retrieval.md. (s80-m03: the dead sync FTS5Retriever was removed.)
 
+import { normalizeMissionStatus } from './terminal-status';
 import {
   getEmbedder,
   isEmbedderUnavailable,
@@ -13,6 +14,8 @@ import { ensureDecisionsFts5, ensureVectorStorage } from './schema-migrations';
 import { extractKeywords } from './supersession-detection';
 import { recordStoreUpkeepNote } from './tool-call-context';
 import { storedTimeMs } from './stored-time';
+import { citationNeighbors } from './citation-neighbors';
+import { prepareSpinOutRead } from './spin-out-read';
 
 // ─── Public Interface ─────────────────────────────────────────────────────────
 
@@ -92,7 +95,7 @@ export interface RetrievalOptions {
   /** Last N sprints to include (0 = all, default: 0) */
   sprintRange?: number;
 
-  /** Weight given to recency decay: 0 = none, 1 = full decay (default: DEFAULT_RECENCY_WEIGHT, 0.2) */
+  /** Weight given to recency decay: 0 = none, 1 = full decay (default: DEFAULT_RECENCY_WEIGHT, 0.5) */
   recencyWeight?: number;
 
   /** Minimum combined score to include in results (default: 0) */
@@ -120,6 +123,14 @@ export interface RetrievalOptions {
   /** s82-m04: weight of the graph-recall RRF term (default DEFAULT_GRAPH_WEIGHT). Only used
    *  when expandGraph is on. Kept < 1 to bound over-promotion of graph-only neighbors. */
   graphWeight?: number;
+
+  /** Same-kind textual citation recall for decisions/learnings. Default false; hybrid backend
+   *  only, like expandGraph. Precision callers and cosine-only retrieval retain their semantics. */
+  citationRecall?: boolean;
+
+  /** Learning score prior applied only when decision and learning types are both requested.
+   *  Default 1: the Sprint94 mixed-query comparison rejected a .5 penalty. */
+  learningPrior?: number;
 }
 
 /** What a retriever backend supports. */
@@ -153,12 +164,10 @@ export interface IAsyncRetriever {
 /** Recency decay half-life in days. After this many days, score is halved. */
 const RECENCY_HALF_LIFE_DAYS = 60;
 
-/** Default recency weight (blend between BM25 and recency decay). Empirically tuned
- *  in Sprint 67 m02 against the production fixture set (cmos/db/cmos.sqlite, 22
- *  hand-authored paraphrases) — 0.2 wins MRR@10 over the canonical 0.5 because the
- *  active-decision corpus skews older and aggressive recency decay penalizes the
- *  expected hits below their RRF-fused rank. See decision captured at s67-m02 close. */
-export const DEFAULT_RECENCY_WEIGHT = 0.2;
+/** Default recency blend. Sprint94's frozen natural-citation gate retains the research
+ *  starting weight .5: primary recall and actual mission emissions improve over the
+ *  pre-citation .2 baseline. This is measured acceptance, not a claim of global optimality. */
+export const DEFAULT_RECENCY_WEIGHT = 0.5;
 
 /** Default number of results to return. */
 const DEFAULT_LIMIT = 5;
@@ -229,6 +238,8 @@ function statusPredicate(
  * neighbor fan-out (chiefly the same-sprint edge).
  */
 export const DEFAULT_GRAPH_WEIGHT = 0.5;
+export const DEFAULT_CITATION_WEIGHT = 0.5;
+export const DEFAULT_LEARNING_PRIOR = 1;
 const GRAPH_SEED_COUNT = 5;
 const GRAPH_PER_SEED_CAP = 5;
 
@@ -320,6 +331,7 @@ export class HybridRetriever implements IAsyncRetriever {
   }
 
   async search(query: string, options: RetrievalOptions = {}): Promise<RankedResult[]> {
+    const visibility = prepareSpinOutRead(this.client);
     const backend = this.hybridOptions.backend ?? 'hybrid';
     const {
       limit = DEFAULT_LIMIT,
@@ -330,6 +342,8 @@ export class HybridRetriever implements IAsyncRetriever {
       rrfK = DEFAULT_RRF_K,
       expandGraph = false,
       graphWeight = DEFAULT_GRAPH_WEIGHT,
+      citationRecall = false,
+      learningPrior = DEFAULT_LEARNING_PRIOR,
     } = options;
 
     // Ensure the FTS5 + vec0 substrate exists. Idempotent at the migration layer. s93-m11: a read
@@ -361,13 +375,17 @@ export class HybridRetriever implements IAsyncRetriever {
               statusFilter,
               rrfK,
               expandGraph,
-              graphWeight
+              graphWeight,
+              citationRecall
             );
+      if (type === 'learning' && types.includes('decision') && types.includes('learning')) {
+        for (const row of perType) row.score *= learningPrior;
+      }
       aggregated.push(...perType);
     }
 
     return aggregated
-      .filter((r) => r.score >= minScore)
+      .filter((r) => r.score >= minScore && !visibility.hidden(r.type as RetrievableType, r.id))
       .sort((a, b) => b.score - a.score)
       .slice(0, limit);
   }
@@ -477,7 +495,8 @@ export class HybridRetriever implements IAsyncRetriever {
     statusFilter: string[] | undefined,
     rrfK: number,
     expandGraph: boolean,
-    graphWeight: number
+    graphWeight: number,
+    citationRecall: boolean
   ): RankedResult[] {
     // s92-m07 (R1): both arms apply the status filter while filling their pools, not after.
     const bm25Candidates = this.fts5CandidatesForType(type, query, candidateLimit, statusFilter);
@@ -570,6 +589,35 @@ export class HybridRetriever implements IAsyncRetriever {
       });
     }
 
+    // Textual citations are a separate opt-in arm. Mission graph behavior above is unchanged.
+    const citationRank = new Map<string, number>();
+    if (citationRecall && (type === 'decision' || type === 'learning')) {
+      const orderedSeeds = allIds
+        .map((id) => {
+          const bm = bm25Rank.get(String(id));
+          const vk = vecRank.get(String(id));
+          return {
+            id: Number(id),
+            score:
+              (bm !== undefined ? 1 / (rrfK + bm) : 0) +
+              (vk !== undefined ? VECTOR_RRF_WEIGHT / (rrfK + vk) : 0),
+          };
+        })
+        .sort((a, b) => b.score - a.score)
+        .map((seed) => seed.id);
+      // The helper filters origins/status before taking five seeds and five neighbors per seed.
+      const expanded = citationNeighbors(this.client, type, orderedSeeds, { statusFilter });
+      for (const [seed, neighbors] of expanded.bySeed) seedNeighbors.set(String(seed), neighbors);
+      for (const [id, neighbor] of expanded.neighbors) {
+        const key = String(id);
+        citationRank.set(key, neighbor.rank);
+        if (!seen.has(key)) {
+          seen.add(key);
+          allIds.push(id);
+        }
+      }
+    }
+
     const rows = this.fetchSourceRows(type, allIds, statusFilter);
     const textById = new Map<string, string>();
     for (const row of rows) textById.set(String(row.id), row.text);
@@ -580,6 +628,7 @@ export class HybridRetriever implements IAsyncRetriever {
       const bm = bm25Rank.get(key);
       const vk = vecRank.get(key);
       const gr = graphRank.get(key);
+      const citation = citationRank.get(key);
       const rrf =
         (bm !== undefined ? 1 / (rrfK + bm) : 0) +
         // s92-m07: the vector term is weighted (VECTOR_RRF_WEIGHT); see the constant's note.
@@ -590,7 +639,8 @@ export class HybridRetriever implements IAsyncRetriever {
         // conversely, nudge a genuine mission hit down — an accepted MISSION-internal trade-off,
         // measured net-positive by the m02 mission floor. It never touches decisions/learnings
         // (guarded above), so their baselines are structurally protected.
-        (gr !== undefined ? graphWeight * (1 / (rrfK + gr)) : 0);
+        (gr !== undefined ? graphWeight * (1 / (rrfK + gr)) : 0) +
+        (citation !== undefined ? DEFAULT_CITATION_WEIGHT / (rrfK + citation) : 0);
       const ageDays = computeAgeDays(row.createdAt);
       const recencyFactor = computeRecencyFactor(ageDays);
       const finalScore = rrf * (1 - recencyWeight + recencyWeight * recencyFactor);
@@ -635,9 +685,17 @@ export class HybridRetriever implements IAsyncRetriever {
     seedIds: Array<number | string>
   ): Map<string, Array<number | string>> {
     const bySeed = new Map<string, Array<number | string>>();
+    const visibility = prepareSpinOutRead(this.client);
+    seedIds = seedIds.filter((id) => !visibility.hidden('mission', id));
     if (seedIds.length === 0) return bySeed;
     const add = (seed: string, neighbor: number | string): void => {
-      if (String(neighbor) === seed || neighbor === null || neighbor === undefined) return;
+      if (
+        String(neighbor) === seed ||
+        neighbor === null ||
+        neighbor === undefined ||
+        visibility.hidden('mission', neighbor)
+      )
+        return;
       const list = bySeed.get(seed) ?? [];
       if (!list.some((x) => String(x) === String(neighbor))) list.push(neighbor);
       bySeed.set(seed, list);
@@ -703,29 +761,22 @@ export class HybridRetriever implements IAsyncRetriever {
       .map((k) => `"${k.replace(/"/g, '""')}"`)
       .join(' OR ');
 
-    // s92-m07 (R1): decisions and learnings join their own table so the status predicate runs
-    // before LIMIT. FTS5 ranks over its whole index either way, so the order is unchanged.
-    const base = type === 'mission' ? null : baseTableForType(type);
-    const predicate = base ? statusPredicate(statusFilter, 'base.status') : null;
+    // Join every type before LIMIT: transferred source rows must not consume the pool.
+    const base = type === 'mission' ? 'missions' : baseTableForType(type);
+    const predicate =
+      type === 'mission'
+        ? { sql: '1=1', params: [] }
+        : (statusPredicate(statusFilter, 'base.status') ?? { sql: '1=1', params: [] });
+    const visible = prepareSpinOutRead(this.client).predicate(type, 'base.id');
     let raw: Array<{ rowid: number; rank: number }>;
     try {
-      const result =
-        base && predicate
-          ? this.client.getMany<{ rowid: number; rank: number }>(
-              `SELECT ${ftsTable}.rowid AS rowid, ${ftsTable}.rank AS rank
-                 FROM ${ftsTable} JOIN ${base} base ON base.id = ${ftsTable}.rowid
-                WHERE ${ftsTable} MATCH ? AND ${predicate.sql}
-                ORDER BY ${ftsTable}.rank
-                LIMIT ?`,
-              [ftsQuery, ...predicate.params, candidateLimit]
-            )
-          : this.client.getMany<{ rowid: number; rank: number }>(
-              `SELECT rowid, rank FROM ${ftsTable}
-               WHERE ${ftsTable} MATCH ?
-               ORDER BY rank
-               LIMIT ?`,
-              [ftsQuery, candidateLimit]
-            );
+      const result = this.client.getMany<{ rowid: number; rank: number }>(
+        `SELECT ${ftsTable}.rowid AS rowid, ${ftsTable}.rank AS rank
+         FROM ${ftsTable} JOIN ${base} base ON base.rowid = ${ftsTable}.rowid
+         WHERE ${ftsTable} MATCH ? AND ${predicate.sql} AND ${visible.sql}
+         ORDER BY ${ftsTable}.rank LIMIT ?`,
+        [ftsQuery, ...predicate.params, ...visible.params, candidateLimit]
+      );
       if (!result.success || !result.data) return [];
       raw = result.data;
     } catch {
@@ -765,8 +816,12 @@ export class HybridRetriever implements IAsyncRetriever {
   ): Array<{ id: number | string; distance: number }> {
     const vecTable = vecTableForType(type);
     const idColumn = vecIdColumnForType(type);
-    const base = type === 'mission' ? null : baseTableForType(type);
-    const predicate = base ? statusPredicate(statusFilter, 'status') : null;
+    const base = type === 'mission' ? 'missions' : baseTableForType(type);
+    const predicate =
+      type === 'mission'
+        ? { sql: '1=1', params: [] }
+        : (statusPredicate(statusFilter, 'status') ?? { sql: '1=1', params: [] });
+    const visible = prepareSpinOutRead(this.client).predicate(type, `${base}.id`);
 
     const blob = packEmbedding(queryVec);
     // s92-m07 (R1): vec0's KNN cannot take the status predicate, so the arm widens k until the
@@ -786,13 +841,17 @@ export class HybridRetriever implements IAsyncRetriever {
       } catch {
         return [];
       }
-      if (!base || !predicate || nearest.length === 0) return nearest.slice(0, candidateLimit);
+      if (nearest.length === 0) return [];
 
       const ids = nearest.map((c) => c.id);
       const allowed = this.client.getMany<{ id: number }>(
-        `SELECT id FROM ${base} WHERE id IN (${ids.map(() => '?').join(', ')}) AND ${predicate.sql}`,
-        [...ids, ...predicate.params]
+        `SELECT id FROM ${base} WHERE id IN (${ids.map(() => '?').join(', ')}) AND ${predicate.sql} AND ${visible.sql}`,
+        [...ids, ...predicate.params, ...visible.params]
       );
+      if (!allowed.success)
+        throw new Error(
+          `SPIN_OUT_READ_FAILED: ${allowed.error?.message ?? 'vector eligibility query failed'}`
+        );
       const keep = new Set((allowed.data ?? []).map((r) => String(r.id)));
       const eligible = nearest.filter((c) => keep.has(String(c.id)));
       if (eligible.length >= candidateLimit || nearest.length < k || k >= VECTOR_MAX_K) {
@@ -925,7 +984,7 @@ export class HybridRetriever implements IAsyncRetriever {
       text: formatMissionText(r.name, r.objective, r.notes),
       sprintId: r.sprint_id,
       category: null,
-      status: r.status,
+      status: normalizeMissionStatus(r.status),
       evidence: null,
       createdAt: r.created_at,
       projectId: r.project_id,

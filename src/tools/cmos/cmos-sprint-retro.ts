@@ -10,8 +10,15 @@
  * @module tools/cmos/cmos-sprint-retro
  */
 
+import { normalizeMissionStatus } from './terminal-status';
 import { withClient, type CmosDatabaseClient } from './client';
 import type { CmosToolResult } from './types';
+import {
+  prepareSpinOutRead,
+  spinOutDetails,
+  spinOutHistoryLines,
+  type SpinOutDetails,
+} from './spin-out-read';
 import { createError, createSuccess, CmosErrors } from './errors';
 import { buildUntaggedSessionAdvisory } from './untagged-advisory';
 import { appendWarnings } from './format-warnings';
@@ -21,7 +28,7 @@ import { storedTimeMs } from './stored-time';
 /**
  * Mission summary in the retrospective.
  */
-export interface RetroMissionSummary {
+export interface RetroMissionSummary extends SpinOutDetails {
   id: string;
   name: string;
   status: string;
@@ -164,7 +171,11 @@ export async function cmosSprintRetro(
       const sprint = sprintRow.data;
 
       // Get missions
-      const missions = getMissions(client, params.sprintId);
+      const visibility = prepareSpinOutRead(client);
+      const missions = getMissions(client, params.sprintId).map((mission) => ({
+        ...mission,
+        ...spinOutDetails(visibility, 'mission', mission.id),
+      }));
 
       // Get decisions
       const decisions = getDecisions(client, params.sprintId);
@@ -177,7 +188,9 @@ export async function cmosSprintRetro(
       const sessionCount = sessions.length;
 
       // Compute KPIs
-      const completedMissions = missions.filter((m) => m.status === 'Completed');
+      const completedMissions = missions.filter(
+        (m) => normalizeMissionStatus(m.status) === 'Completed'
+      );
       const blockedMissions = missions.filter((m) => m.status === 'Blocked');
       // s86-m08: retro computes from a raw missions SELECT, NOT from sprint_summary, so the
       // view fix does not reach it. Same rule, same source constant — a sprint is not scored
@@ -255,7 +268,13 @@ export async function cmosSprintRetro(
           carryForwards,
           commitSummary,
         },
-        untaggedAdvisory ? [untaggedAdvisory] : undefined
+        [
+          ...(untaggedAdvisory ? [untaggedAdvisory] : []),
+          ...spinOutHistoryLines(
+            visibility,
+            missions.map((mission) => mission.id)
+          ),
+        ]
       );
     },
     { projectRoot: params.projectRoot }
@@ -401,7 +420,9 @@ function generateCommitSummary(
   decisionCount: number,
   carryForwards: RetroCarryForward[]
 ): string {
-  const completedCount = missions.filter((m) => m.status === 'Completed').length;
+  const completedCount = missions.filter(
+    (m) => normalizeMissionStatus(m.status) === 'Completed'
+  ).length;
   const totalCount = missions.length;
   const statusTag = sprint.status === 'Completed' ? 'Complete' : (sprint.status ?? 'In Progress');
 
@@ -508,7 +529,8 @@ export function formatSprintRetroForLLM(result: CmosToolResult<SprintRetroResult
   lines.push('');
   lines.push('**Missions**');
   for (const m of data.missions) {
-    const icon = m.status === 'Completed' ? '✓' : m.status === 'Blocked' ? '✗' : '○';
+    const icon =
+      normalizeMissionStatus(m.status) === 'Completed' ? '✓' : m.status === 'Blocked' ? '✗' : '○';
     const cycle = m.cycleTimeDays !== null ? ` (${m.cycleTimeDays}d)` : '';
     lines.push(`  ${icon} ${m.id}: ${m.name}${cycle}`);
     if (m.notes) {

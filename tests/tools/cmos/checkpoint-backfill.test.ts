@@ -8,6 +8,24 @@ jest.mock('../../../src/tools/cmos/client', () => ({
   withClientAsync: jest.fn(),
 }));
 
+// Lease fencing and physical SQLite backups have their own real-store/child-process suites.
+// These tests retain their registration, attribution and failure-path focus.
+jest.mock('../../../src/tools/cmos/dashboard-upload', () => ({
+  uploadLog: jest.fn(),
+  withUploadLease: jest.fn(
+    async (_root: string, _explicit: boolean, send: () => Promise<unknown>) => send()
+  ),
+  withUploadSnapshot: jest.fn(async (file: string, send: (file: string) => Promise<unknown>) =>
+    send(file)
+  ),
+}));
+jest.mock('../../../src/intelligence/sender-context', () => ({
+  ...jest.requireActual<typeof import('../../../src/intelligence/sender-context')>(
+    '../../../src/intelligence/sender-context'
+  ),
+  resolveSenderContext: jest.fn(async () => ({ projectRoot: '/tmp/test' })),
+}));
+
 jest.mock('../../../src/tools/cmos/dashboard-client', () => {
   const actual = jest.requireActual<typeof import('../../../src/tools/cmos/dashboard-client')>(
     '../../../src/tools/cmos/dashboard-client'
@@ -338,7 +356,7 @@ describe('checkpoint-backfill', () => {
 
     expect(mockSyncSqliteFile).not.toHaveBeenCalled();
     expect(mockBackfill).toHaveBeenCalledWith({
-      projectRoot: undefined,
+      projectRoot: '/tmp/test',
       force: false,
       dryRun: false,
     });

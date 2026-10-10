@@ -56,7 +56,7 @@
  * ── FALSE-NEGATIVE PROFILE ────────────────────────────────────────────────────────────────────
  *  1. IT COMPARES DECLARATIONS, NOT BEHAVIOUR. `integer` on both sides says nothing about whether
  *     the handler floors a float before binding it into `LIMIT ?`. It does not (measured).
- *  2. UNWRAPPING IS FINITE. ZodOptional/ZodNullable/ZodDefault/ZodEffects are unwrapped; an exotic
+ *  2. UNWRAPPING IS FINITE. ZodOptional/ZodNullable/ZodDefault/ZodPipe are unwrapped; an exotic
  *     wrapper this walk does not know reaches the base-node check as itself and is reported, not
  *     skipped.
  *  3. NESTED PARITY IS SHALLOW BEYOND `strict`. Leg (v) recurses into nested objects for the
@@ -73,6 +73,7 @@
 
 import * as path from 'path';
 import { z } from 'zod';
+import type { $ZodChecks } from 'zod/v4/core';
 
 import { CMOS_TOOL_DEFINITIONS } from '../../src/tools/cmos/index';
 
@@ -85,7 +86,7 @@ interface Violation {
 }
 
 interface JsonProp {
-  type?: string;
+  type?: string | readonly string[];
   minimum?: number;
   maximum?: number;
   enum?: readonly unknown[];
@@ -103,7 +104,7 @@ interface JsonSchema {
  * Resolve a tool's ZodObject from its NAME, by rule (build plan CORRECTION 8).
  * `cmos_agent_onboard` → `src/tools/cmos/cmos-agent-onboard.ts` → export `cmosAgentOnboardSchema`.
  */
-function resolveSchema(toolName: string): z.ZodObject<z.ZodRawShape> {
+function resolveSchema(toolName: string): z.ZodObject<Record<string, z.ZodType>> {
   const file = 'cmos-' + toolName.replace(/^cmos_/, '').replace(/_/g, '-');
   const exportName = toolName.replace(/_(\w)/g, (_m, c: string) => c.toUpperCase()) + 'Schema';
   // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -116,24 +117,23 @@ function resolveSchema(toolName: string): z.ZodObject<z.ZodRawShape> {
         `name on purpose; do not add a name map, fix the naming or the export.`
     );
   }
-  return schema as z.ZodObject<z.ZodRawShape>;
+  return schema as z.ZodObject<Record<string, z.ZodType>>;
 }
 
-/** Strip Optional/Nullable/Default/Effects to the base node. */
-function baseOf(node: z.ZodTypeAny): z.ZodTypeAny {
+/** Strip Optional/Nullable/Default/Pipe to the base node. */
+function baseOf(node: z.core.$ZodType): z.core.$ZodType {
   let cur = node;
   for (let i = 0; i < 20; i++) {
-    const def = cur._def as { innerType?: z.ZodTypeAny; schema?: z.ZodTypeAny };
     if (
       cur instanceof z.ZodOptional ||
       cur instanceof z.ZodNullable ||
       cur instanceof z.ZodDefault
     ) {
-      cur = def.innerType as z.ZodTypeAny;
+      cur = cur.unwrap();
       continue;
     }
-    if (cur instanceof z.ZodEffects) {
-      cur = def.schema as z.ZodTypeAny;
+    if (cur instanceof z.ZodPipe) {
+      cur = cur.in;
       continue;
     }
     return cur;
@@ -147,21 +147,20 @@ interface NumberFacts {
   readonly max?: number;
 }
 
-/** zod records `.positive()` as `{kind:'min', value:0, inclusive:false}`. */
+/** Zod 4 stores explicit numeric bounds in documented core checks, separate from int formats. */
 function numberFacts(node: z.ZodNumber): NumberFacts {
-  const checks = (
-    node._def as { checks: Array<{ kind: string; value?: number; inclusive?: boolean }> }
-  ).checks;
-  const isInt = checks.some((c) => c.kind === 'int');
+  const isInt = node.isInt;
   let min: number | undefined;
   let max: number | undefined;
-  for (const c of checks) {
-    if (c.kind === 'min' && c.value !== undefined) {
+  for (const check of node._zod.def.checks ?? []) {
+    const c = (check as $ZodChecks)._zod.def;
+    if (c.check === 'greater_than' && typeof c.value === 'number') {
       const effective = c.inclusive === false ? (isInt ? c.value + 1 : c.value) : c.value;
       min = min === undefined ? effective : Math.max(min, effective);
     }
-    if (c.kind === 'max' && c.value !== undefined) {
-      max = max === undefined ? c.value : Math.min(max, c.value);
+    if (c.check === 'less_than' && typeof c.value === 'number') {
+      const effective = c.inclusive === false ? (isInt ? c.value - 1 : c.value) : c.value;
+      max = max === undefined ? effective : Math.min(max, effective);
     }
   }
   return { isInt, min, max };
@@ -177,7 +176,7 @@ interface WalkTotals {
 function compareNode(
   tool: string,
   key: string,
-  zodNode: z.ZodTypeAny,
+  zodNode: z.core.$ZodType,
   json: JsonProp,
   violations: Violation[],
   totals: WalkTotals,
@@ -227,9 +226,23 @@ function compareNode(
     return;
   }
 
+  // Nullable strings are now a published mission contract; unwrapping must not erase nullability.
+  if (base instanceof z.ZodString) {
+    const expected = z.safeParse(zodNode, null).success ? ['null', 'string'] : ['string'];
+    const published = (Array.isArray(json.type) ? [...json.type] : [json.type]).sort();
+    if (JSON.stringify(published) !== JSON.stringify(expected)) {
+      violations.push({
+        tool,
+        key,
+        leg,
+        detail: `zod string types [${expected}] vs published [${published}]`,
+      });
+    }
+  }
+
   // (iv) enum parity, in BOTH directions.
   if (base instanceof z.ZodEnum) {
-    const zodValues = [...(base._def as { values: readonly string[] }).values].sort();
+    const zodValues = [...base.options].sort();
     const jsonValues = [...((json.enum ?? []) as string[])].sort();
     if (json.enum === undefined) {
       violations.push({
@@ -262,7 +275,7 @@ function compareNode(
 
   // Recurse into array elements.
   if (base instanceof z.ZodArray) {
-    const element = (base._def as { type: z.ZodTypeAny }).type;
+    const element = base.element;
     if (json.items) {
       compareNode(tool, `${key}[]`, element, json.items, violations, totals, true);
     }
@@ -279,19 +292,19 @@ function compareNode(
 function compareObject(
   tool: string,
   prefix: string,
-  zodObject: z.ZodObject<z.ZodRawShape>,
+  zodObject: z.ZodObject<Record<string, z.ZodType>>,
   json: { properties?: Record<string, JsonProp>; additionalProperties?: boolean },
   violations: Violation[],
   totals: WalkTotals
 ): void {
-  const strict = (zodObject._def as { unknownKeys?: string }).unknownKeys === 'strict';
+  const strict = zodObject.def.catchall instanceof z.ZodNever;
   const closed = json.additionalProperties === false;
   if (strict !== closed) {
     violations.push({
       tool,
       key: prefix || '(root)',
       leg: 'strict',
-      detail: `zod unknownKeys='${(zodObject._def as { unknownKeys?: string }).unknownKeys}' vs published additionalProperties=${json.additionalProperties}`,
+      detail: `zod strict=${strict} vs published additionalProperties=${json.additionalProperties}`,
     });
   }
 
@@ -343,7 +356,7 @@ function compareObject(
  */
 export function comparePair(
   name: string,
-  zodObject: z.ZodObject<z.ZodRawShape>,
+  zodObject: z.ZodObject<Record<string, z.ZodType>>,
   json: JsonSchema
 ): Violation[] {
   const violations: Violation[] = [];
@@ -363,6 +376,52 @@ function walkAll(): { violations: Violation[]; totals: WalkTotals } {
   }
   return { violations, totals };
 }
+
+describe('Zod 4 introspection preserves the guard', () => {
+  it('detects every constraint leg after unwrapping and reading array elements', () => {
+    const schema = z
+      .object({
+        count: z.number().int().positive().max(50).default(1),
+        ids: z.array(z.number().int().positive()),
+        mode: z.enum(['a', 'b']).optional(),
+      })
+      .strict();
+    const failures = comparePair('mutated', schema, {
+      properties: {
+        count: { type: 'number' },
+        ids: { type: 'array', items: { type: 'number' } },
+        mode: { type: 'string', enum: ['a'] },
+        invented: { type: 'string' },
+      },
+    });
+    expect([...new Set(failures.map((finding) => finding.leg))].sort()).toEqual(
+      ['type', 'array-item-type', 'minimum', 'maximum', 'enum', 'strict', 'key-set'].sort()
+    );
+  });
+
+  it('checks nullable string declarations in both directions and unwraps transform inputs', () => {
+    const schema = z.object({
+      sprintId: z.string().nullable().optional(),
+      plain: z.string().transform((v) => v),
+    });
+    expect(
+      comparePair('green', schema, {
+        properties: {
+          sprintId: { type: ['string', 'null'] },
+          plain: { type: 'string' },
+        },
+      })
+    ).toEqual([]);
+    expect(
+      comparePair('red', schema, {
+        properties: {
+          sprintId: { type: 'string' },
+          plain: { type: ['string', 'null'] },
+        },
+      }).map((finding) => `${finding.leg}:${finding.key}`)
+    ).toEqual(['type:sprintId', 'type:plain']);
+  });
+});
 
 describe('published JSON inputSchema ↔ zod parity (s86-m04 Part A)', () => {
   const { violations, totals } = walkAll();
@@ -507,7 +566,7 @@ describe('arrayUpdates states ONE thing in all three places (s86-m04 Part B)', (
     const zodKeys = Object.keys(
       (
         resolveSchema('cmos_context').shape.arrayUpdates as z.ZodOptional<
-          z.ZodObject<z.ZodRawShape>
+          z.ZodObject<Record<string, z.ZodType>>
         >
       ).unwrap().shape
     ).sort();

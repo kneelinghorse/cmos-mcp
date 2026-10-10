@@ -8,8 +8,8 @@ import type { CmosDatabaseClient } from './client';
  * WHY A LEASE. Next-steps and carry-forwards accumulated with no way to expire: rows #486-#506
  * were six closes old at sprint-91 planning and nothing had disposed of them. Policy 2 (operator,
  * 2026-09-17): a row holds a lease that lapses unless renewed. CARRY is the renewal — it stamps
- * `resolved_at` and resets the clock. REOPEN clears `resolved_at`, so the clock restarts from
- * `created_at`: a reopened row is deliberately not renewed by being reopened.
+ * `resolved_at` and resets the clock. REOPEN clears that timestamp for completed/dropped rows,
+ * restoring the creation anchor; reopening carried rows preserves their last carry anchor.
  *
  * s92-m02 — WHAT A CLOSE IS. 3.1.0 counted a close by `sprints.end_date`, and `cmos_sprint(complete)`
  * kept a PLANNED end date when one was set (`COALESCE(end_date, ?)`). A sprint planned to end next

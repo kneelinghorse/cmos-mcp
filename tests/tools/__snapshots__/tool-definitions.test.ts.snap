@@ -426,6 +426,13 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           ],
           "type": "string",
         },
+        "alternatives": {
+          "description": "Other options considered, as strings",
+          "items": {
+            "type": "string",
+          },
+          "type": "array",
+        },
         "citesLearningIds": {
           "description": "Learnings this cites",
           "items": {
@@ -434,9 +441,24 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
           },
           "type": "array",
         },
-        "content": {
-          "description": "The decision text",
+        "consequences": {
+          "description": "Expected effects and tradeoffs",
           "type": "string",
+        },
+        "content": {
+          "description": "One or two sentences stating the decision; over 600 UTF-16 units warns",
+          "type": "string",
+        },
+        "context": {
+          "description": "Why this decision is needed",
+          "type": "string",
+        },
+        "deciders": {
+          "description": "Who made the decision, as strings",
+          "items": {
+            "type": "string",
+          },
+          "type": "array",
         },
         "decisionId": {
           "minimum": 1,
@@ -485,6 +507,13 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
         },
         "missionId": {
           "description": "Filter, or the mission to stamp",
+          "type": "string",
+        },
+        "mode": {
+          "description": "autonomous when no operator approval is claimed",
+          "enum": [
+            "autonomous",
+          ],
           "type": "string",
         },
         "page": {
@@ -920,7 +949,10 @@ exports[`Tool definitions contract registered tool schema stays stable 1`] = `
         },
         "sprintId": {
           "description": "Filter, or the sprint a new mission joins",
-          "type": "string",
+          "type": [
+            "string",
+            "null",
+          ],
         },
         "status": {
           "description": "Filter, or a new mission's status",

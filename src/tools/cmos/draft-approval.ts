@@ -2,6 +2,8 @@
 // ABOUTME: s93-m06 — turning an answered draft into a record: which draft, how its approval is known (approved,
 // ABOUTME: agent-judged, agent-attested), and the constraint, rule and profile kinds, claimed before they are written.
 
+import * as path from 'path';
+import { formatCliRemedy } from '../../utils/cli-remedy';
 import type { CmosDatabaseClient } from './client';
 import { withClientAsync } from './client';
 import { cmosSessionCapture } from './cmos-session-capture';
@@ -126,8 +128,7 @@ export function evaluateDraft(
       error: {
         code: CMOS_ERROR_CODES.DRAFT_NOT_FOUND,
         message: `No draft ${label} in this project's store; nothing was recorded.`,
-        suggestion:
-          'Check the project (projectRoot) and the id with `cmos-mcp drafts list`, or record without fromDraft.',
+        suggestion: `Check the project (projectRoot) and the id with ${formatCliRemedy('drafts list', { projectRoot: path.resolve(client.path, '../../..') })}, or record without fromDraft.`,
       },
     };
   if (draft.outcome !== 'pending') return { ok: false, error: notPending(draft, label) };
@@ -294,19 +295,21 @@ export async function recordDraftOfKind(
     : [
         `The ${kind} was written as drafted (${evaluation.label}); the content passed differs and was not used. Propose a revised line to change it.`,
       ];
-  const claimed = await withRun(params.projectRoot, (client) =>
-    clientRunner(client).run(
+  let projectRoot = params.projectRoot ?? process.cwd();
+  const claimed = await withRun(params.projectRoot, (client) => {
+    projectRoot = path.resolve(client.path, '../../..');
+    return clientRunner(client).run(
       `UPDATE proposals SET outcome = 'approved', approval_mode = ?, answered_at = ?
        WHERE id = ? AND outcome = 'pending'`,
       [evaluation.mode, at, id]
-    )
-  );
+    );
+  });
   if (!claimed.success) return createError(claimed.error!);
   if (claimed.data!.changes === 0)
     return createError({
       code: CMOS_ERROR_CODES.DRAFT_NOT_PENDING,
       message: `Draft ${evaluation.label} was answered by another call first; nothing was written.`,
-      suggestion: 'Read the drafts with `cmos-mcp drafts list` before recording again.',
+      suggestion: `Read the drafts with ${formatCliRemedy('drafts list', { projectRoot })} before recording again.`,
     });
   const release = async (): Promise<void> => {
     await withRun(params.projectRoot, (client) =>

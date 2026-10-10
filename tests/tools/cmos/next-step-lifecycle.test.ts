@@ -710,7 +710,7 @@ describe('next-step lifecycle (s40-m02)', () => {
         }
       });
 
-      it('should neutrally name pending, carried, and absent IDs as unmatched', async () => {
+      it('should neutrally name pending and absent IDs as unmatched while reopening carried work', async () => {
         await seedNextSteps(testDb.db);
         testDb.db.exec(`
           UPDATE next_steps
@@ -727,14 +727,14 @@ describe('next-step lifecycle (s40-m02)', () => {
         expect(result).toMatchObject({
           success: true,
           data: {
-            affected: 0,
+            affected: 1,
             writeFailures: [],
-            unmatchedIds: [1, 2, 999999],
+            unmatchedIds: [1, 999999],
           },
         });
         const formatted = formatNextStepsForLLM(result);
-        expect(formatted).toContain('Not matched (not completed/dropped, or no such id)');
-        expect(formatted).toContain('#1, #2, #999999');
+        expect(formatted).toContain('Not matched (not completed/dropped/carried, or no such id)');
+        expect(formatted).toContain('#1, #999999');
         expect(formatted).not.toContain('Write failures');
 
         const rows = testDb.db
@@ -744,7 +744,7 @@ describe('next-step lifecycle (s40-m02)', () => {
           .all();
         expect(rows).toEqual([
           { id: 1, status: 'pending', carried_to_sprint: null },
-          { id: 2, status: 'carried', carried_to_sprint: 'sprint-40' },
+          { id: 2, status: 'pending', carried_to_sprint: null },
         ]);
       });
 

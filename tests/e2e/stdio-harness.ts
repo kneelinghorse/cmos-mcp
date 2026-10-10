@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // ABOUTME: s80-m01 — shared MCP-over-stdio bootstrap for the first-run E2E and the
 // ABOUTME: verify:dist answer-shape gate, so the two never drift on transport setup.
-
 /**
  * Shared stdio bootstrap (s80-m01).
  *
@@ -18,9 +17,8 @@
  * @module tests/e2e/stdio-harness
  */
 
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { ListRootsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
+import { Client } from '@modelcontextprotocol/client';
 import { pathToFileURL } from 'url';
 
 /** Minimal shape of an MCP tool-call result we read from. */
@@ -93,11 +91,15 @@ export async function connectStdioServer(opts: {
   });
   const client = new Client(
     { name: opts.clientName ?? 'cmos-stdio-harness', version: '0.0.0' },
-    { capabilities: opts.roots ? { roots: { listChanged: false } } : {} }
+    {
+      capabilities: opts.roots ? { roots: { listChanged: false } } : {},
+      supportedProtocolVersions: ['2025-11-25'],
+      versionNegotiation: { mode: 'legacy' },
+    }
   );
   if (opts.roots) {
     const roots = opts.roots.map((root) => ({ uri: pathToFileURL(root).href }));
-    client.setRequestHandler(ListRootsRequestSchema, async () => ({ roots }));
+    client.setRequestHandler('roots/list', async () => ({ roots }));
   }
   await client.connect(transport);
 

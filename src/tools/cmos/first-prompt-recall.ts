@@ -1,10 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // ABOUTME: Read-only first-prompt decision recall combines keyword rank with bounded explicit citations.
-// ABOUTME: Origin/status filters precede caps; no embeddings, migrations, persistent graph, or prompt state.
+// ABOUTME: Origin/status filters precede caps; no embeddings, migrations, graph writes, or prompt state.
 
+import { prepareSpinOutRead } from './spin-out-read';
 import Database from 'better-sqlite3';
+import {
+  composeDecisionText,
+  decisionTextProjection,
+  type DecisionTextRow,
+} from './decision-fields';
 import { extractKeywords } from './keyword-extraction';
-import { decisionCitations } from './decision-citations';
+import { citationNeighbors } from './citation-neighbors';
 import { storedTimeMs } from './stored-time';
 import { previewText } from './text-preview';
 import { getProjectId } from './project-id';
@@ -31,7 +37,7 @@ export interface RecallResult {
   readonly warnings: readonly string[];
   readonly available: boolean;
 }
-interface Row {
+interface Row extends Omit<DecisionTextRow, 'decision_text'> {
   id: number;
   text: string;
   createdAt: string | null;
@@ -41,7 +47,11 @@ interface Row {
 interface Options {
   readonly nowMs?: number;
   readonly deadlineAtMs?: number;
+  readonly minimumKeywordMatches?: number;
 }
+// Sprint94: floor2 costs .02469 recall on162 queries while control emissions fall39 to9.
+// Filter the final union, leave seeds unchanged, and refill only within that existing pool.
+export const DEFAULT_MIN_KEYWORD_MATCHES = 2;
 const DAY_MS = 86_400_000;
 
 function columns(db: Database.Database, table: string): Set<string> {
@@ -51,42 +61,6 @@ function deadline(options: Options): void {
   if (options.deadlineAtMs !== undefined && Date.now() >= options.deadlineAtMs)
     throw new Error('recall_deadline');
 }
-function neighbors(
-  rows: Row[],
-  seeds: Row[],
-  options: Options
-): Map<number, { rank: number; via: RecallVia[] }> {
-  const byId = new Map(rows.map((row) => [row.id, row]));
-  const citations = new Map<number, number[]>();
-  for (const row of rows) {
-    deadline(options);
-    const created = storedTimeMs(row.createdAt);
-    if (!Number.isFinite(created)) continue;
-    citations.set(
-      row.id,
-      decisionCitations(row.text).filter((id) => {
-        const target = byId.get(id);
-        return id !== row.id && target !== undefined && storedTimeMs(target.createdAt) < created;
-      })
-    );
-  }
-  const result = new Map<number, { rank: number; via: RecallVia[] }>();
-  seeds.forEach((seed, index) => {
-    deadline(options);
-    const accepted = new Set<number>();
-    const add = (id: number, direction: RecallVia['direction']): void => {
-      if (accepted.size >= 5 || accepted.has(id) || id === seed.id) return;
-      accepted.add(id);
-      const prior = result.get(id);
-      if (!prior) result.set(id, { rank: index + 1, via: [{ seedId: seed.id, direction }] });
-      else prior.via.push({ seedId: seed.id, direction });
-    };
-    for (const id of citations.get(seed.id) ?? []) add(id, 'out');
-    for (const row of rows) if (citations.get(row.id)?.includes(seed.id)) add(row.id, 'in');
-  });
-  return result;
-}
-
 /** Local/legacy decisions only; unavailable reads are distinguishable from a valid empty result. */
 export function recallFirstPrompt(
   dbPath: string,
@@ -106,8 +80,12 @@ export function recallFirstPrompt(
     )
       throw new Error('recall_index_missing');
     const identityDb = db;
-    const identityReader: Pick<CmosDatabaseClient, 'getOne' | 'path'> = {
+    const identityReader: Pick<CmosDatabaseClient, 'getOne' | 'getMany' | 'path'> = {
       path: dbPath,
+      getMany: <T>(sql: string, params?: QueryParams): CmosToolResult<T[]> => {
+        const statement = identityDb.prepare(sql);
+        return { success: true, data: (params ? statement.all(params) : statement.all()) as T[] };
+      },
       getOne: <T>(sql: string, params?: QueryParams): CmosToolResult<T | undefined> => {
         // SQL/schema errors must reach the outer unavailable result; only a missing row is a
         // legitimate canonical identity fallback.
@@ -121,6 +99,9 @@ export function recallFirstPrompt(
     localProjectId = getProjectId(identityReader);
     const where = [cols.has('status') ? "(d.status IS NULL OR d.status <> 'superseded')" : '1'];
     const params: (string | null)[] = [];
+    const visible = prepareSpinOutRead(identityReader).predicate('decision', 'd.id');
+    where.push(visible.sql);
+    params.push(...visible.params);
     if (cols.has('project_id')) {
       where.push('(d.project_id IS NULL OR d.project_id = ?)');
       params.push(localProjectId);
@@ -128,7 +109,7 @@ export function recallFirstPrompt(
     if (cols.has('superseded_by')) where.push('d.superseded_by IS NULL');
     const fields = `d.id, d.decision_text AS text, d.created_at AS createdAt,
       ${cols.has('status') ? "COALESCE(d.status,'active')" : "'active'"} AS status,
-      ${cols.has('project_id') ? 'd.project_id' : 'NULL'} AS projectId`;
+      ${cols.has('project_id') ? 'd.project_id' : 'NULL'} AS projectId, ${decisionTextProjection(cols, 'd.')}`;
     const keywords = extractKeywords(query).slice(0, 64);
     if (!keywords.length) return { items: [], localProjectId, warnings: [], available: true };
     const match = keywords.map((word) => `"${word.replace(/"/g, '""')}"`).join(' OR ');
@@ -145,11 +126,28 @@ export function recallFirstPrompt(
         `SELECT ${fields} FROM strategic_decisions d WHERE ${where.join(' AND ')} ORDER BY d.id`
       )
       .all(...params) as Row[];
-    const graph = neighbors(rows, candidates.slice(0, 5), options);
+    const citations = citationNeighbors(
+      identityReader,
+      'decision',
+      candidates.map((row) => row.id),
+      {
+        deadlineAtMs: options.deadlineAtMs,
+      }
+    );
+    const graph = citations.neighbors;
+    const floor = options.minimumKeywordMatches ?? DEFAULT_MIN_KEYWORD_MATCHES;
+    if (!Number.isInteger(floor) || floor < 0) throw new Error('recall_floor_invalid');
     const keywordRank = new Map(candidates.map((row, index) => [row.id, index + 1]));
     const now = options.nowMs ?? Date.now();
     const ranked = rows
       .filter((row) => keywordRank.has(row.id) || graph.has(row.id))
+      // Filter the unchanged bounded union before taking five; never fetch replacements.
+      .filter((row) => {
+        const words = new Set(
+          extractKeywords(composeDecisionText({ ...row, decision_text: row.text }))
+        );
+        return keywords.filter((word) => words.has(word)).length >= floor;
+      })
       .map((row) => {
         const keyword = keywordRank.get(row.id);
         const citation = graph.get(row.id);
@@ -176,11 +174,12 @@ export function recallFirstPrompt(
         via: citation?.via ?? [],
       };
     });
-    return { items, localProjectId, warnings: [], available: true };
+    return { items, localProjectId, warnings: citations.warnings, available: true };
   } catch (error) {
     const known = ['recall_deadline', 'recall_schema_missing', 'recall_index_missing'];
     const warning =
-      error instanceof Error && known.includes(error.message)
+      error instanceof Error &&
+      (known.includes(error.message) || error.message.startsWith('SPIN_OUT_READ_FAILED:'))
         ? error.message
         : 'recall_query_failed';
     return { items: [], localProjectId, warnings: [warning], available: false };

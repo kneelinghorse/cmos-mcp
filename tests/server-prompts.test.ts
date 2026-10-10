@@ -5,10 +5,8 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { ErrorCode } from '@modelcontextprotocol/sdk/types.js';
+import { Server, InMemoryTransport, ProtocolErrorCode } from '@modelcontextprotocol/server';
+import { Client } from '@modelcontextprotocol/client';
 import { parse as parseYaml } from 'yaml';
 import { registerCmosPromptHandlers } from '../src/server-prompts';
 
@@ -65,13 +63,13 @@ describe('CMOS MCP prompts', () => {
     const { client, close } = await connect();
     try {
       await expect(client.getPrompt({ name: '../../agents.md' })).rejects.toMatchObject({
-        code: ErrorCode.InvalidParams,
+        code: ProtocolErrorCode.InvalidParams,
         message: expect.stringContaining('cmos-start'),
       });
       await expect(
         client.getPrompt({ name: 'cmos-build', arguments: { mission: 'wrong' } })
       ).rejects.toMatchObject({
-        code: ErrorCode.InvalidParams,
+        code: ProtocolErrorCode.InvalidParams,
         message: expect.stringContaining('does not accept arguments'),
       });
       expect(await client.getPrompt({ name: 'cmos-start', arguments: {} })).toHaveProperty(
@@ -100,10 +98,12 @@ describe('CMOS MCP prompts', () => {
       const { client, close } = await connect(skillRoot);
       try {
         await expect(client.getPrompt({ name: 'cmos-start' })).rejects.toMatchObject({
-          code: ErrorCode.InternalError,
+          code: ProtocolErrorCode.InternalError,
           message: expect.stringContaining('Reinstall @aquex/cmos-mcp'),
         });
-        await expect(client.listPrompts()).rejects.toMatchObject({ code: ErrorCode.InternalError });
+        await expect(client.listPrompts()).rejects.toMatchObject({
+          code: ProtocolErrorCode.InternalError,
+        });
       } finally {
         await close();
         fs.rmSync(skillRoot, { recursive: true, force: true });

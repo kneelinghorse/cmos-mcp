@@ -712,7 +712,11 @@ describe('s86-m02 Step 1 — the envelope warnings channel is universal', () => 
       // s93-m06: draft-approval.ts joins (a draft written as a constraint, rule or profile line
       // whose draft cannot then name it carries that as a warning); it has no formatter of its own,
       // and formatDecisionsRecordForLLM renders the warning.
-    }).toEqual({ warningEnvelopeModules: 33, modulesWithFormatters: 30, formatters: 33 });
+      // s94-m10: review-presentation.ts attaches the registry upload receipt as an envelope warning
+      // and appends it to the digest text; it adds no format*ForLLM declaration.
+      // s94-m04: sync-bootstrap.ts and sync-pull.ts now attach failed migration warnings to
+      // their error envelopes too; their existing formatters already render those warnings.
+    }).toEqual({ warningEnvelopeModules: 36, modulesWithFormatters: 32, formatters: 35 });
     expect(
       [...new Set(looseErrorPreambles.map((row) => row.errorPreambleCondition))].sort()
     ).toEqual(['!result.success || !result.data']);

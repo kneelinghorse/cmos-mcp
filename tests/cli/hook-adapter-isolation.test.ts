@@ -67,6 +67,8 @@ async function run(harness: string, includeCwd: boolean, hookEnv = env) {
   return { code, stdout, stderr };
 }
 
+// Hook folders can come from environment or payload rather than the caller's shell cwd.
+// Printed remedies must therefore keep their concrete target even when CLI resolution says cwd.
 it.each(PORTABLE)(
   '%s uses its payload project and never rewrites the inherited Claude link',
   async (harness) => {
@@ -77,7 +79,8 @@ it.each(PORTABLE)(
     expect(digest.buildDigest).toHaveBeenCalledWith(
       nativeRoot,
       expect.anything(),
-      expect.any(Number)
+      expect.any(Number),
+      'explicit'
     );
     expect(fs.readFileSync(harnessLinkPath(process.pid, env), 'utf8')).toBe(priorLink);
     expect(env.CLAUDE_PROJECT_DIR).toBe(parentRoot);
@@ -93,7 +96,8 @@ it.each(PORTABLE)(
     expect(digest.buildDigest).toHaveBeenCalledWith(
       nativeRoot,
       expect.anything(),
-      expect.any(Number)
+      expect.any(Number),
+      'explicit'
     );
     expect(fs.readFileSync(harnessLinkPath(process.pid, env), 'utf8')).toBe(priorLink);
   }
@@ -127,10 +131,28 @@ it('Claude retains its environment project priority and verified process link', 
   expect(digest.buildDigest).toHaveBeenCalledWith(
     parentRoot,
     expect.anything(),
-    expect.any(Number)
+    expect.any(Number),
+    'explicit'
   );
   expect(readHarnessLink(process.pid, env)).toMatchObject({
     hash: harnessSessionHash('native-session'),
     projectDir: parentRoot,
   });
+});
+
+it('review carries the environment-selected root into remedies outside the shell folder', async () => {
+  const code = await runCli(['review'], {
+    env,
+    cwd: nativeRoot,
+    readStdin: async () => '',
+    stdout: () => {},
+    stderr: () => {},
+  });
+  expect(code).toBe(0);
+  expect(digest.buildDigest).toHaveBeenCalledWith(
+    parentRoot,
+    expect.anything(),
+    Infinity,
+    'explicit'
+  );
 });

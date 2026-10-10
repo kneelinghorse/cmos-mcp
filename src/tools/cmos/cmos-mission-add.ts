@@ -1,13 +1,16 @@
+// ABOUTME: Creates missions with explicit, inferred or unscheduled sprint assignment.
+// ABOUTME: Validates lifecycle choices and discloses failed writes through the standard tool result.
 /**
  * cmos_mission_add Tool
  *
  * MCP tool for creating new missions in the CMOS database.
- * Validates sprint exists before creation and supports all spec fields.
+ * Supports explicitly unscheduled work and validates any named sprint before creation.
  *
  * @module tools/cmos/cmos-mission-add
  */
 
 import { z } from 'zod';
+import { SPRINT_OPEN_STATUSES, statusInSql } from './terminal-status';
 import { withClientAsync } from './client';
 import { genesisColumns, getProjectId } from './genesis-columns';
 import type { CmosToolResult, MissionStatus, Sprint } from './types';
@@ -33,7 +36,7 @@ export interface MissionAddResult {
   name: string;
 
   /** Sprint ID the mission belongs to */
-  sprintId: string;
+  sprintId: string | null;
 
   /** Mission status */
   status: MissionStatus;
@@ -50,7 +53,7 @@ export interface MissionAddResult {
   mission: {
     id: string;
     name: string;
-    sprintId: string;
+    sprintId: string | null;
     status: MissionStatus;
     objective?: string;
     context?: string;
@@ -76,7 +79,13 @@ export const cmosMissionAddSchema = z.object({
   name: z.string().min(1).describe('Display name for the mission'),
 
   /** Sprint ID to associate with */
-  sprintId: z.string().min(1).describe('Must reference an existing sprint'),
+  sprintId: z
+    .string()
+    .trim()
+    .min(1)
+    .nullable()
+    .optional()
+    .describe('Existing sprint; omitted infers the unique open sprint, null is unscheduled'),
 
   /** Mission status (default: Queued) */
   status: z
@@ -89,7 +98,7 @@ export const cmosMissionAddSchema = z.object({
 
   /** Mission context - can be string or object */
   context: z
-    .union([z.string(), z.record(z.unknown())])
+    .union([z.string(), z.record(z.string(), z.unknown())])
     .optional()
     .describe('Background context explaining why this mission matters'),
 
@@ -109,7 +118,10 @@ export const cmosMissionAddSchema = z.object({
     .describe('Documentation to reference during implementation'),
 
   /** Domain-specific fields */
-  domainFields: z.record(z.unknown()).optional().describe('Domain-specific custom fields'),
+  domainFields: z
+    .record(z.string(), z.unknown())
+    .optional()
+    .describe('Domain-specific custom fields'),
 
   /** Notes */
   notes: z.string().optional().describe('Additional notes about the mission'),
@@ -130,7 +142,7 @@ export const cmosMissionAddToolDefinition = {
   name: 'cmos_mission_add',
   description:
     'Create a new mission in the CMOS database. ' +
-    'Validates that the specified sprint exists before creation. ' +
+    'Omit sprintId to infer the unique open sprint, or pass null for unscheduled work; a named sprint must exist. ' +
     'Supports all mission spec fields including objective, context, success criteria, deliverables, and reference docs.',
   inputSchema: {
     type: 'object',
@@ -144,8 +156,9 @@ export const cmosMissionAddToolDefinition = {
         description: 'Display name for the mission',
       },
       sprintId: {
-        type: 'string',
-        description: 'Must reference an existing sprint',
+        type: ['string', 'null'],
+        description:
+          'Existing sprint ID; omitted infers the unique open sprint, null requests unscheduled work',
       },
       status: {
         type: 'string',
@@ -188,7 +201,7 @@ export const cmosMissionAddToolDefinition = {
         description: 'Project root directory to search for CMOS database (defaults to cwd)',
       },
     },
-    required: ['missionId', 'name', 'sprintId'],
+    required: ['missionId', 'name'],
     additionalProperties: false,
   },
 } as const;
@@ -242,8 +255,14 @@ export async function cmosMissionAdd(
     return createError(CmosErrors.missingParameter('name'));
   }
 
-  if (!sprintId || sprintId.trim() === '') {
-    return createError(CmosErrors.missingParameter('sprintId'));
+  if (
+    sprintId !== undefined &&
+    sprintId !== null &&
+    (typeof sprintId !== 'string' || sprintId.trim() === '')
+  ) {
+    return createError(
+      CmosErrors.invalidParameter('sprintId', sprintId, ['a nonempty sprint ID, null, or omitted'])
+    );
   }
 
   // Validate status if provided
@@ -254,19 +273,36 @@ export async function cmosMissionAdd(
   const warnings: string[] = [];
   const result = await withClientAsync(
     async (client) => {
-      // Verify sprint exists
-      const sprintResult = client.getOne<Sprint>('SELECT id, title FROM sprints WHERE id = ?', [
-        sprintId,
-      ]);
-
-      if (!sprintResult.success) {
-        return createError<MissionAddResult>(
-          sprintResult.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to verify sprint' }
+      let assignedSprintId = sprintId?.trim() ?? null;
+      if (sprintId === undefined) {
+        const open = client.getMany<{ id: string }>(
+          `SELECT id FROM sprints WHERE ${statusInSql('status', SPRINT_OPEN_STATUSES)}`
         );
+        if (!open.success)
+          return createError<MissionAddResult>({
+            code: open.error?.code ?? 'DB_QUERY_FAILED',
+            message: open.error?.message ?? 'Failed to resolve an open sprint',
+            suggestion:
+              'Restore read access to sprints, or pass sprintId: null for explicitly unscheduled work.',
+          });
+        if (open.data?.length === 1) assignedSprintId = open.data[0].id;
+        else if ((open.data?.length ?? 0) > 1)
+          warnings.push(
+            'Multiple sprints are open; the mission is unscheduled. Name sprintId to assign it.'
+          );
       }
-
-      if (!sprintResult.data) {
-        return createError<MissionAddResult>(CmosErrors.sprintNotFound(sprintId));
+      if (assignedSprintId !== null) {
+        const sprintResult = client.getOne<Sprint>('SELECT id, title FROM sprints WHERE id = ?', [
+          assignedSprintId,
+        ]);
+        if (!sprintResult.success)
+          return createError<MissionAddResult>({
+            code: sprintResult.error?.code ?? 'DB_QUERY_FAILED',
+            message: sprintResult.error?.message ?? 'Failed to verify sprint',
+            suggestion: 'Check database access and the named sprint, then retry mission add.',
+          });
+        if (!sprintResult.data)
+          return createError<MissionAddResult>(CmosErrors.sprintNotFound(assignedSprintId));
       }
 
       // Check if mission ID already exists
@@ -311,7 +347,7 @@ export async function cmosMissionAdd(
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${genesis.placeholders})`,
         [
           missionId.trim(),
-          sprintId.trim(),
+          assignedSprintId,
           name.trim(),
           status,
           objective?.trim() || null,
@@ -350,11 +386,11 @@ export async function cmosMissionAdd(
           now,
           missionId,
           status,
-          `Created mission ${missionId} in sprint ${sprintId}`,
+          `Created mission ${missionId}${assignedSprintId ? ` in sprint ${assignedSprintId}` : ' (unscheduled)'}`,
           JSON.stringify({
             tool: 'cmos_mission_add',
             missionId,
-            sprintId,
+            sprintId: assignedSprintId,
             name: name.trim(),
             status,
           }),
@@ -391,13 +427,13 @@ export async function cmosMissionAdd(
         {
           id: missionId.trim(),
           name: name.trim(),
-          sprintId: sprintId.trim(),
+          sprintId: assignedSprintId,
           status,
-          message: `Mission '${missionId}' created successfully in sprint '${sprintId}'`,
+          message: `Mission '${missionId}' created successfully${assignedSprintId ? ` in sprint '${assignedSprintId}'` : ' (unscheduled)'}`,
           mission: {
             id: missionId.trim(),
             name: name.trim(),
-            sprintId: sprintId.trim(),
+            sprintId: assignedSprintId,
             status,
           },
           fields,
@@ -435,7 +471,7 @@ export function formatMissionAddForLLM(result: CmosToolResult<MissionAddResult>)
   const lines: string[] = [
     `Mission '${data.id}' created`,
     '',
-    `Sprint: ${data.sprintId}`,
+    `Sprint: ${data.sprintId ?? '(unscheduled)'}`,
     `Name: ${data.name}`,
     `Status: ${data.status}`,
   ];

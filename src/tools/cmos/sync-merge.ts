@@ -33,6 +33,35 @@
 
 import type { CmosDatabaseClient } from './client';
 import { checkWrite, type WriteSink } from './write-guard';
+import { requireRecordLinks } from './record-link-write';
+
+export interface MergedRecordRef {
+  kind: 'decision' | 'learning';
+  id: number;
+}
+
+/** A supplied batch is repaired by its outer transaction after all endpoints have arrived. */
+function mergeLinkedRecord(
+  db: CmosDatabaseClient,
+  kind: 'decision' | 'learning',
+  id: number,
+  write: () => InsertOutcome,
+  batch?: MergedRecordRef[]
+): InsertOutcome {
+  if (batch) {
+    const outcome = write();
+    if (outcome !== 'failed') batch.push({ kind, id });
+    return outcome;
+  }
+  const result = db.transaction(() => {
+    const outcome = write();
+    if (outcome === 'failed') throw new Error('Replica record insert failed');
+    requireRecordLinks(db, kind, id);
+    return outcome;
+  });
+  if (!result.success) return 'failed';
+  return result.data!;
+}
 
 // ─── Provenance ────────────────────────────────────────────────────────────────
 
@@ -213,63 +242,79 @@ export function insertSessionRow(
 export function insertDecisionRow(
   db: CmosDatabaseClient,
   row: MergeDecisionRow,
-  prov: GenesisProvenance
+  prov: GenesisProvenance,
+  batch?: MergedRecordRef[]
 ): InsertOutcome {
-  return runInsert(
+  return mergeLinkedRecord(
     db,
-    `INSERT INTO strategic_decisions
+    'decision',
+    row.id,
+    () =>
+      runInsert(
+        db,
+        `INSERT INTO strategic_decisions
        (id, context_id, decision_text, created_at, sprint_id, mission_id, category,
         author_session_id, content_hash,
         project_id, stable_event_id, occurred_at, origin_seq, event_type, schema_version)
      VALUES (?, 'master_context', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'decision_captured', ?)
      ON CONFLICT(id) DO NOTHING`,
-    [
-      row.id,
-      row.decisionText,
-      row.createdAt,
-      row.sprintId,
-      row.missionId,
-      row.category,
-      row.sessionId,
-      row.contentHash,
-      prov.projectId,
-      prov.stableEventId,
-      prov.occurredAt,
-      prov.originSeq,
-      prov.schemaVersion ?? 1,
-    ]
+        [
+          row.id,
+          row.decisionText,
+          row.createdAt,
+          row.sprintId,
+          row.missionId,
+          row.category,
+          row.sessionId,
+          row.contentHash,
+          prov.projectId,
+          prov.stableEventId,
+          prov.occurredAt,
+          prov.originSeq,
+          prov.schemaVersion ?? 1,
+        ]
+      ),
+    batch
   );
 }
 
 export function insertLearningRow(
   db: CmosDatabaseClient,
   row: MergeLearningRow,
-  prov: GenesisProvenance
+  prov: GenesisProvenance,
+  batch?: MergedRecordRef[]
 ): InsertOutcome {
-  return runInsert(
+  return mergeLinkedRecord(
     db,
-    `INSERT INTO learnings
+    'learning',
+    row.id,
+    () =>
+      runInsert(
+        db,
+        `INSERT INTO learnings
        (id, content, category, status, sprint_id, author_session_id, mission_id, created_at,
         content_hash,
         project_id, stable_event_id, occurred_at, origin_seq, event_type, schema_version)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'learning_captured', ?)
      ON CONFLICT(id) DO NOTHING`,
-    [
-      row.id,
-      row.content,
-      row.category,
-      row.status,
-      row.sprintId,
-      row.sessionId,
-      row.missionId,
-      row.createdAt,
-      row.contentHash,
-      prov.projectId,
-      prov.stableEventId,
-      prov.occurredAt,
-      prov.originSeq,
-      prov.schemaVersion ?? 1,
-    ]
+        [
+          row.id,
+          row.content,
+          row.category,
+          row.status,
+          row.sprintId,
+          row.sessionId,
+          row.missionId,
+          row.createdAt,
+          row.contentHash,
+          prov.projectId,
+          prov.stableEventId,
+          prov.occurredAt,
+          prov.originSeq,
+          prov.schemaVersion ?? 1,
+        ]
+      ),
+    batch
   );
 }
 

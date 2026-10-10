@@ -21,6 +21,7 @@
  * @module tools/cmos/cmos-db-backfill
  */
 
+import { normalizeMissionStatus } from './terminal-status';
 import * as path from 'path';
 import { withClientAsync, type CmosDatabaseClient } from './client';
 import { DashboardClient, resolveDashboardBaseUrl } from './dashboard-client';
@@ -538,7 +539,7 @@ export async function cmosDbBackfill(
             data: {
               missionId: mission.id,
               name: mission.name,
-              sprintId: mission.sprint_id ?? '',
+              sprintId: mission.sprint_id,
               status: mission.status,
               objective: mission.notes ?? null,
               successCriteria: null,
@@ -566,7 +567,7 @@ export async function cmosDbBackfill(
             breakdown.missions++;
           }
 
-          if (mission.status === 'Completed' && mission.completed_at) {
+          if (normalizeMissionStatus(mission.status) === 'Completed' && mission.completed_at) {
             events.push({
               type: 'mission_completed',
               timestamp: mission.completed_at,

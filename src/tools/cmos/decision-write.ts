@@ -3,9 +3,15 @@
 // ABOUTME: dedup lookup, genesis-stamped INSERT, then supersession detection and embedding.
 
 import type { CmosDatabaseClient } from './client';
+import {
+  storedDecisionFields,
+  type DecisionFieldsParams,
+  type DecisionTextRow,
+} from './decision-fields';
 import { genesisColumns, getProjectId } from './genesis-columns';
 import { recordEmbedding, decisionEmbeddingInput } from '../../intelligence/embedding-pipeline';
 import { checkWrite, type WriteSink } from './write-guard';
+import { requireRecordLinks } from './record-link-write';
 
 /**
  * s91-m04 — extracted from the decision arm of `cmosSessionCapture` so `cmos_decisions(record)`
@@ -16,11 +22,10 @@ import { checkWrite, type WriteSink } from './write-guard';
  * each caller because the two resolve differently (capture: mission -> session -> active work;
  * record: mission -> explicit sprintId -> open-sprint write resolver).
  *
- * NOT LOOKED AT: `captureDecisions` in cmos-mission-complete.ts is a third copy (no dedup, no
- * detection) and stays untouched this sprint.
+ * Every caller prepares the schema first and owns the transaction containing this row and links.
  */
 
-export interface DecisionRowInput {
+export interface DecisionRowInput extends DecisionFieldsParams {
   readonly content: string;
   readonly now: string;
   readonly sprintId: string | null;
@@ -96,6 +101,11 @@ export function insertDecisionRow(
     insertParams.push(JSON.stringify(input.evidence));
   }
 
+  for (const [column, value] of Object.entries(storedDecisionFields(input))) {
+    columns.push(column);
+    insertParams.push(value);
+  }
+
   if (input.approval) {
     columns.push('approval_mode', 'approval_draft', 'approval_words');
     insertParams.push(input.approval.mode, input.approval.draft, input.approval.words);
@@ -123,6 +133,7 @@ export function insertDecisionRow(
   const lastId = insertResult.data?.lastInsertRowid;
   const decisionId =
     typeof lastId === 'number' ? lastId : typeof lastId === 'bigint' ? Number(lastId) : undefined;
+  requireRecordLinks(client, 'decision', decisionId);
   return { kind: 'materialized', decisionId };
 }
 
@@ -136,7 +147,7 @@ export function insertDecisionRow(
  */
 export async function followDecisionInsert(
   client: CmosDatabaseClient,
-  content: string,
+  content: string | DecisionTextRow,
   decisionId: number | undefined,
   warnings: string[]
 ): Promise<void> {

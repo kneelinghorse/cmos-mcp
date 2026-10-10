@@ -17,8 +17,13 @@
  * hook-less block, between its marker comments, is counted apart, as the G1 review counts it.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
+import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 import Database from 'better-sqlite3';
+import { execFileSync } from 'child_process';
+import { cliCommand } from '../../../src/cli/session-start';
+import * as resolutionPolicy from '../../../src/intelligence/resolution-policy';
+import * as senderContext from '../../../src/intelligence/sender-context';
+import { setServerProjectRoot } from '../../../src/intelligence/resolution-policy';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -548,7 +553,7 @@ describe('s93-m12 — what init writes', () => {
     expect(fs.readFileSync(file, 'utf8')).toBe(edited);
   });
 
-  it('a recreated store takes back the level of an edited line and the hooks setting the line names', async () => {
+  it('a recreated store takes back the level of an edited line while keeping hooks on', async () => {
     const root = folder('recreated-edited');
     await cmosProjectInit({ projectRoot: root, projectType: 'build' });
     CmosDetector.resetInstance();
@@ -570,7 +575,7 @@ describe('s93-m12 — what init writes', () => {
     ProjectGraphRegistry.resetInstance();
     const again = await cmosProjectInit({ projectRoot: root });
     expect(again.data).toMatchObject({ level: 'builder', levelSource: 'agents-file' });
-    expect(meta(root, 'ambient')).toBe('off');
+    expect(meta(root, 'ambient')).toBeUndefined();
   });
 
   it('points out a CMOS line that names another level than the store, and changes nothing', async () => {
@@ -635,7 +640,9 @@ describe('s93-m12 — what init writes', () => {
     expect(warned).toContain(
       'says the Builder level with the hooks off, but this project is at the Builder level with the hooks on'
     );
-    expect(warned).toContain('`cmos-mcp ambient off` sets the hooks as the line says');
+    expect(warned).toContain(
+      `\`cmos-mcp ambient off --project-root '${root}'\` (POSIX shell) sets the hooks as the line says`
+    );
     CmosDetector.resetInstance();
     const updated = await cmosProjectUpdate({ projectRoot: root, projectType: 'build' });
     expect((updated.warnings ?? []).join('\n')).toContain(
@@ -673,7 +680,7 @@ describe('s93-m12 — what init writes', () => {
     );
   });
 
-  it('a recreated store that takes the hooks setting back from its line says so', async () => {
+  it('a recreated store keeps hooks on and offers an explicit opt-out', async () => {
     const root = folder('recreated-hooks');
     await cmosProjectInit({ projectRoot: root });
     CmosDetector.resetInstance();
@@ -684,9 +691,9 @@ describe('s93-m12 — what init writes', () => {
     CmosDetector.resetInstance();
     ProjectGraphRegistry.resetInstance();
     const again = await cmosProjectInit({ projectRoot: root });
-    expect(meta(root, 'ambient')).toBe('off');
+    expect(meta(root, 'ambient')).toBeUndefined();
     expect((again.warnings ?? []).join('\n')).toContain(
-      "The hooks are off here, as AGENTS.md's CMOS line says: this store was recreated in place. `cmos-mcp ambient on` turns them back on."
+      `\`cmos-mcp ambient off --project-root '${root}'\` (POSIX shell) sets the hooks as the line says`
     );
   });
 
@@ -843,5 +850,212 @@ describe('s93-m12 — the operator profile', () => {
       addProfileLine(line, { kind: 'profile', status: 'approved', draftId: 'd3', line })
     ).toThrow(new RegExp(`capped at ${PROFILE_CAP_CHARS} characters`));
     expect(fs.readFileSync(profilePath(), 'utf8')).toBe(full);
+  });
+});
+
+describe('s94-m11 — remedies act on the project that produced them', () => {
+  async function mismatch(root: string): Promise<void> {
+    await cmosProjectInit({ projectRoot: root, projectType: 'build' });
+    const file = path.join(root, 'AGENTS.md');
+    fs.writeFileSync(
+      file,
+      fs
+        .readFileSync(file, 'utf8')
+        .replace(
+          cmosRulesLine('builder'),
+          cmosRulesLine('planner', { hooks: true, ambient: 'off' })
+        )
+    );
+    CmosDetector.resetInstance();
+  }
+
+  it.each(['explicit', 'cwd'] as const)(
+    'CLI %s names the planner flag and scopes its ambient remedy',
+    async (source) => {
+      const root = folder('CLI target');
+      await mismatch(root);
+      const result = await cli(
+        source === 'explicit' ? ['init', '--project-root', root] : ['init'],
+        source === 'explicit' ? tmp : root
+      );
+      expect(result.code).toBe(0);
+      expect(result.out).toContain('init --level planner');
+      expect(result.out).toContain(
+        source === 'cwd'
+          ? '`cmos-mcp ambient off`'
+          : `cmos-mcp ambient off --project-root '${root}'`
+      );
+    }
+  );
+
+  it.each(['space here', "apostrophe's", '$HOME'])(
+    'MCP init preserves the literal %s root in a POSIX remedy',
+    async (name) => {
+      const root = folder(name);
+      await mismatch(root);
+      const result = await cmosProjectInit({ projectRoot: root });
+      const warning = result.warnings!.find((line) => line.includes('sets the hooks'))!;
+      expect(warning).toContain('POSIX shell');
+      const command = /`(cmos-mcp ambient off[^`]+)`/.exec(warning)![1];
+      const words = JSON.parse(
+        execFileSync(
+          '/bin/sh',
+          [
+            '-c',
+            `set -- ${command}; node -e 'process.stdout.write(JSON.stringify(process.argv.slice(1)))' "$@"`,
+          ],
+          { encoding: 'utf8' }
+        )
+      );
+      expect(words).toEqual(['cmos-mcp', 'ambient', 'off', '--project-root', root]);
+    }
+  );
+
+  it.each(['back`tick', 'new\nline', 'control\u0007'])(
+    'an unsafe %s root is inert in the ambient remedy',
+    async (name) => {
+      const root = folder(name);
+      await mismatch(root);
+      const result = await cmosProjectInit({ projectRoot: root });
+      const warning = result.warnings!.find((line) => line.includes('sets the hooks'))!;
+      expect(warning).not.toContain('`cmos-mcp ambient');
+      expect(warning).toContain('no runnable remedy');
+      expect(warning).toContain(JSON.stringify(root).replace(/`/g, '\\u0060'));
+    }
+  );
+
+  it('gets an apostrophe-containing original path from the registry, never from its error text', async () => {
+    const original = folder("Dana's original");
+    await cmosProjectInit({ projectRoot: original });
+    const copy = path.join(tmp, 'copied');
+    fs.cpSync(original, copy, { recursive: true });
+    const result = await cmosProjectInit({ projectRoot: copy });
+    const warning = result.warnings!.find((line) => line.includes('copy of that project'))!;
+    expect(warning).toContain(`at ${JSON.stringify(original)}:`);
+    expect(warning).not.toContain('That folder no longer exists');
+  });
+
+  it('a recreated store never adopts a teammate’s committed hooks-off line', async () => {
+    const root = folder('teammate');
+    await mismatch(root);
+    for (const suffix of ['', '-wal', '-shm'])
+      fs.rmSync(path.join(root, 'cmos/db', `cmos.sqlite${suffix}`), { force: true });
+    const result = await cmosProjectInit({ projectRoot: root });
+    expect(result.success).toBe(true);
+    expect(meta(root, 'ambient')).toBeUndefined();
+    expect(result.warnings!.join('\n')).toContain('with the hooks on');
+  });
+
+  it.each(['registry is locked', 'Project identity collision: unavailable path'])(
+    'a registration failure stays an init warning when the registry cannot be reread: %s',
+    async (message) => {
+      const root = folder('unreadable-registry');
+      await cmosProjectInit({ projectRoot: root });
+      const graph = await ProjectGraphRegistry.create();
+      let failed = false;
+      const originalGet = graph.get.bind(graph);
+      const get = jest.spyOn(graph, 'get').mockImplementation((id) => {
+        if (failed) throw new Error('registry reread failed');
+        return originalGet(id);
+      });
+      const register = jest.spyOn(graph, 'registerStore').mockImplementation(() => {
+        failed = true;
+        throw new Error(message);
+      });
+      try {
+        const result = await cmosProjectInit({ projectRoot: root });
+        expect(result.success).toBe(true);
+        const warnings = result.warnings!.join('\n');
+        expect(warnings).toContain(message);
+        expect(warnings).not.toContain('copy of that project');
+        expect(warnings).not.toContain('path alias');
+      } finally {
+        register.mockRestore();
+        get.mockRestore();
+      }
+    }
+  );
+
+  it('a registry collision for the same physical directory says alias, never copy', async () => {
+    const root = folder('physical');
+    const id = (await cmosProjectInit({ projectRoot: root })).data!.projectId;
+    const alias = path.join(tmp, 'alias');
+    fs.symlinkSync(root, alias);
+    const graph = await ProjectGraphRegistry.create();
+    const sameDirectory = jest.spyOn(resolutionPolicy, 'isSameDirectory').mockReturnValue(false);
+    const register = jest.spyOn(graph, 'registerStore').mockImplementation(() => {
+      throw new Error(`Project identity collision: '${id}' is already registered to '${root}'`);
+    });
+    try {
+      const result = await cmosProjectInit({ projectRoot: alias });
+      const warning = result.warnings!.join('\n');
+      expect(warning).not.toContain('copy of that project');
+      expect(warning).toContain('same physical folder');
+    } finally {
+      register.mockRestore();
+      sameDirectory.mockRestore();
+    }
+  });
+
+  it.each(['explicit', 'mcp-roots', 'cwd', 'server-project-root', 'registry-default'] as const)(
+    'dispatcher %s keeps the resolved project on a missing-draft remedy',
+    async (source) => {
+      const root = folder(`dispatch-${source}`);
+      const id = (await cmosProjectInit({ projectRoot: root })).data!.projectId;
+      const graph = await ProjectGraphRegistry.create();
+      if (source === 'registry-default') graph.setDefault(id, { confirmed: true });
+      setServerProjectRoot(source === 'server-project-root' ? root : undefined);
+      const original = senderContext.resolveSenderContext;
+      const resolve = jest
+        .spyOn(senderContext, 'resolveSenderContext')
+        .mockImplementation((options) =>
+          original({
+            ...options,
+            mcpRoots: source === 'mcp-roots' ? [root] : [],
+            cwdOverride: source === 'cwd' ? root : '/',
+          })
+        );
+      try {
+        const result = await executeMissionProtocolTool(
+          'cmos_decisions',
+          {
+            action: 'record',
+            content: 'Keep the intended project on every command.',
+            fromDraft: 'P999999',
+            ...(source === 'explicit' ? { projectRoot: root } : {}),
+          },
+          await buildMissionProtocolContext()
+        );
+        const structured = result.structuredContent as {
+          error: { code: string; suggestion: string };
+          resolvedBy: string;
+        };
+        expect(structured.error.code).toBe('DRAFT_NOT_FOUND');
+        expect(
+          (await (resolve.mock.results[0].value as Promise<senderContext.SenderContext>)).source
+        ).toBe(source);
+        expect(structured.error.suggestion).toContain(
+          source === 'cwd'
+            ? '`cmos-mcp drafts list`'
+            : `cmos-mcp drafts list --project-root '${root}'`
+        );
+      } finally {
+        resolve.mockRestore();
+        setServerProjectRoot(undefined);
+      }
+    }
+  );
+
+  it('cliCommand quotes executable arguments as literal POSIX words', () => {
+    const argv = ['/node path/with $HOME', '/script "quotes"/apostrophe\'s `echo bad`.js'];
+    const actual = execFileSync(
+      '/bin/sh',
+      [
+        '-c',
+        `set -- ${cliCommand(argv)}; node -e 'process.stdout.write(JSON.stringify(process.argv.slice(1)))' "$@"`,
+      ],
+      { encoding: 'utf8' }
+    );
+    expect(JSON.parse(actual)).toEqual(argv);
   });
 });

@@ -199,24 +199,24 @@ PRIVATE.describe(PRIVATE_SUITE_TITLE, () => {
 
     const { result, text } = await captureADecision(projectRoot, sessionId);
 
-    // success stays TRUE — the capture DID happen; what failed is the derived decision row.
-    // The class is "assert something not so", not "keep going after a failure" (fork f09).
-    expect(result.success).toBe(true);
-
-    const data = result.data as CaptureShape;
-    expect(data.decisionExtractionFailed).toBeDefined();
-    expect(data.decisionExtractionFailed).toMatch(/FOREIGN KEY|constraint/i);
-
-    // The structured channel carries op + code + message separately.
-    const failures = data.writeFailures ?? [];
-    expect(failures.map((f) => f.op)).toContain('strategic_decisions.insert');
-    expect(failures[0]?.code).toBeTruthy();
+    // m06: the authoritative capture and required projection now roll back together.
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBeTruthy();
+    expect(result.error?.message).toMatch(/FOREIGN KEY|constraint/i);
+    expect(result.error?.suggestion).toBeTruthy();
+    const after = new Database(dbPath, { readonly: true });
+    try {
+      expect(after.prepare('SELECT captures FROM sessions WHERE id=?').get(sessionId)).toEqual({
+        captures: '[]',
+      });
+    } finally {
+      after.close();
+    }
 
     // THE POINT OF THE MISSION: the TEXT an agent reads must say so.
     expect(text).not.toContain('Extraction skipped');
-    expect(text).toContain('**Decision Extraction**: FAILED');
+    expect(text).toContain('Failed');
     expect(text).toMatch(/FOREIGN KEY|constraint/i);
-    expect(text).toContain('Write failures');
   });
 
   it('the same store WITH master_context present still reports a clean extraction', async () => {
@@ -261,10 +261,18 @@ describe('s86-m02b portable fixture agreement control', () => {
 
     const { result, text } = await captureADecision(projectRoot, sessionId);
 
-    expect(result.success).toBe(true);
-    const data = result.data as CaptureShape;
-    expect(data.decisionExtractionFailed).toBeDefined();
+    expect(result.success).toBe(false);
+    expect(result.error?.message).toMatch(/FOREIGN KEY|constraint/i);
+    expect(result.error?.suggestion).toBeTruthy();
+    const after = new Database(dbPath, { readonly: true });
+    try {
+      expect(after.prepare('SELECT captures FROM sessions WHERE id=?').get(sessionId)).toEqual({
+        captures: '[]',
+      });
+    } finally {
+      after.close();
+    }
     expect(text).not.toContain('Extraction skipped');
-    expect(text).toContain('**Decision Extraction**: FAILED');
+    expect(text).toContain('Failed');
   });
 });

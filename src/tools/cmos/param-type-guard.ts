@@ -8,7 +8,7 @@ import type { CmosToolError } from './types';
 /**
  * s89-m08 — THE CLASS, AND WHY IT IS GUARDED IN ONE PLACE.
  *
- * `@modelcontextprotocol/sdk` types tool arguments as `z.record(z.string(), z.unknown())` and
+ * MCP tool arguments permit arbitrary string-keyed JSON values and
  * `src/index.ts` forwards `request.params.arguments` to the routers with NO per-tool inputSchema
  * validation. So a client can legally put a JSON number where the published schema declares
  * `type: "string"`, and the value reaches an unguarded `String.prototype` method or `path.resolve`
@@ -61,7 +61,7 @@ import type { CmosToolError } from './types';
  * It is therefore NOT a member of the defect class this guard exists to close, and refusing it
  * would convert 238 currently-working calls into errors to fix a fault it does not cause — while
  * breaking every client whose JSON serializer emits `null` for an absent optional field, which is
- * a very common shape. `null` is treated exactly as absent.
+ * a very common shape. `null` passes through to the handler; mission add deliberately uses it to request unscheduled work.
  *
  * THIS MODULE AUTHORS NO `suggestion:` LITERAL (s89-m08 fold 4). It returns
  * `CmosErrors.invalidParameter`, whose own `validValues` branch owns the only suggestion string
@@ -112,7 +112,17 @@ export function findWrongTypedStringParam(
   const applicable = applicableParams ? new Set(applicableParams) : undefined;
 
   for (const [name, property] of Object.entries(properties)) {
-    if (!property || property.type !== 'string') continue;
+    if (
+      !property ||
+      !(
+        property.type === 'string' ||
+        (Array.isArray(property.type) &&
+          property.type.length === 2 &&
+          property.type.includes('string') &&
+          property.type.includes('null'))
+      )
+    )
+      continue;
     if (applicable && !applicable.has(name)) continue;
     if (!Object.prototype.hasOwnProperty.call(provided, name)) continue;
     const value = provided[name];

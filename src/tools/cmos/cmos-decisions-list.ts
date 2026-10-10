@@ -7,6 +7,7 @@
  * @module tools/cmos/cmos-decisions-list
  */
 
+import { spinOutQuery } from '../../intelligence/spin-out-query';
 import { withClient } from './client';
 import type { CmosToolResult } from './types';
 import { createError, createSuccess } from './errors';
@@ -340,11 +341,13 @@ async function listAcrossProjects(
     sqlParams.push(params.until);
   }
 
-  const fanout = await queryAcrossStores<CrossStoreDecisionRow>({
-    sql: `SELECT project_id, id, decision_text, project_domain, sprint_id, mission_id,
+  const sql = `SELECT project_id, id, decision_text, project_domain, sprint_id, mission_id,
                  category, status, evidence, created_at, occurred_at, origin_seq
           FROM strategic_decisions
-          WHERE ${conditions.join(' AND ')}`,
+          WHERE ${conditions.join(' AND ')}`;
+  const fanout = await queryAcrossStores<CrossStoreDecisionRow>({
+    sql,
+    perStoreQuery: spinOutQuery('decision', sql, sqlParams),
     params: sqlParams,
     order: 'desc',
     limit: pageSize,

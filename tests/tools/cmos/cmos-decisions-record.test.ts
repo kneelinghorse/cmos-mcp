@@ -221,7 +221,7 @@ describe('cmos_decisions(action="record") — s91-m04', () => {
     db.close();
     const none = await record(project.projectRoot, { content: 'No sprint is open now.' });
     expect((none.data as unknown as RecordReceipt).sprintId).toBeNull();
-    expect(none.warnings?.join('\n')).toContain('no open sprint');
+    expect(none.warnings?.join('\n')).toContain('sprint_id NULL (unscheduled)');
   });
 
   it('requires content', async () => {

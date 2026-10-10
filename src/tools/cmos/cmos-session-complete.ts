@@ -1,3 +1,5 @@
+// ABOUTME: Closes a session after its decision batch and citation links commit successfully.
+// ABOUTME: Required link failures leave the session active; embeddings run outside transactions.
 /**
  * cmos_session_complete Tool
  *
@@ -7,6 +9,9 @@
  * @module tools/cmos/cmos-session-complete
  */
 
+import { ensureDecisionShapeColumns } from './schema-migrations';
+import { prepareRecordLinkWrite, requireRecordLinks, recordLinkFailure } from './record-link-write';
+import { missionCompletedSql } from './terminal-status';
 import { z } from 'zod';
 import * as crypto from 'crypto';
 import { withClientAsync, type CmosDatabaseClient } from './client';
@@ -30,7 +35,6 @@ import {
   ensureContentPrunedColumn,
   ensureNextStepsTable,
   ensureConstraintsTable,
-  ensureAuthorNamespaceColumns,
   computeContentHash,
 } from './schema-migrations';
 import { applyLearningReaffirm, sanitizeLearningIds } from './learning-reaffirm';
@@ -440,6 +444,17 @@ export async function cmosSessionComplete(
         captures = [];
       }
 
+      if (decisions.length > 0 || captures.some((capture) => capture.category === 'decision')) {
+        const shape = ensureDecisionShapeColumns(client);
+        warnings.push(...(shape.warnings ?? []));
+        if (!shape.ready)
+          return createError<CmosSessionCompleteResult>({
+            code: 'DB_QUERY_FAILED',
+            message: 'Decision schema migration failed; the operation was not completed.',
+            suggestion: 'Resolve the reported schema or lock problem, then retry.',
+          });
+      }
+
       const capturesByCategory: Partial<Record<CaptureCategory, number>> = {};
       for (const capture of captures) {
         const cat = capture.category as CaptureCategory;
@@ -453,6 +468,119 @@ export async function cmosSessionComplete(
       const durationMinutes = Math.round(durationMs / 60000);
 
       const now = completedAt.toISOString();
+
+      // Create every pending extraction table before any genesis/firehose preparation.
+      // Its store-wide marker otherwise skips a table created after the decision batch.
+      let nextStepsSchemaEnsured = false;
+      if (captures.some((capture) => capture.category === 'next-step' && capture.content?.trim())) {
+        warnings.push(...(ensureNextStepsTable(client).warnings ?? []));
+        nextStepsSchemaEnsured = true;
+      }
+      if (nextSteps && nextSteps.length > 0 && !nextStepsSchemaEnsured) {
+        warnings.push(...(ensureNextStepsTable(client).warnings ?? []));
+      }
+      if (
+        captures.some((capture) => capture.category === 'constraint' && capture.content?.trim())
+      ) {
+        warnings.push(...(ensureConstraintsTable(client).warnings ?? []));
+      }
+
+      const decisionSources: string[] = [...decisions];
+      for (const capture of captures) {
+        if (capture.category === 'decision' && typeof capture.content === 'string') {
+          const trimmed = capture.content.trim();
+          if (trimmed && !decisionSources.includes(trimmed)) decisionSources.push(trimmed);
+        }
+      }
+      const pendingEmbeddings: Array<{ id: number; content: string }> = [];
+      if (decisionSources.length > 0) {
+        warnings.push(...ensureMissionIdColumn(client));
+        const ready = prepareRecordLinkWrite(client, warnings);
+        if (!ready.success) return createError<CmosSessionCompleteResult>(ready.error!);
+      }
+      const decisionBatch = client.transaction(() => {
+        let decisionsExtracted = 0;
+        if (decisionSources.length > 0) {
+          const domainResult = client.getOne<{ value: string }>(
+            "SELECT value FROM metadata WHERE key = 'project_domain'",
+            []
+          );
+          const projectDomain = domainResult.success ? (domainResult.data?.value ?? null) : null;
+          // Author, mission and citation schema preflights completed before this transaction.
+          // Required link failure rolls back every decision in this batch, including repairs.
+          for (const decisionText of decisionSources) {
+            const existing = client.getOne<{ id: number }>(
+              'SELECT id FROM strategic_decisions WHERE decision_text = ? AND author_session_id = ?',
+              [decisionText, sessionId]
+            );
+            // s86-m02b (fork f10, read side): a FAILED dedup SELECT reads as "no duplicate" and falls
+            // through to the INSERT. Behaviour is UNCHANGED — a duplicate row is recoverable and
+            // detectable, unlike a lost write — but the operator is told rather than left to find out.
+            if (!existing.success) {
+              warnings.push(
+                `decision de-duplication check failed (strategic_decisions); a duplicate row may have been ` +
+                  `written: ${existing.error?.code ?? 'DB_ERROR'} — ${existing.error?.message ?? 'unknown'}`
+              );
+            } else if (existing.data) {
+              requireRecordLinks(client, 'decision', existing.data.id);
+              continue;
+            }
+            const g = genesisColumns(client, 'strategic_decisions', getProjectId(client));
+            // s85-m04: mission_id was omitted from this column list entirely — the second of the
+            // two SQL omissions behind #487. The call-level missionId applies UNIFORMLY here and
+            // that is correct: decisionSources flattens the decisions[] param and
+            // decision-category captures into a plain string[] before this loop, discarding any
+            // per-capture missionId. Do NOT restructure decisionSources to recover it — the
+            // capture path already promoted and stamped those rows, so they are normally skipped
+            // by the dedup SELECT above; this is a defensive second pass.
+            const insertResult = client.execute(
+              `INSERT INTO strategic_decisions
+               (decision_text, created_at, sprint_id, project_domain, author_session_id, mission_id, ${g.columns.join(', ')})
+             VALUES (?, ?, ?, ?, ?, ?, ${g.placeholders})`,
+              [
+                decisionText,
+                now,
+                closeSprintId,
+                projectDomain,
+                sessionId,
+                callMissionId ?? null,
+                ...g.values,
+              ]
+            );
+            if (!checkWrite(insertResult, writeSink, 'strategic_decisions extraction insert'))
+              throw new Error(insertResult.error?.message ?? 'Decision extraction failed');
+            {
+              decisionsExtracted++;
+              // Sprint 66 m03 — write-path embedding hook
+              const newId = insertResult.data?.lastInsertRowid;
+              const numericId =
+                typeof newId === 'bigint'
+                  ? Number(newId)
+                  : typeof newId === 'number'
+                    ? newId
+                    : null;
+              requireRecordLinks(client, 'decision', numericId ?? undefined);
+              if (numericId !== null)
+                pendingEmbeddings.push({ id: numericId, content: decisionText });
+            }
+          }
+        }
+
+        return decisionsExtracted;
+      });
+      if (!decisionBatch.success)
+        return recordLinkFailure(
+          decisionBatch.error?.message ?? 'Session decision batch rolled back'
+        );
+      const decisionsExtracted = decisionBatch.data ?? 0;
+      for (const pending of pendingEmbeddings) {
+        const embedded = await recordEmbedding(client, {
+          type: 'decision',
+          id: pending.id,
+          inputText: decisionEmbeddingInput(pending.content),
+        });
+        warnings.push(...(embedded.warnings ?? []));
+      }
 
       // Update the session
       const updateResult = client.execute(
@@ -518,17 +646,12 @@ export async function cmosSessionComplete(
       // only a tiebreaker in the cross-store merge key and both orderings are equally valid
       // within one call — noted so a reviewer does not read it as a regression.
       let nextStepsExtracted = 0;
-      let nextStepsSchemaEnsured = false;
 
       // (a) capture-sourced next-steps FIRST — these can carry a per-capture missionId.
       for (const capture of captures) {
         if (capture.category === 'next-step' && capture.content) {
           const trimmed = capture.content.trim();
           if (!trimmed) continue;
-          if (!nextStepsSchemaEnsured) {
-            warnings.push(...(ensureNextStepsTable(client).warnings ?? []));
-            nextStepsSchemaEnsured = true;
-          }
           const hash = computeContentHash(trimmed, 'next-step');
           const existing = client.getOne<{ id: number }>(
             `SELECT id FROM next_steps WHERE content_hash = ? AND session_id = ?`,
@@ -572,10 +695,6 @@ export async function cmosSessionComplete(
       // list ENTIRELY — one of the two literal SQL omissions behind #487. It now stamps the
       // call-level missionId, matching the shape of the capture-sourced insert above.
       if (nextSteps && nextSteps.length > 0) {
-        if (!nextStepsSchemaEnsured) {
-          warnings.push(...(ensureNextStepsTable(client).warnings ?? []));
-          nextStepsSchemaEnsured = true;
-        }
         for (const step of nextSteps) {
           const trimmed = step.trim();
           if (!trimmed) continue;
@@ -611,15 +730,10 @@ export async function cmosSessionComplete(
       // Extract constraints to structured constraints table
       // ============================================================
       let constraintsExtracted = 0;
-      let constraintsSchemaEnsured = false;
       for (const capture of captures) {
         if (capture.category === 'constraint' && capture.content) {
           const trimmed = capture.content.trim();
           if (!trimmed) continue;
-          if (!constraintsSchemaEnsured) {
-            warnings.push(...(ensureConstraintsTable(client).warnings ?? []));
-            constraintsSchemaEnsured = true;
-          }
           const hash = computeContentHash(trimmed, 'constraint');
           // Dedup: skip if same content already active
           const existing = client.getOne<{ id: number }>(
@@ -675,89 +789,6 @@ export async function cmosSessionComplete(
       // from the metadata table. Dedup is (decision_text, author_session_id) —
       // the same key cmos_session_capture uses. FTS5 is maintained by the
       // decisions_fts_insert trigger, so no explicit index work is needed.
-      let decisionsExtracted = 0;
-      const decisionSources: string[] = [...decisions];
-      for (const capture of captures) {
-        if (capture.category === 'decision' && typeof capture.content === 'string') {
-          const trimmed = capture.content.trim();
-          if (trimmed && !decisionSources.includes(trimmed)) decisionSources.push(trimmed);
-        }
-      }
-      if (decisionSources.length > 0) {
-        const domainResult = client.getOne<{ value: string }>(
-          "SELECT value FROM metadata WHERE key = 'project_domain'",
-          []
-        );
-        const projectDomain = domainResult.success ? (domainResult.data?.value ?? null) : null;
-        // s69-m04 — settle the author_* rename before the dedup SELECT/INSERT below.
-        // s86-m02b (fork f23): one of the original six warning splices. s88-m09's semantic
-        // census now guards every reachable migration caller. A half-applied rename is not silent.
-        warnings.push(...(ensureAuthorNamespaceColumns(client).warnings ?? []));
-        // s85-m04 — DECISIONS-ONLY column guard. strategic_decisions.mission_id rides the v2.1
-        // migration, so an un-migrated store lacks it and the INSERT below would throw
-        // "no such column". learnings.mission_id and next_steps.mission_id are in the SEED BASE
-        // schema, so they need no guard. Deliberately NOT a tableHasColumn conditional-omit:
-        // that would silently drop the provenance this mission exists to add (decision #926 #3
-        // bans silent fail-open). ensureStrategicDecisionsSchema is plain ALTER ADD COLUMN +
-        // CREATE INDEX IF NOT EXISTS (no 12-step rebuild) and this handler opens no
-        // transaction, so point-of-use is correct and needs no pre-BEGIN dance.
-        warnings.push(...ensureMissionIdColumn(client));
-        for (const decisionText of decisionSources) {
-          const existing = client.getOne<{ id: number }>(
-            'SELECT id FROM strategic_decisions WHERE decision_text = ? AND author_session_id = ?',
-            [decisionText, sessionId]
-          );
-          // s86-m02b (fork f10, read side): a FAILED dedup SELECT reads as "no duplicate" and falls
-          // through to the INSERT. Behaviour is UNCHANGED — a duplicate row is recoverable and
-          // detectable, unlike a lost write — but the operator is told rather than left to find out.
-          if (!existing.success) {
-            warnings.push(
-              `decision de-duplication check failed (strategic_decisions); a duplicate row may have been ` +
-                `written: ${existing.error?.code ?? 'DB_ERROR'} — ${existing.error?.message ?? 'unknown'}`
-            );
-          } else if (existing.data) {
-            continue;
-          }
-          const g = genesisColumns(client, 'strategic_decisions', getProjectId(client));
-          // s85-m04: mission_id was omitted from this column list entirely — the second of the
-          // two SQL omissions behind #487. The call-level missionId applies UNIFORMLY here and
-          // that is correct: decisionSources flattens the decisions[] param and
-          // decision-category captures into a plain string[] before this loop, discarding any
-          // per-capture missionId. Do NOT restructure decisionSources to recover it — the
-          // capture path already promoted and stamped those rows, so they are normally skipped
-          // by the dedup SELECT above; this is a defensive second pass.
-          const insertResult = client.execute(
-            `INSERT INTO strategic_decisions
-               (decision_text, created_at, sprint_id, project_domain, author_session_id, mission_id, ${g.columns.join(', ')})
-             VALUES (?, ?, ?, ?, ?, ?, ${g.placeholders})`,
-            [
-              decisionText,
-              now,
-              closeSprintId,
-              projectDomain,
-              sessionId,
-              callMissionId ?? null,
-              ...g.values,
-            ]
-          );
-          if (checkWrite(insertResult, writeSink, 'strategic_decisions extraction insert')) {
-            decisionsExtracted++;
-            // Sprint 66 m03 — write-path embedding hook
-            const newId = insertResult.data?.lastInsertRowid;
-            const numericId =
-              typeof newId === 'bigint' ? Number(newId) : typeof newId === 'number' ? newId : null;
-            if (numericId !== null) {
-              const embedResult = await recordEmbedding(client, {
-                type: 'decision',
-                id: numericId,
-                inputText: decisionEmbeddingInput(decisionText),
-              });
-              warnings.push(...(embedResult.warnings ?? []));
-            }
-          }
-        }
-      }
-
       // ============================================================
       // Sprint 61 m01 — reaffirm the learnings this call cites. Since s92-m04 only the explicit
       // `citesLearningIds[]` bump; the decisions' text no longer reaffirms by overlap.
@@ -807,7 +838,7 @@ export async function cmosSessionComplete(
           [session.sprint_id]
         );
         const remainingResult = client.getOne<{ count: number }>(
-          "SELECT COUNT(*) as count FROM missions WHERE sprint_id = ? AND status != 'Completed'",
+          `SELECT COUNT(*) as count FROM missions WHERE sprint_id = ? AND NOT (${missionCompletedSql('status')})`,
           [session.sprint_id]
         );
         if (

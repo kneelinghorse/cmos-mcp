@@ -2,7 +2,7 @@
 
 For a first project digest, use the [three-step quickstart](../README.md#get-a-project-digest-in-three-steps). This guide covers MCP client configuration and an optional Builder walkthrough with a sprint, mission and session. A Ledger needs none of that ceremony. The dashboard at [cmos.aquex.ai](https://cmos.aquex.ai) is optional; ordinary project work runs locally without signing in.
 
-For hooks, MCP prompts and client limitations in CMOS 3.3.0, use the [harness coverage guide](harnesses.md).
+For hooks, MCP prompts and client limitations in CMOS 3.4.0, use the [harness coverage guide](harnesses.md).
 
 ## Prerequisites
 
@@ -15,11 +15,11 @@ Pick one:
 
 ```bash
 # Recommended: a global install of this release. It starts from disk, with no registry lookup.
-npm install -g @aquex/cmos-mcp@3.3.0
+npm install -g @aquex/cmos-mcp@3.4.0
 
 # Or run on demand via npx: pinned, and preferring the local cache. The first launch downloads
 # the package; later launches reuse the npm cache.
-npx --prefer-offline -y @aquex/cmos-mcp@3.3.0
+npx --prefer-offline -y @aquex/cmos-mcp@3.4.0
 ```
 
 Verify it starts:
@@ -27,7 +27,7 @@ Verify it starts:
 ```bash
 cmos-mcp --version  # if globally installed (the bin is `cmos-mcp`)
 # or
-npx --prefer-offline -y @aquex/cmos-mcp@3.3.0 --version
+npx --prefer-offline -y @aquex/cmos-mcp@3.4.0 --version
 ```
 
 Semantic (vector) search is optional: without it, retrieval is keyword-only and the install is about
@@ -41,7 +41,7 @@ Pick the block that matches your tool. Each example runs a pinned version throug
 ### Claude Code
 
 ```bash
-claude mcp add-json cmos-mcp '{"command":"npx","args":["--prefer-offline","-y","@aquex/cmos-mcp@3.3.0"]}'
+claude mcp add-json cmos-mcp '{"command":"npx","args":["--prefer-offline","-y","@aquex/cmos-mcp@3.4.0"]}'
 claude mcp list   # confirm it's registered
 ```
 
@@ -59,7 +59,7 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS), 
       "args": [
         "--prefer-offline",
         "-y",
-        "@aquex/cmos-mcp@3.3.0",
+        "@aquex/cmos-mcp@3.4.0",
         "--project-root",
         "/absolute/path/to/your/project"
       ]
@@ -82,7 +82,7 @@ Edit `~/.cursor/mcp.json`:
   "mcpServers": {
     "cmos-mcp": {
       "command": "npx",
-      "args": ["--prefer-offline", "-y", "@aquex/cmos-mcp@3.3.0"]
+      "args": ["--prefer-offline", "-y", "@aquex/cmos-mcp@3.4.0"]
     }
   }
 }
@@ -97,7 +97,7 @@ Edit your Zed `settings.json`:
   "context_servers": {
     "cmos-mcp": {
       "command": "npx",
-      "args": ["--prefer-offline", "-y", "@aquex/cmos-mcp@3.3.0"]
+      "args": ["--prefer-offline", "-y", "@aquex/cmos-mcp@3.4.0"]
     }
   }
 }
@@ -118,7 +118,7 @@ your terminal PATH, so the terminal route needs the standalone Claude CLI.
   "mcpServers": {
     "cmos-mcp": {
       "command": "npx",
-      "args": ["--prefer-offline", "-y", "@aquex/cmos-mcp@3.3.0"]
+      "args": ["--prefer-offline", "-y", "@aquex/cmos-mcp@3.4.0"]
     }
   }
 }
@@ -337,7 +337,9 @@ This polls until the device is approved (or 30s, whichever comes first; agents r
 
 ### What happens next
 
-With a stored user-scoped dashboard key or legacy environment credentials, the next explicit `cmos_session(action="complete")` or `cmos_sprint(action="complete")` attempts to register the project, store its project-scoped key and upload the whole SQLite file in the background. Later explicit closes attempt another upload. This includes pending, declined and expired proposals: exclusion from event sync does not exclude a table from a whole-file checkpoint. A failed upload does not fail the local close, and implicit process-exit closes do not upload.
+With a stored user-scoped dashboard key or legacy environment credentials, the next explicit `cmos_session(action="complete")` or `cmos_sprint(action="complete")` attempts to register the project, store its project-scoped key and upload the whole SQLite file in the background. Later explicit closes attempt another upload. For a registered project, an MCP tool call that actually writes its store also schedules an upload. It becomes due after 5 quiet minutes or 30 minutes of continuous writes, and starts within the next 60 seconds when no upload lease or failure backoff blocks it. Transfer time follows dispatch. A running server must have opened the project; an owed upload survives a short-lived process for the next server, and concurrent servers share one upload lease per project.
+
+Each upload sends a consistent snapshot of the whole SQLite file, including pending, declined and expired proposals: exclusion from event sync does not exclude a table from a whole-file checkpoint. `cmos_status` and `cmos_review` show the last upload result and any failure. HTTP 401, 402 or 403 pauses automatic retries until an explicit close succeeds. A failed upload does not fail the local write or close, and implicit process-exit closes do not upload.
 
 Set `CMOS_CHECKPOINT_SYNC=off` in the MCP server environment to disable automatic checkpoint uploads. It does not disable explicit sync, messaging, sign-in, status queries, shared-collaboration pushes or other requested network actions. (`cmos_project(action="register", projectRoot=…)` is different: it records the project in the local registry only.) See the [network disclosure](../SECURITY.md#outbound-network).
 

@@ -220,13 +220,9 @@ describe('s93-m04 CLI telemetry', () => {
           finish = resolve;
         })
     );
-    const result = await run(
-      ['hook', 'prompt'],
-      { prompt: 'Run cmos_review' },
-      {
-        startedAtMs: Date.now() - 795,
-      }
-    );
+    // Give setup a full deadline: a nearly-expired wall clock could reject before the mocked
+    // work starts on a loaded Node20/22 runner, leaving no pending work to resolve below.
+    const result = await run(['hook', 'prompt'], { prompt: 'Run cmos_review' });
     expect(result.stdout).toBe('');
     expect(records()).toHaveLength(1);
     expect(records()[0]).toMatchObject({ ok: false, failOpen: 'deadline', charsInjected: 0 });

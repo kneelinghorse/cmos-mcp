@@ -8,8 +8,8 @@
 // For hosts that cannot reconnect a stopped MCP server; this does not restart the host's connection.
 const fs = require('fs');
 const path = require('path');
-const { Client } = require('@modelcontextprotocol/sdk/client/index.js');
-const { StdioClientTransport } = require('@modelcontextprotocol/sdk/client/stdio.js');
+const { Client } = require('@modelcontextprotocol/client');
+const { StdioClientTransport } = require('@modelcontextprotocol/client/stdio');
 
 async function main() {
   const request = JSON.parse(fs.readFileSync(0, 'utf8'));
@@ -34,7 +34,14 @@ async function main() {
     env: { ...process.env },
     stderr: 'inherit',
   });
-  const client = new Client({ name: 'cmos-call-current', version: '1.0.0' }, { capabilities: {} });
+  const client = new Client(
+    { name: 'cmos-call-current', version: '1.0.0' },
+    {
+      capabilities: {},
+      supportedProtocolVersions: ['2025-11-25'],
+      versionNegotiation: { mode: 'legacy' },
+    }
+  );
   const cancellation = new AbortController();
   const options = { signal: cancellation.signal };
 
@@ -45,7 +52,6 @@ async function main() {
         name: 'cmos_agent_onboard',
         arguments: { projectRoot: request.arguments.projectRoot },
       },
-      undefined,
       options
     );
     const health = preflight.structuredContent?.data?.serverHealth;
@@ -64,7 +70,6 @@ async function main() {
 
     const result = await client.callTool(
       { name: request.name, arguments: request.arguments },
-      undefined,
       options
     );
     process.stdout.write(JSON.stringify(result.structuredContent ?? result) + '\n');

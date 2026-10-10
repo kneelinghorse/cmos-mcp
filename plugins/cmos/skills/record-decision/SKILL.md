@@ -88,9 +88,21 @@ exist for this draft in this conversation, including when words exist only in an
 Constraint, rule and profile drafts require a plain approval and never record as agent-attested.
 Without a draft id, record the operator's approved choice directly.
 
-Write with `cmos_decisions(action="record", content="<decision and supporting context>")`.
+Write a one- or two-sentence headline in `content`. Put the reasons and constraints in `context`,
+other options in `alternatives` (an array of strings), effects in `consequences`, and people or agents
+in `deciders` (an array of strings). For an implementation choice made within authorized work,
+use `mode="autonomous"`; omission leaves the mode unrecorded. Do not use autonomous to claim approval.
+A headline over 600 UTF-16 units warns but still records; split separate choices or move details to
+these fields. Approved drafts are exempt from that headline warning. A `fromDraft` call cannot
+add mode or these fields because they were not part of the approved draft.
+
 Add `missionId` when the choice belongs to a mission, and use structured `evidence` only for real
-TraceLab references supported by the tool. Put ordinary source paths and URLs in the content.
+TraceLab references supported by the tool. Put ordinary source paths and URLs in `context` or
+`consequences`. The CLI uses the same handler:
+`cmos-mcp decisions record --session-id <harness-id> --content "<headline>" --context "<why>" --mode autonomous`.
+Pass `--alternatives` and `--deciders` as JSON arrays; `--project-root` selects the store and
+`--format json` returns the structured receipt. A retry preserves existing metadata; if supplied
+fields differ, its warning recommends a new superseding record.
 To correct a decision, record the replacement with `supersedes=[<old decision id>]`; preserve the
 old record instead of editing its historical meaning. A decision needs no session opened merely
 to file it. Verify `decisionId` and `materialization`, and inspect any `writeFailures`; report a

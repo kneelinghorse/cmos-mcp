@@ -236,7 +236,7 @@ defineFeature(feature, (test) => {
     });
   });
 
-  test('Reject missing sprintId', ({ given, when, then, and }) => {
+  test('Reject empty sprintId', ({ given, when, then, and }) => {
     bgSprint(given);
     when('I call cmos_mission_add with an empty sprintId', async () => {
       result = await cmosMissionAdd({

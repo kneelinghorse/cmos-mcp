@@ -1021,8 +1021,8 @@ describe('role-bearing shipped prose (s89-m02)', () => {
       `R1 column roles: ${result.objectCount} oracle objects, ` +
         `${result.keyColumnTableCount} Key-Columns table(s), ${result.claimCount} claims`
     );
-    // s93-m06: the schema reference names `proposals` (26 -> 27).
-    expect(result.objectCount).toBe(27);
+    // s94-m06: the seed adds `record_links` (27 -> 28); indexes are outside this table/view count.
+    expect(result.objectCount).toBe(28);
     expect(result.keyColumnTableCount).toBeGreaterThanOrEqual(1);
     expect(result.claimCount).toBeGreaterThanOrEqual(65);
     expect(result.findings.map((finding) => finding.message)).toEqual([]);
@@ -1478,6 +1478,20 @@ describePrivate(
         counts: { protectedNonemptyLines: number; retained: number; moved: number };
         migrationReceipt: { architectureAfterSha256: string };
       };
+    // s94-m09 replaces only the old presence-only compliance claim. Preserve the frozen
+    // ledger and the complete original rule/evidence prefix; the bounded replacement's
+    // clauses and cross-document parity are checked below. No other protected line changes.
+    const currentPreservationLines = (entries: ProtectedLine[]): ProtectedLine[] =>
+      entries.map((entry) =>
+        entry.home === PRIVATE.relativePaths.agents &&
+        createHash('sha256').update(entry.text).digest('hex') ===
+          '190c3fa08a6daf2730457a8c7ebb7ea7eddbcf0e3b96fc8a1435995d8a496019'
+          ? {
+              ...entry,
+              text: entry.text.slice(0, entry.text.indexOf('Compliance is reviewer-judgment;')),
+            }
+          : entry
+      );
     const normalize = (value: string) => value.replace(/\s+/g, ' ').trim();
     const missingLines = (entries: ProtectedLine[], homes: Map<string, string>) =>
       entries.filter(
@@ -1504,13 +1518,41 @@ describePrivate(
       expect(ledger.protected.filter((entry) => entry.disposition === 'moved').length).toBe(
         ledger.counts.moved
       );
-      expect(missingLines(ledger.protected, homes())).toEqual([]);
+      expect(missingLines(currentPreservationLines(ledger.protected), homes())).toEqual([]);
       const architecture = ledger.sources.find(
         (source) => source.path === PRIVATE.relativePaths.architecture
       )!;
       // The already-moved architecture text was unchanged at this migration boundary. Keep
       // that receipt without freezing the entire architecture document against future edits.
       expect(ledger.migrationReceipt.architectureAfterSha256).toBe(architecture.sha256);
+    });
+
+    it('limits the m09 replacement to its exact historical practice-8 claim', () => {
+      const original = readLedger().protected;
+      const current = currentPreservationLines(original);
+      expect(current.filter((entry, index) => entry.text !== original[index].text)).toHaveLength(1);
+      const previous = original.find((entry) => entry.text.startsWith('8. **Name a defect class'))!;
+      const replacement = current[original.indexOf(previous)];
+      expect(replacement.text).toBe(
+        previous.text.slice(0, previous.text.indexOf('Compliance is reviewer-judgment;'))
+      );
+      expect(missingLines(current, homes())).toEqual([]);
+      const unrelated = { ...previous, text: `${previous.text} changed original` };
+      expect(currentPreservationLines([unrelated])).toEqual([unrelated]);
+    });
+
+    it.each([
+      'publish a runnable PREDICATE',
+      'the COUNT it returns across the whole tree BEFORE any matching site is edited',
+      'name both the sites it will change and those it deliberately leaves',
+    ])('still detects removal of an original practice-8 obligation: %s', (clause) => {
+      const required = currentPreservationLines(readLedger().protected).find((entry) =>
+        entry.text.startsWith('8. **Name a defect class')
+      )!;
+      const copies = homes();
+      expect(missingLines([required], copies)).toEqual([]);
+      copies.set(required.home, copies.get(required.home)!.replace(clause, 'removed obligation'));
+      expect(missingLines([required], copies)).toEqual([required]);
     });
 
     it('detects deletion of the shared-host safeguard from an isolated carrier copy', () => {
@@ -1661,9 +1703,12 @@ describePrivate('build-session-prompt ↔ agents.md process-hardening parity (s8
    * numbering, parity, and clause wording of practices 8 and 9 in agents.md and
    * cmos/docs/build-session-prompt.md.
    *
-   * They cannot see COMPLIANCE with practice 8. Its sweep lives in missions.objective in
-   * cmos/db/cmos.sqlite, a shared mutable file every concurrent agent appends to; asserting over
-   * that file here would recreate learning #364's defect class, so that check is refused.
+   * This file does not verify practice-8 sweep execution. The separate class-sweeps gate checks
+   * only s92-m03, s92-m09 and both s94-m11 arms over tracked UTF-8 src files, across extensions:
+   * current witnesses, residual predicates and historical ledger arithmetic. Whole-tree scope,
+   * pre-edit chronology, semantic classifications and all other sweeps remain unverified by
+   * machine checks. snapshot-diet independently retains its recursive untracked INSERT checks.
+   * Neither gate reads the shared mutable CMOS store as evidence of historical compliance.
    * They cannot see COMPLIANCE with practice 9 either: next-step #555 passes the strongest
    * home-of-record text predicate by citing cmos-context-view.ts while never naming its actual
    * home, cmos/planning/phase-2-master-plan.md. A predicate that green-lights its motivating
@@ -1679,6 +1724,70 @@ describePrivate('build-session-prompt ↔ agents.md process-hardening parity (s8
    * this mission; the other eighteen remain out of scope and are named as a next-step. Historical
    * planning prose that proposed these rules is evidence, not either designated authority.
    */
+  const practice8MachineClauses = [
+    ['names the artifact home', /tests\/sweeps\//, 'tests/sweeps/'],
+    [
+      'names the separate source gate',
+      /tests\/docs\/class-sweeps\.test\.ts/,
+      'tests/docs/class-sweeps.test.ts',
+    ],
+    ['limits the machine claim', /Machine checks cover only/, 'Machine checks cover only'],
+    ['requires s92-m03', /s92-m03/, 's92-m03'],
+    ['requires s92-m09', /s92-m09/, 's92-m09'],
+    [
+      'requires both s94-m11 arms',
+      /both s94-m11 arms \(literal and variable commands\)/,
+      'both s94-m11 arms (literal and variable commands)',
+    ],
+    [
+      'limits current source scope',
+      /tracked UTF-8 files under `src\/` across all extensions/,
+      'tracked UTF-8 files under `src/` across all extensions',
+    ],
+    [
+      'checks current witnesses and residuals',
+      /current witnesses\/residual predicates/,
+      'current witnesses/residual predicates',
+    ],
+    ['checks ledger arithmetic', /historical ledger arithmetic/, 'historical ledger arithmetic'],
+    [
+      'leaves whole-tree coverage unverified',
+      /Whole-tree coverage, pre-edit chronology, semantic classifications and compliance for all other sweeps remain unverified by machine checks/,
+      'Whole-tree coverage, pre-edit chronology, semantic classifications and compliance for all other sweeps remain unverified by machine checks',
+    ],
+    [
+      'retains the separate untracked snapshot gate',
+      /snapshot-diet\.test\.ts` separately checks untracked snapshot INSERT sites; this tracked-source gate does not replace it/,
+      'snapshot-diet.test.ts` separately checks untracked snapshot INSERT sites; this tracked-source gate does not replace it',
+    ],
+  ] as const;
+  const practice8MachineFindings = (body: string): string[] =>
+    practice8MachineClauses.filter(([, pattern]) => !pattern.test(body)).map(([label]) => label);
+
+  it('states the exact bounded machine checks and their unverified complements in both authorities', () => {
+    for (const file of [PRIVATE.paths.agents, promptPath]) {
+      const body =
+        processHardeningPracticeBlocks(fs.readFileSync(file, 'utf8')).find(
+          (practice) => practice.number === 8
+        )?.body ?? '';
+      expect({ file, findings: practice8MachineFindings(body) }).toEqual({ file, findings: [] });
+    }
+  });
+
+  it.each(practice8MachineClauses)(
+    'rejects a practice-8 clause deletion: %s',
+    (label, _pattern, token) => {
+      const body =
+        processHardeningPracticeBlocks(fs.readFileSync(PRIVATE.paths.agents, 'utf8')).find(
+          (practice) => practice.number === 8
+        )?.body ?? '';
+      expect(practice8MachineFindings(body)).toEqual([]);
+      const changed = body.split(token).join('removed clause');
+      expect(changed).not.toBe(body);
+      expect(practice8MachineFindings(changed)).toContain(label);
+    }
+  );
+
   it('keeps every required clause of practices 8 and 9 in each authority document', () => {
     const clauses = [
       [
@@ -1765,6 +1874,9 @@ describePrivate('build-session-prompt ↔ agents.md process-hardening parity (s8
 
     expect(authoring).toMatch(/classSweep/);
     expect(authoring).toMatch(/practice 8/i);
+    expect(authoring).toMatch(/tests\/sweeps\/<id>\.json/);
+    expect(authoring).toMatch(/private whole-tree pre-edit evidence/);
+    expect(authoring).toMatch(/tracked UTF-8 `src\/` files across all extensions/);
     expect(review).toMatch(/home of record/i);
     expect(review).toMatch(/practice 9/i);
   });

@@ -1,3 +1,5 @@
+// ABOUTME: Updates decision status and supersession while repairing required textual links atomically.
+// ABOUTME: Schema readiness precedes the transaction, including idempotent no-change updates.
 /**
  * cmos_decisions update action
  *
@@ -8,6 +10,7 @@
  */
 
 import { withClientValidated } from './client';
+import { prepareRecordLinkWrite, requireRecordLinks, recordLinkFailure } from './record-link-write';
 import type { CmosToolResult } from './types';
 import { createError, createSuccess, CmosErrors, CMOS_ERROR_CODES } from './errors';
 import { appendWarnings, attachWarnings } from './format-warnings';
@@ -144,29 +147,22 @@ export async function cmosDecisionsUpdate(
         updateParams.push(params.supersededBy);
       }
 
-      if (sets.length === 0) {
-        return createSuccess<CmosDecisionsUpdateResult>({
-          decisionId: params.decisionId,
-          previousStatus,
-          newStatus,
-          supersededBy: existing.data.superseded_by,
-          message: 'No changes needed',
-        });
-      }
+      const ready = prepareRecordLinkWrite(client, warnings);
+      if (!ready.success) return createError<CmosDecisionsUpdateResult>(ready.error!);
       const reviewOnly = newStatus === previousStatus && params.supersededBy === undefined;
-
-      updateParams.push(params.decisionId);
-      const updateResult = client.execute(
-        `UPDATE strategic_decisions SET ${sets.join(', ')} WHERE id = ?`,
-        updateParams
-      );
-
-      if (!updateResult.success) {
-        return createError<CmosDecisionsUpdateResult>({
-          code: CMOS_ERROR_CODES.DB_QUERY_FAILED,
-          message: `Failed to update decision: ${updateResult.error?.message ?? 'Unknown error'}`,
-        });
-      }
+      const committed = client.transaction(() => {
+        if (sets.length > 0) {
+          updateParams.push(params.decisionId);
+          const updated = client.execute(
+            `UPDATE strategic_decisions SET ${sets.join(', ')} WHERE id = ?`,
+            updateParams
+          );
+          if (!updated.success) throw new Error(updated.error?.message ?? 'Decision update failed');
+        }
+        requireRecordLinks(client, 'decision', params.decisionId);
+      });
+      if (!committed.success)
+        return recordLinkFailure(committed.error?.message ?? 'Decision update rolled back');
 
       const finalSupersededBy = params.supersededBy ?? existing.data.superseded_by;
 
@@ -175,11 +171,14 @@ export async function cmosDecisionsUpdate(
         previousStatus,
         newStatus,
         supersededBy: finalSupersededBy,
-        message: reviewOnly
-          ? `Decision #${params.decisionId} kept as ${newStatus}; its review time is recorded`
-          : `Decision #${params.decisionId} updated: status ${previousStatus} → ${newStatus}${
-              params.supersededBy !== undefined ? `, superseded by #${params.supersededBy}` : ''
-            }`,
+        message:
+          sets.length === 0
+            ? 'No changes needed'
+            : reviewOnly
+              ? `Decision #${params.decisionId} kept as ${newStatus}; its review time is recorded`
+              : `Decision #${params.decisionId} updated: status ${previousStatus} → ${newStatus}${
+                  params.supersededBy !== undefined ? `, superseded by #${params.supersededBy}` : ''
+                }`,
       });
     },
     { projectRoot: params.projectRoot }

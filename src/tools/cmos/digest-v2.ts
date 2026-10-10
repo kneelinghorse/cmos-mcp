@@ -2,6 +2,7 @@
 // ABOUTME: Render the same small, stable local context for session hooks, CLI review and MCP review.
 // ABOUTME: Preserve complete profiles, provenance fences and typed item spans within explicit section caps.
 
+import { formatCliRemedy, type CliRemedyTarget } from '../../utils/cli-remedy';
 import { frameInlineIfForeign, isForeignProject } from '../../intelligence/provenance-frame';
 import type { OperatorProfile } from './operator-profile';
 import { PROFILE_CAP_CHARS } from './operator-profile';
@@ -144,7 +145,11 @@ function projectSection(model: DigestV2Model): Section {
  * The drafts section within its own cap and whatever room the rest of the digest leaves under
  * {@link DIGEST_V2_CAP}: a full store never makes the digest throw because drafts are pending.
  */
-function draftsSection(drafts: readonly DigestDraft[], room: number): Section | null {
+function draftsSection(
+  drafts: readonly DigestDraft[],
+  room: number,
+  target: CliRemedyTarget
+): Section | null {
   if (!drafts.length) return null;
   const cap = Math.min(DRAFTS_SECTION_CAP, room);
   const shown = drafts.slice(0, 3);
@@ -159,12 +164,15 @@ function draftsSection(drafts: readonly DigestDraft[], room: number): Section | 
     lines.push({ text: prefix + cut(digestHeadline(draft.text) || draft.text, roomForText) });
   }
   if (lines.length) return section([{ text: heading }, ...lines, { text: DRAFTS_ASK }]);
-  const short = `Pending drafts: ${drafts.length}. Read them: cmos-mcp drafts list.`;
+  const short = `Pending drafts: ${drafts.length}. Read them: ${formatCliRemedy('drafts list', target)}.`;
   return short.length <= cap ? section([{ text: short }]) : null;
 }
 
 /** Empty sections vanish; all caps include headings, except the profile's approved text allowance. */
-export function renderDigestV2(model: DigestV2Model): RenderedContext {
+export function renderDigestV2(
+  model: DigestV2Model,
+  target: CliRemedyTarget = { projectRoot: process.cwd(), resolvedBy: 'cwd' }
+): RenderedContext {
   const sections: Section[] = [projectSection(model)];
   if (model.profile?.text.trim()) {
     sections.push(
@@ -210,7 +218,7 @@ export function renderDigestV2(model: DigestV2Model): RenderedContext {
     (sum, part, i) => sum + part.text.length + (i ? 2 : 0),
     0
   );
-  const drafts = draftsSection(model.drafts ?? [], DIGEST_V2_CAP - used - 2);
+  const drafts = draftsSection(model.drafts ?? [], DIGEST_V2_CAP - used - 2, target);
   if (drafts) sections.push(drafts);
   sections.push(...tail);
   let text = '';

@@ -1,3 +1,5 @@
+// ABOUTME: Surfaces decisions from the production retriever with a rich-text overlap floor.
+// ABOUTME: Emits headline previews while scoring persisted decision context and alternatives.
 /**
  * Relevance Surfacing
  *
@@ -8,10 +10,18 @@
  * @module tools/cmos/relevance-surfacing
  */
 
+import { prepareSpinOutRead } from './spin-out-read';
 import type { CmosDatabaseClient } from './client';
+import type { CmosToolResult } from './types';
 import { HybridRetriever } from './fts5-retriever';
 import { extractKeywords } from './supersession-detection';
 import { previewText } from './text-preview';
+import {
+  composeDecisionText,
+  decisionTextProjection,
+  type DecisionTextRow,
+} from './decision-fields';
+import { recordStoreUpkeepNote } from './tool-call-context';
 
 const MAX_RELEVANT_DECISIONS = 5;
 const MIN_RELEVANCE_KEYWORDS = 2;
@@ -80,12 +90,30 @@ export async function findRelevantDecisions(
     // s92-m07 (R1): no statusFilter, so only superseded rows drop out. A decision archived at a
     // sprint close is still the record; on 276 mission -> decision citations, active-only surfacing
     // found 0.192 of what the mission text named (R@5), and dropping only superseded rows 0.320.
-    // s82-m04: no expandGraph — the graph arm is mission-only (decisions never expand), and this
-    // path additionally gates on a countOverlap>=2 keyword filter that would strip graph-only
-    // rescues anyway. Left off deliberately.
+    // Recall uses citation edges; mutation-oriented precision callers keep the opt-in off.
+    citationRecall: true,
   });
 
+  if (!results.length) return [];
+  const columns = client.getMany<{ name: string }>('PRAGMA table_info(strategic_decisions)');
+  const rich: CmosToolResult<(DecisionTextRow & { id: number })[]> = columns.success
+    ? client.getMany<DecisionTextRow & { id: number }>(
+        `SELECT id,decision_text,${decisionTextProjection(new Set(columns.data?.map((c) => c.name) ?? []))}
+     FROM strategic_decisions WHERE id IN (${results.map(() => '?').join(',')})`,
+        results.map((r) => Number(r.id))
+      )
+    : { success: false, error: columns.error };
+  if (!rich.success) {
+    const warning =
+      'DECISION_OVERLAP_READ_FAILED: rich decision text could not be read; mission context is unavailable.';
+    recordStoreUpkeepNote(warning);
+    console.error(warning);
+    return [];
+  }
+  const visibility = prepareSpinOutRead(client);
+  const fullTexts = new Map((rich.data ?? []).map((row) => [row.id, composeDecisionText(row)]));
   return results
+    .filter((r) => !visibility.hidden('decision', r.id))
     .map((r) => {
       const preview = previewText(r.text);
       return {
@@ -99,7 +127,7 @@ export async function findRelevantDecisions(
         projectId: r.projectId,
         evidence: r.evidence,
         // Scored on the FULL text: the preview would undercount long decisions.
-        relevanceScore: countOverlap(r.text, keywords),
+        relevanceScore: countOverlap(fullTexts.get(Number(r.id)) ?? r.text, keywords),
       };
     })
     .filter((d) => d.relevanceScore >= MIN_RELEVANCE_KEYWORDS);

@@ -23,6 +23,7 @@
  * @module tools/cmos/current-sprint
  */
 
+import { missionCompletedSql } from './terminal-status';
 import type { CmosDatabaseClient } from './client';
 import {
   SPRINT_TERMINAL_STATUSES as DEAD_SPRINT_STATUSES,
@@ -264,7 +265,7 @@ function getExplicitOpenSprintId(client: CmosDatabaseClient): string | null {
           )
           OR EXISTS (
             SELECT 1 FROM missions m
-             WHERE m.sprint_id = s.id AND COALESCE(m.status, '') != 'Completed'
+             WHERE m.sprint_id = s.id AND NOT (${missionCompletedSql("COALESCE(m.status, '')")})
           )
         )
       ORDER BY CASE COALESCE(s.status, 'Planned')

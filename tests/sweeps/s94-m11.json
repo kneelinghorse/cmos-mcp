@@ -1,0 +1,570 @@
+{
+  "schemaVersion": 1,
+  "mission": "s94-m11",
+  "defectClass": "Runtime CLI remedies without the resolved project root",
+  "scopeSentence": "Every tracked UTF-8 source line under src/, across all extensions, evaluated against the published ordered JavaScript predicates.",
+  "falseNegativeProfile": [
+    "Only tracked UTF-8 text under src/ across all extensions; untracked files, non-src files (including these artifacts), binary NUL bytes and invalid UTF-8 are outside this universe and encoding exclusions are reported.",
+    "This checks line syntax, current occurrence coverage, required replacement witnesses and historical count consistency; whole-tree coverage, pre-edit chronology, semantic classification and runtime dataflow remain reviewer judgment.",
+    "Historical source text is public src-only evidence; original whole-tree provenance remains private. Recorded SHAs are labels, never runtime Git lookups.",
+    "Other command variable names, multiline/escaped commands and generated source can evade these textual arms. cli-remedy, hook-adapter and project-init tests separately verify actual project resolution and shell-inert output."
+  ],
+  "universe": "tracked-src-utf8-lines",
+  "recordedAt": {
+    "sha": "b05407bd0755ded721941a73e009361fa495cba6"
+  },
+  "arms": [
+    {
+      "id": "literal",
+      "unit": "lines",
+      "predicate": [
+        {
+          "op": "include",
+          "pattern": "cmos-mcp [a-z]+",
+          "flags": ""
+        },
+        {
+          "op": "exclude",
+          "pattern": "project-root",
+          "flags": ""
+        },
+        {
+          "op": "exclude",
+          "pattern": "^\\s*(//|\\*|/\\*)",
+          "flags": ""
+        }
+      ],
+      "historical": {
+        "count": 38,
+        "matches": [
+          {
+            "id": "historical-1",
+            "file": "src/cli.ts",
+            "line": 139,
+            "text": "io.stderr(`cmos-mcp hook: name an event: ${HOOK_EVENTS.join(', ')}.`);",
+            "occurrence": 1,
+            "class": "outside",
+            "reason": "Diagnostic prefix, usage for the already invoked command, package name or installation guidance; not a recovery command selecting another project."
+          },
+          {
+            "id": "historical-2",
+            "file": "src/cli.ts",
+            "line": 187,
+            "text": "ownLine = 'cmos-mcp hook prompt: rules in force could not be read for telemetry.';",
+            "occurrence": 1,
+            "class": "outside",
+            "reason": "Diagnostic prefix, usage for the already invoked command, package name or installation guidance; not a recovery command selecting another project."
+          },
+          {
+            "id": "historical-3",
+            "file": "src/cli.ts",
+            "line": 267,
+            "text": "ownLine = oneLine(`cmos-mcp hook ${event}: ${reason}`);",
+            "occurrence": 1,
+            "class": "outside",
+            "reason": "Diagnostic prefix, usage for the already invoked command, package name or installation guidance; not a recovery command selecting another project."
+          },
+          {
+            "id": "historical-4",
+            "file": "src/cli.ts",
+            "line": 275,
+            "text": "ownLine ?? (stray.length > 0 ? oneLine(`cmos-mcp hook ${event}: ${stray[0]}`) : null);",
+            "occurrence": 1,
+            "class": "outside",
+            "reason": "Diagnostic prefix, usage for the already invoked command, package name or installation guidance; not a recovery command selecting another project."
+          },
+          {
+            "id": "historical-5",
+            "file": "src/cli/commands.ts",
+            "line": 89,
+            "text": "io.stderr('cmos-mcp review: the digest could not be built.');",
+            "occurrence": 1,
+            "class": "outside",
+            "reason": "Diagnostic prefix, usage for the already invoked command, package name or installation guidance; not a recovery command selecting another project."
+          },
+          {
+            "id": "historical-6",
+            "file": "src/cli/commands.ts",
+            "line": 185,
+            "text": "io.stderr('cmos-mcp relevant: pass --query <text>.');",
+            "occurrence": 1,
+            "class": "outside",
+            "reason": "Diagnostic prefix, usage for the already invoked command, package name or installation guidance; not a recovery command selecting another project."
+          },
+          {
+            "id": "historical-7",
+            "file": "src/cli/commands.ts",
+            "line": 214,
+            "text": "io.stderr(`cmos-mcp capture: ${NO_SESSION_REMEDY}.`);",
+            "occurrence": 1,
+            "class": "outside",
+            "reason": "Diagnostic prefix, usage for the already invoked command, package name or installation guidance; not a recovery command selecting another project."
+          },
+          {
+            "id": "historical-8",
+            "file": "src/cli/commands.ts",
+            "line": 220,
+            "text": "io.stderr('cmos-mcp capture: pass --category <c> and --content <text>.');",
+            "occurrence": 1,
+            "class": "outside",
+            "reason": "Diagnostic prefix, usage for the already invoked command, package name or installation guidance; not a recovery command selecting another project."
+          },
+          {
+            "id": "historical-9",
+            "file": "src/cli/commands.ts",
+            "line": 251,
+            "text": "io.stderr('cmos-mcp session: ensure or close, with --session-id <id>.');",
+            "occurrence": 1,
+            "class": "outside",
+            "reason": "Diagnostic prefix, usage for the already invoked command, package name or installation guidance; not a recovery command selecting another project."
+          },
+          {
+            "id": "historical-10",
+            "file": "src/cli/commands.ts",
+            "line": 256,
+            "text": "io.stderr(`cmos-mcp session ${action}: ${NO_SESSION_REMEDY}.`);",
+            "occurrence": 1,
+            "class": "outside",
+            "reason": "Diagnostic prefix, usage for the already invoked command, package name or installation guidance; not a recovery command selecting another project."
+          },
+          {
+            "id": "historical-11",
+            "file": "src/cli/commands.ts",
+            "line": 265,
+            "text": "io.stderr('cmos-mcp session ensure: no session could be opened in this store.');",
+            "occurrence": 1,
+            "class": "outside",
+            "reason": "Diagnostic prefix, usage for the already invoked command, package name or installation guidance; not a recovery command selecting another project."
+          },
+          {
+            "id": "historical-12",
+            "file": "src/cli/commands.ts",
+            "line": 275,
+            "text": "`cmos-mcp session close: ${failed.sessionId}: ${failed.error ?? 'the close failed'}.`",
+            "occurrence": 1,
+            "class": "outside",
+            "reason": "Diagnostic prefix, usage for the already invoked command, package name or installation guidance; not a recovery command selecting another project."
+          },
+          {
+            "id": "historical-13",
+            "file": "src/cli/commands.ts",
+            "line": 294,
+            "text": "io.stderr(`cmos-mcp ambient: ${AMBIENT_MODES.join(', ')}, or nothing to show the setting.`);",
+            "occurrence": 1,
+            "class": "outside",
+            "reason": "Diagnostic prefix, usage for the already invoked command, package name or installation guidance; not a recovery command selecting another project."
+          },
+          {
+            "id": "historical-14",
+            "file": "src/cli/commands.ts",
+            "line": 298,
+            "text": "io.stderr(`cmos-mcp ambient: the CMOS store is missing: ${resolution.dbPath}.`);",
+            "occurrence": 1,
+            "class": "outside",
+            "reason": "Diagnostic prefix, usage for the already invoked command, package name or installation guidance; not a recovery command selecting another project."
+          },
+          {
+            "id": "historical-15",
+            "file": "src/cli/commands.ts",
+            "line": 308,
+            "text": "io.stderr('cmos-mcp ambient: no CMOS project and no git repository here.');",
+            "occurrence": 1,
+            "class": "outside",
+            "reason": "Diagnostic prefix, usage for the already invoked command, package name or installation guidance; not a recovery command selecting another project."
+          },
+          {
+            "id": "historical-16",
+            "file": "src/cli/commands.ts",
+            "line": 316,
+            "text": "io.stderr('cmos-mcp ambient digest-off: this repository has no CMOS record.');",
+            "occurrence": 1,
+            "class": "outside",
+            "reason": "Diagnostic prefix, usage for the already invoked command, package name or installation guidance; not a recovery command selecting another project."
+          },
+          {
+            "id": "historical-17",
+            "file": "src/cli/commands.ts",
+            "line": 361,
+            "text": "io.stderr(`cmos-mcp ambient: ${written.error?.message ?? 'the setting was not written'}.`);",
+            "occurrence": 1,
+            "class": "outside",
+            "reason": "Diagnostic prefix, usage for the already invoked command, package name or installation guidance; not a recovery command selecting another project."
+          },
+          {
+            "id": "historical-18",
+            "file": "src/cli/commands.ts",
+            "line": 391,
+            "text": "io.stderr(`cmos-mcp init: --level is ${rules.PROJECT_LEVELS.join(', ')}.`);",
+            "occurrence": 1,
+            "class": "outside",
+            "reason": "Diagnostic prefix, usage for the already invoked command, package name or installation guidance; not a recovery command selecting another project."
+          },
+          {
+            "id": "historical-19",
+            "file": "src/cli/commands.ts",
+            "line": 420,
+            "text": "io.stderr(`cmos-mcp init: ${result.error?.message ?? 'init failed'}`);",
+            "occurrence": 1,
+            "class": "outside",
+            "reason": "Diagnostic prefix, usage for the already invoked command, package name or installation guidance; not a recovery command selecting another project."
+          },
+          {
+            "id": "historical-20",
+            "file": "src/cli/commands.ts",
+            "line": 444,
+            "text": "io.stderr('cmos-mcp profile: show prints the operator profile.');",
+            "occurrence": 1,
+            "class": "outside",
+            "reason": "Diagnostic prefix, usage for the already invoked command, package name or installation guidance; not a recovery command selecting another project."
+          },
+          {
+            "id": "historical-21",
+            "file": "src/cli/drafts.ts",
+            "line": 127,
+            "text": "`cmos-mcp drafts: the store could not be read: ${error instanceof Error ? error.message : String(error)}`",
+            "occurrence": 1,
+            "class": "outside",
+            "reason": "Diagnostic prefix, usage for the already invoked command, package name or installation guidance; not a recovery command selecting another project."
+          },
+          {
+            "id": "historical-22",
+            "file": "src/cli/feedback.ts",
+            "line": 32,
+            "text": "`cmos-mcp feedback: ${result.error?.message ?? 'Feedback was not recorded.'} ` +",
+            "occurrence": 1,
+            "class": "outside",
+            "reason": "Diagnostic prefix, usage for the already invoked command, package name or installation guidance; not a recovery command selecting another project."
+          },
+          {
+            "id": "historical-23",
+            "file": "src/cli/feedback.ts",
+            "line": 113,
+            "text": "toolName: 'cmos-mcp feedback',",
+            "occurrence": 1,
+            "class": "outside",
+            "reason": "Diagnostic prefix, usage for the already invoked command, package name or installation guidance; not a recovery command selecting another project."
+          },
+          {
+            "id": "historical-24",
+            "file": "src/cli/stats.ts",
+            "line": 150,
+            "text": "io.stderr(`cmos-mcp stats: ${error instanceof Error ? error.message : String(error)}`);",
+            "occurrence": 1,
+            "class": "outside",
+            "reason": "Diagnostic prefix, usage for the already invoked command, package name or installation guidance; not a recovery command selecting another project."
+          },
+          {
+            "id": "historical-25",
+            "file": "src/index.ts",
+            "line": 1653,
+            "text": "`  cmos-mcp              Run the MCP server over stdio (default; also: cmos-mcp serve).\\n` +",
+            "occurrence": 1,
+            "class": "outside",
+            "reason": "Diagnostic prefix, usage for the already invoked command, package name or installation guidance; not a recovery command selecting another project."
+          },
+          {
+            "id": "historical-26",
+            "file": "src/intelligence/embedding-pipeline.ts",
+            "line": 128,
+            "text": "'Install it next to cmos-mcp to add a vector term.',",
+            "occurrence": 1,
+            "class": "outside",
+            "reason": "Diagnostic prefix, usage for the already invoked command, package name or installation guidance; not a recovery command selecting another project."
+          },
+          {
+            "id": "historical-27",
+            "file": "src/server-prompts.ts",
+            "line": 43,
+            "text": "'Reinstall @aquex/cmos-mcp to restore its shared skill sources.'",
+            "occurrence": 1,
+            "class": "outside",
+            "reason": "Diagnostic prefix, usage for the already invoked command, package name or installation guidance; not a recovery command selecting another project."
+          },
+          {
+            "id": "historical-28",
+            "file": "src/tools/cmos/cmos-decisions-record.ts",
+            "line": 309,
+            "text": "suggestion: 'Read the drafts with `cmos-mcp drafts list` before recording again.',",
+            "occurrence": 1,
+            "class": "changed",
+            "reason": "Runtime remedy must carry the resolved project target through formatCliRemedy.",
+            "resolution": {
+              "witnessIds": ["current-1"]
+            }
+          },
+          {
+            "id": "historical-29",
+            "file": "src/tools/cmos/cmos-project-init.ts",
+            "line": 250,
+            "text": "? [`\\`cmos-mcp ambient ${reading.ambient}\\` sets the hooks as the line says`]",
+            "occurrence": 1,
+            "class": "changed",
+            "reason": "Runtime remedy must carry the resolved project target through formatCliRemedy.",
+            "resolution": {
+              "witnessIds": ["current-2"]
+            }
+          },
+          {
+            "id": "historical-30",
+            "file": "src/tools/cmos/cmos-project-init.ts",
+            "line": 597,
+            "text": "'Ensure cmos-seed/ exists in the cmos-mcp package root. If installed via npm, reinstall the package.',",
+            "occurrence": 1,
+            "class": "outside",
+            "reason": "Diagnostic prefix, usage for the already invoked command, package name or installation guidance; not a recovery command selecting another project."
+          },
+          {
+            "id": "historical-31",
+            "file": "src/tools/cmos/cmos-project-init.ts",
+            "line": 931,
+            "text": "`The hooks ${ambientRestored === 'off' ? 'are off' : 'run without the session digest'} here, as ${lineReading?.name ?? AGENTS_FILE_NAME}'s CMOS line says: this store was recreated in place. \\`cmos-mcp ambient on\\` turns them back on.`",
+            "occurrence": 1,
+            "class": "changed",
+            "reason": "Remove unsafe automatic adoption of another agent's committed ambient rule.",
+            "resolution": {
+              "removed": true,
+              "reason": "The recreated-store ambientRestored adoption warning and its automatic setting adoption were removed by m11."
+            }
+          },
+          {
+            "id": "historical-32",
+            "file": "src/tools/cmos/digest-v2.ts",
+            "line": 162,
+            "text": "const short = `Pending drafts: ${drafts.length}. Read them: cmos-mcp drafts list.`;",
+            "occurrence": 1,
+            "class": "changed",
+            "reason": "Runtime remedy must carry the resolved project target through formatCliRemedy.",
+            "resolution": {
+              "witnessIds": ["current-3"]
+            }
+          },
+          {
+            "id": "historical-33",
+            "file": "src/tools/cmos/digest-v2.ts",
+            "line": 176,
+            "text": "? `Profile exceeds ${PROFILE_CAP_CHARS} characters; not injected. Read: cmos-mcp profile show.`",
+            "occurrence": 1,
+            "class": "left",
+            "reason": "Own-project rules text or user-level profile command deliberately retains its scope."
+          },
+          {
+            "id": "historical-34",
+            "file": "src/tools/cmos/draft-approval.ts",
+            "line": 130,
+            "text": "'Check the project (projectRoot) and the id with `cmos-mcp drafts list`, or record without fromDraft.',",
+            "occurrence": 1,
+            "class": "changed",
+            "reason": "Runtime remedy must carry the resolved project target through formatCliRemedy.",
+            "resolution": {
+              "witnessIds": ["current-4"]
+            }
+          },
+          {
+            "id": "historical-35",
+            "file": "src/tools/cmos/draft-approval.ts",
+            "line": 309,
+            "text": "suggestion: 'Read the drafts with `cmos-mcp drafts list` before recording again.',",
+            "occurrence": 1,
+            "class": "changed",
+            "reason": "Runtime remedy must carry the resolved project target through formatCliRemedy.",
+            "resolution": {
+              "witnessIds": ["current-5"]
+            }
+          },
+          {
+            "id": "historical-36",
+            "file": "src/tools/cmos/rules-files.ts",
+            "line": 110,
+            "text": "return `${head} Its hooks are off here; \\`cmos-mcp ambient on\\` turns them back on.`;",
+            "occurrence": 1,
+            "class": "left",
+            "reason": "Own-project rules text or user-level profile command deliberately retains its scope."
+          },
+          {
+            "id": "historical-37",
+            "file": "src/tools/cmos/rules-files.ts",
+            "line": 112,
+            "text": "return `${head} Its hooks run here without the session digest; \\`cmos-mcp ambient on\\` restores it.`;",
+            "occurrence": 1,
+            "class": "left",
+            "reason": "Own-project rules text or user-level profile command deliberately retains its scope."
+          },
+          {
+            "id": "historical-38",
+            "file": "src/tools/cmos/rules-files.ts",
+            "line": 114,
+            "text": "return `${head} Its tools and hooks say when to use it; \\`cmos-mcp ambient off\\` turns the hooks off here.`;",
+            "occurrence": 1,
+            "class": "left",
+            "reason": "Own-project rules text or user-level profile command deliberately retains its scope."
+          }
+        ]
+      },
+      "witnesses": [
+        {
+          "id": "current-1",
+          "file": "src/tools/cmos/cmos-decisions-record.ts",
+          "line": 373,
+          "text": "suggestion: `Read the drafts with ${formatCliRemedy('drafts list', { projectRoot: path.resolve(client.path, '../../..') })} before recording again.`,",
+          "occurrence": 1,
+          "class": "fixed",
+          "reason": "Required formatCliRemedy call at the corrected runtime remedy site."
+        },
+        {
+          "id": "current-2",
+          "file": "src/tools/cmos/cmos-project-init.ts",
+          "line": 271,
+          "text": "? [`${formatCliRemedy(`ambient ${reading.ambient}`, target)} sets the hooks as the line says`]",
+          "occurrence": 1,
+          "class": "fixed",
+          "reason": "Required formatCliRemedy call at the corrected runtime remedy site."
+        },
+        {
+          "id": "current-3",
+          "file": "src/tools/cmos/digest-v2.ts",
+          "line": 167,
+          "text": "const short = `Pending drafts: ${drafts.length}. Read them: ${formatCliRemedy('drafts list', target)}.`;",
+          "occurrence": 1,
+          "class": "fixed",
+          "reason": "Required formatCliRemedy call at the corrected runtime remedy site."
+        },
+        {
+          "id": "current-4",
+          "file": "src/tools/cmos/draft-approval.ts",
+          "line": 131,
+          "text": "suggestion: `Check the project (projectRoot) and the id with ${formatCliRemedy('drafts list', { projectRoot: path.resolve(client.path, '../../..') })}, or record without fromDraft.`,",
+          "occurrence": 1,
+          "class": "fixed",
+          "reason": "Required formatCliRemedy call at the corrected runtime remedy site."
+        },
+        {
+          "id": "current-5",
+          "file": "src/tools/cmos/draft-approval.ts",
+          "line": 312,
+          "text": "suggestion: `Read the drafts with ${formatCliRemedy('drafts list', { projectRoot })} before recording again.`,",
+          "occurrence": 1,
+          "class": "fixed",
+          "reason": "Required formatCliRemedy call at the corrected runtime remedy site."
+        },
+        {
+          "id": "current-6",
+          "file": "src/cli/decisions.ts",
+          "line": 20,
+          "text": "io.stderr('cmos-mcp decisions: use record --session-id <id> --content <headline>.');",
+          "occurrence": 1,
+          "class": "outside",
+          "reason": "Added after the historical sweep: diagnostic/argument guidance for the already invoked command, not a separately scoped recovery command."
+        },
+        {
+          "id": "current-7",
+          "file": "src/cli/decisions.ts",
+          "line": 24,
+          "text": "io.stderr(`cmos-mcp decisions record: ${NO_SESSION_REMEDY}.`);",
+          "occurrence": 1,
+          "class": "outside",
+          "reason": "Added after the historical sweep: diagnostic/argument guidance for the already invoked command, not a separately scoped recovery command."
+        },
+        {
+          "id": "current-8",
+          "file": "src/cli/decisions.ts",
+          "line": 28,
+          "text": "io.stderr('cmos-mcp decisions record: pass --content <headline>.');",
+          "occurrence": 1,
+          "class": "outside",
+          "reason": "Added after the historical sweep: diagnostic/argument guidance for the already invoked command, not a separately scoped recovery command."
+        },
+        {
+          "id": "current-9",
+          "file": "src/cli/decisions.ts",
+          "line": 40,
+          "text": "io.stderr(`cmos-mcp decisions record: --${name} must be a JSON array of strings.`);",
+          "occurrence": 1,
+          "class": "outside",
+          "reason": "Added after the historical sweep: diagnostic/argument guidance for the already invoked command, not a separately scoped recovery command."
+        },
+        {
+          "id": "current-10",
+          "file": "src/cli/spin-out.ts",
+          "line": 73,
+          "text": "io.stderr(`cmos-mcp spin-out: ${error instanceof Error ? error.message : String(error)}`);",
+          "occurrence": 1,
+          "class": "outside",
+          "reason": "Added after the historical sweep: diagnostic/argument guidance for the already invoked command, not a separately scoped recovery command."
+        }
+      ],
+      "residual": [
+        {
+          "op": "include",
+          "pattern": "cmos-mcp [a-z]+",
+          "flags": ""
+        },
+        {
+          "op": "exclude",
+          "pattern": "project-root",
+          "flags": ""
+        },
+        {
+          "op": "exclude",
+          "pattern": "^\\s*(//|\\*|/\\*)",
+          "flags": ""
+        },
+        {
+          "op": "include",
+          "pattern": "cmos-mcp (?:drafts list\\b|ambient (?:on|off|digest-off)(?![\\w:-])|ambient \\$\\{|init\\s)",
+          "flags": ""
+        },
+        {
+          "op": "exclude",
+          "pattern": "^\\s*return `\\$\\{head\\} Its (?:hooks|tools and hooks)",
+          "flags": ""
+        }
+      ]
+    },
+    {
+      "id": "variable",
+      "unit": "lines",
+      "predicate": [
+        {
+          "op": "include",
+          "pattern": "\\$\\{command\\} (init|ambient off)",
+          "flags": ""
+        }
+      ],
+      "historical": {
+        "count": 1,
+        "matches": [
+          {
+            "id": "historical-1",
+            "file": "src/cli/session-start.ts",
+            "line": 35,
+            "text": "`kept across sessions, ${portable ? `run \\`${command} init\\` with their agreement to start one` : '/cmos:init starts one'}; if they decline, run \\`${command} ambient off\\` ` +",
+            "occurrence": 1,
+            "class": "changed",
+            "reason": "Both inherited executable remedies use the resolved target; this remains one physical source line.",
+            "resolution": {
+              "witnessIds": ["current-1"]
+            }
+          }
+        ]
+      },
+      "witnesses": [
+        {
+          "id": "current-1",
+          "file": "src/cli/session-start.ts",
+          "line": 30,
+          "text": "`kept across sessions, ${portable ? `run ${formatCliRemedy('init', target, command)} with their agreement to start one` : '/cmos:init starts one'}; if they decline, run ${formatCliRemedy('ambient off', target, command)} ` +",
+          "occurrence": 1,
+          "class": "fixed",
+          "reason": "The same physical line must route both init and ambient off through formatCliRemedy with target and command."
+        }
+      ],
+      "residual": [
+        {
+          "op": "include",
+          "pattern": "\\$\\{command\\} (init|ambient off)",
+          "flags": ""
+        }
+      ]
+    }
+  ]
+}

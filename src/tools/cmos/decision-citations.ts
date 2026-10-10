@@ -3,6 +3,18 @@
 // ABOUTME: Shared by first-prompt decision edges and digest rule counts; bounded ranges preserve order.
 
 type Prefix = 'd' | 'l' | 'c' | 'n';
+type CandidatePrefix = Prefix | 'blocked' | null;
+export interface CitationSpan {
+  readonly start: number;
+  readonly end: number;
+  readonly prefix: CandidatePrefix;
+  readonly ids: readonly number[];
+}
+const UNSUPPORTED = new Set(
+  'pr prs pull-request issue issues feedback rule rules practice practices adr adrs session sessions mission missions sprint sprints'.split(
+    ' '
+  )
+);
 const TYPES: Readonly<Record<string, Prefix>> = {
   decision: 'd',
   decisions: 'd',
@@ -65,12 +77,15 @@ function qualified(tokens: RegExpMatchArray[], before: number): boolean {
       const label = tokens[i - 1]?.[0] ?? '';
       const word = normalize(label);
       const localWork = /^(?:sprint-?\d+|s\d+(?:-m\d+|-review)?|m\d+)$/i.test(word);
+      let qualifier = i - 2;
+      while (qualifier >= 0 && MODIFIERS.has(normalize(tokens[qualifier][0]))) qualifier--;
+      const explicitlyForeign = FOREIGN.has(normalize(tokens[qualifier]?.[0] ?? ''));
       return (
         FOREIGN.has(word) ||
         (!localWork &&
           !FILLER.has(word) &&
           !CONNECTIVES.has(word) &&
-          /^[A-Z][A-Za-z0-9-]+$/.test(label))
+          (explicitlyForeign || /^[A-Z][A-Za-z0-9-]+$/.test(label)))
       );
     }
     if (!/^[A-Za-z]/.test(raw)) return false;
@@ -81,29 +96,36 @@ function qualified(tokens: RegExpMatchArray[], before: number): boolean {
   return false;
 }
 
-function explicitType(text: string, start: number): Prefix | null {
+function explicitType(text: string, start: number): CandidatePrefix {
   const window = text.slice(Math.max(0, start - 80), start);
   const tokens = [...window.matchAll(TOKEN)];
   let fillers = 0;
+  let localBoundary = false;
   for (let i = tokens.length - 1; i >= 0; i--) {
     const raw = tokens[i][0];
     const word = normalize(raw);
     if (raw === '(') continue;
     if (/^[.;!?)\n—]|^--$/.test(raw)) return null;
-    if (FOREIGN.has(word)) return null;
+    if (FOREIGN.has(word) || UNSUPPORTED.has(word)) return 'blocked';
     if (TYPES[word]) {
       // A named qualifier before the type is not a local namespace. Ordinary connective words
       // are published above; e.g. "this decision" is local, "Stage1 decision" is not.
-      return qualified(tokens, i) ? null : TYPES[word];
+      return qualified(tokens, i) ? 'blocked' : TYPES[word];
     }
-    if ((FILLER.has(word) || /^\d+$/.test(word)) && ++fillers <= 4) continue;
+    if ((FILLER.has(word) || /^\d+$/.test(word)) && ++fillers <= 4) {
+      if (CONNECTIVES.has(word)) localBoundary = true;
+      continue;
+    }
+    // Unknown attribution before a bare id is foreign just as it is before a typed noun.
+    // Case cannot distinguish a project name from prose; known local connectives remain valid.
+    if (!localBoundary && !CONNECTIVES.has(word) && word !== 'local') return 'blocked';
     return null;
   }
   return null;
 }
 
-/** Explicit d/l/c/n references only, unique in appearance order. No bare #N fallback. */
-export function typedCitations(text: string): string[] {
+/** Original offsets survive masking; a range is one replacement span with ordered members. */
+export function citationSpans(text: string): CitationSpan[] {
   // Examples in code, URI fragments and linked external labels do not establish local edges.
   const barrier = (match: string): string => '.'.repeat(match.length);
   const visible = text
@@ -115,9 +137,9 @@ export function typedCitations(text: string): string[] {
       /```[\s\S]*?```|`[^`\n]*`|\[[^\]\n]*\]\([^\n)]*\)|\b[a-z][a-z0-9+.-]*:\/\/\S+/gi,
       barrier
     );
-  const result = new Set<string>();
+  const result: CitationSpan[] = [];
   let previousEnd = -1;
-  let previousType: Prefix | null = null;
+  let previousType: CandidatePrefix = null;
   for (const match of visible.matchAll(CITATION)) {
     const start = match.index!;
     const end = start + match[0].length;
@@ -129,15 +151,15 @@ export function typedCitations(text: string): string[] {
     const malformed =
       /[\w]/.test(visible[end] ?? '') ||
       /^\.\d/.test(visible.slice(end)) ||
-      (typed !== undefined && /^\s*[-–]\s*#?\d/.test(visible.slice(end)));
+      ((typed !== undefined || match[4] === undefined) &&
+        /^\s*[-–]\s*#?\d/.test(visible.slice(end)));
     const continuation = previousEnd >= 0 && CHAIN.test(visible.slice(previousEnd, start));
-    const prefix: Prefix | null =
+    const prefix: CandidatePrefix =
       foreign || malformed
-        ? null
+        ? 'blocked'
         : (typed ?? (continuation ? previousType : explicitType(visible, start)));
     previousEnd = end;
     previousType = prefix;
-    if (!prefix) continue;
     const first = Number(match[2] ?? match[3]);
     const last = match[4] === undefined ? first : Number(match[4]);
     if (
@@ -147,12 +169,30 @@ export function typedCitations(text: string): string[] {
       last < first ||
       last - first > 12
     ) {
-      previousType = null;
+      previousType = 'blocked';
       continue;
     }
-    for (let id = first; id <= last; id++) result.add(`${prefix}:${id}`);
+    const ids: number[] = [];
+    for (let id = first; id <= last; id++) ids.push(id);
+    result.push({ start, end, prefix, ids });
   }
-  return [...result];
+  return result;
+}
+
+/** Candidates retain blocked namespaces so a rejected typed list never becomes bare fallback. */
+export function citationCandidates(text: string): { prefix: CandidatePrefix; id: number }[] {
+  return citationSpans(text).flatMap(({ prefix, ids }) => ids.map((id) => ({ prefix, id })));
+}
+
+/** Explicit d/l/c/n references only, unique in appearance order. No bare #N fallback. */
+export function typedCitations(text: string): string[] {
+  return [
+    ...new Set(
+      citationCandidates(text)
+        .filter((c) => c.prefix && c.prefix !== 'blocked')
+        .map((c) => `${c.prefix}:${c.id}`)
+    ),
+  ];
 }
 
 /** Decision-only projection; the caller separately proves local origin, existence and time. */

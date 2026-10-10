@@ -1,3 +1,5 @@
+// ABOUTME: Starts missions while preserving the single-open-sprint invariant and persisted tracking.
+// ABOUTME: Validates lifecycle choices and discloses failed writes through the standard tool result.
 /**
  * cmos_mission_start Tool
  *
@@ -7,6 +9,8 @@
  * @module tools/cmos/cmos-mission-start
  */
 
+import { syncSprintTracking } from './sprint-tracking';
+import { SPRINT_OPEN_STATUSES, statusInSql, normalizeMissionStatus } from './terminal-status';
 import { z } from 'zod';
 import { withClientAsync, type CmosDatabaseClient } from './client';
 import type { CmosToolResult, Mission, MissionStatus } from './types';
@@ -55,6 +59,7 @@ export interface MissionStartResult {
    * whose project_id differs (a pull-merged FOREIGN row) as untrusted data.
    */
   localProjectId?: string | null;
+  activatedSprintId?: string;
 }
 
 /**
@@ -145,7 +150,7 @@ export async function cmosMissionStart(
       }
 
       const mission = missionResult.data;
-      const currentStatus = mission.status;
+      const currentStatus = normalizeMissionStatus(mission.status);
 
       // Check if already in target status
       if (currentStatus === targetStatus) {
@@ -189,17 +194,6 @@ export async function cmosMissionStart(
 
       // Perform the update
       const now = new Date().toISOString();
-      const sprintActivationResult = shouldActivateParentSprint(client, mission.sprint_id);
-      if (!sprintActivationResult.success || sprintActivationResult.data === undefined) {
-        return createError<MissionStartResult>(
-          sprintActivationResult.error ?? {
-            code: CMOS_ERROR_CODES.DB_QUERY_FAILED,
-            message: `Failed to inspect parent sprint for mission '${missionId}'`,
-            suggestion: 'Check database connectivity and schema',
-          }
-        );
-      }
-
       // Ensure timestamp columns exist (migration)
       warnings.push(...(ensureMissionTimestamps(client).warnings ?? []));
 
@@ -250,7 +244,37 @@ export async function cmosMissionStart(
         transactionOpen = false;
       };
 
+      let activatedSprintId: string | undefined;
+      const sprintActivationResult = shouldActivateParentSprint(client, mission.sprint_id);
+      if (!sprintActivationResult.success) {
+        rollbackTransaction();
+        return createError<MissionStartResult>({
+          code: sprintActivationResult.error?.code ?? 'DB_QUERY_FAILED',
+          message: sprintActivationResult.error?.message ?? 'Could not inspect the parent sprint',
+          suggestion: 'Check the sprints table and retry the mission start.',
+        });
+      }
+      let otherOpen: string | undefined;
       if (sprintActivationResult.data && mission.sprint_id) {
+        const open = client.getMany<{ id: string }>(
+          `SELECT id FROM sprints WHERE id <> ? AND ${statusInSql('status', SPRINT_OPEN_STATUSES)}`,
+          [mission.sprint_id]
+        );
+        if (!open.success) {
+          rollbackTransaction();
+          return createError<MissionStartResult>({
+            code: open.error?.code ?? 'DB_QUERY_FAILED',
+            message: open.error?.message ?? 'Could not check for another open sprint',
+            suggestion: 'Restore read access to the sprints table, then retry the mission start.',
+          });
+        }
+        otherOpen = open.data?.[0]?.id;
+        if (otherOpen)
+          warnings.push(
+            `Sprint '${otherOpen}' is already open; '${mission.sprint_id}' stays Planned. To switch, use cmos_sprint(action="update", sprintId="${mission.sprint_id}", fields={status:"Active"}).`
+          );
+      }
+      if (sprintActivationResult.data && mission.sprint_id && !otherOpen) {
         const activateSprintResult = activateParentSprint(client, mission.sprint_id, now);
 
         if (!activateSprintResult.success) {
@@ -265,6 +289,8 @@ export async function cmosMissionStart(
         }
       }
 
+      if (sprintActivationResult.data && mission.sprint_id && !otherOpen)
+        activatedSprintId = mission.sprint_id;
       const updateResult = client.execute(updateQuery, updateParams);
 
       if (!updateResult.success) {
@@ -295,6 +321,7 @@ export async function cmosMissionStart(
         );
       }
       transactionOpen = false;
+      if (activatedSprintId) syncSprintTracking(client, warnings);
 
       // Log the state change to session_events
       const eventResult = client.execute(
@@ -348,6 +375,7 @@ export async function cmosMissionStart(
           currentStatus: targetStatus,
           message: `Mission '${missionId}' is now In Progress`,
           startedAt: now,
+          ...(activatedSprintId ? { activatedSprintId } : {}),
           relevantDecisions,
           localProjectId: getProjectId(client),
         },

@@ -495,7 +495,7 @@ describe('s86-m02b f23: the structural shape of the migration warnings channel',
     expect(source).toMatch(/import \{ checkWrite, countWrite \} from '\.\/write-guard';/);
   });
 
-  it('retains the original six sink-bearing warning splices', () => {
+  it('retains the original warning paths through direct splices and the shared preflight', () => {
     // Fork f23's original consumer-side regression anchors. The semantic census owns completeness.
     const expected: ReadonlyArray<{ file: string; splices: ReadonlyArray<[string, number]> }> = [
       {
@@ -506,12 +506,10 @@ describe('s86-m02b f23: the structural shape of the migration warnings channel',
         ],
       },
       {
-        file: 'tools/cmos/cmos-session-capture.ts',
-        splices: [['warnings.push(...(ensureAuthorNamespaceColumns(client).warnings ?? []));', 2]],
-      },
-      {
-        file: 'tools/cmos/cmos-session-complete.ts',
-        splices: [['warnings.push(...(ensureAuthorNamespaceColumns(client).warnings ?? []));', 1]],
+        file: 'tools/cmos/record-link-write.ts',
+        // s94-m06: the capture/complete author migration shares one preflight. The separate
+        // symbol-aware reachability gate proves every caller's exact sink through refusals.
+        splices: [['warnings.push(...(author.warnings ?? []));', 1]],
       },
       {
         file: 'tools/cmos/cmos-db-backfill.ts',
@@ -533,7 +531,13 @@ describe('s86-m02b f23: the structural shape of the migration warnings channel',
         total += count;
       }
     }
-    expect(total).toBe(6);
+    expect(total).toBe(4);
+    for (const file of ['cmos-session-capture.ts', 'cmos-session-complete.ts']) {
+      const source = fs.readFileSync(path.join(SRC_ROOT, 'tools', 'cmos', file), 'utf8');
+      expect(
+        source.match(/prepareRecordLinkWrite\(client, warnings(?:, category)?\)/g)
+      ).toHaveLength(1);
+    }
   });
 
   it('only carrier-less consumer modules remain unspliced, and the doc names that class', () => {

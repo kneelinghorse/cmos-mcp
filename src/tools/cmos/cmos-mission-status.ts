@@ -250,12 +250,21 @@ export async function cmosMissionStatus(
       // Fetch Queued missions - scoped to active sprint when identified
       let queuedMissions: Mission[] = [];
       if (activeSprintInfo && activeSprintInfo.isComplete) {
-        // Sprint is complete - no queued missions to show
-        queuedMissions = [];
+        const queuedResult = client.getMany<Mission>(
+          "SELECT * FROM missions WHERE status = 'Queued' AND sprint_id IS NULL ORDER BY id ASC LIMIT ?",
+          [queuedLimit]
+        );
+        if (!queuedResult.success)
+          return createError<CmosMissionStatusResult>({
+            code: queuedResult.error?.code ?? 'DB_QUERY_FAILED',
+            message: queuedResult.error?.message ?? 'Failed to list unscheduled missions',
+            suggestion: 'Restore read access to the missions table and retry mission status.',
+          });
+        queuedMissions = queuedResult.data ?? [];
       } else if (activeSprintInfo) {
         // Scope queued to active sprint only
         const queuedResult = client.getMany<Mission>(
-          `SELECT * FROM missions WHERE status = 'Queued' AND sprint_id = ? ORDER BY id ASC LIMIT ?`,
+          `SELECT * FROM missions WHERE status = 'Queued' AND (sprint_id = ? OR sprint_id IS NULL) ORDER BY id ASC LIMIT ?`,
           [activeSprintInfo.sprint.id, queuedLimit]
         );
         if (!queuedResult.success) {

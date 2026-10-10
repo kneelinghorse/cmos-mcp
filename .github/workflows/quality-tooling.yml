@@ -11,6 +11,7 @@ on:
       - 'src/**'
       - 'tests/**'
       - 'scripts/**'
+      - 'cmos/research/2026-10-s94-m06/**'
       - '.github/workflows/quality-tooling.yml'
       - 'package.json'
       - 'package-lock.json'
@@ -19,8 +20,12 @@ on:
 
 jobs:
   quality:
-    name: Lint, Format, Tests, Snapshots
+    name: Lint, Format, Tests, Snapshots (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20', '22']
 
     steps:
       - name: Checkout repository
@@ -34,7 +39,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: ${{ matrix.node }}
           cache: 'npm'
 
       - name: Install dependencies
@@ -56,13 +61,22 @@ jobs:
           CI: 'true'
         run: npm run snapshots -- --ci
 
+      - name: Validate sealed retrieval quality and prompt floors
+        run: npm run test:retrieval-quality -- --output artifacts/retrieval-quality/latest.json
+
+      - name: Upload aggregate retrieval acceptance
+        uses: actions/upload-artifact@v4
+        with:
+          name: retrieval-quality-node-${{ matrix.node }}
+          path: artifacts/retrieval-quality/latest.json
+
       - name: Generate quality metrics
         run: npm run metrics
 
       - name: Upload metrics report
         uses: actions/upload-artifact@v4
         with:
-          name: quality-metrics
+          name: quality-metrics-node-${{ matrix.node }}
           path: artifacts/quality-metrics/latest.json
 
   first-run-e2e:

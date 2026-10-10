@@ -33,9 +33,9 @@
  *    asserts the DB error text in the STRING the formatter produced, reached through the same
  *    dispatcher `src/index.ts` uses (`formatMissionTransitionForLLM` / `formatMissionForLLM`),
  *    not through the leaf formatter directly.
- *  - `success` must stay TRUE (fork f09). The mission DID transition. The cure is disclosure, not
+ *  - Except for the ratified s94-m08 atomic drop, `success` stays TRUE (fork f09). The mission DID transition. The cure is disclosure, not
  *    abortion — so each case also reads the mission's status back out of the DB and proves the
- *    transition landed while its event row did not.
+ *    transition landed while its event row did not. Drop instead requires its audit, refuses and rolls back.
  *
  * NEGATIVE CONTROL, per case: the identical scenario with NO trigger must produce exactly one
  * `session_events` row and NO event-logging warning. Without it, a store broken for some unrelated
@@ -315,6 +315,19 @@ describe('s86-m02b: a lost session_events row is named in the answer, not only o
 
         const result = await site.run(projectRoot, missionId);
         const text = site.format(result);
+
+        // s94-m08 makes drop and its audit indivisible; refuse with the DB message and prove rollback.
+        if (label === 'drop') {
+          expect(result.success).toBe(false);
+          expect(result.error?.code).toBe('MISSION_DROP_AUDIT_FAILED');
+          expect(readMissionStatus(dbPath, missionId)).toBe(site.fromStatus);
+          expect(countSessionEvents(dbPath)).toBe(0);
+          expect(result.error?.message).toContain(dbErrorText);
+          expect(text).toContain(dbErrorText);
+          const hidden = { ...result, error: { ...result.error!, message: 'redacted fault' } };
+          expect(site.format(hidden)).not.toContain(dbErrorText);
+          return;
+        }
 
         // 1. success stays TRUE — the transition happened; only its provenance row did not.
         expect(result.success).toBe(true);

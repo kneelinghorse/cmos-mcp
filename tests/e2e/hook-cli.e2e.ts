@@ -14,9 +14,8 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import Database from 'better-sqlite3';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-
+import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
+import { Client } from '@modelcontextprotocol/client';
 import { harnessSessionHash } from '../../src/tools/cmos/harness-session';
 import { seedCmosDb } from '../helpers/seedCmosDb';
 import { installPackedArtifact } from './packed-artifact';
@@ -59,7 +58,10 @@ async function listTools(command: string, args: string[], cwd: string): Promise<
     env: { ...process.env, CMOS_CONFIG_DIR: configDir } as Record<string, string>,
     stderr: 'pipe',
   });
-  const client = new Client({ name: 'hook-cli-e2e', version: '1.0.0' });
+  const client = new Client(
+    { name: 'hook-cli-e2e', version: '1.0.0' },
+    { supportedProtocolVersions: ['2025-11-25'], versionNegotiation: { mode: 'legacy' } }
+  );
   await client.connect(transport);
   try {
     expect(client.getServerVersion()?.version).toBe(PKG.version);
@@ -222,7 +224,10 @@ describe('s93-m01 — the installed bin', () => {
         env,
         stderr: 'pipe',
       });
-      const client = new Client({ name: 'hook-cli-e2e-npx', version: '1.0.0' });
+      const client = new Client(
+        { name: 'hook-cli-e2e-npx', version: '1.0.0' },
+        { supportedProtocolVersions: ['2025-11-25'], versionNegotiation: { mode: 'legacy' } }
+      );
       await client.connect(transport);
       try {
         const result = await client.callTool({

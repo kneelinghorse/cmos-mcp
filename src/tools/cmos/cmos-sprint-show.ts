@@ -10,6 +10,12 @@
 import { z } from 'zod';
 import { withClient } from './client';
 import type { CmosToolResult, MissionStatus } from './types';
+import {
+  prepareSpinOutRead,
+  spinOutDetails,
+  spinOutHistoryLines,
+  type SpinOutDetails,
+} from './spin-out-read';
 import { createError, createSuccess, CmosErrors } from './errors';
 import { getSprintDecisionCounts } from './decision-memory';
 import { appendWarnings, attachWarnings } from './format-warnings';
@@ -19,7 +25,7 @@ import { parkedColumn } from './sprint-summary-read';
 /**
  * Mission summary within a sprint.
  */
-export interface SprintMissionSummary {
+export interface SprintMissionSummary extends SpinOutDetails {
   /** Mission ID */
   id: string;
 
@@ -229,6 +235,13 @@ export async function cmosSprintShow(
         );
       }
 
+      const visibility = prepareSpinOutRead(client);
+      warnings.push(
+        ...spinOutHistoryLines(
+          visibility,
+          missionsResult.data.map((row) => row.id)
+        )
+      );
       // Build result
       const result: SprintShowResult = {
         id: sprint.sprint_id,
@@ -246,6 +259,7 @@ export async function cmosSprintShow(
         sessionDecisionsCount: decisionCounts.sessionDecisionsCount,
         totalDecisionsCount: decisionCounts.totalDecisionsCount,
         missions: missionsResult.data.map((m) => ({
+          ...spinOutDetails(visibility, 'mission', m.id),
           id: m.id,
           name: m.name,
           status: m.status,

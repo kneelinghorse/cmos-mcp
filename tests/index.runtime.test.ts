@@ -23,23 +23,12 @@ async function loadIndexModule() {
   };
   const serverCtor = jest.fn(() => mockServer);
 
-  const mockTransport = {};
-  const transportCtor = jest.fn(() => mockTransport);
-
-  jest.doMock('@modelcontextprotocol/sdk/server/index.js', () => ({
-    Server: serverCtor,
-  }));
-
-  jest.doMock('@modelcontextprotocol/sdk/server/stdio.js', () => ({
-    StdioServerTransport: transportCtor,
-  }));
-
   const errorCode = {
     InternalError: 'internal_error',
     MethodNotFound: 'method_not_found',
   };
 
-  class McpError extends Error {
+  class ProtocolError extends Error {
     code: string;
     constructor(code: string, message: string) {
       super(message);
@@ -47,14 +36,18 @@ async function loadIndexModule() {
     }
   }
 
-  jest.doMock('@modelcontextprotocol/sdk/types.js', () => ({
-    ListToolsRequestSchema: { id: 'list' },
-    CallToolRequestSchema: { id: 'call' },
-    ListPromptsRequestSchema: { id: 'list-prompts' },
-    GetPromptRequestSchema: { id: 'get-prompt' },
-    ErrorCode: errorCode,
-    McpError,
+  jest.doMock('@modelcontextprotocol/server', () => ({
+    Server: serverCtor,
+    ProtocolErrorCode: errorCode,
+    ProtocolError: ProtocolError,
+    CLIENT_INFO_META_KEY: 'io.modelcontextprotocol/clientInfo',
+    PROTOCOL_VERSION_META_KEY: 'io.modelcontextprotocol/protocolVersion',
   }));
+  const serveStdioMock = jest.fn((factory: () => unknown, _options?: unknown) => {
+    factory();
+    return { close: mockServer.close };
+  });
+  jest.doMock('@modelcontextprotocol/server/stdio', () => ({ serveStdio: serveStdioMock }));
 
   // s77-m03: the boot-time tokenizer preload was removed from initializeServer(),
   // so the #714/#721 cold-load flake (Sprint 70 m01 mocked it away) no longer
@@ -116,7 +109,7 @@ async function loadIndexModule() {
     indexModule,
     mockServer,
     serverCtor,
-    transportCtor,
+    serveStdioMock,
     ErrorHandler,
     MissionProtocolError,
     newSigint,
@@ -178,6 +171,110 @@ function withDebugEnv(value: string | undefined): () => void {
     if (saved === undefined) delete process.env.CMOS_DEBUG;
     else process.env.CMOS_DEBUG = saved;
   };
+}
+
+// s94-m07: these four callers must not ask an explicit or modern caller for roots.
+// A blocked client must not hold an otherwise valid local tool response hostage.
+const ROOTS_PATHS = [
+  ['resolver', 'cmos_decisions', { action: 'list' }],
+  ['onboard', 'cmos_agent_onboard', {}],
+  ['review', 'cmos_review', {}],
+  ['message whoami', 'cmos_message', { action: 'whoami' }],
+  [
+    'message send',
+    'cmos_message',
+    {
+      action: 'send',
+      targetAddress: 'cmos://test/peer',
+      type: 'status_update',
+      summary: 'Fixture only',
+      body: 'Test fixture',
+    },
+  ],
+  ['message list', 'cmos_message', { action: 'list' }],
+] as const;
+
+for (const [mode, explicit] of [
+  ['2025-11-25', true],
+  ['2026-07-28', true],
+  ['2026-07-28', false],
+] as const) {
+  test.each(ROOTS_PATHS)(
+    `roots precedence: %s, protocol=${mode}, explicit=${explicit}`,
+    async (_label, name, args) => {
+      const moduleData = await loadIndexModule();
+      const { indexModule, mockServer } = moduleData;
+      const root = path.join(os.tmpdir(), `cmos-roots-boundary-${process.pid}`);
+      const resolvedBy = explicit ? 'explicit' : 'cwd';
+      const sender = await import('../src/intelligence/sender-context');
+      const cmos = await import('../src/tools/cmos');
+      const review = await import('../src/tools/cmos/review-presentation');
+      const uploads = await import('../src/tools/cmos/dashboard-upload-scheduler');
+      const previousRole = process.env.CMOS_AGENT_ROLE;
+      delete process.env.CMOS_AGENT_ROLE;
+      jest.spyOn(sender, 'resolveSenderContext').mockResolvedValue({
+        projectRoot: root,
+        source: resolvedBy,
+        candidates: [],
+        dashboardProjectId: '5ea6fbd5-35a6-43f0-a23d-68ab20c4d6f2',
+        cmosAddress: 'cmos://test/roots',
+      });
+      jest.spyOn(uploads, 'observeDashboardUploadProject').mockResolvedValue(undefined);
+      const result = { success: true, data: {} };
+      jest.spyOn(cmos, 'cmosDecisions').mockResolvedValue(result as never);
+      jest.spyOn(cmos, 'formatDecisionsForLLM').mockReturnValue('Fixture ready');
+      jest.spyOn(cmos, 'cmosAgentOnboard').mockResolvedValue(result as never);
+      jest.spyOn(cmos, 'formatAgentOnboardForLLM').mockReturnValue('Fixture ready');
+      jest
+        .spyOn(review, 'cmosReviewPresentation')
+        .mockResolvedValue({ result, text: 'Fixture ready' } as never);
+      jest.spyOn(cmos, 'cmosMessage').mockResolvedValue(result as never);
+      jest.spyOn(cmos, 'getWhoamiDiagnostics').mockResolvedValue({
+        success: true,
+        data: { resolved: { projectRoot: root, source: resolvedBy } },
+      } as never);
+      jest.spyOn(cmos, 'formatMessageForLLM').mockReturnValue('Fixture ready');
+      mockServer.getClientCapabilities.mockReturnValue({ roots: { listChanged: true } } as never);
+      Object.assign(mockServer, { getNegotiatedProtocolVersion: () => mode });
+      let releaseRoots!: (value: { roots: never[] }) => void;
+      const blockedRoots = new Promise<{ roots: never[] }>((resolve) => {
+        releaseRoots = resolve;
+      });
+      mockServer.listRoots.mockImplementation(() => blockedRoots);
+      indexModule.registerToolHandlers(createMockContext());
+      const handler = mockServer.setRequestHandler.mock.calls[1][1] as (
+        request: unknown,
+        ctx?: unknown
+      ) => Promise<{ isError?: boolean }>;
+      const pending = handler(
+        { params: { name, arguments: { ...args, ...(explicit ? { projectRoot: root } : {}) } } },
+        {
+          mcpReq: {
+            envelope:
+              mode === '2026-07-28'
+                ? {
+                    'io.modelcontextprotocol/protocolVersion': mode,
+                    'io.modelcontextprotocol/clientInfo': { name: 'roots-fixture', version: '1' },
+                    'io.modelcontextprotocol/clientCapabilities': { roots: { listChanged: true } },
+                  }
+                : undefined,
+          },
+        }
+      );
+      try {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(mockServer.listRoots).not.toHaveBeenCalled();
+        expect((await pending).isError).not.toBe(true);
+      } finally {
+        // Release only during cleanup; a failing old implementation never leaves a pending timer.
+        releaseRoots({ roots: [] });
+        await pending.catch(() => undefined);
+        if (previousRole === undefined) delete process.env.CMOS_AGENT_ROLE;
+        else process.env.CMOS_AGENT_ROLE = previousRole;
+        moduleData.cleanup();
+      }
+    }
+  );
 }
 
 describe('Mission Protocol entry lifecycle', () => {
@@ -678,7 +775,7 @@ describe('Mission Protocol entry lifecycle', () => {
     }
   });
 
-  // Sprint 74 m03: a write-path handler that throws an unhandled (non-McpError)
+  // Sprint 74 m03: a write-path handler that throws an unhandled (non-ProtocolError)
   // exception must surface a structured CmosToolResult error (code+message+
   // suggestion) as an isError result — never a bare JSON-RPC -32603 that swallows
   // the real cause. Reported by aquex.ai (msg aa124685): forceComplete + capture
@@ -727,7 +824,7 @@ describe('Mission Protocol entry lifecycle', () => {
       const { indexModule, mockServer } = moduleData;
       const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
 
-      // Force the cross-module handler to throw a plain (non-McpError) exception,
+      // Force the cross-module handler to throw a plain (non-ProtocolError) exception,
       // simulating the aquex.ai store-specific write crash.
       const cmosBarrel = await import('../src/tools/cmos');
       const handlerName = toolName === 'cmos_sprint' ? 'cmosSprint' : 'cmosSession';
@@ -767,7 +864,7 @@ describe('Mission Protocol entry lifecycle', () => {
                 },
               };
 
-        // Must RESOLVE to a structured error result, NOT reject with an McpError.
+        // Must RESOLVE to a structured error result, NOT reject with an ProtocolError.
         const result = await callHandler(request);
 
         expect(result.isError).toBe(true);
@@ -965,7 +1062,7 @@ describe('Mission Protocol entry lifecycle', () => {
     ['with CMOS_DEBUG=1: the diagnostics come back', '1'],
   ])('main connects the server and logs its startup (%s)', async (_label, debug) => {
     const moduleData = await loadIndexModule();
-    const { indexModule, mockServer, transportCtor } = moduleData;
+    const { indexModule, mockServer, serveStdioMock } = moduleData;
     const context = createMockContext();
     indexModule.__test__.setContextBuilder(async () => context);
     indexModule.__test__.setStartupAttributionSelfTestRunner(async () => ({
@@ -996,10 +1093,14 @@ describe('Mission Protocol entry lifecycle', () => {
         expect.objectContaining({ capabilities: { tools: {}, prompts: {} } }),
       ]);
       expect(mockServer.setRequestHandler.mock.calls.map(([schema]) => schema)).toEqual(
-        expect.arrayContaining([{ id: 'list-prompts' }, { id: 'get-prompt' }])
+        expect.arrayContaining(['prompts/list', 'prompts/get'])
       );
-      expect(mockServer.connect).toHaveBeenCalled();
-      expect(transportCtor).toHaveBeenCalled();
+      expect(moduleData.serveStdioMock).toHaveBeenCalledWith(
+        expect.any(Function),
+        expect.objectContaining({ legacy: 'serve' })
+      );
+      expect(mockServer.connect).not.toHaveBeenCalled();
+      expect(serveStdioMock).toHaveBeenCalledTimes(1);
       const lines = consoleSpy.mock.calls.map((call) => String(call[0]));
       const { version } = JSON.parse(
         await fs.readFile(path.resolve(__dirname, '../package.json'), 'utf8')
@@ -1029,7 +1130,7 @@ describe('Mission Protocol entry lifecycle', () => {
 
   test('main routes --whoami through the CLI runner and skips stdio startup', async () => {
     const moduleData = await loadIndexModule();
-    const { indexModule, mockServer, transportCtor } = moduleData;
+    const { indexModule, mockServer, serveStdioMock } = moduleData;
     const originalArgv = process.argv;
     process.argv = [originalArgv[0] ?? 'node', originalArgv[1] ?? 'index.js', '--whoami'];
 
@@ -1042,7 +1143,7 @@ describe('Mission Protocol entry lifecycle', () => {
 
       expect(runner).toHaveBeenCalledTimes(1);
       expect(mockServer.connect).not.toHaveBeenCalled();
-      expect(transportCtor).not.toHaveBeenCalled();
+      expect(serveStdioMock).not.toHaveBeenCalled();
     } finally {
       process.argv = originalArgv;
       moduleData.cleanup();

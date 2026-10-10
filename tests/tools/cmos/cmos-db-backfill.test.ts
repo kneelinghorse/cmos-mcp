@@ -243,6 +243,20 @@ describe('cmosDbBackfill', () => {
     });
   });
 
+  it('preserves NULL sprint attribution in an unscheduled mission_added event', async () => {
+    createDb();
+    const db = new Database(dbPath);
+    db.prepare(
+      "INSERT INTO missions(id,name,status,sprint_id,created_at) VALUES('unscheduled','Unscheduled','Queued',NULL,?)"
+    ).run(new Date().toISOString());
+    db.close();
+    expect((await cmosDbBackfill({ projectRoot: tempDir })).success).toBe(true);
+    const events = fetchMock.mock.calls
+      .filter((call) => String(call[0]).includes('/api/sync/events'))
+      .map((call) => JSON.parse(String(call[1]?.body)));
+    expect(events.find((event) => event.eventType === 'mission_added')?.data.sprintId).toBeNull();
+  });
+
   // ─── Sprint Events ─────────────────────────────────────────────────────────
 
   it('should generate sprint_added events for active sprints', async () => {

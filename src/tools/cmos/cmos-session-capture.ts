@@ -1,3 +1,5 @@
+// ABOUTME: Captures decisions and learnings with their session history and citation links atomically.
+// ABOUTME: Migrations precede the synchronous unit; embeddings run only after its commit.
 /**
  * cmos_session_capture Tool
  *
@@ -7,8 +9,10 @@
  * @module tools/cmos/cmos-session-capture
  */
 
+import { ensureDecisionShapeColumns } from './schema-migrations';
 import { z } from 'zod';
 import { withClientAsync } from './client';
+import { prepareRecordLinkWrite, requireRecordLinks, recordLinkFailure } from './record-link-write';
 import type { CmosToolResult, Session } from './types';
 import { createError, createSuccess, CmosErrors, CMOS_ERROR_CODES } from './errors';
 import { sanitizeContentField, type SanitizedField } from '../../intelligence/content-sanitizer';
@@ -17,10 +21,8 @@ import { genesisColumns, getProjectId } from './genesis-columns';
 import { resolveOpenSprintIdForWrite } from './current-sprint';
 import {
   ensureImplicitSessionColumns,
-  ensureLearningsTable,
   ensureSessionMissionsTable,
   ensureConstraintsTable,
-  ensureAuthorNamespaceColumns,
   computeContentHash,
 } from './schema-migrations';
 import { type SupersessionCandidate } from './supersession-detection';
@@ -491,7 +493,7 @@ export async function cmosSessionCapture(
         return createError<CmosSessionCaptureResult>(CmosErrors.sessionNotFound(sessionId));
       }
 
-      const session = sessionResult.data;
+      let session = sessionResult.data;
 
       if (session.status !== 'active') {
         return createError<CmosSessionCaptureResult>(CmosErrors.sessionNotActive(sessionId));
@@ -505,368 +507,406 @@ export async function cmosSessionCapture(
         );
       }
 
-      // Parse existing captures
-      let captures: Array<{
-        timestamp: string;
-        category: string;
-        content: string;
-        context?: string;
-      }> = [];
-      try {
-        captures = session.captures ? JSON.parse(session.captures) : [];
-      } catch {
-        captures = [];
+      if (category === 'decision') {
+        const shape = ensureDecisionShapeColumns(client);
+        warnings.push(...(shape.warnings ?? []));
+        if (!shape.ready)
+          return createError<CmosSessionCaptureResult>({
+            code: 'DB_QUERY_FAILED',
+            message: 'Decision schema migration failed; the operation was not completed.',
+            suggestion: 'Resolve the reported schema or lock problem, then retry.',
+          });
       }
 
-      // Add new capture
       const now = new Date().toISOString();
       const missionId = params.missionId?.trim() || undefined;
-      const newCapture: {
-        timestamp: string;
-        category: string;
-        content: string;
-        context?: string;
-        missionId?: string;
-        expiresAt?: string;
-        sprintId?: string;
-      } = {
-        timestamp: now,
-        category,
-        content,
-      };
-      if (captureContext) {
-        newCapture.context = captureContext;
-      }
-      if (missionId) {
-        newCapture.missionId = missionId;
-      }
-      // s86-m03: the SECOND of expiresAt's two independent drops. The direct-write path below
-      // already reads `params.expiresAt` into the constraints INSERT, so forwarding the router
-      // param alone makes THAT leg work — while cmos-session-complete.ts:589, which extracts
-      // `expiresAt` off this stored capture blob to build the constraint at session close, stays
-      // permanently undefined. A test exercising only capture would report the bug fixed.
-      if (params.expiresAt) {
-        newCapture.expiresAt = params.expiresAt;
-      }
-      // s92-m03: a deferred category (next-step, constraint, context) materializes at session
-      // close. Its sprint is decided now, by the rule the immediate rows follow: the mission's
-      // sprint, else the explicit sprintId. With neither, the close decides.
-      let deferredSprintId: string | null = null;
-      if (missionId) {
-        const mission = client.getOne<{ sprint_id: string | null }>(
-          'SELECT sprint_id FROM missions WHERE id = ?',
-          [missionId]
-        );
-        deferredSprintId = mission.success ? (mission.data?.sprint_id ?? null) : null;
-      }
-      deferredSprintId = deferredSprintId ?? explicitSprintId;
-      if (deferredSprintId) {
-        newCapture.sprintId = deferredSprintId;
-      }
-      captures.push(newCapture);
-
-      // Update the session
-      const updateResult = client.execute('UPDATE sessions SET captures = ? WHERE id = ?', [
-        JSON.stringify(captures),
-        sessionId,
-      ]);
-
-      if (!updateResult.success) {
-        return createError<CmosSessionCaptureResult>({
-          code: CMOS_ERROR_CODES.DB_QUERY_FAILED,
-          message: `Failed to save capture: ${updateResult.error?.message ?? 'Unknown error'}`,
-          suggestion: 'Check database permissions',
-        });
-      }
-
-      // Insert session event
-      const summary = `[${category}] ${content.slice(0, 100)}${content.length > 100 ? '...' : ''}`;
-      const rawEvent = JSON.stringify({
-        ts: now,
-        agent,
-        session: sessionId,
-        action: 'capture',
-        category,
-        status: 'active',
-        summary,
-        missionId,
-      });
-
-      checkWrite(
-        client.execute(
-          `INSERT INTO session_events (ts, agent, mission, action, status, summary, next_hint, raw_event)
-           VALUES (?, ?, ?, 'capture', 'active', ?, ?, ?)`,
-          [now, agent, sessionId, summary, captureContext, rawEvent]
-        ),
-        warnings,
-        'capture event logging'
-      );
-
-      // Track session→mission association when missionId is provided
-      if (missionId) {
-        warnings.push(...(ensureSessionMissionsTable(client).warnings ?? []));
-        // INSERT OR IGNORE: idempotent — won't duplicate if already linked
-        checkWrite(
-          client.execute(
-            `INSERT OR IGNORE INTO session_missions (session_id, mission_id, linked_at, source)
-             VALUES (?, ?, ?, 'capture')`,
-            [sessionId, missionId, now]
-          ),
-          warnings,
-          'session-to-mission association'
-        );
-      }
-
-      // Decision extraction with mission association
-      const resultData: CmosSessionCaptureResult = {
-        sessionId,
-        category,
-        content,
-        timestamp: now,
-        captureCount: captures.length,
-        message: `Captured ${category} in session '${sessionId}' (${captures.length} total captures)`,
-        structuredMaterialization: initialStructuredMaterialization(category),
-        writeFailures: writeSink.failures,
-      };
-
-      if (missionId) {
-        resultData.missionId = missionId;
-      }
-      if (implicitSession) {
-        resultData.implicitSession = implicitSession;
-      }
-
-      if (category === 'decision') {
-        // Ensure mission_id column exists for decision association
+      const linkedCategory = category === 'decision' || category === 'learning';
+      if (linkedCategory) {
         if (missionId) {
           warnings.push(...ensureMissionIdColumn(client));
+          warnings.push(...(ensureSessionMissionsTable(client).warnings ?? []));
+        }
+        const ready = prepareRecordLinkWrite(client, warnings, category);
+        if (!ready.success) return createError<CmosSessionCaptureResult>(ready.error!);
+      }
+      const pendingEmbeddings: Array<{ kind: 'decision' | 'learning'; id: number }> = [];
+      const captureUnit = (): CmosSessionCaptureResult => {
+        if (linkedCategory) {
+          const current = client.getOne<
+            Session & { implicit: number | null; owner_key: string | null }
+          >(
+            'SELECT id, status, captures, sprint_id, started_at, implicit, owner_key FROM sessions WHERE id = ?',
+            [sessionId]
+          );
+          if (!current.success || !current.data || current.data.status !== 'active')
+            throw new Error(current.error?.message ?? 'Session is no longer active');
+          if (heldByAnotherProcess(client, current.data, 'write'))
+            throw new Error('Session is owned by another process');
+          session = current.data;
+        }
+        // Parse existing captures
+        let captures: Array<{
+          timestamp: string;
+          category: string;
+          content: string;
+          context?: string;
+        }> = [];
+        try {
+          captures = session.captures ? JSON.parse(session.captures) : [];
+        } catch {
+          captures = [];
         }
 
-        // Get sprint_id from session or mission
-        let sprintId: string | null = null;
+        // Add new capture
+        const newCapture: {
+          timestamp: string;
+          category: string;
+          content: string;
+          context?: string;
+          missionId?: string;
+          expiresAt?: string;
+          sprintId?: string;
+        } = {
+          timestamp: now,
+          category,
+          content,
+        };
+        if (captureContext) {
+          newCapture.context = captureContext;
+        }
         if (missionId) {
-          const missionResult = client.getOne<{ sprint_id: string | null }>(
+          newCapture.missionId = missionId;
+        }
+        // s86-m03: the SECOND of expiresAt's two independent drops. The direct-write path below
+        // already reads `params.expiresAt` into the constraints INSERT, so forwarding the router
+        // param alone makes THAT leg work — while cmos-session-complete.ts:589, which extracts
+        // `expiresAt` off this stored capture blob to build the constraint at session close, stays
+        // permanently undefined. A test exercising only capture would report the bug fixed.
+        if (params.expiresAt) {
+          newCapture.expiresAt = params.expiresAt;
+        }
+        // s92-m03: a deferred category (next-step, constraint, context) materializes at session
+        // close. Its sprint is decided now, by the rule the immediate rows follow: the mission's
+        // sprint, else the explicit sprintId. With neither, the close decides.
+        let deferredSprintId: string | null = null;
+        if (missionId) {
+          const mission = client.getOne<{ sprint_id: string | null }>(
             'SELECT sprint_id FROM missions WHERE id = ?',
             [missionId]
           );
-          sprintId = missionResult.success ? (missionResult.data?.sprint_id ?? null) : null;
+          deferredSprintId = mission.success ? (mission.data?.sprint_id ?? null) : null;
         }
-        if (!sprintId) {
-          sprintId =
-            explicitSprintId ?? session.sprint_id ?? inferSprintIdForDecisionCapture(client);
+        deferredSprintId = deferredSprintId ?? explicitSprintId;
+        if (deferredSprintId) {
+          newCapture.sprintId = deferredSprintId;
         }
+        captures.push(newCapture);
 
-        // s69-m04 — settle the author_* rename (session_id → author_session_id)
-        // BEFORE the dedup SELECT/INSERT below so both reference the live column
-        // name. Marker-gated fast no-op once applied; the later genesisColumns call
-        // would also run it, but that is after this dedup query.
-        // s86-m02b (fork f23): a half-applied rename must not be silent.
-        warnings.push(...(ensureAuthorNamespaceColumns(client).warnings ?? []));
+        // Update the session
+        const updateResult = client.execute('UPDATE sessions SET captures = ? WHERE id = ?', [
+          JSON.stringify(captures),
+          sessionId,
+        ]);
 
-        // s91-m04: the lookup, INSERT, detection and embedding live in decision-write.ts, shared
-        // with cmos_decisions(action="record").
-        const existingDecisionId = findExistingDecisionId(client, content, sessionId);
-
-        if (existingDecisionId !== undefined) {
-          resultData.decisionAlreadyExtracted = true;
-          resultData.decisionExtractionCount = 0;
-          resultData.decisionId = existingDecisionId;
-          resultData.structuredMaterialization.outcome = 'existing';
-        } else {
-          const evidenceArray = params.evidence;
-          const written = insertDecisionRow(
-            client,
-            {
-              content,
-              now,
-              sprintId,
-              authorSessionId: sessionId,
-              missionId,
-              evidence: evidenceArray,
-            },
-            writeSink
+        if (!updateResult.success) {
+          throw new Error(
+            `Failed to save capture: ${updateResult.error?.message ?? 'Unknown error'}`
           );
+        }
 
-          if (written.kind === 'materialized') {
-            resultData.decisionExtractionCount = 1;
-            resultData.decisionAlreadyExtracted = false;
-            if (evidenceArray && evidenceArray.length > 0) {
-              resultData.evidenceStored = evidenceArray;
-            }
-            if (written.decisionId !== undefined) {
-              resultData.decisionId = written.decisionId;
-            }
-            resultData.structuredMaterialization.outcome = 'materialized';
+        // Insert session event
+        const summary = `[${category}] ${content.slice(0, 100)}${content.length > 100 ? '...' : ''}`;
+        const rawEvent = JSON.stringify({
+          ts: now,
+          agent,
+          session: sessionId,
+          action: 'capture',
+          category,
+          status: 'active',
+          summary,
+          missionId,
+        });
 
-            // s92-m04: embedding only; the automatic supersession offer is retired.
-            await followDecisionInsert(client, content, written.decisionId, warnings);
-          } else if (written.kind === 'failed') {
-            // s86-m02b — THE FLAGSHIP FIX. This arm has existed since Sprint 20 and set
-            // count=0 + alreadyExtracted=false, which the formatter rendered as
-            // "Extraction skipped". Nothing was skipped: the INSERT errored and a strategic
-            // decision was LOST while the answer reported a clean, uneventful capture.
+        checkWrite(
+          client.execute(
+            `INSERT INTO session_events (ts, agent, mission, action, status, summary, next_hint, raw_event)
+           VALUES (?, ?, ?, 'capture', 'active', ?, ?, ?)`,
+            [now, agent, sessionId, summary, captureContext, rawEvent]
+          ),
+          warnings,
+          'capture event logging'
+        );
+
+        // Track session→mission association when missionId is provided
+        if (missionId) {
+          if (!linkedCategory)
+            warnings.push(...(ensureSessionMissionsTable(client).warnings ?? []));
+          // INSERT OR IGNORE: idempotent — won't duplicate if already linked
+          checkWrite(
+            client.execute(
+              `INSERT OR IGNORE INTO session_missions (session_id, mission_id, linked_at, source)
+             VALUES (?, ?, ?, 'capture')`,
+              [sessionId, missionId, now]
+            ),
+            warnings,
+            'session-to-mission association'
+          );
+        }
+
+        // Decision extraction with mission association
+        const resultData: CmosSessionCaptureResult = {
+          sessionId,
+          category,
+          content,
+          timestamp: now,
+          captureCount: captures.length,
+          message: `Captured ${category} in session '${sessionId}' (${captures.length} total captures)`,
+          structuredMaterialization: initialStructuredMaterialization(category),
+          writeFailures: writeSink.failures,
+        };
+
+        if (missionId) {
+          resultData.missionId = missionId;
+        }
+        if (implicitSession) {
+          resultData.implicitSession = implicitSession;
+        }
+
+        if (category === 'decision') {
+          // Get sprint_id from session or mission
+          let sprintId: string | null = null;
+          if (missionId) {
+            const missionResult = client.getOne<{ sprint_id: string | null }>(
+              'SELECT sprint_id FROM missions WHERE id = ?',
+              [missionId]
+            );
+            sprintId = missionResult.success ? (missionResult.data?.sprint_id ?? null) : null;
+          }
+          if (!sprintId) {
+            sprintId =
+              explicitSprintId ?? session.sprint_id ?? inferSprintIdForDecisionCapture(client);
+          }
+
+          // s91-m04: the lookup, INSERT, detection and embedding live in decision-write.ts, shared
+          // with cmos_decisions(action="record").
+          const existingDecisionId = findExistingDecisionId(client, content, sessionId);
+
+          if (existingDecisionId !== undefined) {
+            requireRecordLinks(client, 'decision', existingDecisionId);
+            resultData.decisionAlreadyExtracted = true;
             resultData.decisionExtractionCount = 0;
-            resultData.decisionAlreadyExtracted = false;
-            resultData.decisionExtractionFailed = written.message;
+            resultData.decisionId = existingDecisionId;
+            resultData.structuredMaterialization.outcome = 'existing';
+          } else {
+            const evidenceArray = params.evidence;
+            const written = insertDecisionRow(
+              client,
+              {
+                content,
+                now,
+                sprintId,
+                authorSessionId: sessionId,
+                missionId,
+                evidence: evidenceArray,
+              },
+              writeSink
+            );
+
+            if (written.kind === 'materialized') {
+              resultData.decisionExtractionCount = 1;
+              resultData.decisionAlreadyExtracted = false;
+              if (evidenceArray && evidenceArray.length > 0) {
+                resultData.evidenceStored = evidenceArray;
+              }
+              if (written.decisionId !== undefined) {
+                resultData.decisionId = written.decisionId;
+              }
+              resultData.structuredMaterialization.outcome = 'materialized';
+
+              // s92-m04: embedding only; the automatic supersession offer is retired.
+              if (written.decisionId !== undefined)
+                pendingEmbeddings.push({ kind: 'decision', id: written.decisionId });
+            } else if (written.kind === 'failed') {
+              // s86-m02b — THE FLAGSHIP FIX. This arm has existed since Sprint 20 and set
+              // count=0 + alreadyExtracted=false, which the formatter rendered as
+              // "Extraction skipped". Nothing was skipped: the INSERT errored and a strategic
+              // decision was LOST while the answer reported a clean, uneventful capture.
+              resultData.decisionExtractionCount = 0;
+              resultData.decisionAlreadyExtracted = false;
+              resultData.decisionExtractionFailed = written.message;
+            }
           }
         }
-      }
 
-      let newlyInsertedLearningId: number | undefined;
-      if (category === 'learning') {
-        // Ensure learnings table exists
-        warnings.push(...(ensureLearningsTable(client).warnings ?? []));
+        let newlyInsertedLearningId: number | undefined;
+        if (category === 'learning') {
+          // Get sprint_id from session or mission
+          let sprintId: string | null = null;
+          if (missionId) {
+            const missionResult = client.getOne<{ sprint_id: string | null }>(
+              'SELECT sprint_id FROM missions WHERE id = ?',
+              [missionId]
+            );
+            sprintId = missionResult.success ? (missionResult.data?.sprint_id ?? null) : null;
+          }
+          if (!sprintId) {
+            sprintId =
+              explicitSprintId ?? session.sprint_id ?? inferSprintIdForDecisionCapture(client);
+          }
 
-        // Get sprint_id from session or mission
-        let sprintId: string | null = null;
-        if (missionId) {
-          const missionResult = client.getOne<{ sprint_id: string | null }>(
-            'SELECT sprint_id FROM missions WHERE id = ?',
-            [missionId]
+          // Check for duplicate
+          const existingLearning = client.getOne<{ id: number }>(
+            'SELECT id FROM learnings WHERE content = ? AND author_session_id = ?',
+            [content, sessionId]
           );
-          sprintId = missionResult.success ? (missionResult.data?.sprint_id ?? null) : null;
-        }
-        if (!sprintId) {
-          sprintId =
-            explicitSprintId ?? session.sprint_id ?? inferSprintIdForDecisionCapture(client);
-        }
 
-        // s69-m04 — settle the author_* rename before the dedup SELECT/INSERT.
-        // s86-m02b (fork f23): a half-applied rename must not be silent.
-        warnings.push(...(ensureAuthorNamespaceColumns(client).warnings ?? []));
+          // s86-m02b (fork f10, read side): a FAILED dedup SELECT reads as "no duplicate" and
+          // falls through to the INSERT. Behaviour UNCHANGED — a duplicate learning is recoverable
+          // and detectable, unlike a lost write — but the operator is told.
+          if (!existingLearning.success) {
+            warnings.push(
+              `learning de-duplication check failed; a duplicate row may have been written: ` +
+                `${existingLearning.error?.code ?? 'DB_ERROR'} — ${existingLearning.error?.message ?? 'unknown'}`
+            );
+          }
 
-        // Check for duplicate
-        const existingLearning = client.getOne<{ id: number }>(
-          'SELECT id FROM learnings WHERE content = ? AND author_session_id = ?',
-          [content, sessionId]
-        );
-
-        // s86-m02b (fork f10, read side): a FAILED dedup SELECT reads as "no duplicate" and
-        // falls through to the INSERT. Behaviour UNCHANGED — a duplicate learning is recoverable
-        // and detectable, unlike a lost write — but the operator is told.
-        if (!existingLearning.success) {
-          warnings.push(
-            `learning de-duplication check failed; a duplicate row may have been written: ` +
-              `${existingLearning.error?.code ?? 'DB_ERROR'} — ${existingLearning.error?.message ?? 'unknown'}`
-          );
-        }
-
-        if (!existingLearning.success || !existingLearning.data) {
-          const g = genesisColumns(client, 'learnings', getProjectId(client));
-          const insertResult = client.execute(
-            `INSERT INTO learnings (content, category, status, sprint_id, author_session_id, mission_id, created_at, evergreen, ${g.columns.join(', ')})
+          if (!existingLearning.success || !existingLearning.data) {
+            const g = genesisColumns(client, 'learnings', getProjectId(client));
+            const insertResult = client.execute(
+              `INSERT INTO learnings (content, category, status, sprint_id, author_session_id, mission_id, created_at, evergreen, ${g.columns.join(', ')})
              VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ${g.placeholders})`,
-            [
-              content,
-              null,
-              sprintId,
-              sessionId,
-              missionId ?? null,
-              now,
-              params.evergreen === true ? 1 : 0,
-              ...g.values,
-            ]
-          );
-          // s86-m02b: `learningExtracted` used to be the INSERT's success flag, so `false` meant
-          // BOTH "a duplicate already existed" (the else arm below) and "the INSERT errored".
-          // The error case now has its own channel and the flag means only what it says.
-          resultData.learningExtracted = checkWrite(insertResult, writeSink, 'learnings.insert');
-          if (resultData.learningExtracted) {
-            const lastId = insertResult.data?.lastInsertRowid;
-            if (typeof lastId === 'number') {
-              newlyInsertedLearningId = lastId;
-            } else if (typeof lastId === 'bigint') {
-              newlyInsertedLearningId = Number(lastId);
-            }
+              [
+                content,
+                null,
+                sprintId,
+                sessionId,
+                missionId ?? null,
+                now,
+                params.evergreen === true ? 1 : 0,
+                ...g.values,
+              ]
+            );
+            // s86-m02b: `learningExtracted` used to be the INSERT's success flag, so `false` meant
+            // BOTH "a duplicate already existed" (the else arm below) and "the INSERT errored".
+            // The error case now has its own channel and the flag means only what it says.
+            resultData.learningExtracted = checkWrite(insertResult, writeSink, 'learnings.insert');
+            if (resultData.learningExtracted) {
+              const lastId = insertResult.data?.lastInsertRowid;
+              if (typeof lastId === 'number') {
+                newlyInsertedLearningId = lastId;
+              } else if (typeof lastId === 'bigint') {
+                newlyInsertedLearningId = Number(lastId);
+              }
 
-            if (newlyInsertedLearningId !== undefined) {
-              resultData.learningId = newlyInsertedLearningId;
-            }
-            resultData.structuredMaterialization.outcome = 'materialized';
+              if (newlyInsertedLearningId !== undefined) {
+                resultData.learningId = newlyInsertedLearningId;
+              }
+              resultData.structuredMaterialization.outcome = 'materialized';
 
-            // Sprint 66 m03 — write-path embedding hook
-            if (newlyInsertedLearningId !== undefined) {
-              const embedResult = await recordEmbedding(client, {
-                type: 'learning',
-                id: newlyInsertedLearningId,
-                inputText: learningEmbeddingInput(content),
-              });
-              warnings.push(...(embedResult.warnings ?? []));
+              if (newlyInsertedLearningId !== undefined)
+                pendingEmbeddings.push({ kind: 'learning', id: newlyInsertedLearningId });
+            }
+          } else {
+            resultData.learningExtracted = false;
+            newlyInsertedLearningId = existingLearning.data.id;
+            resultData.learningId = existingLearning.data.id;
+            if (params.evergreen === undefined) {
+              resultData.structuredMaterialization.outcome = 'existing';
+            } else if (
+              checkWrite(
+                client.execute('UPDATE learnings SET evergreen = ? WHERE id = ?', [
+                  params.evergreen ? 1 : 0,
+                  existingLearning.data.id,
+                ]),
+                writeSink,
+                'learnings.evergreen.update'
+              )
+            ) {
+              resultData.structuredMaterialization.outcome = 'existing';
             }
           }
-        } else {
-          resultData.learningExtracted = false;
-          newlyInsertedLearningId = existingLearning.data.id;
-          resultData.learningId = existingLearning.data.id;
-          if (params.evergreen === undefined) {
-            resultData.structuredMaterialization.outcome = 'existing';
-          } else if (
-            checkWrite(
-              client.execute('UPDATE learnings SET evergreen = ? WHERE id = ?', [
-                params.evergreen ? 1 : 0,
-                existingLearning.data.id,
-              ]),
-              writeSink,
-              'learnings.evergreen.update'
-            )
-          ) {
-            resultData.structuredMaterialization.outcome = 'existing';
+        }
+
+        if (category === 'constraint') {
+          warnings.push(...(ensureConstraintsTable(client).warnings ?? []));
+
+          // Get sprint_id from session or mission
+          let sprintId: string | null = null;
+          if (missionId) {
+            const missionResult = client.getOne<{ sprint_id: string | null }>(
+              'SELECT sprint_id FROM missions WHERE id = ?',
+              [missionId]
+            );
+            sprintId = missionResult.success ? (missionResult.data?.sprint_id ?? null) : null;
           }
-        }
-      }
+          if (!sprintId) {
+            sprintId =
+              explicitSprintId ?? session.sprint_id ?? inferSprintIdForDecisionCapture(client);
+          }
 
-      if (category === 'constraint') {
-        warnings.push(...(ensureConstraintsTable(client).warnings ?? []));
-
-        // Get sprint_id from session or mission
-        let sprintId: string | null = null;
-        if (missionId) {
-          const missionResult = client.getOne<{ sprint_id: string | null }>(
-            'SELECT sprint_id FROM missions WHERE id = ?',
-            [missionId]
+          // Dedup via content hash
+          const hash = computeContentHash(content, 'constraint');
+          const existingConstraint = client.getOne<{ id: number }>(
+            'SELECT id FROM constraints WHERE content_hash = ? AND status = ?',
+            [hash, 'active']
           );
-          sprintId = missionResult.success ? (missionResult.data?.sprint_id ?? null) : null;
-        }
-        if (!sprintId) {
-          sprintId =
-            explicitSprintId ?? session.sprint_id ?? inferSprintIdForDecisionCapture(client);
-        }
 
-        // Dedup via content hash
-        const hash = computeContentHash(content, 'constraint');
-        const existingConstraint = client.getOne<{ id: number }>(
-          'SELECT id FROM constraints WHERE content_hash = ? AND status = ?',
-          [hash, 'active']
-        );
+          // s86-m02b (fork f10, read side): same disclosure as the learning arm above.
+          if (!existingConstraint.success) {
+            warnings.push(
+              `constraint de-duplication check failed; a duplicate row may have been written: ` +
+                `${existingConstraint.error?.code ?? 'DB_ERROR'} — ${existingConstraint.error?.message ?? 'unknown'}`
+            );
+          }
 
-        // s86-m02b (fork f10, read side): same disclosure as the learning arm above.
-        if (!existingConstraint.success) {
-          warnings.push(
-            `constraint de-duplication check failed; a duplicate row may have been written: ` +
-              `${existingConstraint.error?.code ?? 'DB_ERROR'} — ${existingConstraint.error?.message ?? 'unknown'}`
-          );
-        }
-
-        if (!existingConstraint.success || !existingConstraint.data) {
-          const expiresAt = params.expiresAt ?? null;
-          const g = genesisColumns(client, 'constraints', getProjectId(client));
-          const insertResult = client.execute(
-            `INSERT INTO constraints (content, status, session_id, sprint_id, created_at, expires_at, content_hash, ${g.columns.join(', ')})
+          if (!existingConstraint.success || !existingConstraint.data) {
+            const expiresAt = params.expiresAt ?? null;
+            const g = genesisColumns(client, 'constraints', getProjectId(client));
+            const insertResult = client.execute(
+              `INSERT INTO constraints (content, status, session_id, sprint_id, created_at, expires_at, content_hash, ${g.columns.join(', ')})
              VALUES (?, 'active', ?, ?, ?, ?, ?, ${g.placeholders})`,
-            [content, sessionId, sprintId, now, expiresAt, hash, ...g.values]
-          );
-          // s86-m02b: same split as `learningExtracted` — `false` now means duplicate only.
-          resultData.constraintExtracted = checkWrite(
-            insertResult,
-            writeSink,
-            'constraints.insert'
-          );
-          if (resultData.constraintExtracted) {
-            resultData.structuredMaterialization.outcome = 'materialized';
+              [content, sessionId, sprintId, now, expiresAt, hash, ...g.values]
+            );
+            // s86-m02b: same split as `learningExtracted` — `false` now means duplicate only.
+            resultData.constraintExtracted = checkWrite(
+              insertResult,
+              writeSink,
+              'constraints.insert'
+            );
+            if (resultData.constraintExtracted) {
+              resultData.structuredMaterialization.outcome = 'materialized';
+            }
+          } else {
+            resultData.constraintExtracted = false;
+            resultData.structuredMaterialization.outcome = 'existing';
           }
-        } else {
-          resultData.constraintExtracted = false;
-          resultData.structuredMaterialization.outcome = 'existing';
+        }
+
+        if (category === 'decision' && resultData.decisionId === undefined)
+          throw new Error(resultData.decisionExtractionFailed ?? 'Decision extraction failed');
+        if (category === 'learning') {
+          if (writeSink.failures.length)
+            throw new Error(writeSink.failures.map((failure) => failure.message).join('; '));
+          requireRecordLinks(client, 'learning', resultData.learningId);
+        }
+        return resultData;
+      };
+      const captured = linkedCategory
+        ? client.transaction(captureUnit)
+        : createSuccess(captureUnit());
+      if (!captured.success || !captured.data)
+        return recordLinkFailure(captured.error?.message ?? 'Capture rolled back');
+      const resultData = captured.data;
+      for (const pending of pendingEmbeddings) {
+        if (pending.kind === 'decision')
+          await followDecisionInsert(client, content, pending.id, warnings);
+        else {
+          const embedded = await recordEmbedding(client, {
+            type: 'learning',
+            id: pending.id,
+            inputText: learningEmbeddingInput(content),
+          });
+          warnings.push(...(embedded.warnings ?? []));
         }
       }
 

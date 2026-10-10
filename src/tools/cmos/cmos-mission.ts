@@ -125,15 +125,15 @@ const cmosMissionFieldsSchema = z
     status: z.string().optional().describe('Mission status'),
     objective: z.string().optional().describe('Mission objective'),
     context: z
-      .union([z.string(), z.record(z.unknown())])
+      .union([z.string(), z.record(z.string(), z.unknown())])
       .optional()
       .describe('Background context'),
     successCriteria: z.array(z.string()).optional().describe('Success criteria'),
     deliverables: z.array(z.string()).optional().describe('Deliverables'),
     referenceDocs: z.array(z.string()).optional().describe('Reference docs'),
-    domainFields: z.record(z.unknown()).optional().describe('Domain-specific fields'),
+    domainFields: z.record(z.string(), z.unknown()).optional().describe('Domain-specific fields'),
     notes: z.string().optional().describe('Notes'),
-    metadata: z.record(z.unknown()).optional().describe('Additional metadata'),
+    metadata: z.record(z.string(), z.unknown()).optional().describe('Additional metadata'),
   })
   .strict();
 
@@ -143,7 +143,13 @@ export const cmosMissionSchema = z
       .enum(CMOS_MISSION_ACTIONS)
       .describe('Mission action: list | show | status | add | update | move | depends | undepends'),
     missionId: z.string().optional().describe('Mission ID for show/add/update/move actions'),
-    sprintId: z.string().optional().describe('Sprint ID for list filter or add action'),
+    sprintId: z
+      .string()
+      .nullable()
+      .optional()
+      .describe(
+        'Sprint ID for list filter; add: omitted infers the unique open sprint, null requests unscheduled'
+      ),
     toSprintId: z.string().optional().describe('Destination sprint ID for move action'),
     reason: z.string().optional().describe('Reason recorded on the breadcrumb for move action'),
     status: z
@@ -176,13 +182,16 @@ export const cmosMissionSchema = z
     name: z.string().optional().describe('Mission name for add action'),
     objective: z.string().optional().describe('Mission objective for add action'),
     context: z
-      .union([z.string(), z.record(z.unknown())])
+      .union([z.string(), z.record(z.string(), z.unknown())])
       .optional()
       .describe('Mission context for add action'),
     successCriteria: z.array(z.string()).optional().describe('Success criteria for add action'),
     deliverables: z.array(z.string()).optional().describe('Deliverables for add action'),
     referenceDocs: z.array(z.string()).optional().describe('Reference docs for add action'),
-    domainFields: z.record(z.unknown()).optional().describe('Domain fields for add action'),
+    domainFields: z
+      .record(z.string(), z.unknown())
+      .optional()
+      .describe('Domain fields for add action'),
     notes: z.string().optional().describe('Notes for add action'),
     fields: cmosMissionFieldsSchema.optional().describe('Fields payload for update action'),
     fromId: z.string().optional().describe('Dependent mission ID for depends/undepends actions'),
@@ -220,8 +229,9 @@ export const cmosMissionToolDefinition = {
         description: 'Mission ID for show/add/update/move actions',
       },
       sprintId: {
-        type: 'string',
-        description: 'Sprint ID for list filter or add action',
+        type: ['string', 'null'],
+        description:
+          'Sprint ID for list filter; add: omitted infers the unique open sprint, null requests unscheduled',
       },
       toSprintId: {
         type: 'string',
@@ -371,7 +381,7 @@ export async function cmosMission(
   switch (actionValue) {
     case 'list':
       return cmosMissionList({
-        sprintId: params.sprintId,
+        sprintId: params.sprintId ?? undefined,
         status: params.status as CmosMissionListParams['status'],
         limit: params.limit,
         projectRoot: params.projectRoot,
@@ -400,7 +410,7 @@ export async function cmosMission(
       return cmosMissionAdd({
         missionId: params.missionId ?? '',
         name: params.name ?? '',
-        sprintId: params.sprintId ?? '',
+        sprintId: params.sprintId,
         status: params.status as CmosMissionAddParams['status'],
         objective: params.objective,
         context: params.context,

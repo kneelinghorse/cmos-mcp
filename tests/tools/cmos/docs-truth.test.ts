@@ -190,6 +190,27 @@ describe('s92-m06 — the shipped documents agree with the code and with each ot
     expect(read('README.md')).toContain('CMOS_CHECKPOINT_SYNC');
   });
 
+  it('all three network disclosures name automatic writes, due times and the local-only opt-out', () => {
+    for (const rel of ['README.md', 'SECURITY.md', 'docs/getting-started.md']) {
+      const text = read(rel).replace(/\s+/g, ' ');
+      // A reader must be able to decide whether background uploads fit their project before
+      // enabling credentials. Completion-only wording would hide m10's new network trigger.
+      expect({ rel, writes: /registered project.*(?:MCP|tool).*write/i.test(text) }).toEqual({
+        rel,
+        writes: true,
+      });
+      expect(text).toContain('5 quiet minutes');
+      expect(text).toContain('30 minutes');
+      expect(text).toContain('60 seconds');
+      expect(text).toMatch(/whole.*SQLite.*snapshot|snapshot.*whole.*SQLite/i);
+      expect(text).toMatch(/401.*402.*403/);
+      expect(text).toContain('CMOS_CHECKPOINT_SYNC=off');
+      expect(text).toContain('cmos_status');
+      expect(text).toMatch(/process.exit closes do not upload/i);
+      expect(text).not.toContain('Sync is checkpoint-driven, not continuous');
+    }
+  });
+
   it('getting-started no longer says register issues a key or that an empty URL breaks sign-in', () => {
     const guide = read('docs/getting-started.md');
     expect(guide).not.toMatch(/auto-issued on first registration/);

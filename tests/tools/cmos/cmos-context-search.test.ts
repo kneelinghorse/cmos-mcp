@@ -169,8 +169,8 @@ describe('cmosContextSearch', () => {
   it('uses defaults when options not provided', async () => {
     const result = await cmosContextSearch({ query: 'test query', projectRoot: tempDir });
     expect(result.data?.options.limit).toBe(5);
-    // s82-m04 (FORK-E5): default recency is now the tuned DEFAULT_RECENCY_WEIGHT (0.2), not 0.5.
-    expect(result.data?.options.recencyWeight).toBe(0.2);
+    // s94-m06: response metadata must expose the measured production recency default.
+    expect(result.data?.options.recencyWeight).toBe(0.5);
     expect(result.data?.options.types).toEqual(['decision']);
     // s92-m07 (R1): no include list by default; only superseded rows are left out.
     expect(result.data?.options.statusFilter).toEqual([]);

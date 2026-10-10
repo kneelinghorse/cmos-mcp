@@ -11,7 +11,13 @@
  */
 
 import { PROPOSALS_TABLE_SQL } from './proposals';
-import { PARKED_MISSION_STATUSES, statusInSql, statusNotInSql } from './terminal-status';
+import { RECORD_LINKS_TABLE_SQL, RECORD_LINKS_INDEX_SQL } from './record-link-schema';
+import {
+  PARKED_MISSION_STATUSES,
+  missionCompletedSql,
+  statusInSql,
+  statusNotInSql,
+} from './terminal-status';
 
 /**
  * Current CMOS schema version identifier.
@@ -49,9 +55,8 @@ export const CMOS_SCHEMA_VERSION = '2.1';
  * INVARIANT, asserted in tests against every sprint on a real store:
  * `total_missions + parked_missions = COUNT(m.id)`.
  *
- * NOT CHANGED HERE, deliberately: completed_missions / blocked_missions / active_missions keep
- * their case-SENSITIVE comparisons. Making them case-folded is a wider blast radius than this
- * mission's, and mixing the two changes would make a moved number impossible to attribute.
+ * s94-m05: completed_missions recognizes historical complete/completed case aliases without
+ * rewriting rows. Blocked and active counts retain their existing comparisons.
  */
 export const SPRINT_SUMMARY_VIEW_SQL = `CREATE VIEW IF NOT EXISTS sprint_summary AS
 SELECT
@@ -62,7 +67,7 @@ SELECT
   s.start_date,
   s.end_date,
   COUNT(CASE WHEN m.id IS NOT NULL AND ${statusNotInSql("COALESCE(m.status, '')", PARKED_MISSION_STATUSES)} THEN 1 END) AS total_missions,
-  COUNT(CASE WHEN m.status = 'Completed' THEN 1 END) AS completed_missions,
+  COUNT(CASE WHEN ${missionCompletedSql('m.status')} THEN 1 END) AS completed_missions,
   COUNT(CASE WHEN m.status = 'Blocked' THEN 1 END) AS blocked_missions,
   COUNT(CASE WHEN m.status IN ('Current', 'In Progress') THEN 1 END) AS active_missions,
   COUNT(CASE WHEN m.id IS NOT NULL AND ${statusInSql("COALESCE(m.status, '')", PARKED_MISSION_STATUSES)} THEN 1 END) AS parked_missions,
@@ -311,8 +316,13 @@ CREATE TABLE IF NOT EXISTS strategic_decisions (
   schema_version INTEGER NOT NULL DEFAULT 1,
   -- Author identity (nullable; bound when the multi-user layer lands).
   author_user_id TEXT,
-  -- How a decision recorded from a draft was approved (NULL for a direct record).
-  approval_mode TEXT,     -- approved | agent-judged | agent-attested
+  -- Decision reasoning and effects; omitted legacy fields remain NULL.
+  context_text TEXT,
+  alternatives TEXT,     -- JSON array of strings
+  consequences TEXT,
+  deciders TEXT,         -- JSON array of strings
+  -- Approval or declared execution mode (NULL means not recorded).
+  approval_mode TEXT,     -- approved | agent-judged | agent-attested | autonomous
   approval_draft TEXT,    -- the draft it came from (P<n>)
   approval_words TEXT,    -- the operator's message, for approved and agent-judged
   FOREIGN KEY (context_id) REFERENCES contexts(id) ON DELETE CASCADE,
@@ -366,25 +376,37 @@ CREATE INDEX IF NOT EXISTS idx_learnings_category ON learnings (category);
 CREATE INDEX IF NOT EXISTS idx_learnings_mission ON learnings (mission_id);
 CREATE INDEX IF NOT EXISTS idx_learnings_hash ON learnings (content_hash);
 
+-- Derived local citation links; the write migration backfills and stamps its version.
+${RECORD_LINKS_TABLE_SQL.replace('CREATE TABLE', 'CREATE TABLE IF NOT EXISTS')};
+${RECORD_LINKS_INDEX_SQL.replace('CREATE INDEX', 'CREATE INDEX IF NOT EXISTS')};
+
 -- FTS5 full-text search index for strategic decisions
 CREATE VIRTUAL TABLE IF NOT EXISTS decisions_fts USING fts5(
   decision_text,
+  context_text,
+  alternatives,
+  consequences,
+  deciders,
   content='strategic_decisions',
   content_rowid='id'
 );
 
 -- Auto-sync triggers for FTS5 index
 CREATE TRIGGER IF NOT EXISTS decisions_fts_insert AFTER INSERT ON strategic_decisions BEGIN
-  INSERT INTO decisions_fts(rowid, decision_text) VALUES (new.id, new.decision_text);
+  INSERT INTO decisions_fts(rowid, decision_text, context_text, alternatives, consequences, deciders)
+  VALUES (new.id, new.decision_text, new.context_text, new.alternatives, new.consequences, new.deciders);
 END;
 
 CREATE TRIGGER IF NOT EXISTS decisions_fts_delete AFTER DELETE ON strategic_decisions BEGIN
-  INSERT INTO decisions_fts(decisions_fts, rowid, decision_text) VALUES('delete', old.id, old.decision_text);
+  INSERT INTO decisions_fts(decisions_fts, rowid, decision_text, context_text, alternatives, consequences, deciders)
+  VALUES('delete', old.id, old.decision_text, old.context_text, old.alternatives, old.consequences, old.deciders);
 END;
 
-CREATE TRIGGER IF NOT EXISTS decisions_fts_update AFTER UPDATE OF decision_text ON strategic_decisions BEGIN
-  INSERT INTO decisions_fts(decisions_fts, rowid, decision_text) VALUES('delete', old.id, old.decision_text);
-  INSERT INTO decisions_fts(rowid, decision_text) VALUES (new.id, new.decision_text);
+CREATE TRIGGER IF NOT EXISTS decisions_fts_update AFTER UPDATE OF decision_text, context_text, alternatives, consequences, deciders ON strategic_decisions BEGIN
+  INSERT INTO decisions_fts(decisions_fts, rowid, decision_text, context_text, alternatives, consequences, deciders)
+  VALUES('delete', old.id, old.decision_text, old.context_text, old.alternatives, old.consequences, old.deciders);
+  INSERT INTO decisions_fts(rowid, decision_text, context_text, alternatives, consequences, deciders)
+  VALUES (new.id, new.decision_text, new.context_text, new.alternatives, new.consequences, new.deciders);
 END;
 
 -- Persistent sync event queue for WAL-backed event delivery

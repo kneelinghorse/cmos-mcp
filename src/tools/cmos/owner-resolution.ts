@@ -168,7 +168,12 @@ function writeMetadata(
   sink: WriteSink
 ): void {
   checkWrite(
-    client.execute('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)', [key, value]),
+    client.execute(
+      `INSERT INTO metadata (key, value) VALUES (?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value
+       WHERE metadata.value IS NOT excluded.value`,
+      [key, value]
+    ),
     sink,
     `metadata.${key}`
   );

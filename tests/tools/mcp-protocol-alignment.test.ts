@@ -1,7 +1,7 @@
 import { describe, expect, test, jest } from '@jest/globals';
 import Ajv2020 from 'ajv/dist/2020';
 import { executeMissionProtocolTool, getToolDefinitions } from '../../src/index';
-import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
+import { ProtocolError, ProtocolErrorCode } from '@modelcontextprotocol/server';
 
 function createMockContext(): any {
   return {
@@ -55,7 +55,7 @@ describe('MCP protocol alignment', () => {
         createMockContext()
       )
     ).rejects.toMatchObject({
-      code: ErrorCode.MethodNotFound,
+      code: ProtocolErrorCode.MethodNotFound,
     });
     await expect(
       executeMissionProtocolTool(
@@ -63,6 +63,6 @@ describe('MCP protocol alignment', () => {
         { missionFile: 'bad.yaml' },
         createMockContext()
       )
-    ).rejects.toBeInstanceOf(McpError);
+    ).rejects.toBeInstanceOf(ProtocolError);
   });
 });

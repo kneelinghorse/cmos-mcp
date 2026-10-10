@@ -153,6 +153,77 @@ describe('cross-store fan-out read API (Sprint 69 m06)', () => {
     return reg;
   }
 
+  it('filters transferred decision and learning rows inside every named fanout before its cap', async () => {
+    const now = Date.now();
+    const root = makeStore('fork-source', {
+      decisions: [
+        {
+          id: 1,
+          text: 'hidden',
+          occurred_at: now,
+          origin_seq: 1,
+          evidence: '[{"type":"report","id":"x"}]',
+        },
+        {
+          id: 2,
+          text: 'visible',
+          occurred_at: now - 1,
+          origin_seq: 2,
+          evidence: '[{"type":"report","id":"x"}]',
+        },
+      ],
+      learnings: [
+        { id: 1, content: 'hidden lesson', category: 'tag', occurred_at: now, origin_seq: 1 },
+        { id: 2, content: 'visible lesson', category: 'tag', occurred_at: now - 1, origin_seq: 2 },
+      ],
+    });
+    const sibling = makeStore('other', {
+      decisions: [
+        {
+          id: 3,
+          text: 'other',
+          occurred_at: now - 2,
+          origin_seq: 1,
+          evidence: '[{"type":"report","id":"x"}]',
+        },
+      ],
+    });
+    const db = new Database(storeDbPath(root));
+    db.exec('CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT)');
+    for (const kind of ['decision', 'learning'])
+      db.prepare('INSERT INTO metadata VALUES(?,?)').run(
+        `spin_out_row:${kind}:1`,
+        JSON.stringify({
+          operationId: 'fork',
+          sourceProjectId: 'fork-source',
+          sourceRoot: root,
+          sourceId: 1,
+          targetProjectId: 'other',
+          targetRoot: sibling,
+          targetId: 1,
+        })
+      );
+    db.close();
+    const registry = await registryWith([
+      { projectId: 'fork-source', root },
+      { projectId: 'other', root: sibling },
+    ]);
+    expect(
+      (await decisionsAcrossProjects({ registry, limit: 1 })).results.map((row) => row.id)
+    ).toEqual([2]);
+    expect(
+      (await learningsTaggedAcrossProjects('tag', { registry, limit: 1 })).results.map(
+        (row) => row.id
+      )
+    ).toEqual([2]);
+    const clusters = await citationGraphAcrossProjects({ registry, limit: 3 });
+    expect(clusters.clusters[0].members.map((row) => row.decisionId)).toEqual([2, 3]);
+    expect(
+      (await cmosDecisionsList({ acrossProjects: true, pageSize: 1 })).data?.decisions.map(
+        (row) => row.id
+      )
+    ).toEqual([2]);
+  });
   // ── (a) basic merge across 3 stores ─────────────────────────────────────────
   it('merges decisions newest-first across 3 stores with project attribution', async () => {
     const a = makeStore('a', {

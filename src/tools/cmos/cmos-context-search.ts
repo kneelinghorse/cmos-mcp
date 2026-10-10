@@ -114,8 +114,7 @@ export async function cmosContextSearch(
 
   const limit = params.limit ?? 5;
   const types: RankedResultType[] = params.types ?? ['decision'];
-  // s82-m04 (FORK-E5): default to the retriever's tuned DEFAULT_RECENCY_WEIGHT (0.2), not the
-  // stale 0.5 — so this production recall path matches the measurement gate and the s67-m02 sweep.
+  // Use the shared measured default so production recall matches the acceptance gate.
   const recencyWeight = params.recencyWeight ?? DEFAULT_RECENCY_WEIGHT;
   // s92-m07 (R1): no default include list. The retriever then drops only superseded rows: a row
   // archived at a sprint close is still the record, and 46% of cited rows were inactive when cited.
@@ -133,6 +132,7 @@ export async function cmosContextSearch(
         statusFilter,
         // s82-m04: recall-oriented read — expand with same-type 1-hop graph neighbors.
         expandGraph: true,
+        citationRecall: true,
       });
 
       const hits: ContextSearchHit[] = results.map((r) => {

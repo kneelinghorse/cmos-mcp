@@ -18,6 +18,7 @@
  */
 
 import { z } from 'zod';
+import * as path from 'path';
 import { withClientAsync } from './client';
 import type { CmosToolResult } from './types';
 import { createError, createSuccess } from './errors';
@@ -27,6 +28,7 @@ import { DashboardClient, resolveDashboardBaseUrl } from './dashboard-client';
 import { computeAuthState } from '../../auth/auth-state';
 import type { AuthTier } from '../../auth/auth-state';
 import { appendWarnings } from './format-warnings';
+import { readDashboardUploadStatus } from './dashboard-upload-scheduler';
 
 /**
  * Public status payload. The five top-level fields are FROZEN — adding,
@@ -171,7 +173,8 @@ export async function cmosStatus(
         last_delivery_observed_at: authState.lastDeliveryObservedAt,
       };
 
-      return createSuccess(result);
+      const upload = await readDashboardUploadStatus(path.resolve(client.path, '..', '..', '..'));
+      return createSuccess(result, upload ? [upload] : undefined);
     },
     { projectRoot: params.projectRoot }
   );

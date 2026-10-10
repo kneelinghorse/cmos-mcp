@@ -1,3 +1,5 @@
+// ABOUTME: Completes missions while keeping each optional decision and its citation links atomic.
+// ABOUTME: Failed optional decision units remain explicit warnings and are excluded from committed counts.
 /**
  * cmos_mission_complete Tool
  *
@@ -7,6 +9,10 @@
  * @module tools/cmos/cmos-mission-complete
  */
 
+import { ensureDecisionShapeColumns } from './schema-migrations';
+import { prepareRecordLinkWrite, requireRecordLinks } from './record-link-write';
+import { normalizeMissionStatus } from './terminal-status';
+import { missionCompletedSql } from './terminal-status';
 import * as crypto from 'crypto';
 import { z } from 'zod';
 import { withClientAsync, type CmosDatabaseClient } from './client';
@@ -271,7 +277,7 @@ export async function cmosMissionComplete(
       }
 
       const mission = missionResult.data;
-      const currentStatus = mission.status;
+      const currentStatus = normalizeMissionStatus(mission.status);
 
       // Check if already completed
       if (currentStatus === targetStatus) {
@@ -331,6 +337,23 @@ export async function cmosMissionComplete(
           WHERE id = ?
         `;
         updateParams = [targetStatus, now, now, missionId];
+      }
+
+      if ((cleanDecisions?.length ?? 0) > 0) {
+        const shape = ensureDecisionShapeColumns(client);
+        warnings.push(...(shape.warnings ?? []));
+        if (!shape.ready)
+          return createError<MissionCompleteResult>({
+            code: 'DB_QUERY_FAILED',
+            message: 'Decision schema migration failed; the operation was not completed.',
+            suggestion: 'Resolve the reported schema or lock problem, then retry.',
+          });
+      }
+
+      if ((cleanDecisions?.length ?? 0) > 0) {
+        warnings.push(...ensureMissionIdColumn(client));
+        const ready = prepareRecordLinkWrite(client, warnings);
+        if (!ready.success) return createError<MissionCompleteResult>(ready.error!);
       }
 
       const updateResult = client.execute(updateQuery, updateParams);
@@ -542,22 +565,37 @@ async function captureDecisions(
 
     for (const decision of decisions) {
       const trimmed = decision.trim();
-      const g = genesisColumns(client, 'strategic_decisions', getProjectId(client));
-      const insertResult = client.execute(
-        // s69-m04: session_id renamed → author_session_id. genesisColumns above
-        // ran the rename migration, so the column exists by this INSERT.
-        `INSERT INTO strategic_decisions (decision_text, created_at, sprint_id, project_domain, author_session_id, mission_id, ${g.columns.join(', ')})
+      const committed = client.transaction(() => {
+        const g = genesisColumns(client, 'strategic_decisions', getProjectId(client));
+        const insertResult = client.execute(
+          // s69-m04: session_id renamed → author_session_id. genesisColumns above
+          // ran the rename migration, so the column exists by this INSERT.
+          `INSERT INTO strategic_decisions (decision_text, created_at, sprint_id, project_domain, author_session_id, mission_id, ${g.columns.join(', ')})
          VALUES (?, ?, ?, ?, ?, ?, ${g.placeholders})`,
-        [
-          trimmed,
-          input.completedAt,
-          input.sprintId,
-          projectDomain,
-          sessionId,
-          input.missionId,
-          ...g.values,
-        ]
-      );
+          [
+            trimmed,
+            input.completedAt,
+            input.sprintId,
+            projectDomain,
+            sessionId,
+            input.missionId,
+            ...g.values,
+          ]
+        );
+
+        if (!insertResult.success)
+          throw new Error(insertResult.error?.message ?? 'Decision insert failed');
+        const id = insertResult.data?.lastInsertRowid;
+        requireRecordLinks(client, 'decision', id === undefined ? undefined : Number(id));
+        return insertResult;
+      });
+      if (!committed.success || !committed.data) {
+        warnings.push(
+          `Optional decision and citation links rolled back: ${committed.error?.message ?? 'write failed'}. Resolve the database error and record this decision again.`
+        );
+        continue;
+      }
+      const insertResult = committed.data;
 
       // s86-m02b: the return value is the count. It used to be discarded, and `decisionCount`
       // reported `decisions.length` — the number the code MEANT to insert — so a rejected INSERT
@@ -811,7 +849,7 @@ function isSprintFullyCompleted(client: CmosDatabaseClient, sprintId: string): b
     [sprintId]
   );
   const remainingResult = client.getOne<{ count: number }>(
-    "SELECT COUNT(*) as count FROM missions WHERE sprint_id = ? AND status != 'Completed'",
+    `SELECT COUNT(*) as count FROM missions WHERE sprint_id = ? AND NOT (${missionCompletedSql('status')})`,
     [sprintId]
   );
 

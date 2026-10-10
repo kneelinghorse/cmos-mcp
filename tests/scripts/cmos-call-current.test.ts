@@ -11,14 +11,14 @@ const ROOT = path.resolve(__dirname, '../..');
 const SCRIPT = path.join(ROOT, 'scripts', 'cmos-call-current.js');
 const SERVER = `
 const fs = require('fs');
-const { Server } = require('@modelcontextprotocol/sdk/server/index.js');
-const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio.js');
-const { CallToolRequestSchema } = require('@modelcontextprotocol/sdk/types.js');
+const { Server } = require('@modelcontextprotocol/server');
+const { serveStdio } = require('@modelcontextprotocol/server/stdio');
 const log = (event) => fs.appendFileSync(process.env.CURRENT_CALL_LOG, JSON.stringify(event) + '\\n');
 log({ event: 'start', pid: process.pid });
 process.on('exit', () => log({ event: 'exit' }));
+serveStdio(() => {
 const server = new Server({ name: 'fixture', version: '1.0.0' }, { capabilities: { tools: {} } });
-server.setRequestHandler(CallToolRequestSchema, async ({ params }) => {
+server.setRequestHandler('tools/call', async ({ params }) => {
   log({ event: 'call', name: params.name, args: params.arguments });
   if (params.name === 'cmos_agent_onboard') {
     const mode = process.env.CURRENT_CALL_MODE;
@@ -42,7 +42,8 @@ server.setRequestHandler(CallToolRequestSchema, async ({ params }) => {
   }
   return { content: [], structuredContent: { success: true, data: { marker: process.env.CURRENT_CALL_MARKER } } };
 });
-server.connect(new StdioServerTransport());
+return server;
+}, { legacy: 'serve' });
 `;
 
 let checkout: string;
@@ -123,6 +124,7 @@ describe('scripts/cmos-call-current.js', () => {
       success: true,
       data: { marker: 'preserved environment' },
     });
+    expect(events().filter((event) => event.event === 'start')).toHaveLength(1);
     expect(events().filter((event) => event.event === 'call')).toEqual([
       { event: 'call', name: 'cmos_agent_onboard', args: { projectRoot: checkout } },
       { event: 'call', name: input.name, args: input.arguments },

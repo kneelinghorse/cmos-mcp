@@ -127,6 +127,12 @@ describe('s86-m06 structural gate: user-scoped resolution for credential repair'
       { file: path.join(AUTH_DIR, 'project-key-capture.ts'), premise: 'holds no user-scoped keys' },
       {
         file: path.join(REPO_ROOT, 'src', 'tools', 'cmos', 'checkpoint-backfill.ts'),
+        premise: 'checkAndRegister(',
+      },
+      {
+        // s94-m10: registration and its key-attribution remedy moved together; keep the caller
+        // and extracted module under the forbidden-wording check.
+        file: path.join(REPO_ROOT, 'src', 'tools', 'cmos', 'checkpoint-registration.ts'),
         premise: 'keySource=',
       },
     ];

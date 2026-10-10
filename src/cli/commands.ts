@@ -2,6 +2,7 @@
 // ABOUTME: s93-m01 — the non-hook verbs: review, relevant, capture, session, ambient, init and profile. Exit 0
 // ABOUTME: on success, 1 on a refusal, a failure or a usage error (never 2); one stderr line says why.
 
+import { prepareSpinOutRead, spinOutSqliteReader } from '../tools/cmos/spin-out-read';
 import Database from 'better-sqlite3';
 import * as path from 'path';
 
@@ -60,6 +61,12 @@ export async function runCommand(
       return review(resolution, flags, io);
     case 'relevant':
       return (await captureToolCall('read', () => relevant(resolution, flags, io))).value;
+    case 'decisions': {
+      const store = requireStore('decisions', resolution, io);
+      return store
+        ? (await import('./decisions')).decisions(store.projectRoot, positional, flags, io)
+        : 1;
+    }
     case 'capture':
       return capture(resolution, flags, io);
     case 'session':
@@ -84,7 +91,12 @@ async function review(
   const store = requireStore('review', resolution, io);
   if (!store) return 1;
   const digest = await import('./digest');
-  const text = await digest.buildDigest(store.projectRoot, io);
+  const text = await digest.buildDigest(
+    store.projectRoot,
+    io,
+    Infinity,
+    io.env.CLAUDE_PROJECT_DIR ? 'explicit' : store.source
+  );
   if (text === null) {
     io.stderr('cmos-mcp review: the digest could not be built.');
     return 1;
@@ -129,9 +141,10 @@ export function keywordRelevant(dbPath: string, query: string, limit: number): R
           .all() as Array<{ name: string }>
       ).map((row) => row.name)
     );
+    const visibility = prepareSpinOutRead(spinOutSqliteReader(db));
     const rows: Array<RelevantItem & { score: number }> = [];
-    const collect = (kind: RelevantItem['kind'], sql: string): void => {
-      for (const row of db.prepare(sql).all(match, limit) as Array<{
+    const collect = (kind: RelevantItem['kind'], sql: string, params: string[]): void => {
+      for (const row of db.prepare(sql).all(match, ...params, limit) as Array<{
         id: number;
         text: string;
         status: string | null;
@@ -149,21 +162,25 @@ export function keywordRelevant(dbPath: string, query: string, limit: number): R
       }
     };
     if (tables.has('decisions_fts')) {
+      const visible = visibility.predicate('decision', 'd.id');
       collect(
         'decision',
         `SELECT d.id AS id, d.decision_text AS text, d.status AS status, bm25(decisions_fts) AS score
            FROM decisions_fts JOIN strategic_decisions d ON d.id = decisions_fts.rowid
-          WHERE decisions_fts MATCH ? AND COALESCE(d.status, 'active') <> 'superseded'
-          ORDER BY score LIMIT ?`
+          WHERE decisions_fts MATCH ? AND COALESCE(d.status, 'active') <> 'superseded' AND ${visible.sql}
+          ORDER BY score LIMIT ?`,
+        visible.params
       );
     }
     if (tables.has('learnings_fts')) {
+      const visible = visibility.predicate('learning', 'l.id');
       collect(
         'learning',
         `SELECT l.id AS id, l.content AS text, l.status AS status, bm25(learnings_fts) AS score
            FROM learnings_fts JOIN learnings l ON l.id = learnings_fts.rowid
-          WHERE learnings_fts MATCH ? AND COALESCE(l.status, 'active') <> 'superseded'
-          ORDER BY score LIMIT ?`
+          WHERE learnings_fts MATCH ? AND COALESCE(l.status, 'active') <> 'superseded' AND ${visible.sql}
+          ORDER BY score LIMIT ?`,
+        visible.params
       );
     }
     return rows
@@ -413,7 +430,7 @@ async function init(flags: Readonly<Record<string, string>>, io: CliIo): Promise
       ...(flags.name && flags.name !== 'true' ? { projectName: flags.name } : {}),
       ...(level ? { projectType: rules.LEVEL_TIERS[level as keyof typeof rules.LEVEL_TIERS] } : {}),
     },
-    { hooks: flags['no-hooks'] !== 'true' }
+    { hooks: flags['no-hooks'] !== 'true', cliSource: explicit ? 'explicit' : 'cwd' }
   );
   observeCliResult(io, 'cmos_project', { action: 'init' }, result);
   if (!result.success || !result.data) {

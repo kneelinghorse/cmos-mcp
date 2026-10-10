@@ -35,6 +35,7 @@ Feature: Start a mission
   Scenario: Starting a mission auto-activates a Planned parent sprint
     Given a mission "work-m05" exists with status "Queued"
     And its parent sprint has status "Planned"
+    And no other sprint is open
     When I call cmos_mission_start with missionId "work-m05"
     Then the mission transitions to "In Progress"
     And the parent sprint transitions from "Planned" to "Active"

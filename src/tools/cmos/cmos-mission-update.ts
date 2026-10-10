@@ -1,3 +1,5 @@
+// ABOUTME: Updates mission fields and atomically records repairs of unknown stored statuses.
+// ABOUTME: Validates lifecycle choices and discloses failed writes through the standard tool result.
 /**
  * cmos_mission_update Tool
  *
@@ -8,6 +10,7 @@
  */
 
 import { z } from 'zod';
+import { normalizeMissionStatus } from './terminal-status';
 import { withClientAsync } from './client';
 import type { CmosToolResult, Mission, MissionStatus } from './types';
 import {
@@ -83,7 +86,7 @@ export interface MissionUpdateResult {
   message: string;
 
   /** Previous status (if status was changed) */
-  previousStatus?: MissionStatus;
+  previousStatus?: string;
 
   /** Current status (if status was changed) */
   currentStatus?: MissionStatus;
@@ -113,11 +116,14 @@ export const cmosMissionUpdateSchema = z.object({
       deliverables: z.array(z.string()).optional().describe('Deliverables (array of strings)'),
       referenceDocs: z.array(z.string()).optional().describe('Reference docs (array of strings)'),
       domainFields: z
-        .record(z.unknown())
+        .record(z.string(), z.unknown())
         .optional()
         .describe('Domain-specific fields (key-value object)'),
       notes: z.string().optional().describe('Notes about the mission'),
-      metadata: z.record(z.unknown()).optional().describe('Additional metadata (key-value object)'),
+      metadata: z
+        .record(z.string(), z.unknown())
+        .optional()
+        .describe('Additional metadata (key-value object)'),
     })
     .describe('Fields to update (only provided fields are changed)'),
 
@@ -312,202 +318,223 @@ export async function cmosMissionUpdate(
   return withClientAsync(
     async (client) => {
       const warnings: string[] = [];
-
-      // Query mission by ID
-      const missionResult = client.getOne<Mission>(
-        `
+      const begin = client.execute('BEGIN IMMEDIATE', []);
+      if (!begin.success)
+        return createError<MissionUpdateResult>({
+          code: begin.error?.code ?? 'DB_QUERY_FAILED',
+          message: begin.error?.message ?? 'Failed to reserve the mission update transaction',
+          suggestion: 'Retry the mission update once the database write lock is available.',
+        });
+      let transactionOpen = true;
+      try {
+        // Query mission by ID
+        const missionResult = client.getOne<Mission>(
+          `
         SELECT id, status, name
         FROM missions
         WHERE id = ?
       `,
-        [missionId]
-      );
-
-      if (!missionResult.success) {
-        return createError<MissionUpdateResult>(
-          missionResult.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to query mission' }
+          [missionId]
         );
-      }
 
-      if (!missionResult.data) {
-        return createError<MissionUpdateResult>(CmosErrors.missionNotFound(missionId));
-      }
-
-      const mission = missionResult.data;
-      const currentStatus = mission.status;
-      let previousStatus: MissionStatus | undefined;
-      let newStatus: MissionStatus | undefined;
-
-      // Validate status transition if status is being changed
-      if (fields.status !== undefined && fields.status !== currentStatus) {
-        // s87-m01, correcting s86-m08's comment as well as its code. The premise was right —
-        // `currentStatus` comes from the STORE, not the type system, and this repo's own store
-        // holds mission B1.1 at status 'Archived', which import and peer-merge paths never
-        // validated. The CONCLUSION was false: with `?? []` in place, an unknown status did NOT
-        // yield "the ordinary invalid-transition error". `[].includes(x)` is false, so control
-        // fell into `CmosErrors.missionInvalidTransition`, which performed the SAME unguarded
-        // lookup one frame up and threw `Cannot read properties of undefined (reading 'length')`
-        // from errors.ts. The guard was real; it was simply below the throw. Measured: driving
-        // cmos_mission(update, fields:{status:'Queued'}) against B1.1 threw from errors.ts, never
-        // from this line (D-4, #1023). Both frames are now guarded, and an unrecognized status
-        // gets a refusal that names it rather than one that guesses a transition.
-        const validTransitions = transitionsFrom(currentStatus);
-        if (validTransitions === undefined) {
+        if (!missionResult.success) {
           return createError<MissionUpdateResult>(
-            CmosErrors.missionUnrecognizedStatus(missionId, currentStatus)
+            missionResult.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to query mission' }
           );
         }
-        if (!validTransitions.includes(fields.status)) {
-          return createError<MissionUpdateResult>(
-            CmosErrors.missionInvalidTransition(missionId, currentStatus, fields.status)
-          );
+
+        if (!missionResult.data) {
+          return createError<MissionUpdateResult>(CmosErrors.missionNotFound(missionId));
         }
-        previousStatus = currentStatus;
-        newStatus = fields.status;
-      }
 
-      // Build dynamic UPDATE query
-      const setClauses: string[] = [];
-      const queryParams: (string | null)[] = [];
+        const mission = missionResult.data;
+        const currentStatus = normalizeMissionStatus(mission.status);
+        let previousStatus: string | undefined;
+        let repairing = false;
+        let newStatus: MissionStatus | undefined;
 
-      // JSON fields that need serialization
-      const jsonFields = new Set([
-        'successCriteria',
-        'deliverables',
-        'referenceDocs',
-        'domainFields',
-        'metadata',
-      ]);
-
-      for (const key of fieldKeys) {
-        const dbColumn = MISSION_UPDATE_COLUMNS[key];
-        if (!dbColumn) continue;
-
-        const value = fields[key as keyof MissionUpdateFields];
-        if (value === undefined) continue;
-
-        setClauses.push(`${dbColumn} = ?`);
-
-        if (jsonFields.has(key)) {
-          queryParams.push(JSON.stringify(value));
-        } else {
-          queryParams.push(value as string);
+        // Validate status transition if status is being changed
+        if (fields.status !== undefined && fields.status !== currentStatus) {
+          const validTransitions = transitionsFrom(currentStatus);
+          repairing = validTransitions === undefined;
+          if (repairing && !['Queued', 'Deferred', 'Dropped'].includes(fields.status)) {
+            return createError<MissionUpdateResult>(
+              CmosErrors.missionUnrecognizedStatus(missionId, mission.status)
+            );
+          }
+          if (!repairing && !validTransitions!.includes(fields.status)) {
+            return createError<MissionUpdateResult>(
+              CmosErrors.missionInvalidTransition(missionId, currentStatus, fields.status)
+            );
+          }
+          previousStatus = mission.status;
+          newStatus = fields.status;
         }
-      }
 
-      // Handle completed_at for status changes
-      if (newStatus === 'Completed') {
-        setClauses.push('completed_at = ?');
-        queryParams.push(new Date().toISOString());
-      }
-      // Note: Completed is a terminal state per VALID_STATE_TRANSITIONS,
-      // so we cannot move away from it. No need to clear completed_at.
+        // Build dynamic UPDATE query
+        const setClauses: string[] = [];
+        const queryParams: (string | null)[] = [];
 
-      // Add missionId as the last parameter for WHERE clause
-      queryParams.push(missionId);
+        // JSON fields that need serialization
+        const jsonFields = new Set([
+          'successCriteria',
+          'deliverables',
+          'referenceDocs',
+          'domainFields',
+          'metadata',
+        ]);
 
-      const updateQuery = `
+        for (const key of fieldKeys) {
+          const dbColumn = MISSION_UPDATE_COLUMNS[key];
+          if (!dbColumn) continue;
+
+          const value = fields[key as keyof MissionUpdateFields];
+          if (value === undefined) continue;
+
+          setClauses.push(`${dbColumn} = ?`);
+
+          if (jsonFields.has(key)) {
+            queryParams.push(JSON.stringify(value));
+          } else {
+            queryParams.push(value as string);
+          }
+        }
+
+        // Handle completed_at for status changes
+        if (newStatus === 'Completed') {
+          setClauses.push('completed_at = ?');
+          queryParams.push(new Date().toISOString());
+        }
+        // Note: Completed is a terminal state per VALID_STATE_TRANSITIONS,
+        // so we cannot move away from it. No need to clear completed_at.
+
+        // Add missionId as the last parameter for WHERE clause
+        queryParams.push(missionId);
+
+        const updateQuery = `
         UPDATE missions
         SET ${setClauses.join(', ')}
         WHERE id = ?
       `;
 
-      const updateResult = client.execute(updateQuery, queryParams);
+        const updateResult = client.execute(updateQuery, queryParams);
 
-      if (!updateResult.success) {
-        return createError<MissionUpdateResult>(
-          updateResult.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to update mission' }
-        );
-      }
+        if (!updateResult.success) {
+          return createError<MissionUpdateResult>(
+            updateResult.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to update mission' }
+          );
+        }
 
-      if (updateResult.data?.changes === 0) {
-        return createError<MissionUpdateResult>({
-          code: CMOS_ERROR_CODES.DB_QUERY_FAILED,
-          message: `Failed to update mission '${missionId}'`,
-          suggestion: 'The mission may have been modified by another process',
-        });
-      }
+        if (updateResult.data?.changes === 0) {
+          return createError<MissionUpdateResult>({
+            code: CMOS_ERROR_CODES.DB_QUERY_FAILED,
+            message: `Failed to update mission '${missionId}'`,
+            suggestion: 'The mission may have been modified by another process',
+          });
+        }
 
-      // Log the state change to session_events if status changed
-      if (previousStatus !== undefined && newStatus !== undefined) {
-        const now = new Date().toISOString();
-        const eventResult = client.execute(
-          `
+        // Log the state change to session_events if status changed
+        if (previousStatus !== undefined && newStatus !== undefined) {
+          const now = new Date().toISOString();
+          const eventResult = client.execute(
+            `
           INSERT INTO session_events (ts, agent, mission, action, status, summary, raw_event)
           VALUES (?, 'mcp-tool', ?, 'update', ?, ?, ?)
         `,
-          [
-            now,
-            missionId,
-            newStatus,
-            `Updated mission ${missionId}: status changed from ${previousStatus} to ${newStatus}`,
-            JSON.stringify({
-              tool: 'cmos_mission_update',
+            [
+              now,
               missionId,
-              previousStatus,
               newStatus,
-              updatedFields: fieldKeys,
-            }),
-          ]
-        );
+              `Updated mission ${missionId}: status changed from ${previousStatus} to ${newStatus}`,
+              JSON.stringify({
+                tool: 'cmos_mission_update',
+                missionId,
+                previousStatus,
+                newStatus,
+                updatedFields: fieldKeys,
+              }),
+            ]
+          );
 
-        // Don't fail the operation if event logging fails (non-critical) — but say so.
-        if (!checkWrite(eventResult, warnings, 'mission update event logging')) {
-          console.warn('Failed to log mission update event:', eventResult.error);
-        }
-      }
-
-      // Sprint 66 m03 — write-path embedding hook. recordEmbedding hashes the
-      // composed input text and skips when unchanged, so status-only updates
-      // pay no embed cost. Only fields that touch the embedding input
-      // (name, objective, notes, success_criteria) trigger an actual embed.
-      const refreshed = client.getOne<{
-        name: string;
-        objective: string | null;
-        notes: string | null;
-        success_criteria: string | null;
-      }>(`SELECT name, objective, notes, success_criteria FROM missions WHERE id = ?`, [missionId]);
-      if (refreshed.success && refreshed.data) {
-        const row = refreshed.data;
-        let criteria: string[] | null = null;
-        if (row.success_criteria) {
-          try {
-            const parsed = JSON.parse(row.success_criteria);
-            if (Array.isArray(parsed)) criteria = parsed.filter((s) => typeof s === 'string');
-          } catch {
-            // Malformed JSON in legacy rows — skip success_criteria for embedding.
+          // Don't fail the operation if event logging fails (non-critical) — but say so.
+          if (!checkWrite(eventResult, warnings, 'mission update event logging')) {
+            if (repairing)
+              return createError<MissionUpdateResult>({
+                code: eventResult.error?.code ?? 'DB_QUERY_FAILED',
+                message: `Mission repair rolled back because its history event could not be written: ${eventResult.error?.message ?? 'unknown failure'}`,
+                suggestion:
+                  'Restore write access to session_events, then retry the mission status repair.',
+              });
+            console.warn('Failed to log mission update event:', eventResult.error);
           }
         }
-        const embedResult = await recordEmbedding(client, {
-          type: 'mission',
-          id: missionId,
-          inputText: missionEmbeddingInput({
-            name: row.name,
-            objective: row.objective,
-            notes: row.notes,
-            successCriteria: criteria,
-          }),
-        });
-        // s86-m02b: a failed vec0 upsert / hash write means the row will not be
-        // findable by vector search — say so instead of dropping it.
-        warnings.push(...(embedResult.warnings ?? []));
+
+        const committed = client.execute('COMMIT', []);
+        if (!committed.success)
+          return createError<MissionUpdateResult>({
+            code: committed.error?.code ?? 'DB_QUERY_FAILED',
+            message: committed.error?.message ?? 'Failed to commit the mission update',
+            suggestion:
+              'Check database access and retry the mission update after the write failure is resolved.',
+          });
+        transactionOpen = false;
+
+        // Sprint 66 m03 — write-path embedding hook. recordEmbedding hashes the
+        // composed input text and skips when unchanged, so status-only updates
+        // pay no embed cost. Only fields that touch the embedding input
+        // (name, objective, notes, success_criteria) trigger an actual embed.
+        const refreshed = client.getOne<{
+          name: string;
+          objective: string | null;
+          notes: string | null;
+          success_criteria: string | null;
+        }>(`SELECT name, objective, notes, success_criteria FROM missions WHERE id = ?`, [
+          missionId,
+        ]);
+        if (refreshed.success && refreshed.data) {
+          const row = refreshed.data;
+          let criteria: string[] | null = null;
+          if (row.success_criteria) {
+            try {
+              const parsed = JSON.parse(row.success_criteria);
+              if (Array.isArray(parsed)) criteria = parsed.filter((s) => typeof s === 'string');
+            } catch {
+              // Malformed JSON in legacy rows — skip success_criteria for embedding.
+            }
+          }
+          const embedResult = await recordEmbedding(client, {
+            type: 'mission',
+            id: missionId,
+            inputText: missionEmbeddingInput({
+              name: row.name,
+              objective: row.objective,
+              notes: row.notes,
+              successCriteria: criteria,
+            }),
+          });
+          // s86-m02b: a failed vec0 upsert / hash write means the row will not be
+          // findable by vector search — say so instead of dropping it.
+          warnings.push(...(embedResult.warnings ?? []));
+        }
+
+        // Build result
+        const result: MissionUpdateResult = {
+          missionId,
+          name: refreshed.success && refreshed.data ? refreshed.data.name : mission.name,
+          status: (newStatus ?? mission.status) as MissionStatus,
+          updatedFields: fieldKeys,
+          message: `Mission '${missionId}' updated successfully (${fieldKeys.length} field${fieldKeys.length === 1 ? '' : 's'})`,
+        };
+
+        if (previousStatus !== undefined && newStatus !== undefined) {
+          result.previousStatus = previousStatus;
+          result.currentStatus = newStatus;
+        }
+
+        return createSuccess(result, warnings, sanitizedFields);
+      } finally {
+        if (transactionOpen) client.execute('ROLLBACK', []);
       }
-
-      // Build result
-      const result: MissionUpdateResult = {
-        missionId,
-        name: refreshed.success && refreshed.data ? refreshed.data.name : mission.name,
-        status: (newStatus ?? mission.status) as MissionStatus,
-        updatedFields: fieldKeys,
-        message: `Mission '${missionId}' updated successfully (${fieldKeys.length} field${fieldKeys.length === 1 ? '' : 's'})`,
-      };
-
-      if (previousStatus !== undefined && newStatus !== undefined) {
-        result.previousStatus = previousStatus;
-        result.currentStatus = newStatus;
-      }
-
-      return createSuccess(result, warnings, sanitizedFields);
     },
     { projectRoot: params.projectRoot }
   );

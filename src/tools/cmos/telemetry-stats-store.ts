@@ -2,6 +2,7 @@
 // ABOUTME: Read stats from the existing store without migrations, registration, or lifecycle writes.
 // ABOUTME: Missing schemas and failed queries stay unavailable; semantic quality and severity need review.
 
+import { missionCompletedSql } from './terminal-status';
 import { CmosDatabaseClient } from './client';
 import { openDraftRuntime, startsSince } from './draft-runtime';
 import { clientRunner, draftsCreatedBetween, isExpired, proposalsTableExists } from './proposals';
@@ -95,7 +96,7 @@ function timingCount(client: CmosDatabaseClient, since: string, until: string): 
   const invalid = rows<{ count: number }>(
     client,
     `SELECT COUNT(*) AS count FROM missions m
-      WHERE m.status = 'Completed' AND julianday(m.completed_at) IS NULL
+      WHERE ${missionCompletedSql('m.status')} AND julianday(m.completed_at) IS NULL
         AND EXISTS (SELECT 1 FROM strategic_decisions d WHERE d.mission_id = m.id)`
   )[0].count;
   if (invalid)
@@ -106,7 +107,7 @@ function timingCount(client: CmosDatabaseClient, since: string, until: string): 
     client,
     `SELECT m.id, m.completed_at AS completed, d.created_at AS recorded
        FROM missions m JOIN strategic_decisions d ON d.mission_id = m.id
-      WHERE m.status = 'Completed' AND julianday(m.completed_at) BETWEEN julianday(?) AND julianday(?)`,
+      WHERE ${missionCompletedSql('m.status')} AND julianday(m.completed_at) BETWEEN julianday(?) AND julianday(?)`,
     [since, until]
   );
   const missions = new Map<string, boolean>();

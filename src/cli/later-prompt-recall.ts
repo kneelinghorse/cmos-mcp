@@ -2,7 +2,13 @@
 // ABOUTME: Later prompts recall at most three unseen local decisions using bounded keyword search.
 // ABOUTME: Retrieval opens SQLite readonly, applies an explicit match floor and never expands citations.
 
+import { prepareSpinOutRead, spinOutSqliteReader } from '../tools/cmos/spin-out-read';
 import Database from 'better-sqlite3';
+import {
+  composeDecisionText,
+  decisionTextProjection,
+  type DecisionTextRow,
+} from '../tools/cmos/decision-fields';
 import { extractKeywords } from '../tools/cmos/keyword-extraction';
 import { getProjectId } from '../tools/cmos/project-id';
 import type { CmosDatabaseClient, QueryParams } from '../tools/cmos/client';
@@ -72,26 +78,37 @@ export function recallLaterPrompt(
     });
     if (!keywords.length) return empty();
     const match = keywords.map((word) => `"${word.replace(/"/g, '""')}"`).join(' OR ');
-    const where = [columns.has('status') ? "(d.status IS NULL OR d.status <> 'superseded')" : '1'];
+    const visible = prepareSpinOutRead(spinOutSqliteReader(db)).predicate('decision', 'd.id');
+    const where = [
+      visible.sql,
+      columns.has('status') ? "(d.status IS NULL OR d.status <> 'superseded')" : '1',
+    ];
     if (columns.has('superseded_by')) where.push('d.superseded_by IS NULL');
     if (columns.has('project_id')) where.push('(d.project_id IS NULL OR d.project_id = ?)');
     const rows = db
       .prepare(
         `SELECT d.id, d.decision_text AS text,
       ${columns.has('status') ? "COALESCE(d.status,'active')" : "'active'"} AS status,
-      ${columns.has('project_id') ? 'd.project_id' : 'NULL'} AS projectId
+      ${columns.has('project_id') ? 'd.project_id' : 'NULL'} AS projectId, ${decisionTextProjection(columns, 'd.')}
       FROM decisions_fts JOIN strategic_decisions d ON d.id=decisions_fts.rowid
       WHERE decisions_fts MATCH ? AND ${where.join(' AND ')} ORDER BY decisions_fts.rank,d.id`
       )
-      .iterate(match, ...(columns.has('project_id') ? [localProjectId] : []));
+      .iterate(match, ...visible.params, ...(columns.has('project_id') ? [localProjectId] : []));
     const seen = new Set(seenIds);
     const items: RecallItem[] = [];
     const floor = Math.max(1, options.minKeywordMatches ?? LATER_MIN_KEYWORD_MATCHES);
     for (const entry of rows) {
       check();
-      const row = entry as { id: number; text: string; status: string; projectId: string | null };
+      const row = entry as {
+        id: number;
+        text: string;
+        status: string;
+        projectId: string | null;
+      } & Omit<DecisionTextRow, 'decision_text'>;
       if (seen.has(`d:${row.id}`)) continue;
-      const tokens = new Set(extractKeywords(row.text));
+      const tokens = new Set(
+        extractKeywords(composeDecisionText({ ...row, decision_text: row.text }))
+      );
       if (keywords.filter((word) => tokens.has(word)).length < floor) continue;
       const preview = previewText(row.text);
       items.push({
@@ -111,7 +128,8 @@ export function recallLaterPrompt(
   } catch (error) {
     const known = ['recall_deadline', 'recall_schema_missing', 'recall_index_missing'];
     const warning =
-      error instanceof Error && known.includes(error.message)
+      error instanceof Error &&
+      (known.includes(error.message) || error.message.startsWith('SPIN_OUT_READ_FAILED:'))
         ? error.message
         : 'recall_query_failed';
     return { items: [], localProjectId, warnings: [warning], available: false };

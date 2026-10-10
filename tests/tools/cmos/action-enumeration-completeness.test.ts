@@ -60,7 +60,7 @@ import { CMOS_TOOL_DEFINITIONS } from '../../../src/tools/cmos/index';
  * Resolve a tool's ZodObject from its NAME, by the same derived rule the schema-parity gate uses.
  * No hand-written map: the one tool someone forgot to add would be the one that drifts.
  */
-function resolveSchema(toolName: string): z.ZodObject<z.ZodRawShape> {
+function resolveSchema(toolName: string): z.ZodObject<Record<string, z.ZodType>> {
   const file = 'cmos-' + toolName.replace(/^cmos_/, '').replace(/_/g, '-');
   const exportName = toolName.replace(/_(\w)/g, (_m, c: string) => c.toUpperCase()) + 'Schema';
   // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -69,7 +69,7 @@ function resolveSchema(toolName: string): z.ZodObject<z.ZodRawShape> {
   if (!schema || !(schema instanceof z.ZodObject)) {
     throw new Error(`action-enumeration: cannot resolve a ZodObject for ${toolName}`);
   }
-  return schema as z.ZodObject<z.ZodRawShape>;
+  return schema as z.ZodObject<Record<string, z.ZodType>>;
 }
 
 interface ActionProp {
@@ -178,9 +178,7 @@ describe('action enumerations are complete (s86-m04 Part B)', () => {
     const actions = props.action.enum!;
     // THE THIRD POSITION. The zod `action` key's own `.describe()` — read from the built schema
     // rather than the source, because m04 makes these strings derived template expressions.
-    const zodActionDescription =
-      (resolveSchema(def.name).shape.action?._def as { description?: string } | undefined)
-        ?.description ?? '';
+    const zodActionDescription = resolveSchema(def.name).shape.action?.description ?? '';
     candidates.push(
       { tool: def.name, position: 'zod-action-describe', text: zodActionDescription },
       { tool: def.name, position: 'json-action-description', text: props.action.description ?? '' },
@@ -247,9 +245,7 @@ describe('action enumerations are complete (s86-m04 Part B)', () => {
     // The ZOD describe is where the trap lives: '…for update action: general | managed | build'
     // is a pipe-run immediately after the word "action", and a literal scan flags it. The position
     // rule never offers it to the parser, and the parser WOULD have mis-read it if it had.
-    const projectTypeDescribe = (
-      resolveSchema('cmos_project').shape.projectType?._def as { description?: string } | undefined
-    )?.description;
+    const projectTypeDescribe = resolveSchema('cmos_project').shape.projectType?.description;
     // s93-m12 reworded it ("The level of record for init and update: …"), so the live describe no
     // longer says "action"; the trap is kept below as a literal, which the parser does read.
     expect(projectTypeDescribe).toBe(

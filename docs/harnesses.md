@@ -1,7 +1,7 @@
 # CMOS in your harness
 
-Coverage checked against vendor documentation on **2026-10-09**. These adapters target
-**CMOS 3.3.0**. Every
+Coverage checked against vendor documentation on **2026-10-09**. These adapters were introduced in
+**CMOS 3.3.0**; their hook maps are unchanged in **CMOS 3.4.0**. Every
 non-Claude adapter below is **UNVERIFIED in a live harness**. Local fixture tests check
 the CLI contract and package contents; they do not prove that a vendor loads the file
 or delivers its output to a model.
@@ -9,7 +9,7 @@ or delivers its output to a model.
 Install the CLI before enabling hooks:
 
 ```sh
-npm install -g @aquex/cmos-mcp@3.3.0
+npm install -g @aquex/cmos-mcp@3.4.0
 cmos-mcp --version
 npm root -g
 ```

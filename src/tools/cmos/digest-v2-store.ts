@@ -2,7 +2,13 @@
 // ABOUTME: Read a local digest snapshot without migrations, registration, lifecycle changes or network calls.
 // ABOUTME: Recency and rule ranking use published predicates; failed reads cannot masquerade as empty context.
 
+import { prepareSpinOutRead } from './spin-out-read';
 import * as path from 'path';
+import {
+  composeDecisionText,
+  decisionTextProjection,
+  type DecisionTextRow,
+} from './decision-fields';
 import { CmosDetector } from '../../intelligence/cmos-detector';
 import { isForeignProject } from '../../intelligence/provenance-frame';
 import { CmosDatabaseClient } from './client';
@@ -22,7 +28,7 @@ import { clientRunner, isExpired, pendingDrafts } from './proposals';
 
 /** Distinct local/NULL source rows citing an explicit typed rule; repeated citations in one row count once. */
 export const DIGEST_RULE_CITATION_RULE =
-  'Local/NULL decision and learning text, mission objective/notes and session summary/captures; ' +
+  'Local/NULL decision headline/reasoning fields and learning text, mission objective/notes and session summary/captures; ' +
   'one count per source row and explicitly typed rule ID. Bare #N never counts as a learning or constraint.';
 
 function rows<T>(client: CmosDatabaseClient, sql: string, values: unknown[] = []): T[] {
@@ -58,12 +64,20 @@ function recordRows(
   predicate = ''
 ): RecordRow[] {
   const cols = columns(client, table);
+  const visible =
+    table === 'constraints'
+      ? { sql: '1=1', params: [] }
+      : prepareSpinOutRead(client).predicate(
+          table === 'learnings' ? 'learning' : 'decision',
+          `${table}.id`
+        );
   return rows<RecordRow>(
     client,
     `SELECT id, ${table === 'strategic_decisions' ? 'decision_text' : 'content'} AS text,
     created_at AS createdAt, ${field(cols, 'last_reviewed_at')} AS reviewedAt,
     ${field(cols, 'project_id')} AS projectId FROM ${table} WHERE COALESCE(status,'active') <> 'superseded'
-    ${cols.has('superseded_by') ? 'AND superseded_by IS NULL' : ''} ${predicate}`
+    ${cols.has('superseded_by') ? 'AND superseded_by IS NULL' : ''} ${predicate} AND ${visible.sql}`,
+    visible.params
   );
 }
 
@@ -114,13 +128,29 @@ function citationCounts(client: CmosDatabaseClient, local: string | null): Map<s
       .map((name) => `COALESCE(${name},'')`)
       .join(" || '\n' || ");
     if (!text) continue;
-    const records = rows<{ text: string; projectId: string | null }>(
+    const decisionProjection =
+      table === 'strategic_decisions' ? `, ${decisionTextProjection(cols)}` : '';
+    const visible =
+      table === 'sessions'
+        ? { sql: '1=1', params: [] }
+        : prepareSpinOutRead(client).predicate(
+            table === 'learnings' ? 'learning' : table === 'missions' ? 'mission' : 'decision',
+            `${table}.id`
+          );
+    const records = rows<
+      { text: string; projectId: string | null } & Omit<DecisionTextRow, 'decision_text'>
+    >(
       client,
-      `SELECT ${text} AS text, ${field(cols, 'project_id')} AS projectId FROM ${table}`
+      `SELECT ${text} AS text, ${field(cols, 'project_id')} AS projectId${decisionProjection} FROM ${table} WHERE ${visible.sql}`,
+      visible.params
     );
     for (const record of records) {
       if (isForeignProject(record.projectId, local)) continue;
-      for (const id of new Set(typedCitations(record.text).filter((id) => /^[lc]:/.test(id))))
+      const citationText =
+        table === 'strategic_decisions'
+          ? composeDecisionText({ ...record, decision_text: record.text })
+          : record.text;
+      for (const id of new Set(typedCitations(citationText).filter((id) => /^[lc]:/.test(id))))
         counts.set(id, (counts.get(id) ?? 0) + 1);
     }
   }

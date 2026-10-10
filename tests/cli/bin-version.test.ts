@@ -152,10 +152,7 @@ describe('the bin answers server --version without loading the server', () => {
 
   it.each([
     ["require('./index')", 'DEPENDENCY_DENIED: ./index'],
-    [
-      "require('@modelcontextprotocol/sdk/server/index.js')",
-      'DEPENDENCY_DENIED: @modelcontextprotocol',
-    ],
+    ["require('@modelcontextprotocol/server')", 'DEPENDENCY_DENIED: @modelcontextprotocol'],
     ["require('./tools/cmos/client')", 'DEPENDENCY_DENIED: ./tools/cmos/client'],
     ["require('fs').writeFileSync('forbidden', 'data')", 'WRITE_DENIED: writeFileSync'],
   ])('the child guard catches forbidden work: %s', (code, refusal) => {

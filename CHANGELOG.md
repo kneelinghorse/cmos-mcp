@@ -2,7 +2,58 @@
 
 All notable changes to cmos-mcp are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## 3.4.0 — 2026-10-10
+
+- Retrieval follows explicit stored decision citations and uses measured ranking defaults.
+  First-prompt recall requires a minimum number of keyword matches, reducing unrelated output; the sealed
+  acceptance gate reports retrieval quality and prompt behavior separately.
+- Registered projects checkpoint actual MCP writes after five quiet minutes or thirty minutes
+  of continuous activity. Eligible work starts on the next sixty-second tick while the server
+  is running, subject to leases and backoff. Uploads include the whole local database, including
+  pending, declined and expired drafts. `off` disables automatic uploads; implicit session exit
+  does not upload. See [the upload policy](README.md#what-leaves-your-machine).
+- Registry and credential diagnostics use the supported `cmos-mcp` command paths, including
+  remedies that interpolate a project path.
+- Public class-sweep records validate current tracked UTF-8 source witnesses, residual predicates
+  and historical ledger arithmetic for the session-query, snapshot-insert and CLI-remedy sweeps.
+  The gate preserves occurrence multiplicity and runs without private history; pre-edit timing,
+  semantic classifications and whole-tree compliance remain review obligations.
+
+- `cmos-mcp spin-out` previews or applies an explicit source-to-target transfer. Its `SpinOutResult`
+  reports the copied kind counts, both roots, operation, backups and affected sprint progress;
+  repeat receipts retain original copied counts while separately flagging later matching rows.
+  Source records remain historical with additive `spunOutTo` pointers, and copied records expose
+  `spinOutOrigin`. `SpinOutPointer.sourceId` and `SpinOutPointer.targetId` preserve string mission
+  IDs or numeric record IDs. The CLI copy plan retains original references and approvals in
+  provenance; `SpinOutProvenance.originalProjectId` preserves historical null, string or numeric
+  values. Sprint history and analytics retain original counts with transfer pointers and warnings.
+- Mission drop now requires its audit event and final row state to verify inside the same
+  transaction. Failed or silently ignored writes refuse and roll back instead of reporting a drop.
+
+- Decisions accept separate `context`, `alternatives`, `consequences` and `deciders` fields,
+  plus `mode: autonomous`; approved drafts retain their own approval path. The CLI adds
+  `decisions record`. Search, recall and embeddings use the full record while previews retain
+  the statement. Statements over 600 stored JavaScript characters warn without refusing.
+  `CmosDecisionsShowResult` adds optional nullable `context`, `consequences`, `approvalMode`,
+  `approvalDraft` and `approvalWords`. `CmosDecisionsShowResult.alternatives` and
+  `CmosDecisionsShowResult.deciders` return string arrays or null; malformed historical text
+  remains a string with a warning. Missing historical approval modes remain unknown.
+- The MCP server now uses SDK v2 and Zod 4 on Node.js 20 or newer. Stdio supports
+  legacy initialization and the 2026-07-28 protocol; named projects never wait for
+  client roots. The fresh-process helper pins legacy negotiation to launch exactly
+  one application process. Modern tool listings include a private 60-second cache hint.
+
+- Missions can be unscheduled: omit `sprintId` to infer the unique open sprint, or pass
+  `null` explicitly. Init uses the same rules, and status/onboard retain unscheduled work.
+  Historical completion spellings read as Completed without changing stored records; unknown
+  mission statuses can be repaired only to Queued, Deferred or Dropped with an atomic history entry.
+  `MissionAddResult.sprintId` and `mission.sprintId` may now be null;
+  `MissionUpdateResult.previousStatus` can contain an unrecognized historical string.
+- Starting a mission activates its Planned parent only when no other sprint is open, persists
+  sprint tracking and propagates the sprint before the mission. Reopening a carried next-step
+  preserves its last carry lease anchor. Context condensation reports remaining section sizes
+  in UTF-8 bytes, including unchanged sections. The additive receipt fields are
+  `MissionStartResult.activatedSprintId` and `CmosContextCondenseResult.remainingSectionBytes`.
 
 ## 3.3.0 — 2026-10-09
 

@@ -1,0 +1,203 @@
+{
+  "schemaVersion": 1,
+  "mission": "s92-m03",
+  "defectClass": "Unscoped single-active session readers",
+  "scopeSentence": "Every tracked UTF-8 source line under src/, across all extensions, evaluated against the published ordered JavaScript predicates.",
+  "falseNegativeProfile": [
+    "Only tracked UTF-8 text under src/ across all extensions; untracked files, non-src files (including these artifacts), binary NUL bytes and invalid UTF-8 are outside this universe and encoding exclusions are reported.",
+    "This checks line syntax, current occurrence coverage, required replacement witnesses and historical count consistency; whole-tree coverage, pre-edit chronology, semantic classification and runtime dataflow remain reviewer judgment.",
+    "Historical source text is public src-only evidence; original whole-tree provenance remains private. Recorded SHAs are labels, never runtime Git lookups.",
+    "Multiline or differently spelled SQL can evade this physical-line predicate. implicit-sessions.test.ts separately retains its recursive TypeScript and multiline SQL ownership fence."
+  ],
+  "universe": "tracked-src-utf8-lines",
+  "recordedAt": {
+    "sha": "10de1d1a9415c94fb0d233e8647bb6ec6571182d"
+  },
+  "arms": [
+    {
+      "id": "readers",
+      "unit": "lines",
+      "predicate": [
+        {
+          "op": "include",
+          "pattern": "FROM sessions",
+          "flags": ""
+        },
+        {
+          "op": "include",
+          "pattern": "status",
+          "flags": "i"
+        },
+        {
+          "op": "include",
+          "pattern": "active",
+          "flags": "i"
+        }
+      ],
+      "historical": {
+        "count": 6,
+        "matches": [
+          {
+            "id": "historical-1",
+            "file": "src/tools/cmos/cmos-decisions-record.ts",
+            "line": 151,
+            "text": "`SELECT id FROM sessions WHERE status = 'active' ORDER BY started_at DESC LIMIT 1`,",
+            "occurrence": 1,
+            "class": "changed",
+            "reason": "Replace global active-session selection with caller-owned resolution or an explicit-only listing.",
+            "resolution": {
+              "witnessIds": ["current-1"]
+            }
+          },
+          {
+            "id": "historical-2",
+            "file": "src/tools/cmos/cmos-mission-complete.ts",
+            "line": 492,
+            "text": "\"SELECT id FROM sessions WHERE status = 'active' LIMIT 1\",",
+            "occurrence": 1,
+            "class": "changed",
+            "reason": "Replace global active-session selection with caller-owned resolution or an explicit-only listing.",
+            "resolution": {
+              "witnessIds": ["current-2"]
+            }
+          },
+          {
+            "id": "historical-3",
+            "file": "src/tools/cmos/cmos-project-sweep.ts",
+            "line": 105,
+            "text": ".prepare(`SELECT id, title, status, sprint_id FROM sessions WHERE status = 'active'`)",
+            "occurrence": 1,
+            "class": "changed",
+            "reason": "Replace global active-session selection with caller-owned resolution or an explicit-only listing.",
+            "resolution": {
+              "witnessIds": ["current-3", "current-4"]
+            }
+          },
+          {
+            "id": "historical-4",
+            "file": "src/tools/cmos/cmos-session-capture.ts",
+            "line": 407,
+            "text": "const activeResult = client.getOne<Session>('SELECT id FROM sessions WHERE status = ?', [",
+            "occurrence": 1,
+            "class": "changed",
+            "reason": "Replace global active-session selection with caller-owned resolution or an explicit-only listing.",
+            "resolution": {
+              "witnessIds": ["current-5"]
+            }
+          },
+          {
+            "id": "historical-5",
+            "file": "src/tools/cmos/cmos-session-complete.ts",
+            "line": 359,
+            "text": "const activeResult = client.getOne<Session>('SELECT id FROM sessions WHERE status = ?', [",
+            "occurrence": 1,
+            "class": "changed",
+            "reason": "Replace global active-session selection with caller-owned resolution or an explicit-only listing.",
+            "resolution": {
+              "witnessIds": ["current-6"]
+            }
+          },
+          {
+            "id": "historical-6",
+            "file": "src/tools/cmos/cmos-session-start.ts",
+            "line": 240,
+            "text": ">('SELECT id, type, title, started_at, captures FROM sessions WHERE status = ?', ['active']);",
+            "occurrence": 1,
+            "class": "changed",
+            "reason": "Replace global active-session selection with caller-owned resolution or an explicit-only listing.",
+            "resolution": {
+              "witnessIds": ["current-7"]
+            }
+          }
+        ]
+      },
+      "witnesses": [
+        {
+          "id": "current-1",
+          "file": "src/tools/cmos/cmos-decisions-record.ts",
+          "line": 244,
+          "text": "const caller = resolveCallerSession(client, { open: true });",
+          "occurrence": 1,
+          "class": "fixed",
+          "reason": "Required caller/explicit-scope syntax; runtime ownership remains covered by implicit-sessions tests."
+        },
+        {
+          "id": "current-2",
+          "file": "src/tools/cmos/cmos-mission-complete.ts",
+          "line": 556,
+          "text": "const caller = resolveCallerSession(client, { open: true });",
+          "occurrence": 1,
+          "class": "fixed",
+          "reason": "Required caller/explicit-scope syntax; runtime ownership remains covered by implicit-sessions tests."
+        },
+        {
+          "id": "current-3",
+          "file": "src/tools/cmos/cmos-project-sweep.ts",
+          "line": 107,
+          "text": "const explicitOnly = columns.some((c) => c.name === 'implicit') ? 'AND implicit = 0' : '';",
+          "occurrence": 1,
+          "class": "fixed",
+          "reason": "Required caller/explicit-scope syntax; runtime ownership remains covered by implicit-sessions tests."
+        },
+        {
+          "id": "current-4",
+          "file": "src/tools/cmos/cmos-project-sweep.ts",
+          "line": 110,
+          "text": "`SELECT id, title, status, sprint_id FROM sessions WHERE status = 'active' ${explicitOnly}`",
+          "occurrence": 1,
+          "class": "fixed",
+          "reason": "Required caller/explicit-scope syntax; runtime ownership remains covered by implicit-sessions tests."
+        },
+        {
+          "id": "current-5",
+          "file": "src/tools/cmos/cmos-session-capture.ts",
+          "line": 465,
+          "text": "const caller = resolveCallerSession(client, { open: true, agent });",
+          "occurrence": 1,
+          "class": "fixed",
+          "reason": "Required caller/explicit-scope syntax; runtime ownership remains covered by implicit-sessions tests."
+        },
+        {
+          "id": "current-6",
+          "file": "src/tools/cmos/cmos-session-complete.ts",
+          "line": 376,
+          "text": "const caller = resolveCallerSession(client, { open: false });",
+          "occurrence": 1,
+          "class": "fixed",
+          "reason": "Required caller/explicit-scope syntax; runtime ownership remains covered by implicit-sessions tests."
+        },
+        {
+          "id": "current-7",
+          "file": "src/tools/cmos/cmos-session-start.ts",
+          "line": 271,
+          "text": "WHERE status = 'active' AND implicit = 0 AND (owner_key IS NULL OR owner_key = ?)",
+          "occurrence": 1,
+          "class": "fixed",
+          "reason": "Required caller/explicit-scope syntax; runtime ownership remains covered by implicit-sessions tests."
+        }
+      ],
+      "residual": [
+        {
+          "op": "include",
+          "pattern": "FROM sessions",
+          "flags": ""
+        },
+        {
+          "op": "include",
+          "pattern": "status",
+          "flags": "i"
+        },
+        {
+          "op": "include",
+          "pattern": "active",
+          "flags": "i"
+        },
+        {
+          "op": "exclude",
+          "pattern": "implicit = 0|explicitOnly",
+          "flags": ""
+        }
+      ]
+    }
+  ]
+}

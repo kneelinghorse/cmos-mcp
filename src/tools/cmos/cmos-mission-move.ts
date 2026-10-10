@@ -175,7 +175,7 @@ export async function cmosMissionMove(
           // and in types.ts, and filling it with the SPRINT's status made the answer read
           // "Current status: Completed" about a mission that is Queued. The message above
           // already names the sprint and its status, which is the fact the operator needs.
-          suggestion: `Move '${missionId}' into a sprint whose status is open (e.g. Active, In Progress, Current, or Planned), or open a new sprint with cmos_sprint(action="add").`,
+          suggestion: `Move '${missionId}' into a sprint whose status is open (e.g. Active, In Progress, Current, or Planned), or keep its current assignment. New missions can be unscheduled with cmos_mission(action="add", sprintId=null).`,
         });
       }
 

@@ -2,6 +2,7 @@
 // per-type embedding-input composition, and recordEmbedding() — the write-path hook that hash-compares against
 // last_embedded_hash, embeds on change, and upserts into <type>_vec. Architecture per cmos/planning/adr/s66-vector-retrieval.md.
 
+import { composeDecisionText, type DecisionTextRow } from '../tools/cmos/decision-fields';
 import * as crypto from 'crypto';
 import { debugLog } from '../debug-log';
 import type { CmosDatabaseClient } from '../tools/cmos/client';
@@ -272,8 +273,8 @@ interface XenovaFeatureExtractor {
 
 // ─── Per-type embedding-input composition ────────────────────────────────────
 
-export function decisionEmbeddingInput(decisionText: string): string {
-  return decisionText.trim();
+export function decisionEmbeddingInput(decisionText: string | DecisionTextRow): string {
+  return typeof decisionText === 'string' ? decisionText.trim() : composeDecisionText(decisionText);
 }
 
 export function learningEmbeddingInput(content: string): string {

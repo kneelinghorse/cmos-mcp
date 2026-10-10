@@ -1,5 +1,5 @@
 // ABOUTME: s80-m04 pin-scope gate — every pin-only read stays scoped to the sender.
-// ABOUTME: No src/tools/cmos handler imports the cross-store machinery except the ratified portfolio set.
+// ABOUTME: Only ratified portfolio readers fan out; upload state stays keyed to its caller's project.
 
 /**
  * Sprint 80 m04 — pin-scope convergence gate.
@@ -21,6 +21,8 @@
  *     - cmos-agent-onboard.ts    (portfolio rollup; write-classified, not a pin-only read)
  *   Portfolio-by-design registry management (NOT pin-only reads — they ARE the registry):
  *     - cmos-project-list.ts / -register / -unregister / -init / -validate / -sweep
+ *   Single-project upload state (registry only; cross-store query imports remain forbidden):
+ *     - dashboard-upload.ts / dashboard-upload-scheduler.ts
  *
  * Any OTHER handler importing the machinery is an offender: a pin-only read (session
  * list/search, sprint list/show, mission list/show, decisions/learnings search, context
@@ -32,6 +34,8 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { ProjectGraphRegistry } from '../../../src/intelligence/project-graph-registry';
+import { readDashboardUploadStatus } from '../../../src/tools/cmos/dashboard-upload-scheduler';
 
 const HANDLER_DIR = path.resolve(__dirname, '../../../src/tools/cmos');
 
@@ -52,12 +56,6 @@ const ALLOWLIST = new Set<string>([
   'cmos-project-init.ts',
   'cmos-project-validate.ts',
   'cmos-project-sweep.ts',
-  // s81-m03: the checkpoint push path does a SINGLE-PROJECT registry WRITE
-  // (updateLastSynced, keyed by the store's OWN project_id) after a converged push — it
-  // records last_synced_at for the drift signal. It is NOT a pin-only read and does NOT
-  // fan out across stores (no queryAcrossStores / cross-store-queries), so it does not
-  // violate the sender-scoping this gate protects.
-  'checkpoint-backfill.ts',
   // s88-m08: restore is an explicit destructive, single-project WRITE. After replacing the
   // pinned store, it reconciles that store's identity with its one graph row or rolls both
   // back. It never reads/fans out across portfolio stores.
@@ -69,10 +67,25 @@ const ALLOWLIST = new Set<string>([
   'cmos-message.ts',
 ]);
 
+// s94-m10: the old checkpoint registry write moved into these helpers. Both verify the written
+// store's own id/path; status maps the requested root to one registry row and opens no sibling DB.
+// Permit only the registry import, never the cross-store query machinery allowed above.
+const SINGLE_PROJECT_UPLOAD_STATE = new Set([
+  'dashboard-upload.ts',
+  'dashboard-upload-scheduler.ts',
+]);
+
 // Matches an import from the cross-store fan-out modules OR the project-graph registry —
 // the machinery a pin-only read would use to escape its sender scope.
 const CROSS_STORE_IMPORT =
   /from\s+['"][^'"]*\/(cross-store-query|cross-store-queries|project-graph-registry)['"]/;
+const CROSS_STORE_QUERY_IMPORT = /from\s+['"][^'"]*\/(cross-store-query|cross-store-queries)['"]/;
+
+function violatesScope(name: string, content: string): boolean {
+  if (ALLOWLIST.has(name)) return false;
+  if (SINGLE_PROJECT_UPLOAD_STATE.has(name)) return CROSS_STORE_QUERY_IMPORT.test(content);
+  return CROSS_STORE_IMPORT.test(content);
+}
 
 /** The ratified acrossProjects handlers must genuinely import the canonical query machinery. */
 const RATIFIED_ACROSS_PROJECTS = [
@@ -93,13 +106,48 @@ describe('pin-scope convergence gate (Sprint 80 m04)', () => {
   it('no pin-only read handler imports the cross-store machinery outside the ratified set', () => {
     const offenders: string[] = [];
     for (const name of listHandlerFiles()) {
-      if (ALLOWLIST.has(name)) continue;
       const content = fs.readFileSync(path.join(HANDLER_DIR, name), 'utf8');
-      if (CROSS_STORE_IMPORT.test(content)) {
+      if (violatesScope(name, content)) {
         offenders.push(name);
       }
     }
     expect(offenders).toEqual([]);
+  });
+
+  it('an upload helper cannot gain portfolio queries under its registry-only exception', () => {
+    for (const name of SINGLE_PROJECT_UPLOAD_STATE) {
+      const content = fs.readFileSync(path.join(HANDLER_DIR, name), 'utf8');
+      expect(content).toMatch(/from ['"].*\/project-graph-registry['"]/);
+      expect(violatesScope(name, content)).toBe(false);
+      const mutant =
+        content + '\nimport { queryAcrossStores } from "../../intelligence/cross-store-query";';
+      expect(violatesScope(name, mutant)).toBe(true);
+    }
+  });
+
+  it('upload status reads only the requested root and never falls back to another project', async () => {
+    const getByStorePath = jest.fn((root: string) =>
+      root === '/missing/pinned-project' ? 'pinned' : null
+    );
+    const readUploadState = jest.fn(() => ({ lastSyncedAt: null, firstOwedAt: null }));
+    const create = jest.spyOn(ProjectGraphRegistry, 'create').mockResolvedValue({
+      getByStorePath,
+      readUploadState,
+    } as unknown as ProjectGraphRegistry);
+    try {
+      // These roots deliberately have no database. A presentation read needs only its registry row.
+      expect(await readDashboardUploadStatus('/missing/pinned-project')).toBe(
+        'Dashboard upload: last success never.'
+      );
+      expect(await readDashboardUploadStatus('/missing/other-project')).toBeNull();
+      expect(getByStorePath.mock.calls).toEqual([
+        ['/missing/pinned-project'],
+        ['/missing/other-project'],
+      ]);
+      expect(readUploadState.mock.calls).toEqual([['pinned']]);
+    } finally {
+      create.mockRestore();
+    }
   });
 
   it('the ratified acrossProjects handlers still import a cross-store query (keeps the list honest)', () => {

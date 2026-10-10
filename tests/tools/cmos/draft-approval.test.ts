@@ -19,6 +19,8 @@ import type { CliIo } from '../../../src/cli/core';
 import { buildMissionProtocolContext, executeMissionProtocolTool } from '../../../src/index';
 import { CmosDetector } from '../../../src/intelligence/cmos-detector';
 import { cmosDecisions } from '../../../src/tools/cmos/cmos-decisions';
+import { recordDraftOfKind } from '../../../src/tools/cmos/draft-approval';
+import { getDraft, rawRunner } from '../../../src/tools/cmos/proposals';
 import { bindWindow, openDraftRuntime } from '../../../src/tools/cmos/draft-runtime';
 import { harnessSessionHash } from '../../../src/tools/cmos/harness-session';
 import { profilePath } from '../../../src/tools/cmos/operator-profile';
@@ -147,6 +149,16 @@ function recordState(): unknown {
 }
 
 describe('how the approval is known', () => {
+  it('keeps an approved draft exempt from the direct-record headline budget', async () => {
+    const content = 'Keep the approved detailed choice. ' + 'reason '.repeat(95);
+    expect(content.length).toBeGreaterThan(600);
+    await proposeAndAnswer('approved', reply(content));
+    const result = await record({ content, fromDraft: 'P1' });
+    expect(result.success).toBe(true);
+    expect(result.warnings?.join(' ') ?? '').not.toContain('budget 600');
+    expect(decision(idOf(result)).approval_mode).toBe('approved');
+  });
+
   it('approved: a plain approval of this draft alone, in this session; the row keeps the words', async () => {
     await proposeAndAnswer('approved');
     const result = await record({ content: DRAFT, fromDraft: 'P1' });
@@ -397,6 +409,9 @@ describe('what is never recorded', () => {
     ]);
     expect([a.success, b.success].filter(Boolean)).toHaveLength(1);
     expect([a, b].find((r) => !r.success)?.error?.code).toBe('DRAFT_NOT_PENDING');
+    expect([a, b].find((r) => !r.success)?.error?.suggestion).toContain(
+      `--project-root '${projectRoot}'`
+    );
     expect(
       row<{ n: number }>(
         "SELECT COUNT(*) AS n FROM strategic_decisions WHERE approval_draft = 'P1'"
@@ -528,6 +543,28 @@ describe('constraints, rules and profile lines', () => {
     expect(
       row<{ n: number }>('SELECT COUNT(*) AS n FROM constraints WHERE content = ?', text).n
     ).toBe(1);
+  });
+
+  it('a constraint claim lost after evaluation points its remedy at the evaluated store', async () => {
+    const text = 'Never push to main without a green CI run on the branch.';
+    await proposeAndAnswer('approved', `Proposed.\n\nWould record (constraint): ${text}`);
+    const db = new Database(dbPath, { readonly: true });
+    const draft = getDraft(rawRunner(db), 1)!;
+    db.close();
+    expect((await record({ content: text, fromDraft: 'P1' })).success).toBe(true);
+    // Reproduce the interleaving after both callers evaluated the pending draft but only one
+    // can claim it. A whole-router Promise.all may instead hit the earlier already-answered arm.
+    const refused = await recordDraftOfKind(
+      { content: text, projectRoot },
+      {
+        draft,
+        label: 'P1',
+        mode: 'approved',
+        words: 'approved',
+      }
+    );
+    expect(refused.error?.message).toContain('answered by another call first');
+    expect(refused.error?.suggestion).toContain(`--project-root '${projectRoot}'`);
   });
 
   it('releases the claim when an approved profile line cannot be written', async () => {

@@ -3,6 +3,7 @@
 // existing row in strategic_decisions / learnings / missions and upserts into the
 // matching vec0 virtual table. Resumable (skip-on-no-change via last_embedded_hash).
 
+import { decisionTextProjection, type DecisionTextRow } from '../src/tools/cmos/decision-fields';
 import { CmosDatabaseClient } from '../src/tools/cmos/client';
 import { ensureVectorStorage } from '../src/tools/cmos/schema-migrations';
 import {
@@ -46,11 +47,15 @@ async function backfillDecisions(client: CmosDatabaseClient): Promise<Counts> {
     return counts;
   }
 
+  const schema = client.getMany<{ name: string }>('PRAGMA table_info(strategic_decisions)');
+  if (!schema.success || !schema.data)
+    throw new Error('Could not inspect decision fields for embedding backfill');
+  const projection = decisionTextProjection(new Set(schema.data.map((column) => column.name)));
   let lastId = 0;
   let processed = 0;
   for (;;) {
-    const batch = client.getMany<{ id: number; decision_text: string }>(
-      `SELECT id, decision_text FROM strategic_decisions
+    const batch = client.getMany<{ id: number } & DecisionTextRow>(
+      `SELECT id, decision_text, ${projection} FROM strategic_decisions
        WHERE id > ? ORDER BY id LIMIT ?`,
       [lastId, BATCH_SIZE]
     );
@@ -60,7 +65,7 @@ async function backfillDecisions(client: CmosDatabaseClient): Promise<Counts> {
       const result = await recordEmbedding(client, {
         type: 'decision',
         id: row.id,
-        inputText: decisionEmbeddingInput(row.decision_text),
+        inputText: decisionEmbeddingInput(row),
       });
       bump(counts, result.action);
       lastId = row.id;

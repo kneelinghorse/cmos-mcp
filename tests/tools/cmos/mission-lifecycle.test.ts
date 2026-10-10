@@ -266,6 +266,7 @@ describe('cmos_mission_start', () => {
 
     it('should auto-activate a Planned parent sprint when mission work begins', async () => {
       testDb.db.exec(`
+        UPDATE sprints SET status='Completed' WHERE id='sprint-12';
         INSERT INTO sprints (id, title, focus, status)
         VALUES ('sprint-planned', 'Planned Sprint', 'Future work', 'Planned');
 

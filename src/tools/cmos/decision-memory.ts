@@ -7,6 +7,7 @@
  * @module tools/cmos/decision-memory
  */
 
+import { prepareSpinOutRead } from './spin-out-read';
 import type { CmosDatabaseClient } from './client';
 import { compareStoredTimes, storedTimeMs } from './stored-time';
 
@@ -80,11 +81,22 @@ export function loadUnifiedDecisionRecords(
   filters: DecisionQueryFilters = {}
 ): DecisionRecord[] {
   const strategicRecords = loadStrategicDecisionRecords(client, filters);
+  const visible = prepareSpinOutRead(client);
+  // Presentation dates/domains can exclude the newer canonical row while its older capture
+  // still matches. Hidden canonical identities must suppress those historical duplicates.
+  const hiddenCanonical = filters.sprintId
+    ? loadStrategicDecisionRecords(client, {}, true).filter((record) =>
+        visible.hidden('decision', record.id)
+      )
+    : [];
   const sessionFallbackRecords = filters.sprintId
-    ? loadSessionFallbackDecisionRecords(client, filters, strategicRecords)
+    ? loadSessionFallbackDecisionRecords(client, filters, [...strategicRecords, ...hiddenCanonical])
     : [];
 
-  return [...strategicRecords, ...sessionFallbackRecords].sort(compareDecisionRecords);
+  return [
+    ...strategicRecords.filter((record) => !visible.hidden('decision', record.id)),
+    ...sessionFallbackRecords,
+  ].sort(compareDecisionRecords);
 }
 
 export function getSprintDecisionCounts(
@@ -107,9 +119,10 @@ export function getSprintDecisionCounts(
 
 function loadStrategicDecisionRecords(
   client: CmosDatabaseClient,
-  filters: DecisionQueryFilters
+  filters: DecisionQueryFilters,
+  requiredIdentityRead = false
 ): DecisionRecord[] {
-  const decisionColumns = getTableColumns(client, 'strategic_decisions');
+  const decisionColumns = getTableColumns(client, 'strategic_decisions', requiredIdentityRead);
   if (!decisionColumns.has('created_at') || decisionColumns.size === 0) {
     return [];
   }
@@ -207,6 +220,10 @@ function loadStrategicDecisionRecords(
   );
 
   if (!result.success || !result.data) {
+    if (requiredIdentityRead)
+      throw new Error(
+        `SPIN_OUT_READ_FAILED: ${result.error?.message ?? 'canonical identity query failed'}`
+      );
     return [];
   }
 
@@ -352,9 +369,17 @@ function readDecisionCaptures(
   }
 }
 
-function getTableColumns(client: CmosDatabaseClient, tableName: string): Set<string> {
+function getTableColumns(
+  client: CmosDatabaseClient,
+  tableName: string,
+  requiredIdentityRead = false
+): Set<string> {
   const result = client.getMany<{ name: string }>(`PRAGMA table_info('${tableName}')`, []);
   if (!result.success || !result.data) {
+    if (requiredIdentityRead)
+      throw new Error(
+        `SPIN_OUT_READ_FAILED: ${result.error?.message ?? 'canonical schema query failed'}`
+      );
     return new Set();
   }
   return new Set(result.data.map((row) => row.name));

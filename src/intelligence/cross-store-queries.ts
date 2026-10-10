@@ -11,6 +11,7 @@
  * @module intelligence/cross-store-queries
  */
 
+import { spinOutQuery } from './spin-out-query';
 import {
   queryAcrossStores,
   type CrossStoreQueryResult,
@@ -54,13 +55,15 @@ export function decisionsAcrossProjects(
   const now = opts.now ?? Date.now();
   const days = opts.days ?? 30;
   const cutoff = now - days * 24 * 60 * 60 * 1000;
+  const sql = `SELECT project_id, id, decision_text, sprint_id, stable_event_id, occurred_at, origin_seq
+          FROM strategic_decisions
+          WHERE event_type = 'decision_captured' AND occurred_at > ?`;
   return queryAcrossStores<PortfolioDecisionRow>({
     // Bind the cutoff (don't interpolate) — defense-in-depth against a NaN/Infinity
     // now/days producing a broken or non-numeric SQL literal. The bound `?` precedes
     // queryAcrossStores's own LIMIT `?`, so params order is [cutoff, limit].
-    sql: `SELECT project_id, id, decision_text, sprint_id, stable_event_id, occurred_at, origin_seq
-          FROM strategic_decisions
-          WHERE event_type = 'decision_captured' AND occurred_at > ?`,
+    sql,
+    perStoreQuery: spinOutQuery('decision', sql, [cutoff]),
     params: [cutoff],
     order: 'desc',
     limit: opts.limit,
@@ -113,10 +116,12 @@ export function learningsTaggedAcrossProjects(
   tag: string,
   opts: NamedQueryOpts = {}
 ): Promise<CrossStoreQueryResult<PortfolioLearningRow>> {
-  return queryAcrossStores<PortfolioLearningRow>({
-    sql: `SELECT project_id, id, content, category, occurred_at, origin_seq
+  const sql = `SELECT project_id, id, content, category, occurred_at, origin_seq
           FROM learnings
-          WHERE category = ?`,
+          WHERE category = ?`;
+  return queryAcrossStores<PortfolioLearningRow>({
+    sql,
+    perStoreQuery: spinOutQuery('learning', sql, [tag]),
     params: [tag],
     order: 'desc',
     limit: opts.limit,
@@ -163,10 +168,12 @@ export interface CitationGraphResult {
 export async function citationGraphAcrossProjects(
   opts: NamedQueryOpts = {}
 ): Promise<CitationGraphResult> {
-  const fanout = await queryAcrossStores<DecisionWithEvidenceRow>({
-    sql: `SELECT project_id, id, decision_text, evidence, occurred_at, origin_seq
+  const sql = `SELECT project_id, id, decision_text, evidence, occurred_at, origin_seq
           FROM strategic_decisions
-          WHERE evidence IS NOT NULL AND evidence != ''`,
+          WHERE evidence IS NOT NULL AND evidence != ''`;
+  const fanout = await queryAcrossStores<DecisionWithEvidenceRow>({
+    sql,
+    perStoreQuery: spinOutQuery('decision', sql, []),
     order: 'desc',
     limit: opts.limit ?? 1000,
     concurrency: opts.concurrency,

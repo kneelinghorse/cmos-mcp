@@ -5,8 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals
 import { promises as fs } from 'fs';
 import os from 'os';
 import path from 'path';
-import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
-
+import { ProtocolError, ProtocolErrorCode } from '@modelcontextprotocol/server';
 import {
   PREFLIGHT_PARAMS,
   buildKnownToolErrorResult,
@@ -186,10 +185,10 @@ describe('mission-protocol dispatcher preflight', () => {
         { action: 'not-an-action', projectRoot: 12345 },
         {} as never
       )
-    ).rejects.toMatchObject({ code: ErrorCode.MethodNotFound });
+    ).rejects.toMatchObject({ code: ProtocolErrorCode.MethodNotFound });
     await expect(
       executeMissionProtocolTool('unknown_tool', { projectRoot: 12345 }, {} as never)
-    ).rejects.toBeInstanceOf(McpError);
+    ).rejects.toBeInstanceOf(ProtocolError);
   });
 
   it('gives an unknown tool MethodNotFound precedence over the review-role guard', async () => {
@@ -202,7 +201,7 @@ describe('mission-protocol dispatcher preflight', () => {
         { action: 'not-an-action', projectRoot: 12345 },
         {} as never
       )
-    ).rejects.toMatchObject({ code: ErrorCode.MethodNotFound });
+    ).rejects.toMatchObject({ code: ProtocolErrorCode.MethodNotFound });
     expect(handleSpy).not.toHaveBeenCalled();
   });
 

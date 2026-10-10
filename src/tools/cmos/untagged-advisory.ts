@@ -57,7 +57,7 @@ export function buildUntaggedSessionAdvisory(client: CmosDatabaseClient): string
     `${count} session(s) in this store carry no sprint tag and are therefore NOT counted here ` +
     `(nor are the decisions, learnings, constraints and next-steps captured in them). This is ` +
     `expected for sessions started while no sprint was in an open status — the record is ` +
-    `untagged by design, not missing. Run cmos_sprint(action="add") before starting work if ` +
+    `untagged by design, not missing. Work can stay unscheduled; use cmos_sprint(action="add") if ` +
     `you want it sprint-scoped.`
   );
 }

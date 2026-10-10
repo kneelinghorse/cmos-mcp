@@ -90,3 +90,26 @@ it('masks multiline and unfinished foreign fences conservatively', () => {
 it('rejects unsupported colon-form ranges without accepting their first endpoint', () => {
   expect(typedCitations('d:12-9999; l:13–15; c:14 - #19')).toEqual([]);
 });
+
+it('retains explicit foreign attribution before a lowercase parenthetical label', () => {
+  expect(
+    typedCitations(
+      'foreign project stage1 (decision #12); foreign stage1 (d:13); upstream prior service (learning #14)'
+    )
+  ).toEqual([]);
+  expect(
+    typedCitations(
+      'The exclusion logic (decision #12); local notes (learning #13); the record a project keeps (decision #14)'
+    )
+  ).toEqual(['d:12', 'l:13', 'd:14']);
+});
+
+it('rejects malformed hash ranges as a whole rather than accepting the first endpoint', () => {
+  expect(typedCitations('decision #12-13x; learning #14–#15_bad')).toEqual([]);
+  expect(typedCitations('decisions #12-13; learning #14–#15')).toEqual([
+    'd:12',
+    'd:13',
+    'l:14',
+    'l:15',
+  ]);
+});

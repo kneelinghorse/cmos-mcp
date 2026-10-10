@@ -17,7 +17,6 @@ import type { ActionParamMap, CmosToolResult } from './types';
 import {
   cmosMissionStart,
   formatMissionStartForLLM,
-  type CmosMissionStartParams,
   type MissionStartResult,
 } from './cmos-mission-start';
 import {
@@ -50,7 +49,7 @@ import {
   type CmosMissionDeferParams,
   type MissionDeferResult,
 } from './cmos-mission-defer';
-import { maybePropagateMissionStatus } from './sync-locks';
+import { maybePropagateMissionStatus, maybePropagateSprintStatus } from './sync-locks';
 
 export const CMOS_MISSION_TRANSITION_ACTIONS = [
   'start',
@@ -231,16 +230,21 @@ export async function cmosMissionTransition(
   // POST-transition status and pushes it under a soft-lock. RESILIENT — a sync failure
   // never fails the local transition (folded into warnings); a SOLO store is untouched.
   switch (actionValue) {
-    case 'start':
-      return maybePropagateMissionStatus(
-        await cmosMissionStart({
-          missionId: params.missionId,
-          notes: params.notes,
-          projectRoot: params.projectRoot,
-        } satisfies CmosMissionStartParams),
-        params.missionId,
-        params.projectRoot
-      );
+    case 'start': {
+      let started = await cmosMissionStart({
+        missionId: params.missionId,
+        notes: params.notes,
+        projectRoot: params.projectRoot,
+      });
+      if (started.success && started.data?.activatedSprintId) {
+        started = await maybePropagateSprintStatus(
+          started,
+          started.data.activatedSprintId,
+          params.projectRoot
+        );
+      }
+      return maybePropagateMissionStatus(started, params.missionId, params.projectRoot);
+    }
     case 'complete':
       return maybePropagateMissionStatus(
         await cmosMissionComplete({

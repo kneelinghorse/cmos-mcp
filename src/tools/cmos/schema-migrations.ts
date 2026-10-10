@@ -15,6 +15,7 @@ import { checkWrite, countWrite } from './write-guard';
 import { isReadOnlyAgentSession } from './read-only-agent-guard';
 import { asLazyRepair, callMayWrite } from './tool-call-context';
 import { SPRINT_SUMMARY_VIEW_SQL } from './schema';
+import { decisionFtsDefinition, migrateDecisionShapeColumns } from './decision-shape-migration';
 import {
   FIREHOSE_TABLES,
   GENESIS_TYPE_BY_TABLE,
@@ -1390,42 +1391,58 @@ function deferredIndexNote(label: string, deferred: ExternalFtsResult['deferred'
   );
 }
 
+/** Atomic, write-only upgrade for all nullable decision fields and their owned rich search index. */
+export function ensureDecisionShapeColumns(
+  client: CmosDatabaseClient
+): MigrationResult & { ready: boolean } {
+  return migrateDecisionShapeColumns(client, normalizeSchemaSql);
+}
+
 export function ensureDecisionsFts5(client: CmosDatabaseClient): MigrationResult {
   const warnings: string[] = [];
+  const existing = client.getOne<{ sql: string | null }>(
+    "SELECT sql FROM sqlite_master WHERE name = 'decisions_fts'",
+    []
+  );
+  if (!existing.success) {
+    return {
+      columnsAdded: [],
+      indexesCreated: [],
+      rowsUpdated: 0,
+      alreadyCurrent: false,
+      warnings: [
+        `CREATE VIRTUAL TABLE decisions_fts preflight failed: ${existing.error?.code ?? 'DB_ERROR'} — ${existing.error?.message ?? 'unknown'}`,
+      ],
+    };
+  }
+  const richDefinition = decisionFtsDefinition(true);
+  const columnRead = existing.data
+    ? null
+    : client.getMany<{ name: string }>('PRAGMA table_info(strategic_decisions)', []);
+  if (columnRead && !columnRead.success) {
+    return {
+      columnsAdded: [],
+      indexesCreated: [],
+      rowsUpdated: 0,
+      alreadyCurrent: false,
+      warnings: [
+        `decisions_fts source column read failed: ${columnRead.error?.code ?? 'DB_ERROR'} — ${columnRead.error?.message ?? 'unknown'}`,
+      ],
+    };
+  }
+  const columns = new Set(columnRead?.data?.map((column) => column.name));
+  const rich = existing.data
+    ? normalizeSchemaSql(existing.data.sql ?? '') === normalizeSchemaSql(richDefinition.createSql)
+    : ['context_text', 'alternatives', 'consequences', 'deciders'].every((name) =>
+        columns.has(name)
+      );
+  const definition = decisionFtsDefinition(rich);
   const fts = ensureExternalFts(
     client,
     {
       name: 'decisions_fts',
       sourceTable: 'strategic_decisions',
-      createSql: `CREATE VIRTUAL TABLE decisions_fts USING fts5(
-        decision_text,
-        content='strategic_decisions',
-        content_rowid='id'
-      )`,
-      triggers: [
-        {
-          name: 'decisions_fts_insert',
-          sql: `CREATE TRIGGER decisions_fts_insert AFTER INSERT ON strategic_decisions BEGIN
-            INSERT INTO decisions_fts(rowid, decision_text) VALUES (new.id, new.decision_text);
-          END`,
-        },
-        {
-          name: 'decisions_fts_delete',
-          sql: `CREATE TRIGGER decisions_fts_delete AFTER DELETE ON strategic_decisions BEGIN
-            INSERT INTO decisions_fts(decisions_fts, rowid, decision_text)
-            VALUES('delete', old.id, old.decision_text);
-          END`,
-        },
-        {
-          name: 'decisions_fts_update',
-          sql: `CREATE TRIGGER decisions_fts_update
-            AFTER UPDATE OF decision_text ON strategic_decisions BEGIN
-            INSERT INTO decisions_fts(decisions_fts, rowid, decision_text)
-            VALUES('delete', old.id, old.decision_text);
-            INSERT INTO decisions_fts(rowid, decision_text) VALUES (new.id, new.decision_text);
-          END`,
-        },
-      ],
+      ...definition,
       forceRebuild: false,
       verifyIndexedRowCount: true,
     },

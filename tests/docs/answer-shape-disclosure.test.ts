@@ -169,11 +169,22 @@ const EXPECTED_TOTALS = {
   // constraint, rule and profile drafts) joins the CmosDecisionsResult union; ApprovalEcho,
   // DraftKind and ApprovalMode add three more declarations. Ten rows, all additive; the
   // CHANGELOG names the fields.
-  files: 166,
-  roots: 142,
-  declarations: 300,
-  compositions: 300,
-  rows: 1703,
+  // s94-m10: checkpoint-registration, dashboard-upload and dashboard-upload-scheduler add three
+  // modules. CheckResult remains private as before extraction; no answer declaration changes.
+  // s94-m04: decision-fields and decision-shape-migration add two modules. Decision show gains
+  // seven optional fields; alternatives/deciders preserve malformed historical strings and warn.
+  // s94-m05: condense gains remainingSectionBytes and mission start gains activatedSprintId.
+  // MissionAddResult.sprintId (including its mission copy) becomes nullable; repair receipts can
+  // retain any historical previousStatus. These changes are disclosed in Unreleased.
+  // s94-m06: citation-neighbors, seven record-link helpers and record-links add nine modules.
+  // Their inline helper results add no named Error/Result root or MCP answer declaration.
+  // s94-m08: thirteen modules, one CLI result root, and eleven reachable helper/pointer
+  // declarations. Forty-four property rows add copy provenance, historical pointers and sprint reports.
+  files: 193,
+  roots: 143,
+  declarations: 312,
+  compositions: 312,
+  rows: 1756,
 } as const;
 const EXPLICIT_OPAQUE_LEDGER = [
   'CmosToolError.providedValue = ANY',
@@ -186,6 +197,41 @@ const GENERIC_HOLE_LEDGER = [
   'SingleCurrentSprintResult.data = GENERIC',
 ] as const;
 const MIXED_KIND_LEDGER = [
+  {
+    row: 'SpinOutPointer.sourceId',
+    runtimeKinds: ['number', 'string'],
+    requiredChangelogToken: 'SpinOutPointer.sourceId',
+    reason:
+      'Historical pointers preserve string mission IDs and numeric decision, learning or next-step IDs.',
+  },
+  {
+    row: 'SpinOutPointer.targetId',
+    runtimeKinds: ['number', 'string'],
+    requiredChangelogToken: 'SpinOutPointer.targetId',
+    reason:
+      'Copied-row pointers retain the target identifier type rather than coercing numeric records to strings.',
+  },
+  {
+    row: 'SpinOutProvenance.originalProjectId',
+    runtimeKinds: ['number', 'string'],
+    requiredChangelogToken: 'SpinOutProvenance.originalProjectId',
+    reason:
+      'The CLI copy plan preserves historical scalar project identity values in provenance; null is also retained.',
+  },
+  {
+    row: 'CmosDecisionsShowResult.alternatives',
+    runtimeKinds: ['array', 'string'],
+    requiredChangelogToken: 'CmosDecisionsShowResult.alternatives',
+    reason:
+      'Valid JSON string arrays return arrays; malformed historical text remains visible as a string with a warning.',
+  },
+  {
+    row: 'CmosDecisionsShowResult.deciders',
+    runtimeKinds: ['array', 'string'],
+    requiredChangelogToken: 'CmosDecisionsShowResult.deciders',
+    reason:
+      'Valid JSON string arrays return arrays; malformed historical text remains visible as a string with a warning.',
+  },
   {
     row: 'CmosToolError.currentState',
     runtimeKinds: ['object', 'string'],

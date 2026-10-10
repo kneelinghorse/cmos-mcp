@@ -15,21 +15,22 @@
  *
  * 1. “Highest generation” cannot say WHICH migrations ran. Only the dedicated
  *    `firehose_event_columns`, `author_namespace_columns`, `blob_schema_version`, and
- *    `vector_storage_columns` markers can. The structural v2.1 and v2.2 migrations deliberately
+ *    `vector_storage_columns`, `decision_shape_columns`, and `record_links_schema` markers can.
+ *    The structural v2.1 and v2.2 migrations deliberately
  *    have no marker, so this gate does not claim they do.
- * 2. “No code may branch on it” covers direct executable reads. All 31 shipped literal-token
+ * 2. “No code may branch on it” covers direct executable reads. All 32 shipped literal-token
  *    occurrences are classified below, including the `project_identity` view projection, but a
  *    fully dynamic key and a sync payload remain indirect routes; this syntax gate cannot prove
  *    values obtained through those routes are not branched on.
  * 3. “Monotonic” is closed over the six logical setters classified below, and both mutable paths
- *    atomically re-check the current row before replacement. The eight variable-key metadata
- *    writer statements and their 26 current declaration/call-site key roles are a point-in-time
+ *    atomically re-check the current row before replacement. The fourteen variable-key metadata
+ *    writer statements and their 39 current declaration/call-site key roles are a point-in-time
  *    enumeration; a changed ledger forces their keys to be re-audited.
  * 4. The label heal runs only on the retrieval path. A store that never performs retrieval does
  *    not heal its label, which is harmless because the label is not a control input.
  *
  * Mutation controls in this file prove the census rejects an extra helper/direct setter, a
- * missing expected role, a ninth ARM-3 writer, whitespace/parameterized reads, multiline
+ * missing expected role, an extra ARM-3 writer (REPLACE or UPSERT), whitespace/parameterized reads, multiline
  * inserts, direct updates, and an existing generic writer repointed at this key.
  */
 
@@ -59,7 +60,7 @@ const VECTOR_MARKER_KEY = 'vector_storage_columns';
 const FIREHOSE_MARKER_KEY = 'firehose_event_columns';
 const LABEL_READ = "SELECT value FROM metadata WHERE key = 'schema_version'";
 const VARIABLE_WRITER_RE =
-  /INSERT\s+OR\s+REPLACE\s+INTO\s+metadata\s*\(\s*key\s*,\s*value\s*\)\s*VALUES\s*\(\s*\?\s*,\s*\?\s*\)/g;
+  /INSERT(?:\s+OR\s+REPLACE)?\s+INTO\s+metadata\s*\(\s*key\s*,\s*value\s*\)\s*VALUES\s*\(\s*\?\s*,\s*\?\s*\)/g;
 
 interface SourceSite {
   readonly file: string;
@@ -182,51 +183,57 @@ const EXPECTED_SCHEMA_VERSION_LITERALS: readonly SourceSite[] = sortSourceSites(
   // s93-m12 moved every cmos-project-init.ts site down (a re-init keeps the project's identity,
   // settles it before writing and refuses a different project id; the identity contexts follow a
   // new name or level); the same keys are written, now only when absent or passed.
-  { file: 'intelligence/project-graph-registry.ts', line: 293, role: 'ensureSchema' },
+  // s94-m10/m11: upload-state imports and init remedies move these source locations. The label
+  // roles are unchanged; the removed init ambient-adoption write was never a schema-label setter.
+  // s94-m04/m05 and integration fixes move source lines again. The 32 label roles and six
+  // setters are unchanged; decision shape adds only its dedicated marker to the key ledger.
+  // s94-m06 adds the owned citation schema and atomic sync units. Label roles remain unchanged;
+  // record_links_schema joins only the generic-writer/key ledgers below.
+  { file: 'intelligence/project-graph-registry.ts', line: 296, role: 'ensureSchema' },
   // Read-only registry projection; does not branch on or write the schema label.
   {
     file: 'intelligence/registered-stores-readonly.ts',
     line: 31,
     role: 'listRegisteredStoresReadOnly',
   },
-  { file: 'intelligence/project-graph-registry.ts', line: 369, role: 'register' },
-  { file: 'intelligence/project-graph-registry.ts', line: 370, role: 'register' },
-  { file: INIT_FILE, line: 715, role: 'cmosProjectInit' },
+  { file: 'intelligence/project-graph-registry.ts', line: 373, role: 'register' },
+  { file: 'intelligence/project-graph-registry.ts', line: 374, role: 'register' },
   { file: INIT_FILE, line: 746, role: 'cmosProjectInit' },
-  { file: INIT_FILE, line: 746, role: 'cmosProjectInit' },
-  { file: INIT_FILE, line: 894, role: 'cmosProjectInit' },
+  { file: INIT_FILE, line: 777, role: 'cmosProjectInit' },
+  { file: INIT_FILE, line: 777, role: 'cmosProjectInit' },
+  { file: INIT_FILE, line: 936, role: 'cmosProjectInit' },
   { file: 'tools/cmos/genesis-columns.ts', line: 19, role: '<module>' },
   // s93-m11 (reads critic fold): the label's read and write moved into raiseSchemaVersionLabel,
   // which stampSchemaVersionAtLeast runs as a lazy repair; the sites below it moved down with the
   // read-deferral of index rebuilds. Nothing was added or removed.
-  { file: MIGRATIONS_FILE, line: 129, role: 'raiseSchemaVersionLabel' },
-  { file: MIGRATIONS_FILE, line: 134, role: 'raiseSchemaVersionLabel' },
-  { file: MIGRATIONS_FILE, line: 144, role: 'raiseSchemaVersionLabel' },
-  { file: MIGRATIONS_FILE, line: 147, role: 'raiseSchemaVersionLabel' },
-  { file: MIGRATIONS_FILE, line: 163, role: 'raiseSchemaVersionLabel' },
-  { file: MIGRATIONS_FILE, line: 1559, role: 'ensureVectorStorage' },
-  { file: MIGRATIONS_FILE, line: 2409, role: 'migrateFirehoseTable' },
-  { file: SCHEMA_FILE, line: 123, role: '<module>' },
-  { file: SCHEMA_FILE, line: 141, role: '<module>' },
-  { file: SCHEMA_FILE, line: 178, role: '<module>' },
-  { file: SCHEMA_FILE, line: 213, role: '<module>' },
-  { file: SCHEMA_FILE, line: 265, role: '<module>' },
+  { file: MIGRATIONS_FILE, line: 130, role: 'raiseSchemaVersionLabel' },
+  { file: MIGRATIONS_FILE, line: 135, role: 'raiseSchemaVersionLabel' },
+  { file: MIGRATIONS_FILE, line: 145, role: 'raiseSchemaVersionLabel' },
+  { file: MIGRATIONS_FILE, line: 148, role: 'raiseSchemaVersionLabel' },
+  { file: MIGRATIONS_FILE, line: 164, role: 'raiseSchemaVersionLabel' },
+  { file: MIGRATIONS_FILE, line: 1576, role: 'ensureVectorStorage' },
+  { file: MIGRATIONS_FILE, line: 2426, role: 'migrateFirehoseTable' },
+  { file: SCHEMA_FILE, line: 128, role: '<module>' },
+  { file: SCHEMA_FILE, line: 146, role: '<module>' },
+  { file: SCHEMA_FILE, line: 183, role: '<module>' },
+  { file: SCHEMA_FILE, line: 218, role: '<module>' },
+  { file: SCHEMA_FILE, line: 270, role: '<module>' },
   // s92-m03 moved the sites below the sessions table down four lines (implicit, owner_key).
   // s93-m06 moved every schema.ts site down one (the proposals import), those below
   // strategic_decisions four more (the approval columns) and those below constraints three more
   // (the proposals table); schema-migrations.ts sites below ensureConstraintEvergreen moved down 28
   // (ensureDecisionApprovalColumns). Nothing was added, removed or re-roled.
-  { file: SCHEMA_FILE, line: 311, role: '<module>' },
-  { file: SCHEMA_FILE, line: 353, role: '<module>' },
-  { file: SCHEMA_FILE, line: 436, role: '<module>' },
-  { file: SCHEMA_FILE, line: 465, role: '<module>' },
-  { file: SCHEMA_FILE, line: 485, role: '<module>' },
-  { file: SCHEMA_FILE, line: 485, role: '<module>' },
-  { file: 'tools/cmos/sync-merge.ts', line: 135, role: 'insertSprintRow' },
-  { file: 'tools/cmos/sync-merge.ts', line: 163, role: 'insertMissionRow' },
-  { file: 'tools/cmos/sync-merge.ts', line: 193, role: 'insertSessionRow' },
-  { file: 'tools/cmos/sync-merge.ts', line: 223, role: 'insertDecisionRow' },
-  { file: 'tools/cmos/sync-merge.ts', line: 254, role: 'insertLearningRow' },
+  { file: SCHEMA_FILE, line: 316, role: '<module>' },
+  { file: SCHEMA_FILE, line: 363, role: '<module>' },
+  { file: SCHEMA_FILE, line: 458, role: '<module>' },
+  { file: SCHEMA_FILE, line: 487, role: '<module>' },
+  { file: SCHEMA_FILE, line: 507, role: '<module>' },
+  { file: SCHEMA_FILE, line: 507, role: '<module>' },
+  { file: 'tools/cmos/sync-merge.ts', line: 164, role: 'insertSprintRow' },
+  { file: 'tools/cmos/sync-merge.ts', line: 192, role: 'insertMissionRow' },
+  { file: 'tools/cmos/sync-merge.ts', line: 222, role: 'insertSessionRow' },
+  { file: 'tools/cmos/sync-merge.ts', line: 258, role: 'insertDecisionRow' },
+  { file: 'tools/cmos/sync-merge.ts', line: 297, role: 'insertLearningRow' },
 ]);
 
 function staticSql(node: ts.Expression): string | null {
@@ -234,10 +241,10 @@ function staticSql(node: ts.Expression): string | null {
 }
 
 /**
- * Pin the eight generic metadata-writer statements together with every shipped call-site key
+ * Pin the fourteen generic metadata-writer statements together with every shipped call-site key
  * expression that can reach their wrappers. This closes the natural bypass where an existing
  * `writeMetadata(..., 'owner', ...)` call is silently repointed to `schema_version` without adding
- * a ninth helper declaration.
+ * another helper declaration.
  */
 function metadataWriterKeySites(sources: SourceMap): WriterKeySite[] {
   const sites: WriterKeySite[] = [];
@@ -250,10 +257,21 @@ function metadataWriterKeySites(sources: SourceMap): WriterKeySite[] {
       let key: ts.Expression | undefined;
       if (
         ts.isIdentifier(node.expression) &&
-        ['writeMetadata', 'setIfEmpty', 'writeMeta'].includes(node.expression.text)
+        ['writeMetadata', 'setIfEmpty', 'writeMeta', 'writeSpinOutMetadata'].includes(
+          node.expression.text
+        )
       ) {
         callee = node.expression.text;
         key = node.arguments[1];
+      } else if (
+        ts.isIdentifier(node.expression) &&
+        node.expression.text === 'writeSpinOutRow' &&
+        node.arguments.length > 2 &&
+        ts.isArrayLiteralExpression(node.arguments[2]) &&
+        /into metadata\s*\(\s*key\s*,\s*value\s*\)/i.test(staticSql(node.arguments[1]) ?? '')
+      ) {
+        callee = 'writeSpinOutRow';
+        key = node.arguments[2].elements[0];
       } else if (
         ts.isPropertyAccessExpression(node.expression) &&
         ts.isIdentifier(node.expression.expression) &&
@@ -270,7 +288,10 @@ function metadataWriterKeySites(sources: SourceMap): WriterKeySite[] {
       ) {
         const sql = staticSql(node.arguments[0]);
         const normalized = sql?.replace(/\s+/g, ' ').toLowerCase() ?? '';
-        if (normalized.includes('into metadata') && normalized.includes('values (?, ?)')) {
+        if (
+          normalized.includes('into metadata') &&
+          /values\s*\(\s*\?\s*,\s*\?\s*\)/.test(normalized)
+        ) {
           callee = 'metadata.execute';
           key = node.arguments[1].elements[0];
         }
@@ -293,7 +314,7 @@ const EXPECTED_WRITER_KEYS: readonly WriterKeySite[] = sortSourceSites([
   {
     // s93-m01: the hook CLI's ambient switch — a constant key, never the label.
     file: 'cli/commands.ts',
-    line: 338,
+    line: 355,
     role: 'ambient',
     callee: 'metadata.execute',
     key: 'AMBIENT_METADATA_KEY',
@@ -306,16 +327,15 @@ const EXPECTED_WRITER_KEYS: readonly WriterKeySite[] = sortSourceSites([
     key: 'BLOB_SCHEMA_VERSION_KEY',
   },
   ...[
-    [707, "'project_id'"],
-    [709, "'project_name'"],
-    [712, "'tracelab_project_id'"],
-    [763, "'project_type'"],
-    [766, "'project_type'"],
+    [738, "'project_id'"],
+    [740, "'project_name'"],
+    [743, "'tracelab_project_id'"],
+    [794, "'project_type'"],
+    [797, "'project_type'"],
     // s93-m12: a store recreated beside an agents file takes back the level its CMOS line names.
-    [769, "'project_type'"],
-    // s93-m12: and the hooks setting that line names.
-    [785, 'AMBIENT_METADATA_KEY'],
-    [788, "'created_at'"],
+    [800, "'project_type'"],
+    // s94-m11: recreated stores no longer adopt an ambient setting from the agents file.
+    [808, "'created_at'"],
   ].map(([line, key]) => ({
     file: INIT_FILE,
     line: Number(line),
@@ -331,6 +351,14 @@ const EXPECTED_WRITER_KEYS: readonly WriterKeySite[] = sortSourceSites([
     key: "'project_type'",
   },
   {
+    // s94-m04 owns this marker; it is not the store-level schema label.
+    file: 'tools/cmos/decision-shape-migration.ts',
+    line: 236,
+    role: 'migrateDecisionShapeColumns',
+    callee: 'metadata.execute',
+    key: 'MARKER',
+  },
+  {
     file: 'tools/cmos/owner-resolution.ts',
     line: 171,
     role: 'writeMetadata',
@@ -338,10 +366,10 @@ const EXPECTED_WRITER_KEYS: readonly WriterKeySite[] = sortSourceSites([
     key: 'key',
   },
   ...[
-    [245, "'dashboard_slug'"],
-    [248, "'dashboard_project_id'"],
-    [280, "'owner'"],
-    [281, "'dashboard_username'"],
+    [250, "'dashboard_slug'"],
+    [253, "'dashboard_project_id'"],
+    [285, "'owner'"],
+    [286, "'dashboard_username'"],
   ].map(([line, key]) => ({
     file: 'tools/cmos/owner-resolution.ts',
     line: Number(line),
@@ -349,6 +377,63 @@ const EXPECTED_WRITER_KEYS: readonly WriterKeySite[] = sortSourceSites([
     callee: 'writeMetadata',
     key: String(key),
   })),
+  {
+    // s94-m06 owns this backfill marker; it neither reads nor raises the schema label.
+    file: 'tools/cmos/record-link-migration.ts',
+    line: 50,
+    role: 'ensureRecordLinks',
+    callee: 'metadata.execute',
+    key: 'RECORD_LINKS_MARKER',
+  },
+  {
+    file: 'tools/cmos/spin-out-copy.ts',
+    line: 68,
+    role: 'copySpinOutTarget',
+    callee: 'writeSpinOutMetadata',
+    key: '`${SPIN_OUT_ORIGIN_PREFIX}${provenance.kind}:${provenance.targetId}`',
+  },
+  {
+    file: 'tools/cmos/spin-out-copy.ts',
+    line: 150,
+    role: 'copySpinOutTarget',
+    callee: 'writeSpinOutMetadata',
+    key: 'operationKey(operation.operationId)',
+  },
+  {
+    file: 'tools/cmos/spin-out-ledger.ts',
+    line: 61,
+    role: 'writeSpinOutMetadata',
+    callee: 'writeSpinOutRow',
+    key: 'key',
+  },
+  {
+    file: 'tools/cmos/spin-out-ledger.ts',
+    line: 112,
+    role: 'reserveSpinOut',
+    callee: 'writeSpinOutMetadata',
+    key: 'reservationKey(entry.source)',
+  },
+  {
+    file: 'tools/cmos/spin-out-ledger.ts',
+    line: 115,
+    role: 'reserveSpinOut',
+    callee: 'writeSpinOutMetadata',
+    key: 'operationKey(operation.operationId)',
+  },
+  {
+    file: 'tools/cmos/spin-out-mark.ts',
+    line: 111,
+    role: 'markSpinOutSource',
+    callee: 'writeSpinOutMetadata',
+    key: '`${SPIN_OUT_ROW_PREFIX}${provenance.kind}:${provenance.sourceId}`',
+  },
+  {
+    file: 'tools/cmos/spin-out-mark.ts',
+    line: 117,
+    role: 'markSpinOutSource',
+    callee: 'writeSpinOutMetadata',
+    key: 'operationKey(operation.operationId)',
+  },
   {
     // s92-m02: the one-time sprint end_date repair's marker — a constant key, never the label.
     file: 'tools/cmos/sprint-end-date-repair.ts',
@@ -367,17 +452,17 @@ const EXPECTED_WRITER_KEYS: readonly WriterKeySite[] = sortSourceSites([
   },
   {
     file: 'tools/cmos/sync-bootstrap.ts',
-    line: 400,
+    line: 441,
     role: 'setIfEmpty',
     callee: 'metadata.execute',
     key: 'key',
   },
   ...[
-    [423, "'project_id'"],
-    [424, "'project_name'"],
-    [425, "'dashboard_slug'"],
-    [426, "'dashboard_project_id'"],
-    [433, "'collab_role'"],
+    [464, "'project_id'"],
+    [465, "'project_name'"],
+    [466, "'dashboard_slug'"],
+    [467, "'dashboard_project_id'"],
+    [474, "'collab_role'"],
   ].map(([line, key]) => ({
     file: 'tools/cmos/sync-bootstrap.ts',
     line: Number(line),
@@ -401,7 +486,7 @@ const EXPECTED_WRITER_KEYS: readonly WriterKeySite[] = sortSourceSites([
   },
   {
     file: 'tools/cmos/sync-merge.ts',
-    line: 317,
+    line: 362,
     role: 'persistPullCursor',
     callee: 'metadata.execute',
     key: 'pullCursorKey(slug)',
@@ -479,20 +564,20 @@ function logicalSetterSites(sources: SourceMap): SourceSite[] {
 }
 
 const EXPECTED_LOGICAL_SETTERS: readonly SourceSite[] = [
-  { file: INIT_FILE, line: 727, role: 'prepared-run:cmosProjectInit:CMOS_SCHEMA_VERSION' },
+  { file: INIT_FILE, line: 758, role: 'prepared-run:cmosProjectInit:CMOS_SCHEMA_VERSION' },
   {
     file: MIGRATIONS_FILE,
-    line: 325,
+    line: 326,
     role: "migration:migrateStrategicDecisionsV21:'2.1'",
   },
-  { file: MIGRATIONS_FILE, line: 595, role: "migration:migrateContentHash:'2.2'" },
-  { file: MIGRATIONS_FILE, line: 1798, role: 'migration:ensureVectorStorage:labelVersion' },
+  { file: MIGRATIONS_FILE, line: 596, role: "migration:migrateContentHash:'2.2'" },
+  { file: MIGRATIONS_FILE, line: 1815, role: 'migration:ensureVectorStorage:labelVersion' },
   {
     file: MIGRATIONS_FILE,
-    line: 2536,
+    line: 2553,
     role: 'migration:ensureFirehoseEventColumns:FIREHOSE_SCHEMA_VERSION',
   },
-  { file: SCHEMA_FILE, line: 123, role: 'seed:ignore' },
+  { file: SCHEMA_FILE, line: 128, role: 'seed:ignore' },
 ].sort((a, b) => `${a.file}:${a.line}`.localeCompare(`${b.file}:${b.line}`));
 
 function variableWriterSites(sources: SourceMap): SourceSite[] {
@@ -517,7 +602,13 @@ const EXPECTED_VARIABLE_WRITER_FILES = [
   'tools/cmos/blob-migrations.ts',
   'tools/cmos/cmos-project-init.ts',
   'tools/cmos/cmos-project-update.ts',
+  // s94-m04: the atomic decision-fields migration's own completion marker.
+  'tools/cmos/decision-shape-migration.ts',
   'tools/cmos/owner-resolution.ts',
+  // s94-m06: atomic citation-schema creation/backfill stamps only RECORD_LINKS_MARKER.
+  'tools/cmos/record-link-migration.ts',
+  // s94-m08: operation, reservation and row/provenance keys; never the schema label.
+  'tools/cmos/spin-out-ledger.ts',
   // s92-m02: the one-time sprint end_date repair's marker (key END_DATE_REPAIR_MARKER, a constant).
   'tools/cmos/sprint-end-date-repair.ts',
   // s93-m11: the staleness repair's ledger (key STALENESS_REPAIR_LEDGER_KEY, a constant).
@@ -575,8 +666,8 @@ function auditSources(sources: SourceMap): string[] {
 
   const readers = literalLabelReaders(sources);
   const expectedReaders: readonly SourceSite[] = [
-    { file: MIGRATIONS_FILE, line: 129, role: 'raiseSchemaVersionLabel' },
-    { file: SCHEMA_FILE, line: 485, role: '<module>' },
+    { file: MIGRATIONS_FILE, line: 130, role: 'raiseSchemaVersionLabel' },
+    { file: SCHEMA_FILE, line: 507, role: '<module>' },
   ];
   if (JSON.stringify(readers) !== JSON.stringify(expectedReaders)) {
     findings.push(`literal label readers changed: ${JSON.stringify(readers)}`);
@@ -584,8 +675,8 @@ function auditSources(sources: SourceMap): string[] {
 
   const sinks = literalLabelSinks(sources);
   const expectedSinks: readonly SourceSite[] = [
-    { file: MIGRATIONS_FILE, line: 144, role: 'raiseSchemaVersionLabel' },
-    { file: SCHEMA_FILE, line: 123, role: '<module>' },
+    { file: MIGRATIONS_FILE, line: 145, role: 'raiseSchemaVersionLabel' },
+    { file: SCHEMA_FILE, line: 128, role: '<module>' },
   ];
   if (JSON.stringify(sinks) !== JSON.stringify(expectedSinks)) {
     findings.push(`literal label sinks changed: ${JSON.stringify(sinks)}`);
@@ -634,7 +725,7 @@ function auditSources(sources: SourceMap): string[] {
   });
   if (
     JSON.stringify(parameterizedInitReads) !==
-    JSON.stringify([{ file: INIT_FILE, line: 698, role: 'cmosProjectInit' }])
+    JSON.stringify([{ file: INIT_FILE, line: 729, role: 'cmosProjectInit' }])
   ) {
     findings.push(
       `parameterized init label read changed: ${JSON.stringify(parameterizedInitReads)}`
@@ -690,7 +781,7 @@ describe('schema_version static contract', () => {
       'cannot say WHICH migrations ran',
       'project_identity` view',
       'six logical setters',
-      'eight variable-key',
+      'fourteen variable-key',
       'retrieval path',
     ]) {
       expect(header).toContain(phrase);
@@ -700,16 +791,16 @@ describe('schema_version static contract', () => {
   it('pins setters, literal accesses, and every generic-writer call-site key', () => {
     expect(auditSources(SHIPPED_SOURCES)).toEqual([]);
     expect(logicalSetterSites(SHIPPED_SOURCES)).toEqual(EXPECTED_LOGICAL_SETTERS);
-    // s92-m02 added the ninth (the end_date repair marker) and s93-m11 the tenth (the staleness
-    // repair ledger); one per EXPECTED_VARIABLE_WRITER_FILES.
+    // One statement per EXPECTED_VARIABLE_WRITER_FILES. s94-m10 changed the owner's statement
+    // from REPLACE to a no-op-aware UPSERT; it remains a variable-key writer in this census.
     expect(variableWriterSites(SHIPPED_SOURCES)).toHaveLength(
       EXPECTED_VARIABLE_WRITER_FILES.length
     );
     expect(schemaVersionLiteralSites(SHIPPED_SOURCES)).toEqual(EXPECTED_SCHEMA_VERSION_LITERALS);
     expect(metadataWriterKeySites(SHIPPED_SOURCES)).toEqual(EXPECTED_WRITER_KEYS);
     expect(literalLabelReaders(SHIPPED_SOURCES)).toEqual([
-      { file: MIGRATIONS_FILE, line: 129, role: 'raiseSchemaVersionLabel' },
-      { file: SCHEMA_FILE, line: 485, role: '<module>' },
+      { file: MIGRATIONS_FILE, line: 130, role: 'raiseSchemaVersionLabel' },
+      { file: SCHEMA_FILE, line: 507, role: '<module>' },
     ]);
   });
 
@@ -747,14 +838,19 @@ describe('schema_version static contract', () => {
     expect(logicalSetterSites(changed)).not.toEqual(EXPECTED_LOGICAL_SETTERS);
   });
 
-  it('mutation control rejects one more ARM-3 variable-key writer than the ledger names', () => {
+  it.each([
+    'INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)',
+    'INSERT INTO metadata (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+    'INSERT INTO metadata(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+  ])('mutation control rejects an extra variable-key writer using %s', (sql) => {
     const changed = mutate(
       SHIPPED_SOURCES,
       MIGRATIONS_FILE,
       (source) =>
-        `${source}\nfunction mutantWriter(client: CmosDatabaseClient, key: string, value: string): void { client.execute("INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)", [key, value]); }\n`
+        `${source}\nfunction mutantWriter(client: CmosDatabaseClient, key: string, value: string): void { client.execute(${JSON.stringify(sql)}, [key, value]); }\n`
     );
     expect(variableWriterSites(changed)).toHaveLength(EXPECTED_VARIABLE_WRITER_FILES.length + 1);
+    expect(metadataWriterKeySites(changed)).toHaveLength(EXPECTED_WRITER_KEYS.length + 1);
   });
 
   it('mutation control rejects a direct behavioural label reader outside the helper', () => {
@@ -785,6 +881,19 @@ describe('schema_version static contract', () => {
     expect(schemaVersionLiteralSites(changed)).not.toEqual(EXPECTED_SCHEMA_VERSION_LITERALS);
   });
 
+  it('writer-key ledger follows the spin-out wrapper and rejects a repointed operation key', () => {
+    const changed = mutate(SHIPPED_SOURCES, 'tools/cmos/spin-out-ledger.ts', (source) =>
+      source.replace(
+        'writeSpinOutMetadata(client, operationKey(operation.operationId), operation)',
+        "writeSpinOutMetadata(client, 'schema_version', operation)"
+      )
+    );
+    expect(metadataWriterKeySites(changed)).not.toEqual(EXPECTED_WRITER_KEYS);
+    expect(
+      metadataWriterKeySites(changed).filter((site) => site.key === "'schema_version'")
+    ).toHaveLength(1);
+  });
+
   it('writer-key ledger rejects repointing an existing helper call to the label', () => {
     const changed = mutate(SHIPPED_SOURCES, 'tools/cmos/owner-resolution.ts', (source) =>
       source.replace(
@@ -793,6 +902,28 @@ describe('schema_version static contract', () => {
       )
     );
     expect(metadataWriterKeySites(changed)).not.toEqual(EXPECTED_WRITER_KEYS);
+  });
+
+  it('writer-key ledger includes compact metadata writes and rejects marker repointing', () => {
+    const file = 'tools/cmos/record-link-migration.ts';
+    const markerSite = {
+      file,
+      line: 50,
+      role: 'ensureRecordLinks',
+      callee: 'metadata.execute',
+      key: 'RECORD_LINKS_MARKER',
+    };
+    expect(metadataWriterKeySites(SHIPPED_SOURCES).filter((site) => site.file === file)).toEqual([
+      markerSite,
+    ]);
+    const changed = mutate(SHIPPED_SOURCES, file, (source) =>
+      source.replace("[RECORD_LINKS_MARKER, '1']", "['schema_version', '1']")
+    );
+    expect(metadataWriterKeySites(changed).filter((site) => site.file === file)).toEqual([
+      { ...markerSite, key: "'schema_version'" },
+    ]);
+    expect(metadataWriterKeySites(changed)).not.toEqual(EXPECTED_WRITER_KEYS);
+    expect(schemaVersionLiteralSites(changed)).not.toEqual(EXPECTED_SCHEMA_VERSION_LITERALS);
   });
 });
 

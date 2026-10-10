@@ -2,6 +2,12 @@
 // ABOUTME: s92-m08 — cmos_learnings(action="show"): one learning in full, by id. Search answers carry
 // ABOUTME: 300-character previews, and this is how an agent expands one of them.
 
+import {
+  prepareSpinOutRead,
+  spinOutDetails,
+  spinOutPointerLines,
+  type SpinOutDetails,
+} from './spin-out-read';
 import { frameForeignText } from '../../intelligence/provenance-frame';
 import { withClientAsync, type CmosDatabaseClient } from './client';
 import { createError, createSuccess, CmosErrors, CMOS_ERROR_CODES } from './errors';
@@ -14,7 +20,7 @@ export interface CmosLearningsShowParams {
   projectRoot?: string;
 }
 
-export interface CmosLearningsShowResult {
+export interface CmosLearningsShowResult extends SpinOutDetails {
   id: number;
   /** The full text, never a preview. */
   content: string;
@@ -82,6 +88,7 @@ export async function cmosLearningsShow(
       }
       const l = row.data;
       return createSuccess<CmosLearningsShowResult>({
+        ...spinOutDetails(prepareSpinOutRead(client), 'learning', l.id),
         id: l.id,
         content: l.content,
         status: l.status ?? 'active',
@@ -129,6 +136,7 @@ export function formatLearningsShowForLLM(result: CmosToolResult<CmosLearningsSh
   } else {
     lines.push(l.content);
   }
+  lines.push(...spinOutPointerLines(l));
   appendWarnings(lines, result);
   return lines.join('\n');
 }

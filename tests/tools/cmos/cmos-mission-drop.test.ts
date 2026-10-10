@@ -218,6 +218,41 @@ describe('cmosMissionDrop', () => {
     expect(event!['previousStatus']).toBe('Queued');
   });
 
+  it.each(["RAISE(ABORT, 'drop audit denied')", 'RAISE(IGNORE)'])(
+    'keeps the mission intact when its mandatory drop audit uses %s, then retries once',
+    async (raise) => {
+      const db = new Database(env.dbPath);
+      db.exec(
+        `CREATE TRIGGER deny_drop BEFORE INSERT ON session_events BEGIN SELECT ${raise}; END`
+      );
+      const refused = await cmosMissionDrop({
+        missionId: 'm-queued',
+        reason: 'Moved to another project',
+        projectRoot: env.projectRoot,
+      });
+      expect(refused.success).toBe(false);
+      expect(
+        db.prepare("SELECT status,notes,domain_fields FROM missions WHERE id='m-queued'").get()
+      ).toEqual({ status: 'Queued', notes: null, domain_fields: null });
+      expect(getDropEvent(env.dbPath, 'm-queued')).toBeNull();
+      db.exec('DROP TRIGGER deny_drop');
+      const retried = await cmosMissionDrop({
+        missionId: 'm-queued',
+        reason: 'Moved to another project',
+        projectRoot: env.projectRoot,
+      });
+      expect(retried.success).toBe(true);
+      expect(
+        db
+          .prepare(
+            "SELECT COUNT(*) AS n FROM session_events WHERE mission='m-queued' AND action='drop'"
+          )
+          .get()
+      ).toEqual({ n: 1 });
+      db.close();
+    }
+  );
+
   it('includes droppedAt timestamp in result', async () => {
     const before = new Date().toISOString();
     const result = await cmosMissionDrop({ missionId: 'm-queued', projectRoot: env.projectRoot });
@@ -318,4 +353,24 @@ describe('formatMissionDropForLLM', () => {
     const output = formatMissionDropForLLM(result);
     expect(output).not.toContain('Reason:');
   });
+});
+
+it('refuses an audit trigger that erases the required event after a successful insert', async () => {
+  CmosDetector.resetInstance();
+  ProjectGraphRegistry.resetInstance();
+  const env = createTestEnv();
+  const db = new Database(env.dbPath);
+  try {
+    db.exec(
+      'CREATE TRIGGER erase_audit AFTER INSERT ON session_events BEGIN DELETE FROM session_events WHERE rowid=NEW.rowid; END'
+    );
+    const result = await cmosMissionDrop({ missionId: 'm-queued', projectRoot: env.projectRoot });
+    expect(result.success).toBe(false);
+    expect(db.prepare("SELECT status FROM missions WHERE id='m-queued'").get()).toEqual({
+      status: 'Queued',
+    });
+  } finally {
+    db.close();
+    env.cleanup();
+  }
 });

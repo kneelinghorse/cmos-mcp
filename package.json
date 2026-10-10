@@ -1,6 +1,6 @@
 {
   "name": "@aquex/cmos-mcp",
-  "version": "3.3.0",
+  "version": "3.4.0",
   "description": "Decisions that survive the session. A local project record that AI agents keep through MCP, skills and hooks.",
   "repository": {
     "type": "git",
@@ -70,6 +70,8 @@
     "test": "jest",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
+    "test:retrieval-quality": "node scripts/retrieval-quality-gate.js",
+    "test:class-sweeps": "node scripts/class-sweeps.js",
     "test:performance": "RUN_PERF_ASSERTS=1 jest --coverage=false tests/tools/cmos/e2e-lifecycle.test.ts",
     "test:identity-real-store": "jest --testMatch '**/*.fire.ts' --runTestsByPath tests/private/identity-registration-real-store.fire.ts --runInBand --coverage=false",
     "test:e2e-firstrun": "jest --config jest.e2e.config.js --runInBand",
@@ -112,15 +114,16 @@
     "lint-staged": "^16.2.7",
     "prettier": "^3.3.3",
     "ts-jest": "^29.4.4",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "@modelcontextprotocol/client": "^2.3.1"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.26.0",
     "better-sqlite3": "^12.6.0",
     "sqlite-vec": "^0.1.9",
     "ulid": "^3.0.2",
     "yaml": "^2.8.1",
-    "zod": "^3.25.76"
+    "zod": "^4.2.0",
+    "@modelcontextprotocol/server": "^2.3.1"
   },
   "peerDependencies": {
     "@xenova/transformers": "^2.17.2"

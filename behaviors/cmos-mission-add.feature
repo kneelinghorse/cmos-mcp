@@ -44,9 +44,9 @@ Feature: Create a mission
     Then the call fails with error code "MISSING_PARAMETER"
     And the error identifies "name" as the missing field
 
-  Scenario: Reject missing sprintId
+  Scenario: Reject empty sprintId
     When I call cmos_mission_add with an empty sprintId
-    Then the call fails with error code "MISSING_PARAMETER"
+    Then the call fails with error code "INVALID_PARAMETER"
     And the error identifies "sprintId" as the missing field
 
   Scenario: Reject invalid status value

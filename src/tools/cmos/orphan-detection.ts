@@ -14,6 +14,7 @@ import type { CmosDatabaseClient } from './client';
 import {
   SPRINT_NO_OPEN_WORK_STATUSES,
   MISSION_TERMINAL_STATUSES,
+  missionCompletedSql,
   statusNotInSql,
 } from './terminal-status';
 import { tableHasColumn } from './genesis-columns';
@@ -133,7 +134,7 @@ export function buildOrphanWarnings(result: OrphanDetectionResult): string[] {
   for (const m of result.orphanedMissions) {
     if (m.reason === 'no_sprint') {
       warnings.push(
-        `Mission ${m.id} ("${m.name}") has no parent sprint. Assign it to a sprint or archive it.`
+        `Mission ${m.id} ("${m.name}") has an invalid empty sprint ID. Assign an existing sprint or correct it to NULL for unscheduled work.`
       );
     } else {
       warnings.push(
@@ -178,19 +179,13 @@ function findOrphanedSprints(client: CmosDatabaseClient): OrphanedSprint[] {
 function findOrphanedMissions(client: CmosDatabaseClient, staleDays: number): OrphanedMission[] {
   const missions: OrphanedMission[] = [];
 
-  // Missions with no sprint.
-  //
-  // s87-m01 BEHAVIOUR CHANGE, recorded at the consuming site because the edit was made elsewhere:
-  // `MISSION_TERMINAL_STATUSES` no longer contains 'Failed' (#839 assigns it to the SPRINT domain,
-  // and it was never a key of VALID_STATE_TRANSITIONS). This predicate is the only live consumer
-  // of that set, so a sprint-less mission stored as 'Failed' is now REPORTED AS ORPHANED where it
-  // previously was not. That is a widening of the predicate, not a bug fix. It is unwitnessed:
-  // zero 'Failed' mission rows exist in this store or the fleet enumeration.
+  // NULL is valid unscheduled work. Only an invalid empty ID needs assignment cleanup.
   const noSprintResult = client.getMany<MissionRow>(
     `SELECT id, name, status, started_at
      FROM missions
-     WHERE (sprint_id IS NULL OR sprint_id = '')
+     WHERE sprint_id = ''
        AND ${statusNotInSql('status', MISSION_TERMINAL_STATUSES)}
+       AND NOT (${missionCompletedSql('status')})
      ORDER BY id`
   );
   if (noSprintResult.success && noSprintResult.data) {

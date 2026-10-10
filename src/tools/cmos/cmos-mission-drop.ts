@@ -1,8 +1,9 @@
 // ABOUTME: Implements the cmos_mission_drop action — transitions a mission to Dropped (terminal).
-// ABOUTME: Dropped missions are soft-parked (not deleted) and permanently removed from the active queue.
+// ABOUTME: Drop state and its mandatory audit share the caller-owned transaction used by spin-out.
 
+import { normalizeMissionStatus } from './terminal-status';
 import { z } from 'zod';
-import { withClientValidated } from './client';
+import { withClientValidated, type CmosDatabaseClient } from './client';
 import type { CmosToolResult, Mission, MissionStatus } from './types';
 import {
   createError,
@@ -13,7 +14,6 @@ import {
 } from './errors';
 import { ensureMissionTimestamps } from './schema-migrations';
 import { appendWarnings, attachWarnings } from './format-warnings';
-import { checkWrite } from './write-guard';
 
 /**
  * Result of dropping a mission.
@@ -56,139 +56,217 @@ export async function cmosMissionDrop(
     return createError(CmosErrors.missingParameter('missionId'));
   }
 
-  const missionId = params.missionId.trim();
-  const targetStatus: MissionStatus = 'Dropped';
-
   const warnings: string[] = [];
   const result = await withClientValidated(
     (client) => {
-      const missionResult = client.getOne<Mission>(
-        `SELECT id, status, name, domain_fields FROM missions WHERE id = ?`,
-        [missionId]
-      );
-
-      if (!missionResult.success) {
-        return createError<MissionDropResult>(
-          missionResult.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to query mission' }
-        );
-      }
-
-      if (!missionResult.data) {
-        return createError<MissionDropResult>(CmosErrors.missionNotFound(missionId));
-      }
-
-      const mission = missionResult.data;
-      const currentStatus = mission.status;
-
-      if (currentStatus === 'Dropped') {
+      const migration = ensureMissionTimestamps(client);
+      warnings.push(...(migration.warnings ?? []));
+      const columns = client.getMany<{ name: string }>('PRAGMA table_info(missions)');
+      if (!columns.success || !columns.data?.some((column) => column.name === 'updated_at')) {
         return createError<MissionDropResult>({
-          code: CMOS_ERROR_CODES.MISSION_INVALID_STATE,
-          message: `Mission '${missionId}' is already Dropped`,
-          currentState: currentStatus,
-          suggestion: 'Mission is already in terminal Dropped state',
+          code: 'MISSION_DROP_SCHEMA_FAILED',
+          message: 'Mission timestamp schema is unavailable.',
+          suggestion: 'Resolve the database migration warning, then retry.',
         });
       }
-
-      // s87-m01: guarded through the ONE shared helper. `currentStatus` is read from the store,
-      // not validated by the type system, and an unrecognized value now yields a NAMED refusal
-      // instead of an unhandled TypeError the MCP boundary reports as "an internal error".
-      const validTransitions = transitionsFrom(currentStatus);
-      if (validTransitions === undefined) {
-        return createError<MissionDropResult>(
-          CmosErrors.missionUnrecognizedStatus(missionId, currentStatus)
-        );
-      }
-      if (!validTransitions.includes(targetStatus)) {
-        return createError<MissionDropResult>(
-          CmosErrors.missionInvalidTransition(missionId, currentStatus, targetStatus)
-        );
-      }
-
-      const now = new Date().toISOString();
-
-      let existingDomainFields: Record<string, unknown> = {};
-      if (mission.domain_fields) {
-        try {
-          existingDomainFields = JSON.parse(mission.domain_fields);
-        } catch {
-          existingDomainFields = {};
+      const begin = client.raw('BEGIN IMMEDIATE');
+      if (!begin.success) return createError<MissionDropResult>(begin.error!);
+      try {
+        const dropped = cmosMissionDropOnClient(client, params);
+        if (!dropped.success) {
+          const rollback = client.raw('ROLLBACK');
+          if (!rollback.success) return createError<MissionDropResult>(rollback.error!);
+          return dropped;
         }
-      }
-
-      const updatedDomainFields = {
-        ...existingDomainFields,
-        droppedReason: params.reason ?? null,
-        droppedAt: now,
-        droppedFromStatus: currentStatus,
-      };
-
-      const dropNote = params.reason
-        ? `[Dropped] ${params.reason}`
-        : `[Dropped] Removed from active queue`;
-
-      warnings.push(...(ensureMissionTimestamps(client).warnings ?? []));
-
-      const updateResult = client.execute(
-        `UPDATE missions
-         SET status = ?,
-             domain_fields = ?,
-             notes = COALESCE(notes || ' | ', '') || ?,
-             updated_at = ?
-         WHERE id = ?`,
-        [targetStatus, JSON.stringify(updatedDomainFields), dropNote, now, missionId]
-      );
-
-      if (!updateResult.success) {
-        return createError<MissionDropResult>(
-          updateResult.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to update mission' }
-        );
-      }
-
-      if (updateResult.data?.changes === 0) {
+        const commit = client.raw('COMMIT');
+        if (!commit.success) {
+          const rollback = client.raw('ROLLBACK');
+          return createError<MissionDropResult>(rollback.success ? commit.error! : rollback.error!);
+        }
+        return dropped;
+      } catch (error) {
+        const rollback = client.raw('ROLLBACK');
         return createError<MissionDropResult>({
-          code: CMOS_ERROR_CODES.DB_QUERY_FAILED,
-          message: `Failed to update mission '${missionId}'`,
-          suggestion: 'The mission may have been modified by another process',
+          code: 'MISSION_DROP_FAILED',
+          message: `Mission drop failed: ${String(error)}${rollback.success ? '' : `; rollback failed: ${rollback.error?.message}`}`,
+          suggestion: 'Check the database and session_events write permissions, then retry.',
         });
       }
-
-      const eventResult = client.execute(
-        `INSERT INTO session_events (ts, agent, mission, action, status, summary, raw_event)
-         VALUES (?, 'mcp-tool', ?, 'drop', ?, ?, ?)`,
-        [
-          now,
-          missionId,
-          targetStatus,
-          params.reason ?? `Dropped mission ${missionId}`,
-          JSON.stringify({
-            tool: 'cmos_mission_drop',
-            missionId,
-            previousStatus: currentStatus,
-            newStatus: targetStatus,
-            reason: params.reason ?? null,
-          }),
-        ]
-      );
-
-      if (!checkWrite(eventResult, warnings, 'mission drop event logging')) {
-        console.warn('Failed to log mission drop event:', eventResult.error);
-      }
-
-      return createSuccess<MissionDropResult>(
-        {
-          missionId,
-          previousStatus: currentStatus,
-          currentStatus: targetStatus,
-          reason: params.reason ?? null,
-          message: `Mission '${missionId}' has been dropped`,
-          droppedAt: now,
-        },
-        warnings
-      );
     },
     { projectRoot: params.projectRoot }
   );
   return attachWarnings(result, warnings);
+}
+
+/** Caller must own an IMMEDIATE transaction and roll it back on any failed result. */
+export function cmosMissionDropOnClient(
+  client: CmosDatabaseClient,
+  params: CmosMissionDropParams
+): CmosToolResult<MissionDropResult> {
+  const missionId = params.missionId.trim();
+  const targetStatus: MissionStatus = 'Dropped';
+  const missionResult = client.getOne<Mission>(
+    `SELECT id, status, name, domain_fields, notes FROM missions WHERE id = ?`,
+    [missionId]
+  );
+
+  if (!missionResult.success) {
+    return createError<MissionDropResult>(
+      missionResult.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to query mission' }
+    );
+  }
+
+  if (!missionResult.data) {
+    return createError<MissionDropResult>(CmosErrors.missionNotFound(missionId));
+  }
+
+  const mission = missionResult.data;
+  const currentStatus = normalizeMissionStatus(mission.status);
+
+  if (currentStatus === 'Dropped') {
+    return createError<MissionDropResult>({
+      code: CMOS_ERROR_CODES.MISSION_INVALID_STATE,
+      message: `Mission '${missionId}' is already Dropped`,
+      currentState: currentStatus,
+      suggestion: 'Mission is already in terminal Dropped state',
+    });
+  }
+
+  // s87-m01: guarded through the ONE shared helper. `currentStatus` is read from the store,
+  // not validated by the type system, and an unrecognized value now yields a NAMED refusal
+  // instead of an unhandled TypeError the MCP boundary reports as "an internal error".
+  const validTransitions = transitionsFrom(currentStatus);
+  if (validTransitions === undefined) {
+    return createError<MissionDropResult>(
+      CmosErrors.missionUnrecognizedStatus(missionId, currentStatus)
+    );
+  }
+  if (!validTransitions.includes(targetStatus)) {
+    return createError<MissionDropResult>(
+      CmosErrors.missionInvalidTransition(missionId, currentStatus, targetStatus)
+    );
+  }
+
+  const now = new Date().toISOString();
+
+  let existingDomainFields: Record<string, unknown> = {};
+  if (mission.domain_fields) {
+    try {
+      existingDomainFields = JSON.parse(mission.domain_fields);
+    } catch {
+      existingDomainFields = {};
+    }
+  }
+
+  const updatedDomainFields = {
+    ...existingDomainFields,
+    droppedReason: params.reason ?? null,
+    droppedAt: now,
+    droppedFromStatus: currentStatus,
+  };
+
+  const dropNote = params.reason
+    ? `[Dropped] ${params.reason}`
+    : `[Dropped] Removed from active queue`;
+
+  const updateResult = client.execute(
+    `UPDATE missions
+     SET status = ?,
+         domain_fields = ?,
+         notes = COALESCE(notes || ' | ', '') || ?,
+         updated_at = ?
+     WHERE id = ?`,
+    [targetStatus, JSON.stringify(updatedDomainFields), dropNote, now, missionId]
+  );
+
+  if (!updateResult.success) {
+    return createError<MissionDropResult>(
+      updateResult.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to update mission' }
+    );
+  }
+
+  if (updateResult.data?.changes === 0) {
+    return createError<MissionDropResult>({
+      code: CMOS_ERROR_CODES.DB_QUERY_FAILED,
+      message: `Failed to update mission '${missionId}'`,
+      suggestion: 'The mission may have been modified by another process',
+    });
+  }
+
+  const eventResult = client.execute(
+    `INSERT INTO session_events (ts, agent, mission, action, status, summary, raw_event)
+     VALUES (?, 'mcp-tool', ?, 'drop', ?, ?, ?)`,
+    [
+      now,
+      missionId,
+      targetStatus,
+      params.reason ?? `Dropped mission ${missionId}`,
+      JSON.stringify({
+        tool: 'cmos_mission_drop',
+        missionId,
+        previousStatus: currentStatus,
+        newStatus: targetStatus,
+        reason: params.reason ?? null,
+      }),
+    ]
+  );
+
+  if (!eventResult.success || eventResult.data?.changes !== 1) {
+    return createError<MissionDropResult>({
+      code: 'MISSION_DROP_AUDIT_FAILED',
+      message: `Mission '${missionId}' could not record its mandatory drop audit: ${eventResult.error?.message ?? 'unknown error'}`,
+      suggestion:
+        'Repair the session_events write failure, then retry the drop. The transaction must be rolled back.',
+    });
+  }
+
+  const verifiedMission = client.getOne<{
+    status: string;
+    domain_fields: string;
+    notes: string;
+    updated_at: string;
+  }>('SELECT status,domain_fields,notes,updated_at FROM missions WHERE id=?', [missionId]);
+  const verifiedAudit = client.getOne<{ count: number }>(
+    "SELECT COUNT(*) AS count FROM session_events WHERE ts=? AND mission=? AND action='drop' AND status=? AND raw_event=?",
+    [
+      now,
+      missionId,
+      targetStatus,
+      JSON.stringify({
+        tool: 'cmos_mission_drop',
+        missionId,
+        previousStatus: currentStatus,
+        newStatus: targetStatus,
+        reason: params.reason ?? null,
+      }),
+    ]
+  );
+  if (
+    !verifiedMission.success ||
+    !verifiedAudit.success ||
+    verifiedAudit.data?.count !== 1 ||
+    verifiedMission.data?.status !== targetStatus ||
+    verifiedMission.data?.domain_fields !== JSON.stringify(updatedDomainFields) ||
+    verifiedMission.data?.notes !==
+      (mission.notes == null ? '' : `${mission.notes} | `) + dropNote ||
+    verifiedMission.data?.updated_at !== now
+  ) {
+    return createError<MissionDropResult>({
+      code: 'MISSION_DROP_POSTCONDITION_FAILED',
+      message: `Mission '${missionId}' did not retain its exact drop state and audit.`,
+      suggestion:
+        'Inspect database triggers and write failures, roll back this transaction, then retry after repair.',
+    });
+  }
+
+  return createSuccess<MissionDropResult>({
+    missionId,
+    previousStatus: currentStatus,
+    currentStatus: targetStatus,
+    reason: params.reason ?? null,
+    message: `Mission '${missionId}' has been dropped`,
+    droppedAt: now,
+  });
 }
 
 export function formatMissionDropForLLM(result: CmosToolResult<MissionDropResult>): string {

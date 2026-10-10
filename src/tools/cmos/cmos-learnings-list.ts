@@ -7,6 +7,7 @@
  * @module tools/cmos/cmos-learnings-list
  */
 
+import { prepareSpinOutRead } from './spin-out-read';
 import { withClient } from './client';
 import type { CmosToolResult } from './types';
 import { createError, createSuccess } from './errors';
@@ -163,6 +164,9 @@ export async function cmosLearningsList(
 
       const conditions: string[] = [];
       const queryParams: (string | number)[] = [];
+      const visible = prepareSpinOutRead(client).predicate('learning', 'learnings.id');
+      conditions.push(visible.sql);
+      queryParams.push(...visible.params);
 
       if (params.category) {
         conditions.push('category = ?');

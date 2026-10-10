@@ -27,8 +27,8 @@ import { spawnSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
+import { Client } from '@modelcontextprotocol/client';
 import Database from 'better-sqlite3';
 import { connectStdioServer, textOf, dataOf, type StdioHarness } from './stdio-harness';
 import { installPackedArtifact } from './packed-artifact';
@@ -135,7 +135,11 @@ describe('first-run E2E: pack -> install -> drive quickstart over stdio (s77-m10
       });
       const quietClient = new Client(
         { name: 's92-m07-stderr', version: '0.0.0' },
-        { capabilities: {} }
+        {
+          capabilities: {},
+          supportedProtocolVersions: ['2025-11-25'],
+          versionNegotiation: { mode: 'legacy' },
+        }
       );
       await quietClient.connect(quietTransport);
       await quietClient.listTools();

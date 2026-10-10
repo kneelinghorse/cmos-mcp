@@ -9,25 +9,26 @@ Quick reference for querying CMOS history using any SQLite client.
 
 ## Core Tables
 
-| Table                  | Purpose                                  | Key Columns                                                  |
-| ---------------------- | ---------------------------------------- | ------------------------------------------------------------ |
-| `metadata`             | Project identity and schema markers      | `key`, `value`                                               |
-| `sprints`              | Sprint registry                          | `id`, `title`, `status`, `start_date`, `end_date`            |
-| `missions`             | Mission backlog with status              | `id`, `sprint_id`, `name`, `status`, `completed_at`, `notes` |
-| `mission_dependencies` | Edges between missions                   | `from_id`, `to_id`, `type`                                   |
-| `contexts`             | JSON payloads for project/master context | `id`, `content`, `updated_at`                                |
-| `context_snapshots`    | Historical context versions              | `context_id`, `content`, `created_at`, `content_hash`        |
-| `sessions`             | Universal session registry               | `id`, `type`, `sprint_id`, `started_at`, `status`            |
-| `session_missions`     | Session-to-mission links                 | `session_id`, `mission_id`                                   |
-| `session_events`       | Project activity/event log               | `ts`, `agent`, `mission`, `action`, `status`, `summary`      |
-| `telemetry_events`     | Runtime metrics and health signals       | `mission`, `source_path`, `ts`, `payload`                    |
-| `strategic_decisions`  | Durable decision records                 | `id`, `sprint_id`, `mission_id`, `decision_text`, `status`   |
-| `learnings`            | Durable learning records                 | `id`, `sprint_id`, `mission_id`, `content`, `status`         |
-| `next_steps`           | Action items from sessions and missions  | `id`, `sprint_id`, `mission_id`, `content`, `status`         |
-| `constraints`          | Project constraints and review state     | `id`, `content`, `status`, `content_hash`                    |
-| `sync_event_queue`     | Outbound synchronization queue           | `id`, `event_type`, `envelope`, `status`                     |
-| `prompt_mappings`      | Prompt → behavior mapping                | `prompt`, `behavior`                                         |
-| `proposals`            | Drafted records awaiting the operator    | `id`, `text`, `kind`, `outcome`, `created_at`, `record_id`   |
+| Table                  | Purpose                                   | Key Columns                                                  |
+| ---------------------- | ----------------------------------------- | ------------------------------------------------------------ |
+| `metadata`             | Project identity and schema markers       | `key`, `value`                                               |
+| `sprints`              | Sprint registry                           | `id`, `title`, `status`, `start_date`, `end_date`            |
+| `missions`             | Mission backlog with status               | `id`, `sprint_id`, `name`, `status`, `completed_at`, `notes` |
+| `mission_dependencies` | Edges between missions                    | `from_id`, `to_id`, `type`                                   |
+| `contexts`             | JSON payloads for project/master context  | `id`, `content`, `updated_at`                                |
+| `context_snapshots`    | Historical context versions               | `context_id`, `content`, `created_at`, `content_hash`        |
+| `sessions`             | Universal session registry                | `id`, `type`, `sprint_id`, `started_at`, `status`            |
+| `session_missions`     | Session-to-mission links                  | `session_id`, `mission_id`                                   |
+| `session_events`       | Project activity/event log                | `ts`, `agent`, `mission`, `action`, `status`, `summary`      |
+| `telemetry_events`     | Runtime metrics and health signals        | `mission`, `source_path`, `ts`, `payload`                    |
+| `strategic_decisions`  | Durable decision records                  | `id`, `sprint_id`, `mission_id`, `decision_text`, `status`   |
+| `learnings`            | Durable learning records                  | `id`, `sprint_id`, `mission_id`, `content`, `status`         |
+| `record_links`         | Derived local decision/learning citations | `from_kind`, `from_id`, `to_kind`, `to_id`, `resolution`     |
+| `next_steps`           | Action items from sessions and missions   | `id`, `sprint_id`, `mission_id`, `content`, `status`         |
+| `constraints`          | Project constraints and review state      | `id`, `content`, `status`, `content_hash`                    |
+| `sync_event_queue`     | Outbound synchronization queue            | `id`, `event_type`, `envelope`, `status`                     |
+| `prompt_mappings`      | Prompt → behavior mapping                 | `prompt`, `behavior`                                         |
+| `proposals`            | Drafted records awaiting the operator     | `id`, `text`, `kind`, `outcome`, `created_at`, `record_id`   |
 
 **Views**:
 
@@ -39,6 +40,26 @@ Quick reference for querying CMOS history using any SQLite client.
 `proposals` holds drafts (`Would record:` lines) until the operator answers them; it is outside
 search and sync events. A decision recorded from a draft keeps how its approval was known in
 `strategic_decisions.approval_mode`, `approval_draft` and `approval_words`.
+The mode is `approved`, `agent-judged`, `agent-attested`, or a direct caller's declared
+`autonomous`; NULL means the mode was not recorded. Draft proposals retain their existing
+three approval modes.
+
+Decision reasoning lives in nullable `context_text`, `alternatives` (JSON string array),
+`consequences` and `deciders` (JSON string array). The decision FTS index covers the headline
+and all four fields. A write-time migration upgrades the seven nullable shape/approval columns
+and owned FTS objects atomically, then writes `metadata.decision_shape_columns=1`; reads do not
+run that migration, and old records keep their original text with NULL new fields.
+
+`record_links` stores unique directed textual citation endpoint pairs with `typed` or `bare`
+resolution; typed evidence wins when both cite the same target. Canonical decision fields and
+array items are parsed separately. Both endpoints must be local (or legacy NULL origin), with a
+known target timestamp strictly earlier than its source. Bare numbers must be unambiguous across
+decisions, learnings, constraints, next steps and feedback. Reads revalidate current origin, time
+and collision eligibility; supersession follows `strategic_decisions.superseded_by` separately.
+The owned write-time migration creates/backfills the table atomically and stamps
+`metadata.record_links_schema=1` last. Required source rows and link repair share their writer's
+transaction. Old stores read explicit typed references without writing a migration; query failures
+produce named warnings. Derived links may be removed when endpoint eligibility changes.
 
 Runtime migrations may add tables such as `agent_feedback` and optional search/vector structures.
 
@@ -216,5 +237,5 @@ ORDER BY name;
 
 ---
 
-**Last Updated**: 2026-10-08
+**Last Updated**: 2026-10-10
 **Replaces**: `sqlite-db-browser-guide.md` (tool-agnostic version)

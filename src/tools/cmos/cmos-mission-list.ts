@@ -8,6 +8,8 @@
  * @module tools/cmos/cmos-mission-list
  */
 
+import { prepareSpinOutRead } from './spin-out-read';
+import { normalizeMissionStatus, missionCompletedSql } from './terminal-status';
 import { z } from 'zod';
 import { withClient } from './client';
 import type { CmosToolResult, Mission, MissionStatus } from './types';
@@ -178,7 +180,8 @@ export async function cmosMissionList(
         params.status,
         params.sprintId,
         limit,
-        hasProjectId
+        hasProjectId,
+        prepareSpinOutRead(client).predicate('mission', 'missions.id')
       );
 
       // Get total count first
@@ -223,14 +226,18 @@ function buildQuery(
   status: MissionStatus | undefined,
   sprintId: string | undefined,
   limit: number,
-  hasProjectId: boolean
+  hasProjectId: boolean,
+  visibility: { sql: string; params: string[] }
 ): { sql: string; countSql: string; queryParams: unknown[] } {
-  const conditions: string[] = [];
-  const queryParams: unknown[] = [];
+  const conditions: string[] = [visibility.sql];
+  const queryParams: unknown[] = [...visibility.params];
 
   if (status) {
-    conditions.push('status = ?');
-    queryParams.push(status);
+    if (status === 'Completed') conditions.push(missionCompletedSql('status'));
+    else {
+      conditions.push('status = ?');
+      queryParams.push(status);
+    }
   }
 
   if (sprintId) {
@@ -275,7 +282,7 @@ function parseMission(mission: Mission): MissionListItem {
     id: mission.id,
     sprintId: mission.sprint_id,
     name: mission.name,
-    status: mission.status,
+    status: normalizeMissionStatus(mission.status),
     completedAt: mission.completed_at,
     notes: mission.notes,
     objective: mission.objective,

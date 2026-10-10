@@ -33,7 +33,9 @@ export function openSprintPointer(client: CmosDatabaseClient): SprintPointer | n
       ORDER BY rowid DESC LIMIT 1`,
     [...SPRINT_OPEN_STATUSES]
   );
-  return row.success && row.data ? row.data : null;
+  if (!row.success)
+    throw new Error(`Open sprint lookup failed: ${row.error?.message ?? 'unknown'}`);
+  return row.data ?? null;
 }
 
 /** Set the pointers on an already-parsed master_context object (the close persists it itself). */
@@ -90,7 +92,16 @@ export function syncSprintTracking(
     );
     return;
   }
-  applySprintTracking(parsed, openSprintPointer(client), lastCompletedSprintId);
+  let current: SprintPointer | null;
+  try {
+    current = openSprintPointer(client);
+  } catch (error) {
+    warnings.push(
+      `sprint_tracking was not updated: ${error instanceof Error ? error.message : String(error)}`
+    );
+    return;
+  }
+  applySprintTracking(parsed, current, lastCompletedSprintId);
   checkWrite(
     client.execute(`UPDATE contexts SET content = ?, updated_at = ? WHERE id = 'master_context'`, [
       JSON.stringify(parsed),

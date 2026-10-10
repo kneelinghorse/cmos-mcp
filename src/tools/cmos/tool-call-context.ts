@@ -5,10 +5,12 @@
 import { AsyncLocalStorage } from 'async_hooks';
 
 import type { ActionMode } from './action-taxonomy';
+import type { CliRemedyTarget } from '../../utils/cli-remedy';
 import { isReadOnlyAgentSession } from './read-only-agent-guard';
 
 interface ToolCallContext {
   readonly actionMode: ActionMode;
+  projectResolution?: CliRemedyTarget;
   readonly projectIdentityDisclosures: Set<string>;
   readonly storeUpkeepNotes: Set<string>;
   /** s93-m11 — the database files this call changed a row in (see recordStoreWrite). */
@@ -42,6 +44,16 @@ class CapturedToolCallError extends Error {
 /** The current dispatch call's read/write classification, or undefined outside dispatch. */
 export function currentToolCallActionMode(): ActionMode | undefined {
   return toolCallStorage.getStore()?.actionMode;
+}
+
+/** Preserve the selected project and source for remedies emitted by nested handlers. */
+export function setToolProjectResolution(project: CliRemedyTarget): void {
+  const context = toolCallStorage.getStore();
+  if (context) context.projectResolution = project;
+}
+
+export function currentToolProjectResolution(): CliRemedyTarget | undefined {
+  return toolCallStorage.getStore()?.projectResolution;
 }
 
 /**

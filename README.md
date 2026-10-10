@@ -14,7 +14,7 @@ Requires Node.js 20 or newer.
 1. Install the pinned CLI:
 
    ```sh
-   npm install -g @aquex/cmos-mcp@3.3.0
+   npm install -g @aquex/cmos-mcp@3.4.0
    ```
 
    Ensure the global npm bin directory is on your PATH.
@@ -64,8 +64,11 @@ Other tools use the [harness adapters and coverage guide](docs/harnesses.md).
 
 The record stays in your project's SQLite file. With a stored user-scoped key or legacy
 environment credentials, explicit session and sprint closes attempt a background
-upload of the **whole file**, including pending and declined proposals.
-`CMOS_CHECKPOINT_SYNC=off` stops those checkpoints, not requested network actions or
+upload of the **whole file**, including pending and declined proposals. For a registered project,
+MCP tool writes also schedule an upload after 5 quiet minutes or 30 minutes of continuous writes;
+the next poll starts it within 60 seconds when no upload lease or failure backoff blocks it.
+Transfer time follows. See the timing and failure details under [Optional: hosted dashboard](#optional-hosted-dashboard).
+`CMOS_CHECKPOINT_SYNC=off` stops automatic uploads, not requested network actions or
 shared-collaboration pushes. Implicit process-exit closes do not upload. [Full network and data disclosure](SECURITY.md#outbound-network).
 
 ## Technical reference
@@ -92,14 +95,14 @@ Recommended: a global install of this release. The server then starts from disk,
 lookup on launch:
 
 ```bash
-npm install -g @aquex/cmos-mcp@3.3.0
+npm install -g @aquex/cmos-mcp@3.4.0
 ```
 
 Or run it on demand with `npx`. Pin the version and prefer the local cache: an unpinned `npx -y`
 can look the package up again on every launch.
 
 ```bash
-npx --prefer-offline -y @aquex/cmos-mcp@3.3.0
+npx --prefer-offline -y @aquex/cmos-mcp@3.4.0
 ```
 
 Semantic (vector) search is optional. Without it, retrieval is keyword-only, and the install is
@@ -117,7 +120,7 @@ arguments (keep `--project-root` where an example has it).
 ### Claude Code
 
 ```bash
-claude mcp add-json cmos-mcp '{"command":"npx","args":["--prefer-offline","-y","@aquex/cmos-mcp@3.3.0"]}'
+claude mcp add-json cmos-mcp '{"command":"npx","args":["--prefer-offline","-y","@aquex/cmos-mcp@3.4.0"]}'
 ```
 
 ### Claude Desktop
@@ -132,7 +135,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS)
       "args": [
         "--prefer-offline",
         "-y",
-        "@aquex/cmos-mcp@3.3.0",
+        "@aquex/cmos-mcp@3.4.0",
         "--project-root",
         "/absolute/path/to/your/project"
       ]
@@ -156,7 +159,7 @@ Add to `~/.cursor/mcp.json`:
   "mcpServers": {
     "cmos-mcp": {
       "command": "npx",
-      "args": ["--prefer-offline", "-y", "@aquex/cmos-mcp@3.3.0"]
+      "args": ["--prefer-offline", "-y", "@aquex/cmos-mcp@3.4.0"]
     }
   }
 }
@@ -169,7 +172,7 @@ Add to `~/.cursor/mcp.json`:
   "context_servers": {
     "cmos-mcp": {
       "command": "npx",
-      "args": ["--prefer-offline", "-y", "@aquex/cmos-mcp@3.3.0"]
+      "args": ["--prefer-offline", "-y", "@aquex/cmos-mcp@3.4.0"]
     }
   }
 }
@@ -190,7 +193,7 @@ your terminal PATH, so the terminal route needs the standalone Claude CLI.
   "mcpServers": {
     "cmos-mcp": {
       "command": "npx",
-      "args": ["--prefer-offline", "-y", "@aquex/cmos-mcp@3.3.0"]
+      "args": ["--prefer-offline", "-y", "@aquex/cmos-mcp@3.4.0"]
     }
   }
 }
@@ -261,7 +264,9 @@ Then run `cmos_auth(action="login_init")` from your agent. It returns a one-time
 
 `CMOS_DASHBOARD_URL` defaults to `https://cmos.aquex.ai`. Until you sign in, the dashboard tools (`cmos_message`, sync, registry) return a structured `DASHBOARD_NOT_CONFIGURED` error that names `cmos_auth(action="login_init")`; a paid-tier feature on a free account returns `DASHBOARD_UPGRADE_REQUIRED`. Local tools never depend on the dashboard.
 
-With a stored user-scoped dashboard key or legacy environment credentials, explicit `cmos_session(action="complete")` and `cmos_sprint(action="complete")` calls attempt a background checkpoint upload of the whole SQLite file, including pending, declined and expired proposals. A failed upload does not fail the local close. Implicit process-exit closes do not upload. Set `CMOS_CHECKPOINT_SYNC=off` in the server environment to disable automatic checkpoint uploads; it does not disable explicit sync, messaging, sign-in, shared-collaboration pushes or other requested network actions. See [SECURITY.md](SECURITY.md#outbound-network).
+With a stored user-scoped dashboard key or legacy environment credentials, explicit `cmos_session(action="complete")` and `cmos_sprint(action="complete")` calls attempt a background upload and may register the project first. For a registered project, an MCP tool call that actually writes its store also schedules an upload. It becomes due after 5 quiet minutes or 30 minutes of continuous writes, and starts within the next 60 seconds when no upload lease or failure backoff blocks it. A running server must have opened the project; work owed by a short-lived process survives for the next server. Each upload sends a consistent snapshot of the whole SQLite file, including pending, declined and expired proposals. Transfer time is additional, and concurrent servers share one upload lease per project.
+
+Upload results and failures appear in `cmos_status` and `cmos_review`. HTTP 401, 402 or 403 pauses automatic retries until an explicit close succeeds. A failed upload does not fail the local write or close. Implicit process-exit closes do not upload. Set `CMOS_CHECKPOINT_SYNC=off` in the server environment to disable automatic uploads; it does not disable explicit sync, messaging, sign-in, shared-collaboration pushes or other requested network actions. See [SECURITY.md](SECURITY.md#outbound-network).
 
 ## Project resolution
 
@@ -285,6 +290,58 @@ says so in its text whenever the project came from workspace roots, `--project-r
 default. A registry default set before 3.2.0 is not applied until you re-run `setAsDefault`; the
 server, `cmos_message(action="whoami")` and `cmos_review` say so when one exists.
 
+## Move work out of a central planning folder
+
+If you collect several efforts in one CMOS project, use `spin-out` when an effort needs its
+own project folder. It copies selected missions, their linked decisions, learnings and next
+steps, and any additional record IDs you name. The source remains a readable history with
+pointers to the new project.
+
+Create the destination folder first. The source must be registered, and the two stores must
+have distinct project identities. Both roots are required; this command does not use an ambient
+project or registry default. Omit `--apply` to preview the selection and mapping:
+
+```sh
+cmos-mcp spin-out --from /work/projects --to /work/new-product --sprint sprint-12
+
+# Or select missions, with additional decisions, learnings and next steps by ID:
+cmos-mcp spin-out --from /work/projects --to /work/new-product \
+  --missions product-plan,product-prototype \
+  --decisions 41,42 --learnings 17 --next-steps 23,24
+
+# Apply the same reviewed selection:
+cmos-mcp spin-out --from /work/projects --to /work/new-product \
+  --missions product-plan,product-prototype \
+  --decisions 41,42 --learnings 17 --next-steps 23,24 --apply
+```
+
+Choose either `--sprint` or `--missions`. A destination without CMOS is reported as needing
+initialization in the preview; `--apply` initializes it and takes database backups before
+copying. Copied work retains its status but has no sprint assignment in the destination.
+Assign it to a target sprint when ready. Source Queued, Blocked and Deferred missions become
+Dropped; Completed and already Dropped missions retain their status. Source decisions and
+learnings become archived, and source next steps become dropped. Default lists and retrieval
+omit these transferred source rows. Sprint history retains its counts and identifies transfers
+with their destination pointers. No sprint closes automatically.
+
+Read a source or copied decision, learning or mission with its existing `show` action and an
+explicit `projectRoot`; the result includes `spunOutTo` or `spinOutOrigin` and a readable address.
+For a historical next step, use
+`cmos_context(action="next_steps", nextStepAction="list", nextStepIds=[23], projectRoot="/work/projects")`.
+Explicit IDs include moved or dropped rows; an explicit `nextStepStatus` still filters them.
+The ordinary next-step list continues to show open work. Target next steps without a sprint
+are flagged idle after 42 days. The CLI does not upload either store immediately: each enters
+the normal upload schedule after its next successful MCP write, subject to the configured
+[upload controls](#optional-hosted-dashboard).
+
+Retry the exact command after an interruption. A verified completed operation returns unchanged.
+If source records changed after the target copy committed, final source marking is refused and
+both stores are preserved for review. If a reserved retry lacks its committed target receipt,
+the command also refuses: it cannot distinguish a crash before copying from an erased proof of
+an earlier copy. Preserve **both roots and the operation ID** named in the remedy, inspect their
+ledgers and pre-write snapshots, and resolve or restore the conflicting state before retrying.
+Do not delete a reservation to force another copy; retries never silently overwrite copied work.
+
 ## Environment variables
 
 ```bash
@@ -302,7 +359,7 @@ CMOS_CONFIG_DIR=/custom/path
 # Snapshot retention (default shown)
 CMOS_MAX_SNAPSHOTS=50
 
-# Optional — disable best-effort checkpoint uploads triggered by explicit completion calls.
+# Optional — disable background uploads after writes and explicit completion calls.
 # Shared-store propagation and explicitly requested network actions remain available.
 CMOS_CHECKPOINT_SYNC=off
 ```
@@ -333,7 +390,7 @@ Every tool returns a uniform envelope:
 
 ## Known limits
 
-- Sync is checkpoint-driven, not continuous — manual `cmos_db(action="backfill")` flushes pending events to the dashboard.
+- Registered projects sync after writes and explicit closes while a server is running; manual `cmos_db(action="backfill")` requests a sync immediately.
 - SQLite is the source of truth and the Postgres mirror is a mirror. To bring state down, `cmos_db(action="clone")` bootstraps a fresh machine from dashboard state and `cmos_db(action="pull")` merges events since your last cursor.
 - Cross-user messaging on the dashboard is paid-tier; same-user (multi-device) messaging is free.
 

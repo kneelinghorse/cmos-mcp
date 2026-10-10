@@ -211,7 +211,7 @@ export async function cmosSessionStart(
   // violations regardless of call site — MCP layer or direct invocation).
   const parseResult = cmosSessionStartSchema.safeParse(params);
   if (!parseResult.success) {
-    const firstError = parseResult.error.errors[0];
+    const firstError = parseResult.error.issues[0];
     return createError({
       code: CMOS_ERROR_CODES.INVALID_PARAMETER,
       message: `Validation error: ${firstError?.message ?? 'Unknown error'}`,
@@ -369,8 +369,8 @@ export async function cmosSessionStart(
           advisorySprintId = resolveCurrentSprintId(client);
           warnings.push(
             advisorySprintId
-              ? `No sprint is in an open status (Active / In Progress / Current), so this session is recorded with sprint_id NULL — decisions, learnings, constraints and next-steps captured in it will be untagged too. Display surfaces still name '${advisorySprintId}' (the most recent non-dead sprint). Run cmos_sprint(action="add") to open a sprint before starting mission work.`
-              : 'No sprint is in an open status (Active / In Progress / Current), so this session is recorded with sprint_id NULL — decisions, learnings, constraints and next-steps captured in it will be untagged too. Run cmos_sprint(action="add") to open a sprint before starting mission work.'
+              ? `No sprint is in an open status (Active / In Progress / Current), so this session is recorded with sprint_id NULL — decisions, learnings, constraints and next-steps captured in it will be untagged too. Display surfaces still name '${advisorySprintId}' (the most recent non-dead sprint). Missions can be unscheduled; optionally use cmos_sprint(action="add") to group work in a sprint.`
+              : 'No sprint is in an open status (Active / In Progress / Current), so this session is recorded with sprint_id NULL — decisions, learnings, constraints and next-steps captured in it will be untagged too. Missions can be unscheduled; optionally use cmos_sprint(action="add") to group work in a sprint.'
           );
         }
       }

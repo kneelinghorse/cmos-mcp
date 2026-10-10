@@ -177,6 +177,30 @@ describe('sprint_status emit (Sprint 72 m02)', () => {
     db.close();
   }
 
+  it('mission start propagates an activated parent before the mission, under each existing lock', async () => {
+    createStore({
+      sprintStatus: 'Planned',
+      extraSql:
+        "INSERT INTO missions(id,name,status,sprint_id) VALUES('m1','Start','Queued','s1');",
+    });
+    const { cmosMissionTransition } =
+      await import('../../../src/tools/cmos/cmos-mission-transition');
+    const result = await cmosMissionTransition({
+      action: 'start',
+      missionId: 'm1',
+      projectRoot: tempDir,
+    });
+    expect(result.success).toBe(true);
+    expect(pushedBodies.map((body) => body.eventType)).toEqual([
+      'sprint_updated',
+      'mission_updated',
+    ]);
+    expect(lockScopes.filter((scope) => scope.startsWith('acquire:'))).toEqual([
+      'acquire:sprint_status',
+      'acquire:mission_active',
+    ]);
+  });
+
   // ─── maybePropagateSprintStatus (the dispatcher hook, tested directly) ──────────
 
   it('emits exactly ONE sprint_updated {sprintId,status,occurredAt,originSeq} under the sprint_status lock', async () => {

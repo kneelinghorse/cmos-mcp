@@ -6,13 +6,13 @@
  */
 
 import { describe, it, expect, beforeAll } from '@jest/globals';
-import { ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import {
   buildMissionProtocolContext,
   executeMissionProtocolTool,
   getToolDefinitions,
   MissionProtocolContext,
 } from '../../src/index';
+import { ProtocolErrorCode } from '@modelcontextprotocol/server';
 
 const DEPRECATED_TOOL_NAMES = [
   'get_available_domains',
@@ -46,7 +46,7 @@ describe('Legacy tool deprecation smoke coverage', () => {
 
   it.each(DEPRECATED_TOOL_NAMES)('rejects deprecated tool %s', async (toolName) => {
     await expect(executeMissionProtocolTool(toolName, {}, context)).rejects.toMatchObject({
-      code: ErrorCode.MethodNotFound,
+      code: ProtocolErrorCode.MethodNotFound,
     });
   });
 });

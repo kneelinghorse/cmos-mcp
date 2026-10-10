@@ -18,6 +18,9 @@
  */
 
 import { z } from 'zod';
+import { SPRINT_OPEN_STATUSES, statusInSql } from './terminal-status';
+import { formatCliRemedy, inertCliPath } from '../../utils/cli-remedy';
+import { isSameDirectory } from '../../intelligence/resolution-policy';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
@@ -218,6 +221,18 @@ function applyIdentityChange(
   });
 }
 
+/** Init diagnostics recognize filesystem aliases that realpath alone may not collapse on macOS. */
+function sameInitFolder(left: string, right: string): boolean {
+  if (isSameDirectory(left, right)) return true;
+  try {
+    const a = fs.statSync(left);
+    const b = fs.statSync(right);
+    return a.isDirectory() && b.isDirectory() && a.dev === b.dev && a.ino === b.ino;
+  } catch {
+    return false;
+  }
+}
+
 /** How a CMOS line or a store describes the hooks. */
 function hooksText(ambient: RulesAmbient): string {
   return ambient === 'on' ? 'on' : ambient === 'off' ? 'off' : 'on without the session digest';
@@ -233,21 +248,27 @@ function cmosLineMismatch(
   reading: CmosLineReading,
   level: ProjectLevel,
   ambient: RulesAmbient,
-  projectRoot: string
+  projectRoot: string,
+  cliSource?: 'explicit' | 'cwd'
 ): string {
+  const target = { projectRoot, resolvedBy: cliSource ?? 'explicit' } as const;
   const says =
     `${reading.level ? `the ${levelName(reading.level)} level` : 'no level'}` +
     (reading.hooks ? ` with the hooks ${hooksText(reading.ambient)}` : '');
   const is = `the ${levelName(level)} level with the hooks ${hooksText(ambient)}`;
   const toLine = reading.rendered
-    ? `cmos_project(action="update", projectRoot="${projectRoot}", projectType="${LEVEL_TIERS[level]}") re-renders the line to match the project`
+    ? `cmos_project(action="update", projectRoot=${inertCliPath(projectRoot)}, projectType="${LEVEL_TIERS[level]}") re-renders the line to match the project`
     : `the line was edited by hand, so write it as: ${cmosRulesLine(level, { hooks: reading.hooks, ambient })}`;
   const toProject = [
     ...(reading.level && reading.level !== level
-      ? [`init with projectType="${LEVEL_TIERS[reading.level]}" sets the level the line names`]
+      ? [
+          cliSource
+            ? `${formatCliRemedy(`init --level ${reading.level}`, target)} sets the level the line names`
+            : `init with projectType="${LEVEL_TIERS[reading.level]}" sets the level the line names`,
+        ]
       : []),
     ...(reading.hooks && reading.ambient !== ambient
-      ? [`\`cmos-mcp ambient ${reading.ambient}\` sets the hooks as the line says`]
+      ? [`${formatCliRemedy(`ambient ${reading.ambient}`, target)} sets the hooks as the line says`]
       : []),
   ];
   return `${reading.name}'s CMOS line says ${says}, but this project is at ${is}. ${toLine}${toProject.length > 0 ? `; or ${toProject.join(', and ')}` : ''}.`;
@@ -311,7 +332,7 @@ export interface InitialSprint {
 export interface InitialMission {
   id: string;
   name: string;
-  sprintId: string;
+  sprintId?: string | null;
   objective?: string;
   successCriteria?: string[];
   deliverables?: string[];
@@ -357,7 +378,13 @@ export const cmosProjectInitSchema = z.object({
       z.object({
         id: z.string().describe('Mission ID (e.g., "s01-m01")'),
         name: z.string().describe('Mission name'),
-        sprintId: z.string().describe('Sprint ID this mission belongs to'),
+        sprintId: z
+          .string()
+          .trim()
+          .min(1)
+          .nullable()
+          .optional()
+          .describe('Existing sprint; omitted infers the unique open sprint, null is unscheduled'),
         objective: z.string().optional().describe('Mission objective'),
         successCriteria: z.array(z.string()).optional().describe('Success criteria'),
         deliverables: z.array(z.string()).optional().describe('Expected deliverables'),
@@ -488,7 +515,11 @@ export const cmosProjectInitToolDefinition = {
           properties: {
             id: { type: 'string', description: 'Mission ID' },
             name: { type: 'string', description: 'Mission name' },
-            sprintId: { type: 'string', description: 'Sprint ID' },
+            sprintId: {
+              type: ['string', 'null'],
+              description:
+                'Existing sprint; omitted infers the unique open sprint, null is unscheduled',
+            },
             objective: { type: 'string', description: 'Mission objective' },
             successCriteria: {
               type: 'array',
@@ -506,7 +537,7 @@ export const cmosProjectInitToolDefinition = {
               description: 'Initial status',
             },
           },
-          required: ['id', 'name', 'sprintId'],
+          required: ['id', 'name'],
         },
         description: 'Optional initial missions to create',
       },
@@ -526,7 +557,7 @@ export async function cmosProjectInit(
   input: CmosProjectInitInput,
   // s93-m12: `cmos-mcp init --no-hooks` (a harness without hooks) appends the hook-less block to
   // AGENTS.md. Internal and non-schema: the MCP tool always writes the hooked form.
-  internalOpts: { hooks?: boolean } = {}
+  internalOpts: { hooks?: boolean; cliSource?: 'explicit' | 'cwd' } = {}
 ): Promise<CmosToolResult<CmosProjectInitResult>> {
   // s93-m11 (#606 f): init takes its path literally and never infers one, so a missing projectRoot
   // gets a remedy instead of a raw schema message.
@@ -543,7 +574,7 @@ export async function cmosProjectInit(
   // Parse input to apply defaults and validate
   const parseResult = cmosProjectInitSchema.safeParse(input);
   if (!parseResult.success) {
-    const firstError = parseResult.error.errors[0];
+    const firstError = parseResult.error.issues[0];
     return createError({
       code: CMOS_ERROR_CODES.INVALID_PARAMETER,
       message: `Validation error: ${firstError?.message ?? 'Unknown error'}`,
@@ -756,7 +787,7 @@ export async function cmosProjectInit(
       // s93-m12 (the confirming critics): with no level passed, a new store takes the level its
       // folder's agents file names in its CMOS line (a store recreated beside the file, or a team's
       // committed AGENTS.md), so the store and the file agree; with no such line a new project is a
-      // Ledger. The hooks' setting the line names comes back with it. The answer says which.
+      // Ledger. The answer names the chosen level; the line cannot establish a hook preference.
       const lineLevel = dbExisted ? null : (lineReading?.level ?? null);
       let levelSource: InitLevelSource = 'stored';
       if (projectType) {
@@ -769,20 +800,9 @@ export async function cmosProjectInit(
         updateMetadata.run('project_type', 'general');
         levelSource = 'default';
       }
-      // The hooks' setting is the operator's own choice for this checkout, so it comes back from
-      // the line only for this machine's own store recreated in place (the registry's id taken
-      // back). A team's committed or a copied AGENTS.md never turns this operator's hooks off: the
-      // line is pointed out below instead (the fourth confirming critic).
-      const ambientRestored =
-        !dbExisted &&
-        !storeProjectId &&
-        reusableRegistryId !== null &&
-        knownProjectId === reusableRegistryId &&
-        lineReading?.hooks === true &&
-        lineReading.ambient !== 'on'
-          ? lineReading.ambient
-          : null;
-      if (ambientRestored) updateMetadata.run(AMBIENT_METADATA_KEY, ambientRestored);
+      // A committed agents file cannot prove this operator's hook preference, even when a
+      // registry id survives git clean or re-cloning into the same folder. A recreated store
+      // keeps the hooks on; the mismatch below offers an explicit, project-scoped opt-out.
 
       if (isNewProject) {
         updateMetadata.run('created_at', now);
@@ -862,6 +882,7 @@ export async function cmosProjectInit(
 
       // Create initial missions if provided
       const missionsCreated: string[] = [];
+      const missionWarnings: string[] = [];
       if (initialMissions && initialMissions.length > 0) {
         const insertMission = db.prepare(
           `INSERT OR IGNORE INTO missions
@@ -870,9 +891,30 @@ export async function cmosProjectInit(
         );
 
         for (const mission of initialMissions) {
+          let assignedSprintId = mission.sprintId?.trim() ?? null;
+          if (mission.sprintId === undefined) {
+            const open = db
+              .prepare(
+                `SELECT id FROM sprints WHERE ${statusInSql('status', SPRINT_OPEN_STATUSES)}`
+              )
+              .all() as { id: string }[];
+            if (open.length === 1) assignedSprintId = open[0].id;
+            else if (open.length > 1)
+              missionWarnings.push(
+                `Multiple sprints are open; mission '${mission.id}' is unscheduled.`
+              );
+          }
+          if (
+            assignedSprintId !== null &&
+            !db.prepare('SELECT id FROM sprints WHERE id=?').get(assignedSprintId)
+          ) {
+            throw new Error(
+              `Sprint '${assignedSprintId}' does not exist for mission '${mission.id}'.`
+            );
+          }
           const result = insertMission.run(
             mission.id,
-            mission.sprintId,
+            assignedSprintId,
             mission.name,
             mission.status || 'Queued',
             mission.objective || null,
@@ -924,11 +966,14 @@ export async function cmosProjectInit(
         (lineReading.level !== storedLevel ||
           (lineReading.hooks && lineReading.ambient !== storedAmbient))
       ) {
-        rulesWarnings.push(cmosLineMismatch(lineReading, storedLevel, storedAmbient, projectRoot));
-      }
-      if (ambientRestored) {
         rulesWarnings.push(
-          `The hooks ${ambientRestored === 'off' ? 'are off' : 'run without the session digest'} here, as ${lineReading?.name ?? AGENTS_FILE_NAME}'s CMOS line says: this store was recreated in place. \`cmos-mcp ambient on\` turns them back on.`
+          cmosLineMismatch(
+            lineReading,
+            storedLevel,
+            storedAmbient,
+            projectRoot,
+            internalOpts.cliSource
+          )
         );
       }
       if (!storeProjectId && reusableRegistryId && projectId === reusableRegistryId) {
@@ -981,7 +1026,7 @@ export async function cmosProjectInit(
       // result (from any pre-init tool call on this path) doesn't cause registration
       // to fail. The store was just created with a UUID project_id, so registerStore
       // reuses that id. (s80-m02: no JSON mirror to re-derive — graph is the source.)
-      const warnings: string[] = [...rulesWarnings];
+      const warnings: string[] = [...rulesWarnings, ...missionWarnings];
       if (graph) {
         try {
           CmosDetector.getInstance().clearCache(projectRoot);
@@ -1009,11 +1054,21 @@ export async function cmosProjectInit(
             registrationError instanceof Error
               ? registrationError.message
               : String(registrationError);
-          const collision = /already registered to '([^']+)'/.exec(message);
+          let original: string | undefined;
+          if (message.startsWith('Project identity collision:')) {
+            try {
+              original = graph.get(projectId)?.store_path;
+            } catch {
+              // Registration has already failed; a second registry read must not undo init.
+            }
+          }
+          const sameFolder = original && sameInitFolder(original, projectRoot);
           warnings.push(
-            collision
-              ? `This store holds the id '${projectId}' of the project at ${collision[1]}: it is a copy of that project, so it was not registered here, and writes here are refused while that project stays registered. ${fs.existsSync(collision[1]) ? 'CMOS keeps one place per project, so a copy of a live project cannot be registered beside it.' : `That folder no longer exists: cmos_project(action="unregister", projectRoot="${collision[1]}") and then cmos_project(action="register", projectRoot="${projectRoot}") register the project here.`}`
-              : `The project was not registered (${message}); cmos_project(action="register", projectRoot="${projectRoot}") registers it.`
+            sameFolder
+              ? `The registry path ${inertCliPath(original!)} and ${inertCliPath(projectRoot)} name the same physical folder; this is a path alias, not a copied project. Registration did not finish (${inertCliPath(message)}); retry cmos_project(action="register", projectRoot=${inertCliPath(original!)}).`
+              : original
+                ? `This store holds the id '${projectId}' of the project at ${inertCliPath(original)}: it is a copy of that project, so it was not registered here, and writes here are refused while that project stays registered. ${fs.existsSync(original) ? 'CMOS keeps one place per project, so a copy of a live project cannot be registered beside it.' : `That folder no longer exists: cmos_project(action="unregister", projectRoot=${inertCliPath(original)}) and then cmos_project(action="register", projectRoot=${inertCliPath(projectRoot)}) register the project here.`}`
+                : `The project was not registered (${inertCliPath(message)}); cmos_project(action="register", projectRoot=${inertCliPath(projectRoot)}) registers it.`
           );
         }
       }

@@ -2,6 +2,12 @@
 // ABOUTME: s92-m08 — cmos_decisions(action="show"): one decision in full, by id. Retrieval answers
 // ABOUTME: carry 300-character previews, and this is how an agent expands one of them.
 
+import {
+  prepareSpinOutRead,
+  spinOutDetails,
+  spinOutPointerLines,
+  type SpinOutDetails,
+} from './spin-out-read';
 import { frameForeignText } from '../../intelligence/provenance-frame';
 import { withClientAsync, type CmosDatabaseClient } from './client';
 import { createError, createSuccess, CmosErrors, CMOS_ERROR_CODES } from './errors';
@@ -14,7 +20,7 @@ export interface CmosDecisionsShowParams {
   projectRoot?: string;
 }
 
-export interface CmosDecisionsShowResult {
+export interface CmosDecisionsShowResult extends SpinOutDetails {
   id: number;
   /** The full text, never a preview. */
   decisionText: string;
@@ -30,6 +36,13 @@ export interface CmosDecisionsShowResult {
   /** The row's genesis project; a pull-merged row carries its origin's id. */
   projectId: string | null;
   localProjectId: string | null;
+  context?: string | null;
+  alternatives?: string[] | string | null;
+  consequences?: string | null;
+  deciders?: string[] | string | null;
+  approvalMode?: string | null;
+  approvalDraft?: string | null;
+  approvalWords?: string | null;
 }
 
 interface DecisionRow {
@@ -45,6 +58,13 @@ interface DecisionRow {
   evidence: string | null;
   author_session_id: string | null;
   project_id: string | null;
+  context_text: string | null;
+  alternatives: string | null;
+  consequences: string | null;
+  deciders: string | null;
+  approval_mode: string | null;
+  approval_draft: string | null;
+  approval_words: string | null;
 }
 
 /** A column that older stores may lack reads as NULL there instead of failing the read. */
@@ -61,7 +81,17 @@ export async function cmosDecisionsShow(
   return withClientAsync(
     async (client) => {
       const optional = ['mission_id', 'category', 'project_domain', 'superseded_by', 'evidence']
-        .concat(['author_session_id', 'project_id'])
+        .concat([
+          'author_session_id',
+          'project_id',
+          'context_text',
+          'alternatives',
+          'consequences',
+          'deciders',
+          'approval_mode',
+          'approval_draft',
+          'approval_words',
+        ])
         .map((column) => columnOrNull(client, column))
         .join(', ');
       const row = client.getOne<DecisionRow>(
@@ -83,21 +113,49 @@ export async function cmosDecisionsShow(
         );
       }
       const d = row.data;
-      return createSuccess<CmosDecisionsShowResult>({
-        id: d.id,
-        decisionText: d.decision_text,
-        status: d.status ?? 'active',
-        sprintId: d.sprint_id,
-        missionId: d.mission_id,
-        category: d.category,
-        domain: d.project_domain,
-        supersededBy: d.superseded_by,
-        createdAt: d.created_at,
-        evidence: d.evidence,
-        authorSessionId: d.author_session_id,
-        projectId: d.project_id,
-        localProjectId: getProjectId(client),
-      });
+      const warnings: string[] = [];
+      const arrayField = (value: string | null, field: string): string[] | string | null => {
+        if (value === null) return null;
+        try {
+          const parsed: unknown = JSON.parse(value);
+          if (Array.isArray(parsed) && parsed.every((item) => typeof item === 'string'))
+            return parsed;
+        } catch {
+          /* Historical invalid JSON is disclosed and preserved below. */
+        }
+        warnings.push(
+          `${field} has malformed historical array data; displaying its original text.`
+        );
+        return value;
+      };
+      const alternatives = arrayField(d.alternatives, 'alternatives');
+      const deciders = arrayField(d.deciders, 'deciders');
+      return createSuccess<CmosDecisionsShowResult>(
+        {
+          ...spinOutDetails(prepareSpinOutRead(client), 'decision', d.id),
+          id: d.id,
+          decisionText: d.decision_text,
+          status: d.status ?? 'active',
+          sprintId: d.sprint_id,
+          missionId: d.mission_id,
+          category: d.category,
+          domain: d.project_domain,
+          supersededBy: d.superseded_by,
+          createdAt: d.created_at,
+          evidence: d.evidence,
+          authorSessionId: d.author_session_id,
+          projectId: d.project_id,
+          localProjectId: getProjectId(client),
+          context: d.context_text,
+          alternatives,
+          consequences: d.consequences,
+          deciders,
+          approvalMode: d.approval_mode,
+          approvalDraft: d.approval_draft,
+          approvalWords: d.approval_words,
+        },
+        warnings.length ? warnings : undefined
+      );
     },
     { projectRoot: params.projectRoot }
   );
@@ -135,6 +193,26 @@ export function formatDecisionsShowForLLM(result: CmosToolResult<CmosDecisionsSh
     lines.push(d.decisionText);
     if (d.evidence) lines.push('', `Evidence: ${d.evidence}`);
   }
+  lines.push(
+    '',
+    'Approval mode:',
+    isForeign && d.approvalMode
+      ? frameForeignText(d.approvalMode, `proj:${d.projectId}`)
+      : (d.approvalMode ?? 'not recorded')
+  );
+  for (const [label, value] of [
+    ['Context', d.context],
+    ['Alternatives', d.alternatives],
+    ['Consequences', d.consequences],
+    ['Deciders', d.deciders],
+    ['Approval draft', d.approvalDraft],
+    ['Approval words', d.approvalWords],
+  ] as const) {
+    if (value == null) continue;
+    const text = Array.isArray(value) ? value.join('\n') : value;
+    lines.push('', `${label}:`, isForeign ? frameForeignText(text, `proj:${d.projectId}`) : text);
+  }
+  lines.push(...spinOutPointerLines(d));
   appendWarnings(lines, result);
   return lines.join('\n');
 }

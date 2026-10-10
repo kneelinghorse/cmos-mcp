@@ -384,7 +384,8 @@ describe('ACTION_PARAMS vacuity floor (s86-m04)', () => {
       // Feedback list adds acrossProjects; triage now accepts resolutionNote: 409 -> 411.
       // s93-m06: decisions record accepts fromDraft: 411 -> 412.
       expect(actionCount).toBe(84);
-      expect(entryCount).toBe(412);
+      // s94-m04: record adds context, alternatives, consequences, deciders and mode.
+      expect(entryCount).toBe(417);
 
       // Floors, so a walker that silently stops producing branches fails here rather than passing
       // every applicability case with nothing to check.

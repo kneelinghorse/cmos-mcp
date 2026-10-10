@@ -8,6 +8,8 @@
  * @module tools/cmos/cmos-sprint-analytics
  */
 
+import { prepareSpinOutRead, spinOutHistoryLines } from './spin-out-read';
+import { missionCompletedSql } from './terminal-status';
 import { withClient, type CmosDatabaseClient } from './client';
 import type { CmosToolResult } from './types';
 import { createSuccess } from './errors';
@@ -177,6 +179,21 @@ export async function cmosSprintAnalytics(
         );
       }
 
+      const visibility = prepareSpinOutRead(client);
+      const historical = client.getMany<{ id: string }>(
+        `SELECT id FROM missions WHERE sprint_id IN (${sprints.map(() => '?').join(',')})`,
+        sprints.map((sprint) => sprint.sprintId)
+      );
+      if (!historical.success)
+        throw new Error(
+          `SPIN_OUT_READ_FAILED: ${historical.error?.message ?? 'sprint history query failed'}`
+        );
+      advisories.push(
+        ...spinOutHistoryLines(
+          visibility,
+          (historical.data ?? []).map((mission) => mission.id)
+        )
+      );
       const aggregates = computeAggregates(sprints);
       const trends = computeTrends(sprints);
       const highlights = generateHighlights(sprints, aggregates, trends);
@@ -336,7 +353,7 @@ function getAvgCycleTime(client: CmosDatabaseClient, sprintId: string): number |
      ) AS avg_days
      FROM missions
      WHERE sprint_id = ?
-       AND status = 'Completed'
+       AND ${missionCompletedSql('status')}
        AND started_at IS NOT NULL
        AND completed_at IS NOT NULL`,
     [sprintId]

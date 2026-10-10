@@ -19,7 +19,7 @@ Consolidated mission tool with action parameter support. Actions: list, show, st
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
 | `action` | string | yes | Mission action: list \| show \| status \| add \| update \| move \| depends \| undepends |
-| `sprintId` | string | no | Sprint ID for list filter or add action |
+| `sprintId` | string \| null | no | Sprint ID for list filter; add: omitted infers the unique open sprint, null requests unscheduled |
 | `status` | string | no | Status filter for list action, or initial status for add action |
 | `limit` | integer | no | Maximum missions to return for list action, or across-project cap for status action |
 | `projectRoot` | string | no | Project root directory to search for CMOS database (defaults to cwd) |
@@ -49,7 +49,7 @@ Consolidated mission tool with action parameter support. Actions: list, show, st
 | --- | --- | --- | --- |
 | `action` | string | yes | Mission action: list \| show \| status \| add \| update \| move \| depends \| undepends |
 | `missionId` | string | no | Mission ID for show/add/update/move actions |
-| `sprintId` | string | no | Sprint ID for list filter or add action |
+| `sprintId` | string \| null | no | Sprint ID for list filter; add: omitted infers the unique open sprint, null requests unscheduled |
 | `status` | string | no | Status filter for list action, or initial status for add action |
 | `name` | string | no | Mission name for add action |
 | `objective` | string | no | Mission objective for add action |
@@ -336,7 +336,7 @@ Consolidated context tool with action parameter support. Actions: view, update, 
 | `action` | string | yes | Context action: view \| update \| condense \| snapshot \| history \| next_steps \| constraints \| search |
 | `nextStepAction` | string | no | Sub-action for next_steps: list \| complete \| carry \| drop \| reopen |
 | `nextStepStatus` | string | no | Filter status for next_steps list (default: every open row, pending and carried, with its lease age) |
-| `nextStepIds` | array | no | Next-step IDs to act on for complete/carry/drop/reopen |
+| `nextStepIds` | array | no | Next-step IDs for historical list lookup (includes moved/dropped rows and pointers unless explicitly status-filtered), or complete/carry/drop/reopen |
 | `carryToSprint` | string | no | Existing target sprint ID for carry; missing targets are refused by name. Create one with cmos_sprint(action="add"), or omit to park with no target |
 | `missionId` | string | no | Only next steps recorded for this mission |
 | `projectRoot` | string | no | Project root directory to search for CMOS database (defaults to cwd) |
@@ -447,7 +447,7 @@ Consolidated session tool with action parameter support. Actions: list, start, c
 
 ## cmos_decisions
 
-Consolidated decisions tool with action parameter support. Actions: list, search, show, update, review, batch_update, record. Use show to read one decision in full by id: search results and mission start carry 300-character previews. Use review to triage stale decisions with scores and suggested actions. Use batch_update to archive/supersede multiple decisions at once. Use record to write a decision without a session. Decision text is never amended in place: correct a decision by recording a new one with supersedes=[<old id>]. When the operator answers a CMOS draft (a "Would record:" line CMOS gave an id, P<n>), record it with fromDraft="P<n>": the record then says how the approval was known (approved, agent-judged or agent-attested), and a constraint, rule or profile draft is written as that kind. A subagent shares its parent session and binds as the parent.
+Consolidated decisions tool with action parameter support. Actions: list, search, show, update, review, batch_update, record. Use show to read one decision in full by id: search results and mission start carry 300-character previews. Use review to triage stale decisions with scores and suggested actions. Use batch_update to archive/supersede multiple decisions at once. Use record to write a decision without a session: one or two sentences state the choice, context holds the reasons, and consequences holds the effects. alternatives and deciders are optional string arrays. mode=autonomous declares work with no operator. Direct headlines over 600 UTF-16 units succeed with a length warning. Decision text is never amended in place: correct a decision by recording a new one with supersedes=[<old id>]. When the operator answers a CMOS draft (a "Would record:" line CMOS gave an id, P<n>), record it with fromDraft="P<n>": the record then says how the approval was known (approved, agent-judged or agent-attested), and a constraint, rule or profile draft is written as that kind. A subagent shares its parent session and binds as the parent.
 
 **Actions:** `list`, `search`, `show`, `update`, `review`, `batch_update`, `record`
 
@@ -519,6 +519,11 @@ Consolidated decisions tool with action parameter support. Actions: list, search
 | `action` | string | yes | Decisions action: list \| search \| show \| update \| review \| batch_update \| record |
 | `content` | string | no | Decision text for record action (required) |
 | `fromDraft` | string | no | record action: the CMOS draft id (P<n>) the operator just answered; its kind decides what is written |
+| `context` | string | no | record: reasons and background |
+| `alternatives` | array | no | record: options considered |
+| `consequences` | string | no | record: effects and tradeoffs |
+| `deciders` | array | no | record: who made the decision |
+| `mode` | string | no | record: autonomous work with no operator |
 | `missionId` | string | no | Only rows recorded for this mission; for record, the mission to record it for (its sprint is used) |
 | `sprintId` | string | no | Filter by sprint ID; for record, an existing sprint to tag when missionId is absent |
 | `supersedes` | array | no | record action: existing decision IDs this decision supersedes; each is set superseded with a pointer to the new row in the same transaction |

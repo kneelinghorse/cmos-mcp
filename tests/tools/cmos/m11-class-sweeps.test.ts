@@ -21,6 +21,13 @@
 import { describe, expect, it } from '@jest/globals';
 import * as fs from 'fs';
 import * as path from 'path';
+import {
+  claimUpload,
+  ensureUploadColumns,
+  finishUpload,
+  markUploadOwed,
+  readUploadState,
+} from '../../../src/intelligence/project-upload-state';
 
 const SRC = path.resolve(__dirname, '..', '..', '..', 'src');
 
@@ -55,6 +62,16 @@ type Kind = 'caller-requested' | 'automatic';
 
 /** Every status write in src/, keyed `file|table|value`, with who asks for it and why it may. */
 const STATUS_WRITES: ReadonlyArray<{ key: string; kind: Kind; why: string }> = [
+  {
+    key: 'tools/cmos/spin-out-mark.ts|${table}|?',
+    kind: 'caller-requested',
+    why: 'explicit spin-out --apply archives selected learnings and drops next-steps only after target verification',
+  },
+  {
+    key: 'tools/cmos/spin-out-mark.ts|strategic_decisions|archived',
+    kind: 'caller-requested',
+    why: 'explicit spin-out --apply archives selected decisions in atomic source finalization',
+  },
   {
     key: 'tools/cmos/cmos-sprint-complete.ts|next_steps|dropped',
     kind: 'automatic',
@@ -173,8 +190,16 @@ const ORDERING = /ORDER BY[ \t]+(?!julianday)[^`;\n]*?\b(\w+\.)?(\w+_at|\w*_date
 /** Matches that are not stored text timestamps, keyed `file|column`, each with its reason. */
 const SAFE: Readonly<Record<string, string>> = {
   'intelligence/cross-store-queries.ts|occurred_at': 'occurred_at is integer milliseconds',
+  'intelligence/spin-out-query.ts|occurred_at':
+    'same integer-millisecond merge order after source visibility filtering',
   'tools/cmos/cmos-review.ts|occurred_at': 'the drift probe reads integer milliseconds',
   'intelligence/project-graph-registry.ts|last_seen_at': 'the registry stores integer milliseconds',
+  'intelligence/project-upload-state.ts|upload_latest_write_at':
+    'registry INTEGER epoch milliseconds, written from the numeric clock',
+  'intelligence/project-upload-state.ts|upload_first_owed_at':
+    'registry INTEGER epoch milliseconds, written from the numeric clock',
+  'intelligence/project-upload-state.ts|upload_lease_expires_at':
+    'registry INTEGER epoch milliseconds, numeric clock plus lease duration',
   'intelligence/registered-stores-readonly.ts|last_seen_at':
     'same canonical registry integer milliseconds',
   'intelligence/cross-store-query.ts|occurred_at': 'a doc comment naming the merge order',
@@ -199,6 +224,38 @@ describe('s93-m11 class 5 — every stored-timestamp comparison and ordering is 
 
   it('every comparison goes through julianday() or is listed as safe', () => {
     expect(offenders(COMPARISON)).toEqual([]);
+  });
+
+  it('the upload exemptions store numeric epochs, not the mixed timestamp text this gate rejects', async () => {
+    const Database = (await import('better-sqlite3')).default;
+    const db = new Database(':memory:');
+    try {
+      db.exec(
+        'CREATE TABLE projects(project_id TEXT PRIMARY KEY, archived_at INTEGER, last_synced_at INTEGER)'
+      );
+      ensureUploadColumns(db);
+      db.prepare('INSERT INTO projects(project_id) VALUES (?)').run('one');
+      const now = Date.now();
+      markUploadOwed(db, 'one', now);
+      const lease = claimUpload(db, 'one', now, true)!;
+      expect(
+        db
+          .prepare(
+            `SELECT typeof(upload_latest_write_at) AS latest,
+        typeof(upload_first_owed_at) AS first, typeof(upload_lease_expires_at) AS expires
+        FROM projects WHERE project_id = ?`
+          )
+          .get('one')
+      ).toEqual({
+        latest: 'integer',
+        first: 'integer',
+        expires: 'integer',
+      });
+      finishUpload(db, 'one', lease, now + 1, { success: true });
+      expect(readUploadState(db, 'one')?.lastSyncedAt).toBe(now + 1);
+    } finally {
+      db.close();
+    }
   });
 
   /**
@@ -281,6 +338,8 @@ describe('s93-m11 class 5 — every stored-timestamp comparison and ordering is 
     'tools/cmos/cmos-project-list.ts|row.registered_at': 'a registry row: epoch milliseconds',
     'tools/cmos/cmos-project-list.ts|row.last_seen_at': 'a registry row: epoch milliseconds',
     'tools/cmos/cmos-project-register.ts|entry.registered_at': 'a registry row: epoch milliseconds',
+    'tools/cmos/dashboard-upload-scheduler.ts|state.lastSyncedAt':
+      'registry last_synced_at INTEGER epoch milliseconds, not a stored ISO/SQLite text spelling',
     'tools/cmos/dashboard-client.ts|loginResponse.data.expiresAt':
       "the dashboard's own ISO-8601, always with Z; not a stored time",
   };

@@ -96,6 +96,11 @@ export const CMOS_DECISIONS_ACTION_PARAMS: ActionParamMap<
     'action',
     'content',
     'fromDraft',
+    'context',
+    'alternatives',
+    'consequences',
+    'deciders',
+    'mode',
     'missionId',
     'sprintId',
     'supersedes',
@@ -177,6 +182,14 @@ export const cmosDecisionsSchema = z
       .describe('Array of decision IDs for batch_update action (max 100)'),
     // record params (s91-m04)
     content: z.string().optional().describe('Decision text for record action (required)'),
+    context: z.string().optional().describe('record: reasons and background for the decision'),
+    alternatives: z.array(z.string()).optional().describe('record: options considered'),
+    consequences: z.string().optional().describe('record: effects and tradeoffs'),
+    deciders: z.array(z.string()).optional().describe('record: who made the decision'),
+    mode: z
+      .literal('autonomous')
+      .optional()
+      .describe('record: declare autonomous work with no operator'),
     // s93-m06
     fromDraft: z
       .string()
@@ -214,7 +227,10 @@ export const cmosDecisionsToolDefinition = {
     '300-character previews. ' +
     'Use review to triage stale decisions with scores and suggested actions. ' +
     'Use batch_update to archive/supersede multiple decisions at once. ' +
-    'Use record to write a decision without a session. Decision text is never amended in ' +
+    'Use record to write a decision without a session: one or two sentences state the choice, ' +
+    'context holds the reasons, and consequences holds the effects. alternatives and deciders ' +
+    'are optional string arrays. mode=autonomous declares work with no operator. Direct headlines ' +
+    'over 600 UTF-16 units succeed with a length warning. Decision text is never amended in ' +
     'place: correct a decision by recording a new one with supersedes=[<old id>]. ' +
     'When the operator answers a CMOS draft (a "Would record:" line CMOS gave an id, P<n>), ' +
     'record it with fromDraft="P<n>": the record then says how the approval was known ' +
@@ -243,6 +259,23 @@ export const cmosDecisionsToolDefinition = {
           'Only rows recorded for this mission; for record, the mission to record it for (its sprint is used)',
       },
       content: { type: 'string', description: 'Decision text for record action (required)' },
+      context: { type: 'string', description: 'record: reasons and background' },
+      alternatives: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'record: options considered',
+      },
+      consequences: { type: 'string', description: 'record: effects and tradeoffs' },
+      deciders: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'record: who made the decision',
+      },
+      mode: {
+        type: 'string',
+        enum: ['autonomous'],
+        description: 'record: autonomous work with no operator',
+      },
       fromDraft: {
         type: 'string',
         description:
@@ -403,6 +436,11 @@ export async function cmosDecisions(
       return cmosDecisionsRecord({
         content: params.content ?? '',
         fromDraft: params.fromDraft,
+        context: params.context,
+        alternatives: params.alternatives,
+        consequences: params.consequences,
+        deciders: params.deciders,
+        mode: params.mode,
         missionId: params.missionId,
         sprintId: params.sprintId,
         supersedes: params.supersedes,

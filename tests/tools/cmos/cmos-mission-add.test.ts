@@ -33,7 +33,8 @@ interface TestDb {
 
 function createTestDb(): TestDb {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-add-test-'));
-  const dbPath = path.join(tempDir, 'cmos.sqlite');
+  fs.mkdirSync(path.join(tempDir, 'cmos', 'db'), { recursive: true });
+  const dbPath = path.join(tempDir, 'cmos', 'db', 'cmos.sqlite');
   const db = new Database(dbPath);
 
   // Create schema
@@ -114,171 +115,7 @@ async function callMissionAdd(
   dbPath: string,
   params: Omit<CmosMissionAddParams, 'projectRoot'>
 ): Promise<CmosToolResult<MissionAddResult>> {
-  const { withClient } = await import('../../../src/tools/cmos/client');
-  const { createError, createSuccess, CmosErrors, VALID_MISSION_STATUSES } =
-    await import('../../../src/tools/cmos/errors');
-
-  const {
-    missionId,
-    name,
-    sprintId,
-    status = 'Queued',
-    objective,
-    context,
-    successCriteria,
-    deliverables,
-    referenceDocs,
-    domainFields,
-    notes,
-  } = params;
-
-  // Validate required parameters
-  if (!missionId || missionId.trim() === '') {
-    return createError(CmosErrors.missingParameter('missionId'));
-  }
-
-  if (!name || name.trim() === '') {
-    return createError(CmosErrors.missingParameter('name'));
-  }
-
-  if (!sprintId || sprintId.trim() === '') {
-    return createError(CmosErrors.missingParameter('sprintId'));
-  }
-
-  // Validate status if provided
-  if (status && !VALID_MISSION_STATUSES.includes(status as MissionStatus)) {
-    return createError(CmosErrors.invalidParameter('status', status, VALID_MISSION_STATUSES));
-  }
-
-  return withClient(
-    (client) => {
-      // Verify sprint exists
-      const sprintResult = client.getOne<{ id: string; title: string }>(
-        'SELECT id, title FROM sprints WHERE id = ?',
-        [sprintId]
-      );
-
-      if (!sprintResult.success) {
-        return createError<MissionAddResult>(
-          sprintResult.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to verify sprint' }
-        );
-      }
-
-      if (!sprintResult.data) {
-        return createError<MissionAddResult>(CmosErrors.sprintNotFound(sprintId));
-      }
-
-      // Check if mission ID already exists
-      const existingResult = client.getOne<{ id: string }>('SELECT id FROM missions WHERE id = ?', [
-        missionId,
-      ]);
-
-      if (!existingResult.success) {
-        return createError<MissionAddResult>(
-          existingResult.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to check mission' }
-        );
-      }
-
-      if (existingResult.data) {
-        return createError<MissionAddResult>({
-          code: 'MISSION_ID_EXISTS',
-          message: `Mission '${missionId}' already exists`,
-          suggestion: 'Choose a different mission ID or use cmos_mission_update to modify it',
-        });
-      }
-
-      // Prepare context for storage
-      const contextValue =
-        context !== undefined
-          ? typeof context === 'string'
-            ? context
-            : JSON.stringify(context)
-          : null;
-
-      // Insert new mission
-      const insertResult = client.execute(
-        `INSERT INTO missions (
-          id, sprint_id, name, status, objective, context,
-          success_criteria, deliverables, reference_docs, domain_fields, notes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          missionId.trim(),
-          sprintId.trim(),
-          name.trim(),
-          status,
-          objective?.trim() || null,
-          contextValue,
-          successCriteria ? JSON.stringify(successCriteria) : null,
-          deliverables ? JSON.stringify(deliverables) : null,
-          referenceDocs ? JSON.stringify(referenceDocs) : null,
-          domainFields ? JSON.stringify(domainFields) : null,
-          notes?.trim() || null,
-        ]
-      );
-
-      if (!insertResult.success) {
-        return createError<MissionAddResult>(
-          insertResult.error ?? { code: 'DB_QUERY_FAILED', message: 'Failed to create mission' }
-        );
-      }
-
-      if (insertResult.data?.changes === 0) {
-        return createError<MissionAddResult>({
-          code: 'DB_QUERY_FAILED',
-          message: 'Mission was not created (no rows affected)',
-          suggestion: 'Check database permissions and try again',
-        });
-      }
-
-      // Log creation event
-      const now = new Date().toISOString();
-      client.execute(
-        `INSERT INTO session_events (ts, agent, mission, action, status, summary, raw_event)
-         VALUES (?, 'mcp-tool', ?, 'create', ?, ?, ?)`,
-        [
-          now,
-          missionId,
-          status,
-          `Created mission ${missionId} in sprint ${sprintId}`,
-          JSON.stringify({
-            tool: 'cmos_mission_add',
-            missionId,
-            sprintId,
-            name: name.trim(),
-            status,
-          }),
-        ]
-      );
-
-      // Build result. s93-m11: this copy of the handler (next-step #592 tracks retiring it) keeps
-      // the shipped compact receipt; the real handler's receipt is pinned in
-      // mission-receipts.test.ts.
-      const fields: string[] = [];
-      if (objective) fields.push('objective');
-      if (context) fields.push('context');
-      if (successCriteria) fields.push(`successCriteria (${successCriteria.length})`);
-      if (deliverables) fields.push(`deliverables (${deliverables.length})`);
-      if (referenceDocs) fields.push(`referenceDocs (${referenceDocs.length})`);
-      if (domainFields) fields.push('domainFields');
-      if (notes) fields.push('notes');
-
-      return createSuccess({
-        id: missionId.trim(),
-        name: name.trim(),
-        sprintId: sprintId.trim(),
-        status: status as MissionStatus,
-        message: `Mission '${missionId}' created successfully in sprint '${sprintId}'`,
-        mission: {
-          id: missionId.trim(),
-          name: name.trim(),
-          sprintId: sprintId.trim(),
-          status: status as MissionStatus,
-        },
-        fields,
-      });
-    },
-    { dbPath }
-  );
+  return cmosMissionAdd({ ...params, projectRoot: path.resolve(dbPath, '../../..') });
 }
 
 describe('cmos_mission_add', () => {
@@ -498,7 +335,7 @@ describe('cmos_mission_add', () => {
       expect(result.error?.field).toBe('name');
     });
 
-    it('should return error for missing sprintId', async () => {
+    it('should return error for empty sprintId', async () => {
       const result = await callMissionAdd(testDb.dbPath, {
         missionId: 's14-m01',
         name: 'Test',
@@ -506,7 +343,7 @@ describe('cmos_mission_add', () => {
       });
 
       expect(result.success).toBe(false);
-      expect(result.error?.code).toBe(CMOS_ERROR_CODES.MISSING_PARAMETER);
+      expect(result.error?.code).toBe(CMOS_ERROR_CODES.INVALID_PARAMETER);
       expect(result.error?.field).toBe('sprintId');
     });
   });
@@ -533,7 +370,7 @@ describe('cmos_mission_add', () => {
 
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe('MISSION_ID_EXISTS');
-      expect(result.error?.suggestion).toContain('cmos_mission_update');
+      expect(result.error?.suggestion).toContain('cmos_mission(action="update")');
     });
 
     it('should return error for invalid status', async () => {
@@ -557,13 +394,15 @@ describe('cmos_mission_add', () => {
 
     it('should have comprehensive description', () => {
       expect(cmosMissionAddToolDefinition.description).toContain('Create a new mission');
-      expect(cmosMissionAddToolDefinition.description).toContain('sprint exists');
+      expect(cmosMissionAddToolDefinition.description).toContain('Omit sprintId');
+      expect(cmosMissionAddToolDefinition.description).toContain('pass null for unscheduled');
+      expect(cmosMissionAddToolDefinition.description).toContain('a named sprint must exist');
     });
 
-    it('should require missionId, name, and sprintId', () => {
+    it('requires identity and name while allowing omitted or explicit-null sprint scope', () => {
       expect(cmosMissionAddToolDefinition.inputSchema.required).toContain('missionId');
       expect(cmosMissionAddToolDefinition.inputSchema.required).toContain('name');
-      expect(cmosMissionAddToolDefinition.inputSchema.required).toContain('sprintId');
+      expect(cmosMissionAddToolDefinition.inputSchema.required).not.toContain('sprintId');
     });
 
     it('should have all spec fields defined', () => {

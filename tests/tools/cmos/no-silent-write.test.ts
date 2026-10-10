@@ -60,6 +60,12 @@
  *  1. SHAPE, NOT SEMANTICS. `if (!r.success) { /* best effort *\/ }` passes the gate and tells
  *     the operator nothing. So does an arm that pushes a warning into a sink no formatter
  *     renders. The gate is a floor, not a proof of disclosure.
+ *     Inline local helpers count only when their first argument's `!success` arm unconditionally
+ *     throws and their second statement returns that argument's data. Direct parameter/block
+ *     shadows are rejected; computed reassignment and dynamic rebinding are not resolved. A direct
+ *     relative named import may resolve to the same proven exported body in the scanned source
+ *     map; package imports, re-export barrels and namespace imports fail closed. This is structural
+ *     module resolution, not a whole-program type or runtime-binding proof.
  *  2. RAW better-sqlite3 IS INVISIBLE. `db.prepare(...).run()` — used at cmos-project-init.ts
  *     (the fresh-store bootstrap, ~:479-508) and throughout tests/ — is not a client envelope
  *     call and is never walked. That is OUT OF SCOPE BY CONSTRUCTION, not by oversight: `.run()`
@@ -144,6 +150,119 @@ const TRANSACTION_VERB_RE = /^\s*ROLLBACK\b/i;
 
 /** The two helpers from src/tools/cmos/write-guard.ts that discharge the obligation. */
 const GUARD_HELPERS = new Set(['checkWrite', 'countWrite']);
+
+/** A local wrapper is trusted by its body, never merely by a familiar function name. */
+function checkedLocalThrowingGuard(
+  source: ts.SourceFile,
+  call: ts.CallExpression,
+  sources: ReadonlyMap<string, string>
+): boolean {
+  if (!ts.isIdentifier(call.expression)) return false;
+  const name = call.expression.text;
+  let guard = source.statements.find(
+    (statement): statement is ts.FunctionDeclaration =>
+      ts.isFunctionDeclaration(statement) && statement.name?.text === name
+  );
+  if (!guard) {
+    // One direct relative named import only: no package lookup, barrels, namespace aliases,
+    // runtime rebinding or name-based exemptions. The resolved exported body must prove itself.
+    const matches = source.statements.flatMap((statement) => {
+      if (
+        !ts.isImportDeclaration(statement) ||
+        !ts.isStringLiteral(statement.moduleSpecifier) ||
+        !statement.moduleSpecifier.text.startsWith('.') ||
+        statement.importClause?.isTypeOnly
+      )
+        return [];
+      const module = statement.moduleSpecifier.text;
+      const bindings = statement.importClause?.namedBindings;
+      if (!bindings || !ts.isNamedImports(bindings)) return [];
+      return bindings.elements
+        .filter((binding) => !binding.isTypeOnly && binding.name.text === name)
+        .map((binding) => ({
+          module,
+          name: (binding.propertyName ?? binding.name).text,
+        }));
+    });
+    if (matches.length !== 1) return false;
+    const imported = matches[0];
+    const resolved = path.posix.normalize(
+      path.posix.join(path.posix.dirname(source.fileName), `${imported.module}.ts`)
+    );
+    const text = sources.get(resolved);
+    if (text === undefined) return false;
+    const target = parse(resolved, text);
+    const declarations = target.statements.filter(
+      (statement): statement is ts.FunctionDeclaration =>
+        ts.isFunctionDeclaration(statement) &&
+        statement.name?.text === imported.name &&
+        !!statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)
+    );
+    if (declarations.length !== 1) return false;
+    guard = declarations[0];
+  }
+  const parameter = guard?.parameters[0]?.name;
+  const statements = guard?.body?.statements;
+  if (!parameter || !ts.isIdentifier(parameter) || statements?.length !== 2) return false;
+  // A same-named parameter or local declaration would call a different function.
+  for (
+    let ancestor: ts.Node | undefined = call.parent;
+    ancestor && ancestor !== source;
+    ancestor = ancestor.parent
+  ) {
+    if (
+      ts.isFunctionLike(ancestor) &&
+      ancestor.parameters.some((p) => p.name.getText(source) === name)
+    )
+      return false;
+    if (
+      ts.isBlock(ancestor) &&
+      ancestor.statements.some(
+        (statement) =>
+          (ts.isFunctionDeclaration(statement) && statement.name?.text === name) ||
+          (ts.isVariableStatement(statement) &&
+            statement.declarationList.declarations.some((d) => d.name.getText(source) === name))
+      )
+    )
+      return false;
+  }
+  const [check, returned] = statements;
+  if (
+    !ts.isIfStatement(check) ||
+    check.elseStatement ||
+    !ts.isPrefixUnaryExpression(check.expression) ||
+    check.expression.operator !== ts.SyntaxKind.ExclamationToken
+  )
+    return false;
+  const condition = check.expression.operand;
+  const throwing =
+    ts.isBlock(check.thenStatement) && check.thenStatement.statements.length === 1
+      ? check.thenStatement.statements[0]
+      : check.thenStatement;
+  const propertyOfParameter = (value: ts.Node | undefined, property: string): boolean => {
+    // Type-only assertions and parentheses do not change which envelope was inspected.
+    while (
+      value &&
+      (ts.isAsExpression(value) ||
+        ts.isTypeAssertionExpression(value) ||
+        ts.isParenthesizedExpression(value))
+    )
+      value = value.expression;
+    return (
+      !!value &&
+      ts.isPropertyAccessExpression(value) &&
+      ts.isIdentifier(value.expression) &&
+      value.expression.text === parameter.text &&
+      value.name.text === property
+    );
+  };
+  return (
+    propertyOfParameter(condition, 'success') &&
+    ts.isThrowStatement(throwing) &&
+    ts.isReturnStatement(returned) &&
+    propertyOfParameter(returned.expression, 'data')
+  );
+}
 
 type Bucket =
   | 'exempt-transaction-verb'
@@ -477,7 +596,11 @@ function classifyBoundSite(
 // ── the sweep ──────────────────────────────────────────────────────────────────────────────
 
 /** Classify every `.execute(...)` / `.raw(...)` / `.transaction(...)` in one source text. */
-function collectWriteSites(relPath: string, text: string): WriteSite[] {
+function collectWriteSites(
+  relPath: string,
+  text: string,
+  sources: ReadonlyMap<string, string> = new Map()
+): WriteSite[] {
   const sf = parse(relPath, text);
   const sites: WriteSite[] = [];
 
@@ -536,7 +659,7 @@ function collectWriteSites(relPath: string, text: string): WriteSite[] {
       ts.isCallExpression(parent) &&
       parent.arguments[0] === node &&
       ts.isIdentifier(parent.expression) &&
-      GUARD_HELPERS.has(parent.expression.text)
+      (GUARD_HELPERS.has(parent.expression.text) || checkedLocalThrowingGuard(sf, parent, sources))
     ) {
       push(
         {
@@ -700,7 +823,8 @@ function loadSrcFiles(): { rel: string; text: string }[] {
 
 function sweep(): { sites: WriteSite[]; violations: WriteSite[] } {
   const files = loadSrcFiles();
-  const sites = files.flatMap(({ rel, text }) => collectWriteSites(rel, text));
+  const sources = new Map(files.map(({ rel, text }) => [rel, text]));
+  const sites = files.flatMap(({ rel, text }) => collectWriteSites(rel, text, sources));
   const delegatedSites = collectDelegatedCallSites(
     files,
     sites.filter((site) => site.bucket === 'delegated')
@@ -786,9 +910,12 @@ describe('no-silent-write: every execute(), raw(), and transaction() result is i
   // risk masking it.
   // s93-m11: 4 -> 5. staleness-detection.ts's repair unwinds the same way (a failed restore, ledger
   // write or COMMIT), and the failure it rolls back is already in the repair's warnings.
-  it('derives the transaction-verb exemption from the SQL and selects exactly the 5 known ROLLBACKs', () => {
+  it('derives the transaction-verb exemption from the SQL and selects exactly the 8 known ROLLBACKs', () => {
     const exempt = sites.filter((site) => site.bucket === 'exempt-transaction-verb');
-    expect({ count: exempt.length, sites: render(exempt) }).toMatchObject({ count: 5 });
+    // s94-m05 adds cmos-mission-update's finally cleanup, guarded by transactionOpen.
+    // The m04 migration rollback inspects its result, so it is NOT part of this exemption.
+    // s94-m08 adds two mission-drop rollback arms after a failed required write or thrown fault.
+    expect({ count: exempt.length, sites: render(exempt) }).toMatchObject({ count: 8 });
     expect(exempt.every((site) => site.detail.startsWith('transaction verb: ROLLBACK'))).toBe(true);
   });
 });
@@ -994,6 +1121,97 @@ describe('no-silent-write: the rule bites on synthetic shapes', () => {
       }
     `;
     expect(collectWriteSites('fixture.ts', source).map((s) => s.bucket)).toEqual(['unclassified']);
+  });
+
+  it('accepts a local envelope guard only when its negative arm unconditionally throws', () => {
+    const guard = `function requireSuccess(result: any) {
+      if (!result.success) throw new Error('write failed');
+      return result.data;
+    }`;
+    const call = `function f(client: any) { requireSuccess(client.raw('ALTER TABLE x ADD COLUMN y TEXT'), 'step'); }`;
+    expect(collectWriteSites('fixture.ts', guard + call).map((s) => s.bucket)).toEqual([
+      'inspected',
+    ]);
+    for (const mutant of [
+      guard.replace('!result.success', 'result.success'),
+      guard.replace('!result.success', '!other.success'),
+      guard.replace("throw new Error('write failed')", "console.warn('write failed')"),
+      guard.replace("throw new Error('write failed')", 'return undefined'),
+    ])
+      expect(collectWriteSites('fixture.ts', mutant + call).map((s) => s.bucket)).toEqual([
+        'unclassified',
+      ]);
+    expect(
+      collectWriteSites(
+        'fixture.ts',
+        guard + call.replace('client: any)', 'client: any, requireSuccess: any)')
+      ).map((s) => s.bucket)
+    ).toEqual(['unclassified']);
+  });
+
+  it('proves a direct imported throwing guard and rejects changed bodies or import targets', () => {
+    const modulePath = path.join('tools', 'cmos', 'record-link-store.ts');
+    const actual = fs.readFileSync(path.join(SRC_ROOT, modulePath), 'utf8');
+    const consumer = `import { requireLinkSuccess as verify } from './record-link-store';
+      function f(client: any) { verify(client.raw('CREATE TABLE x(id)'), 'fixture'); }`;
+    const classify = (body: string, text = consumer) =>
+      collectWriteSites(
+        path.join('tools', 'cmos', 'consumer.ts'),
+        text,
+        new Map([[modulePath, body]])
+      ).map((site) => site.bucket);
+    expect(classify(actual)).toEqual(['inspected']);
+    const noThrow = actual.replace('throw new Error(', 'console.warn(');
+    expect(noThrow).not.toBe(actual);
+    expect(classify(noThrow)).toEqual(['unclassified']);
+    const redirected = consumer.replace("'./record-link-store'", "'./unchecked-store'");
+    expect(
+      collectWriteSites(
+        path.join('tools', 'cmos', 'consumer.ts'),
+        redirected,
+        new Map([
+          [modulePath, actual],
+          [
+            path.join('tools', 'cmos', 'unchecked-store.ts'),
+            'export function requireLinkSuccess(result: any) { return result.data; }',
+          ],
+        ])
+      ).map((site) => site.bucket)
+    ).toEqual(['unclassified']);
+    expect(
+      classify(actual, consumer.replace("'./record-link-store'", "'./unchecked-store'"))
+    ).toEqual(['unclassified']);
+    expect(
+      classify(actual.replace('export function requireLinkSuccess', 'function requireLinkSuccess'))
+    ).toEqual(['unclassified']);
+    expect(
+      classify(
+        actual,
+        consumer.replace('function f(client: any)', 'function f(client: any, verify: any)')
+      )
+    ).toEqual(['unclassified']);
+  });
+
+  it('checks asserted imported envelope data without trusting a cast over the wrong object', () => {
+    const modulePath = path.join('tools', 'cmos', 'spin-out-store.ts');
+    const actual = fs.readFileSync(path.join(SRC_ROOT, modulePath), 'utf8');
+    const consumer = `import { requireSpinOut } from './spin-out-store';
+      function f(client: any) { requireSpinOut(client.raw('COMMIT'), 'fixture'); }`;
+    const classify = (body: string) =>
+      collectWriteSites(
+        path.join('tools', 'cmos', 'consumer.ts'),
+        consumer,
+        new Map([[modulePath, body]])
+      ).map((site) => site.bucket);
+    expect(classify(actual)).toEqual(['inspected']);
+    for (const changed of [
+      actual.replace('return result.data as T;', 'return other.data as T;'),
+      actual.replace('if (!result.success)', 'if (result.success)'),
+      actual.replace('throw new Error(', 'console.warn('),
+    ]) {
+      expect(changed).not.toBe(actual);
+      expect(classify(changed)).toEqual(['unclassified']);
+    }
   });
 
   it('attributes discharge PER BINDING, not per identifier name', () => {

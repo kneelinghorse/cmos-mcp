@@ -21,7 +21,6 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from '@jest/globals';
-import { ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import Database from 'better-sqlite3';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -29,6 +28,7 @@ import * as path from 'path';
 
 import { startDashboardDouble, type DashboardDouble } from '../helpers/suggestion-axes-external';
 import { connectStdioServer, type StdioHarness, type ToolResult } from './stdio-harness';
+import { ProtocolErrorCode } from '@modelcontextprotocol/server';
 
 const REPO_ROOT = path.resolve(__dirname, '../..');
 const DIST_ENTRY = path.join(REPO_ROOT, 'dist', 'index.js');
@@ -194,9 +194,12 @@ async function callBounded(
   pair: PublishedPair,
   args: Record<string, unknown>
 ): Promise<ToolResult> {
-  return (await harness.client.callTool({ name: pair.tool, arguments: args }, undefined, {
-    timeout: REQUEST_TIMEOUT_MS,
-  })) as ToolResult;
+  return (await harness.client.callTool(
+    { name: pair.tool, arguments: args },
+    {
+      timeout: REQUEST_TIMEOUT_MS,
+    }
+  )) as ToolResult;
 }
 
 function textOf(result: ToolResult): string {
@@ -727,14 +730,13 @@ describe('s90-m04 wire preflight and first-run classification over built stdio',
     try {
       await initializedHarness.client.callTool(
         { name: UNKNOWN_TOOL, arguments: { projectRoot: 12_345 } },
-        undefined,
         { timeout: REQUEST_TIMEOUT_MS }
       );
     } catch (error) {
       rejection = error;
     }
 
-    expect(rejection).toMatchObject({ code: ErrorCode.MethodNotFound });
+    expect(rejection).toMatchObject({ code: ProtocolErrorCode.MethodNotFound });
     expect(rejection).toBeInstanceOf(Error);
     expect((rejection as Error).message).toContain(`Unknown tool: ${UNKNOWN_TOOL}`);
   });

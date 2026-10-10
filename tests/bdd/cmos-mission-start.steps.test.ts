@@ -229,6 +229,15 @@ defineFeature(feature, (test) => {
       insertSprint(instance.dbPath, { id: plannedSprintId, status: sprintStatus });
     });
 
+    and('no other sprint is open', () => {
+      const db = new Database(instance.dbPath);
+      try {
+        db.prepare("UPDATE sprints SET status = 'Completed' WHERE id = ?").run('sprint-work-01');
+      } finally {
+        db.close();
+      }
+    });
+
     when(/^I call cmos_mission_start with missionId "([^"]+)"$/, async (missionId: string) => {
       result = await cmosMissionStart({ missionId, projectRoot: instance.projectRoot });
     });

@@ -6,8 +6,16 @@ import Database from 'better-sqlite3';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { recallFirstPrompt } from '../../../src/tools/cmos/first-prompt-recall';
+import { recallFirstPrompt as productionRecall } from '../../../src/tools/cmos/first-prompt-recall';
 import { captureToolCall } from '../../../src/tools/cmos/tool-call-context';
+
+// These fixtures isolate graph/origin/schema behavior before the independently tested floor.
+// first-prompt-floor.test.ts and the actual hook sweep enforce the published default.
+const recallFirstPrompt = (
+  db: string,
+  query: string,
+  options: Parameters<typeof productionRecall>[2] = {}
+) => productionRecall(db, query, { minimumKeywordMatches: 0, ...options });
 
 let root: string;
 let dbPath: string;

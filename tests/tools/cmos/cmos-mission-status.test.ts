@@ -84,10 +84,12 @@ describe('cmos_mission_status', () => {
 
       expect(result.success).toBe(true);
       // Sprint-12 is active (has In Progress mission), so queued is scoped to it
-      // Only s12-m10, s12-m11, s12-m12 (not standalone-01 which has no sprint)
-      expect(result.data?.queued.length).toBe(3);
+      // The active sprint queue plus explicitly unscheduled work.
+      expect(result.data?.queued.length).toBe(4);
       expect(result.data?.queued.every((m) => m.status === 'Queued')).toBe(true);
-      expect(result.data?.queued.every((m) => m.sprint?.id === 'sprint-12')).toBe(true);
+      expect(
+        result.data?.queued.every((m) => m.sprint === null || m.sprint?.id === 'sprint-12')
+      ).toBe(true);
     });
 
     it('should not include blocked missions by default', async () => {
@@ -151,7 +153,7 @@ describe('cmos_mission_status', () => {
 
       expect(result.success).toBe(true);
       // 3 queued missions in active sprint (sprint-12)
-      expect(result.data?.queued.length).toBe(3);
+      expect(result.data?.queued.length).toBe(4);
     });
 
     it('should return just 1 when queuedLimit is 1', async () => {
@@ -229,8 +231,8 @@ describe('cmos_mission_status', () => {
       const result = await cmosMissionStatusWithDb(dbPath, { queuedLimit: 10 });
 
       expect(result.success).toBe(true);
-      // 3 queued in sprint-12 (active sprint), standalone-01 excluded
-      expect(result.data?.summary.queuedCount).toBe(3);
+      // Three queued in sprint-12 plus standalone-01.
+      expect(result.data?.summary.queuedCount).toBe(4);
     });
 
     it('should recommend continuing in-progress mission', async () => {
@@ -374,16 +376,16 @@ describe('cmos_mission_status', () => {
       expect(result.success).toBe(true);
       const queuedIds = result.data?.queued.map((m) => m.id) || [];
       // All queued should be from sprint-12, ordered by id
-      expect(queuedIds).toEqual(['s12-m10', 's12-m11', 's12-m12']);
+      expect(queuedIds).toEqual(['s12-m10', 's12-m11', 's12-m12', 'standalone-01']);
     });
 
-    it('should exclude standalone missions from sprint-scoped queue', async () => {
+    it('should include unscheduled missions alongside the sprint-scoped queue', async () => {
       const result = await cmosMissionStatusWithDb(dbPath, { queuedLimit: 10 });
 
       expect(result.success).toBe(true);
-      // standalone-01 has no sprint, should not appear in sprint-scoped queue
+      // Unscheduled work stays visible when another sprint is open.
       const standalone = result.data?.queued.find((m) => m.id === 'standalone-01');
-      expect(standalone).toBeUndefined();
+      expect(standalone?.sprint).toBeNull();
     });
   });
 
@@ -411,8 +413,10 @@ describe('cmos_mission_status', () => {
 
       expect(result.success).toBe(true);
       // Active sprint is sprint-12 (has In Progress mission), so queued should only be from sprint-12
-      expect(result.data?.queued.length).toBe(3);
-      expect(result.data?.queued.every((m) => m.sprint?.id === 'sprint-12')).toBe(true);
+      expect(result.data?.queued.length).toBe(4);
+      expect(
+        result.data?.queued.every((m) => m.sprint === null || m.sprint?.id === 'sprint-12')
+      ).toBe(true);
       // sprint-13 missions should NOT appear
       expect(result.data?.queued.find((m) => m.id === 's13-m01')).toBeUndefined();
     });
@@ -429,9 +433,8 @@ describe('cmos_mission_status', () => {
 
       expect(result.success).toBe(true);
       expect(result.data?.activeSprint?.id).toBe('sprint-12');
-      expect(result.data?.queued.length).toBe(0);
-      expect(result.data?.summary.nextAction).toContain('Sprint sprint-12 complete');
-      expect(result.data?.summary.nextAction).toContain('Sprint review recommended');
+      expect(result.data?.queued.map((m) => m.id)).toEqual(['standalone-01']);
+      expect(result.data?.summary.nextAction).toContain('standalone-01');
     });
 
     it('should fall back to next active sprint when current sprint is done', async () => {
@@ -449,7 +452,7 @@ describe('cmos_mission_status', () => {
 
       expect(result.success).toBe(true);
       expect(result.data?.activeSprint?.id).toBe('sprint-13');
-      expect(result.data?.queued.length).toBe(1);
+      expect(result.data?.queued.length).toBe(2);
       expect(result.data?.queued[0].id).toBe('s13-m01');
     });
 

@@ -1,11 +1,12 @@
 import { describe, it, expect, beforeAll } from '@jest/globals';
-import { ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import {
   buildMissionProtocolContext,
   executeMissionProtocolTool,
   getToolDefinitions,
 } from '../../src/index';
 import type { MissionProtocolContext } from '../../src/index';
+import { ProtocolErrorCode } from '@modelcontextprotocol/server';
+
 const DEPRECATED_TOOL_NAMES = [
   'get_available_domains',
   'create_mission',
@@ -81,7 +82,7 @@ describe('Public MCP tool surface integration', () => {
 
   it.each(DEPRECATED_TOOL_NAMES)('rejects deprecated tool %s', async (toolName) => {
     await expect(runTool(toolName, {})).rejects.toMatchObject({
-      code: ErrorCode.MethodNotFound,
+      code: ProtocolErrorCode.MethodNotFound,
     });
   });
 

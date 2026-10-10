@@ -44,18 +44,26 @@ CMOS makes outbound requests in exactly two situations, both optional:
    - **Sign-in.** `cmos_auth(action="login")` or `login_init` contacts that host even when no URL
      variable or credential exists. `login_complete` polls only when given a `deviceCode`; without
      one it returns a local `MISSING_PARAMETER` and sends nothing.
-   - **Successful explicit completion calls start a background checkpoint.**
+   - **Registered-project writes and explicit completion calls start background uploads.**
      `cmos_session(action="complete")` and `cmos_sprint(action="complete")` start this best-effort
      work when a nonempty stored user-scoped key, `CMOS_DASHBOARD_API_KEY`, or the complete
      `CMOS_DASHBOARD_USER` / `CMOS_DASHBOARD_PASSWORD` pair exists. A project key alone does not
-     open that gate. The primary path uploads the **entire SQLite file**, including pending
+     open that gate. The primary path uploads a consistent snapshot of the **whole SQLite file**, including pending
      proposal drafts and any approval words already copied into decision records. It may first
      register the project and save its project key. Completion success does not confirm upload
-     success: this work is asynchronous. Without a project slug it can fall back to event replay;
+     success: this work is asynchronous. For a registered project, an MCP tool call that actually
+     writes the store also schedules an upload, due after 5 quiet minutes or 30 minutes of
+     continuous writes. The next poll starts it within 60 seconds when no upload lease or failure
+     backoff blocks it; transfer time is additional. A running server must have opened the
+     project. An owed upload survives process exit in the per-user registry, and concurrent
+     servers share one lease per project. Only explicit closes may register a new project.
+     Upload results and failures appear in `cmos_status` and `cmos_review`; HTTP 401, 402 or 403
+     pauses automatic retries until an explicit close succeeds. Without a project slug an explicit
+     checkpoint can fall back to event replay;
      a registered project's failed file upload has no replay fallback in that cycle, and a later
-     checkpoint retries. Automatic implicit-session or harness shutdown does not trigger a
-     checkpoint; explicitly completing an implicit session through the tool does. Set
-     **`CMOS_CHECKPOINT_SYNC=off`** to disable this checkpoint path
+     checkpoint retries. Implicit process-exit closes do not upload; explicitly completing an
+     implicit session through the tool does. Set
+     **`CMOS_CHECKPOINT_SYNC=off`** to disable these automatic upload paths
      (`triggerCheckpointBackfill` in [checkpoint-backfill.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/checkpoint-backfill.ts)).
    - **Calls you make.** Messaging, status and sync health, `cmos_db` sync actions (backfill, pull,
      clone, purge), sprint carry-forward, and the onboard and review summaries of messages.
@@ -213,9 +221,15 @@ into your tree, and this package's `overrides` cannot reach a dependent's tree: 
 `^7` in your own `overrides`. In this repository the override still pins it for the development tree
 (where the package is a dev dependency), guarded by
 [tests/release/dependency-overrides.test.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/tests/release/dependency-overrides.test.ts).
-A small number of **moderate, dev-only** advisories remain in the `jest-cucumber → @cucumber/* → uuid`
-test-framework chain; clearing them requires a breaking downgrade of the test framework, so they are
-an accepted residual. They are not in any shipped runtime path.
+For the 3.4.0 candidate on 2026-10-10, `npm audit --omit=dev --json` reported **zero** vulnerable
+package entries. The full development installation's `npm audit --json` reported **40 affected
+package entries: 9 moderate, 30 high and 1 critical**, counting `Object.keys(vulnerabilities)` and
+the report's severity totals, including propagated dependency entries rather than distinct
+advisories. These development-tree findings remain unresolved. The critical entry is
+`handlebars@4.7.9` through the development dependency `ts-jest@29.4.6`; affected direct development
+dependencies also include Jest, lint-staged, jest-cucumber and the optional embedding stack used
+in development. This is not a clean full-tree audit. A consumer that installs the optional
+embedding peer must audit that resulting installation separately.
 
 ## Sanctioned deployment shape
 
@@ -348,4 +362,4 @@ subagent type (e.g. the `Explore` agent) — that is a mitigation, not the machi
 
 ---
 
-_Last verified against the source for release 3.3.0._
+_Last verified against the source for release 3.4.0._

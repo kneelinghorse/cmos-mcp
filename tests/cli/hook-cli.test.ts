@@ -668,10 +668,13 @@ describe('s93-m01 — the init offer', () => {
     const context = (
       JSON.parse(first.stdout) as { hookSpecificOutput: { additionalContext: string } }
     ).hookSpecificOutput.additionalContext;
-    expect(context).toBe(initOffer());
+    expect(context).toBe(
+      initOffer(undefined, false, { projectRoot: repo, resolvedBy: 'explicit' })
+    );
     expect(context.includes('\n')).toBe(false);
     // The remedy names the command that ran this hook, so it works without a global install.
-    expect(context).toMatch(/run `.+ ambient off` here/);
+    expect(context).toContain(`ambient off --project-root '${repo}'`);
+    expect(context).toMatch(/` \(POSIX shell\) here/);
 
     expect(
       (await run(['ambient', 'off'], { cwd: repo, env: { CLAUDE_PROJECT_DIR: '' } })).code

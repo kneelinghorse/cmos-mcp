@@ -7,6 +7,7 @@
  * @module tools/cmos/cmos-mission-block
  */
 
+import { normalizeMissionStatus } from './terminal-status';
 import { z } from 'zod';
 import { withClientValidated } from './client';
 import type { CmosToolResult, Mission, MissionStatus, SanitizedFieldReport } from './types';
@@ -175,7 +176,7 @@ export async function cmosMissionBlock(
       }
 
       const mission = missionResult.data;
-      const currentStatus = mission.status;
+      const currentStatus = normalizeMissionStatus(mission.status);
 
       // Check if already blocked
       if (currentStatus === targetStatus) {

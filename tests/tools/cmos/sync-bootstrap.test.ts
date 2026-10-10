@@ -12,6 +12,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 import Database from 'better-sqlite3';
+import { CmosDatabaseClient } from '../../../src/tools/cmos/client';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -577,7 +578,105 @@ describe('syncBootstrap (Sprint 71 m03)', () => {
     }
   });
 
+  it('links a decision to an older learning imported later in the same clone batch, including duplicate repair', async () => {
+    createFreshStore();
+    const now = Date.now();
+    stateBody!.decisions[0].decisionText = 'Use l:20 from the earlier learning.';
+    stateBody!.decisions[0].createdAt = new Date(now - 1000).toISOString();
+    stateBody!.learnings[0].createdAt = new Date(now - 2000).toISOString();
+    expect((await syncBootstrap({ projectRoot: tempDir, slug: SLUG })).success).toBe(true);
+    const db = openDb();
+    try {
+      expect(db.prepare('SELECT from_kind,from_id,to_kind,to_id FROM record_links').all()).toEqual([
+        { from_kind: 'decision', from_id: 10, to_kind: 'learning', to_id: 20 },
+      ]);
+      db.exec('DELETE FROM record_links');
+    } finally {
+      db.close();
+    }
+    const retry = await syncBootstrap({ projectRoot: tempDir, slug: SLUG });
+    expect(retry.data?.inserted).toBe(0);
+    const after = openDb();
+    try {
+      expect(after.prepare('SELECT COUNT(*) AS n FROM record_links').get()).toEqual({ n: 1 });
+    } finally {
+      after.close();
+    }
+  });
+
+  it('a required-link clone failure rolls back the record union and excludes it from committed tallies', async () => {
+    createFreshStore();
+    const original = stateBody!;
+    stateBody = { ...original, decisions: [], learnings: [] };
+    expect((await syncBootstrap({ projectRoot: tempDir, slug: SLUG })).success).toBe(true);
+    stateBody = original;
+    const now = Date.now();
+    stateBody.decisions[0].decisionText = 'Use l:20.';
+    stateBody.decisions[0].createdAt = new Date(now - 1000).toISOString();
+    stateBody.learnings[0].createdAt = new Date(now - 2000).toISOString();
+    const db = openDb();
+    db.exec(
+      "CREATE TRIGGER reject_clone_links BEFORE INSERT ON record_links BEGIN SELECT RAISE(FAIL,'clone link rejected'); END"
+    );
+    db.close();
+    const result = await syncBootstrap({ projectRoot: tempDir, slug: SLUG });
+    expect(result.success).toBe(true);
+    expect(result.data?.inserted).toBe(0);
+    expect(result.data?.failed).toBe(2);
+    expect(result.warnings?.join(' ')).toContain('clone link rejected');
+    const after = openDb();
+    try {
+      expect(after.prepare('SELECT COUNT(*) AS n FROM strategic_decisions').get()).toEqual({
+        n: 0,
+      });
+      expect(after.prepare('SELECT COUNT(*) AS n FROM learnings').get()).toEqual({ n: 0 });
+    } finally {
+      after.close();
+    }
+  });
+
+  it('counts every deferred record when the clone transaction refuses before its callback', async () => {
+    createFreshStore();
+    const transaction = jest
+      .spyOn(CmosDatabaseClient.prototype, 'transaction')
+      .mockReturnValueOnce({
+        success: false,
+        error: { code: 'DB_QUERY_FAILED', message: 'BEGIN refused before callback' },
+      });
+    try {
+      const result = await syncBootstrap({ projectRoot: tempDir, slug: SLUG });
+      expect(result.success).toBe(true);
+      expect(result.data?.failed).toBe(stateBody!.decisions.length + stateBody!.learnings.length);
+      expect(result.data?.insertedByType.decision_captured).toBeUndefined();
+      expect(result.data?.insertedByType.learning_captured).toBeUndefined();
+      expect(result.warnings?.join(' ')).toContain('BEGIN refused before callback');
+      const db = openDb();
+      try {
+        expect(db.prepare('SELECT COUNT(*) AS n FROM strategic_decisions').get()).toEqual({ n: 0 });
+      } finally {
+        db.close();
+      }
+    } finally {
+      transaction.mockRestore();
+    }
+  });
+
   // ─── Formatter ──────────────────────────────────────────────────────────────────
+
+  it('shows migration warnings and the recovery suggestion when clone refuses', () => {
+    const formatted = formatSyncBootstrapForLLM({
+      success: false,
+      error: {
+        code: 'DB_QUERY_FAILED',
+        message: 'Migration refused',
+        suggestion: 'Inspect schema',
+      },
+      warnings: ['Foreign FTS definition is preserved'],
+    });
+    expect(formatted).toContain('Migration refused');
+    expect(formatted).toContain('Foreign FTS definition is preserved');
+    expect(formatted).toContain('Inspect schema');
+  });
 
   it('formats a successful clone for the LLM', () => {
     const formatted = formatSyncBootstrapForLLM({

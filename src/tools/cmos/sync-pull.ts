@@ -47,6 +47,10 @@
  * @module tools/cmos/sync-pull
  */
 
+import { attachWarnings } from './format-warnings';
+import { ensureRecordLinks, repairRecordLinksBatch } from './record-links';
+import type { MergedRecordRef } from './sync-merge';
+import { ensureDecisionShapeColumns } from './schema-migrations';
 import { withClientAsync, type CmosDatabaseClient } from './client';
 import { DashboardClient, type PulledSyncEvent } from './dashboard-client';
 import { createError, createSuccess, CmosErrors } from './errors';
@@ -175,7 +179,8 @@ export async function syncPull(params: SyncPullParams): Promise<CmosToolResult<S
   }
   const dashboardClient = clientResult.data.client;
 
-  return withClientAsync(
+  const warnings: string[] = [];
+  const result = await withClientAsync<SyncPullResult>(
     async (db) => {
       const slug = params.slug ?? readDashboardSlug(db);
       if (!slug) {
@@ -207,7 +212,23 @@ export async function syncPull(params: SyncPullParams): Promise<CmosToolResult<S
         failed: 0,
       };
       const insertedByType: Record<string, number> = {};
-      const warnings: string[] = [];
+      const shape = ensureDecisionShapeColumns(db);
+      warnings.push(...(shape.warnings ?? []));
+      if (!shape.ready)
+        return createError<SyncPullResult>({
+          code: 'DB_QUERY_FAILED',
+          message: 'Decision schema migration failed; sync merge was not started.',
+          suggestion: 'Resolve the reported schema or lock problem, then retry the sync.',
+        });
+
+      const linkReady = ensureRecordLinks(db);
+      warnings.push(...(linkReady.warnings ?? []));
+      if (!linkReady.ready)
+        return createError<SyncPullResult>({
+          code: 'DB_QUERY_FAILED',
+          message: 'Required citation-link preparation failed; pull records were not merged.',
+          suggestion: 'Resolve the reported schema or lock problem, then retry pull.',
+        });
 
       let cursor = fromCursor;
       let pages = 0;
@@ -235,13 +256,30 @@ export async function syncPull(params: SyncPullParams): Promise<CmosToolResult<S
         pages++;
         received += page.events.length;
 
-        for (const event of page.events) {
-          mergeEvent(db, event, tally, insertedByType, collab, warnings);
+        const stagedTally = { ...tally };
+        const stagedTypes = { ...insertedByType };
+        const recordRefs: MergedRecordRef[] = [];
+        const pageBatch = db.transaction(() => {
+          for (const event of page.events) {
+            mergeEvent(db, event, stagedTally, stagedTypes, collab, warnings, recordRefs);
+          }
+          const repaired = repairRecordLinksBatch(db, recordRefs);
+          if (!repaired.success)
+            throw new Error(repaired.error?.message ?? 'Replica citation repair failed');
+        });
+        if (!pageBatch.success) {
+          recordUncommittedPage(page.events, tally);
+          warnings.push(
+            `PULL page rolled back: ${pageBatch.error?.message ?? 'required citation repair failed'}. Its rows and transitions were not committed; reset the pull cursor and re-pull after resolving the error.`
+          );
+        } else {
+          Object.assign(tally, stagedTally);
+          Object.assign(insertedByType, stagedTypes);
         }
 
         // Advance + persist the cursor after each page so an interrupted multi-page
-        // pull resumes from the last fully-merged page. The cursor advances even when
-        // individual events in the page were skipped/failed (per-event isolation): the
+        // pull resumes from the last fetched page. The cursor advances even when
+        // individual events failed or a required-link page rolled back: the
         // cursor is the broker's cmos_sync_log.id, and ON CONFLICT(natural key) makes a
         // re-pull idempotent, so advancing past an isolated failure never double-applies.
         // s86-m02b: `warnings` is this result's rendered channel (formatSyncPullForLLM), so a
@@ -262,8 +300,7 @@ export async function syncPull(params: SyncPullParams): Promise<CmosToolResult<S
       }
       if (tally.failed > 0) {
         warnings.push(
-          `${tally.failed} genesis event(s) failed to insert locally (e.g. an unmet foreign key from ` +
-            `out-of-order delivery); each was isolated and counted, not silently dropped. The page ` +
+          `${tally.failed} genesis event(s) were not committed locally; an insert or required citation repair failed. The page ` +
             `cursor still advanced past them, so a plain re-run won't re-fetch them — a full re-pull ` +
             `(reset the pull_cursor) re-applies them once the referenced rows exist. In normal ` +
             `cmos_sync_log ordering a row's genesis precedes any edge referencing it, so this is rare.`
@@ -314,9 +351,35 @@ export async function syncPull(params: SyncPullParams): Promise<CmosToolResult<S
     },
     { projectRoot: params.projectRoot }
   );
+  return attachWarnings(result, warnings);
 }
 
 // ─── Per-event merge ─────────────────────────────────────────────────────────
+
+/** A refusal can precede the callback: count the input page, never partial callback progress. */
+function recordUncommittedPage(events: readonly PulledSyncEvent[], tally: MergeTally): void {
+  for (const event of events) {
+    if (
+      PULL_TRANSITION_EVENT_TYPES.has(event.eventType) ||
+      MUTABLE_STATUS_EVENT_TYPES.has(event.eventType)
+    ) {
+      tally.transitionsDeferred++;
+    } else if (!PULL_GENESIS_EVENT_TYPES.has(event.eventType)) {
+      tally.skippedUnknownType++;
+    } else {
+      const envelope = asRecord(event.payload);
+      const data = envelope ? asRecord(envelope.data) : null;
+      if (
+        !envelope ||
+        !data ||
+        (event.eventType !== 'dependency_added' &&
+          !extractProvenance(data, asString(envelope.projectId)))
+      )
+        tally.skippedMissingProvenance++;
+      else tally.failed++;
+    }
+  }
+}
 
 function mergeEvent(
   db: CmosDatabaseClient,
@@ -324,7 +387,8 @@ function mergeEvent(
   tally: MergeTally,
   insertedByType: Record<string, number>,
   collab: boolean,
-  warnings: string[]
+  warnings: string[],
+  recordRefs: MergedRecordRef[]
 ): void {
   const eventType = event.eventType;
 
@@ -400,7 +464,8 @@ function mergeEvent(
           sessionId: asString(data.sessionId),
           contentHash: asString(data.contentHash),
         },
-        provenance
+        provenance,
+        recordRefs
       );
       break;
     }
@@ -423,7 +488,8 @@ function mergeEvent(
           createdAt: timestamp ?? asString(data.capturedAt),
           contentHash: asString(data.contentHash),
         },
-        provenance
+        provenance,
+        recordRefs
       );
       break;
     }
@@ -584,7 +650,10 @@ function extractProvenance(
 
 export function formatSyncPullForLLM(result: CmosToolResult<SyncPullResult>): string {
   if (!result.success) {
-    return `PULL failed: ${result.error?.message ?? 'Unknown error'}`;
+    const lines = [`PULL failed: ${result.error?.message ?? 'Unknown error'}`];
+    if (result.error?.suggestion) lines.push(`Suggestion: ${result.error.suggestion}`);
+    appendWarnings(lines, result);
+    return lines.join('\n');
   }
   const d = result.data!;
   const lines = [

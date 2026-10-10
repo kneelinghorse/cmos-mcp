@@ -138,3 +138,17 @@ export const PARKED_MISSION_STATUSES = ['Deferred', 'Dropped'] as const;
 export function isParkedMissionStatus(status: string | null | undefined): boolean {
   return isTerminalStatus(status, PARKED_MISSION_STATUSES);
 }
+
+/** Historical mission completion spellings are read aliases, never new write enum values. */
+export function normalizeMissionStatus<T extends string | null | undefined>(
+  status: T
+): T | 'Completed' {
+  return typeof status === 'string' && /^(?:complete|completed)$/i.test(status)
+    ? 'Completed'
+    : status;
+}
+
+/** SQL twin of normalizeMissionStatus, preserving SQL NULL behavior. */
+export function missionCompletedSql(statusExpr: string): string {
+  return `UPPER(${statusExpr}) IN ('COMPLETED', 'COMPLETE')`;
+}

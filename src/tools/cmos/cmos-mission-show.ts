@@ -8,6 +8,13 @@
  * @module tools/cmos/cmos-mission-show
  */
 
+import {
+  prepareSpinOutRead,
+  spinOutDetails,
+  spinOutPointerLines,
+  type SpinOutDetails,
+} from './spin-out-read';
+import { normalizeMissionStatus } from './terminal-status';
 import { z } from 'zod';
 import { withClient } from './client';
 import type { CmosToolResult, Mission, MissionStatus, Sprint } from './types';
@@ -19,7 +26,7 @@ import { appendWarnings } from './format-warnings';
 /**
  * Full mission details with parsed JSON fields.
  */
-export interface MissionShowResult {
+export interface MissionShowResult extends SpinOutDetails {
   /** Mission ID (e.g., "s12-m06") */
   id: string;
 
@@ -219,9 +226,10 @@ export async function cmosMissionShow(
 
       // Parse and transform mission
       const result: MissionShowResult = {
+        ...spinOutDetails(prepareSpinOutRead(client), 'mission', mission.id),
         id: mission.id,
         name: mission.name,
-        status: mission.status,
+        status: normalizeMissionStatus(mission.status),
         objective: mission.objective,
         context: mission.context,
         successCriteria: parseJsonArray(mission.success_criteria),
@@ -391,6 +399,7 @@ export function formatMissionShowForLLM(result: CmosToolResult<MissionShowResult
     lines.push(`**Completed**: ${m.completedAt}`);
   }
 
+  lines.push(...spinOutPointerLines(m));
   appendWarnings(lines, result);
 
   return lines.join('\n').trim();

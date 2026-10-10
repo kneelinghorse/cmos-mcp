@@ -44,6 +44,10 @@
  * @module tools/cmos/sync-bootstrap
  */
 
+import { attachWarnings } from './format-warnings';
+import { ensureRecordLinks, repairRecordLinksBatch } from './record-links';
+import type { MergedRecordRef } from './sync-merge';
+import { ensureDecisionShapeColumns } from './schema-migrations';
 import * as path from 'path';
 import { withClientAsync, type CmosDatabaseClient } from './client';
 import { registerResolvedProjectStore } from '../../intelligence/project-resolution';
@@ -117,7 +121,8 @@ export async function syncBootstrap(
   }
   const dashboardClient = clientResult.data.client;
 
-  return withClientAsync(
+  const warnings: string[] = [];
+  const result = await withClientAsync<SyncBootstrapResult>(
     async (db) => {
       const slug = params.slug ?? readDashboardSlug(db);
       if (!slug) {
@@ -137,7 +142,14 @@ export async function syncBootstrap(
       }
       const state = stateResult.data;
 
-      const warnings: string[] = [];
+      const shape = ensureDecisionShapeColumns(db);
+      warnings.push(...(shape.warnings ?? []));
+      if (!shape.ready)
+        return createError<SyncBootstrapResult>({
+          code: 'DB_QUERY_FAILED',
+          message: 'Decision schema migration failed; sync merge was not started.',
+          suggestion: 'Resolve the reported schema or lock problem, then retry the sync.',
+        });
 
       // Clone identity: stamp rows with the store's project_id, seeding it from the
       // snapshot for a fresh store; never clobber existing identity.
@@ -170,6 +182,15 @@ export async function syncBootstrap(
           suggestion: 'Resolve the project identity or graph collision, then retry the clone.',
         });
       }
+
+      const linkReady = ensureRecordLinks(db);
+      warnings.push(...(linkReady.warnings ?? []));
+      if (!linkReady.ready)
+        return createError<SyncBootstrapResult>({
+          code: 'DB_QUERY_FAILED',
+          message: 'Required citation-link preparation failed; clone records were not merged.',
+          suggestion: 'Resolve the reported schema or lock problem, then retry clone.',
+        });
 
       const tally: BootstrapTally = { inserted: 0, duplicates: 0, failed: 0 };
       const insertedByType: Record<string, number> = {};
@@ -280,56 +301,75 @@ export async function syncBootstrap(
         );
       }
 
-      for (const dec of state.decisions ?? []) {
-        const id = asNumber(dec.id);
-        if (id === null) {
-          rec('decision_captured', 'failed');
-          continue;
+      const recordRefs: MergedRecordRef[] = [];
+      const outcomes: Array<[string, InsertOutcome]> = [];
+      const stage = (type: string, outcome: InsertOutcome): void => {
+        outcomes.push([type, outcome]);
+      };
+      const recordBatch = db.transaction(() => {
+        for (const dec of state.decisions ?? []) {
+          const id = asNumber(dec.id);
+          if (id === null) {
+            stage('decision_captured', 'failed');
+            continue;
+          }
+          stage(
+            'decision_captured',
+            insertDecisionRow(
+              db,
+              {
+                id,
+                decisionText: asString(dec.decisionText),
+                createdAt: asString(dec.createdAt),
+                sprintId: asString(dec.sprintId),
+                missionId: asString(dec.missionId),
+                category: asString(dec.category),
+                sessionId: asString(dec.sessionId),
+                contentHash: null, // /state omits content_hash
+              },
+              provOf(dec),
+              recordRefs
+            )
+          );
         }
-        rec(
-          'decision_captured',
-          insertDecisionRow(
-            db,
-            {
-              id,
-              decisionText: asString(dec.decisionText),
-              createdAt: asString(dec.createdAt),
-              sprintId: asString(dec.sprintId),
-              missionId: asString(dec.missionId),
-              category: asString(dec.category),
-              sessionId: asString(dec.sessionId),
-              contentHash: null, // /state omits content_hash
-            },
-            provOf(dec)
-          )
-        );
-      }
 
-      for (const l of state.learnings ?? []) {
-        const id = asNumber(l.id);
-        if (id === null) {
-          rec('learning_captured', 'failed');
-          continue;
+        for (const l of state.learnings ?? []) {
+          const id = asNumber(l.id);
+          if (id === null) {
+            stage('learning_captured', 'failed');
+            continue;
+          }
+          stage(
+            'learning_captured',
+            insertLearningRow(
+              db,
+              {
+                id,
+                content: asString(l.content),
+                category: asString(l.category),
+                status: 'active',
+                sprintId: asString(l.sprintId),
+                sessionId: null, // /state omits author_session_id on learnings
+                missionId: null, // /state omits mission_id on learnings
+                createdAt: asString(l.createdAt),
+                contentHash: null, // /state omits content_hash
+              },
+              provOf(l),
+              recordRefs
+            )
+          );
         }
-        rec(
-          'learning_captured',
-          insertLearningRow(
-            db,
-            {
-              id,
-              content: asString(l.content),
-              category: asString(l.category),
-              status: 'active',
-              sprintId: asString(l.sprintId),
-              sessionId: null, // /state omits author_session_id on learnings
-              missionId: null, // /state omits mission_id on learnings
-              createdAt: asString(l.createdAt),
-              contentHash: null, // /state omits content_hash
-            },
-            provOf(l)
-          )
+
+        const repaired = repairRecordLinksBatch(db, recordRefs);
+        if (!repaired.success)
+          throw new Error(repaired.error?.message ?? 'Replica citation repair failed');
+      });
+      if (!recordBatch.success) {
+        tally.failed += (state.decisions?.length ?? 0) + (state.learnings?.length ?? 0);
+        warnings.push(
+          `Decision/learning clone batch rolled back: ${recordBatch.error?.message ?? 'required citation repair failed'}. Retry clone after resolving this error; no rows in that batch were committed.`
         );
-      }
+      } else for (const [type, outcome] of outcomes) rec(type, outcome);
 
       for (const dep of state.dependencies ?? []) {
         const fromId = asString(dep.fromId);
@@ -356,7 +396,7 @@ export async function syncBootstrap(
 
       if (tally.failed > 0) {
         warnings.push(
-          `${tally.failed} row(s) failed to insert locally. On a store whose firehose ` +
+          `${tally.failed} row(s) were not committed locally; inspect the reported insert or citation errors. On a store whose firehose ` +
             `migration already made the provenance columns NOT NULL, a snapshot row with NULL ` +
             `provenance (single-user mode) cannot be stored without re-stamping — which the ` +
             `preserve-verbatim contract forbids. Clone into a fresh/un-migrated store.`
@@ -384,6 +424,7 @@ export async function syncBootstrap(
     },
     { projectRoot: params.projectRoot, registerProject: false }
   );
+  return attachWarnings(result, warnings);
 }
 
 // ─── Identity + context FK helpers ───────────────────────────────────────────────
@@ -472,7 +513,10 @@ function ensureContexts(
 
 export function formatSyncBootstrapForLLM(result: CmosToolResult<SyncBootstrapResult>): string {
   if (!result.success) {
-    return `Clone failed: ${result.error?.message ?? 'Unknown error'}`;
+    const lines = [`Clone failed: ${result.error?.message ?? 'Unknown error'}`];
+    if (result.error?.suggestion) lines.push(`Suggestion: ${result.error.suggestion}`);
+    appendWarnings(lines, result);
+    return lines.join('\n');
   }
   const d = result.data!;
   const lines = [

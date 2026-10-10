@@ -277,6 +277,7 @@ async function tryHybridSearch(
   const retriever = new HybridRetriever(client);
   const hits = await retriever.search(query, {
     types: ['decision'],
+    citationRecall: true,
     limit: limit * 2,
     statusFilter: ['active', 'superseded', 'archived'],
   });

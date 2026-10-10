@@ -74,6 +74,24 @@ function createTestDb(): TestDb {
 
   // Create schema
   db.exec(`
+    -- Keep the fixture a valid pre-shape store: session decisions are also structured records.
+    -- Earlier versions omitted these tables and silently exercised failed decision extraction.
+    CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    INSERT INTO metadata VALUES ('project_id', 'session-ops-fixture');
+    CREATE TABLE strategic_decisions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      context_id TEXT DEFAULT 'master_context',
+      decision_text TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      sprint_id TEXT,
+      project_domain TEXT,
+      author_session_id TEXT,
+      mission_id TEXT,
+      category TEXT,
+      status TEXT DEFAULT 'active',
+      superseded_by INTEGER,
+      evidence TEXT
+    );
     CREATE TABLE sprints (
       id TEXT PRIMARY KEY,
       title TEXT,
@@ -532,6 +550,24 @@ describe('cmos_session_capture', () => {
 
   afterEach(() => {
     cleanupTestDb(testDb);
+  });
+
+  it('refuses a missing decision schema visibly before persisting a capture', async () => {
+    testDb.db.exec('DROP TABLE strategic_decisions');
+    const before = testDb.db
+      .prepare('SELECT captures FROM sessions WHERE id=?')
+      .get('PS-2024-01-12-001');
+    const result = await cmosSessionCapture({
+      sessionId: 'PS-2024-01-12-001',
+      category: 'decision',
+      content: 'A decision needs its structured record.',
+      projectRoot: testDb.tempDir,
+    });
+    expect(result.success).toBe(false);
+    expect(result.warnings?.join(' ')).toContain('strategic_decisions source table is missing');
+    expect(
+      testDb.db.prepare('SELECT captures FROM sessions WHERE id=?').get('PS-2024-01-12-001')
+    ).toEqual(before);
   });
 
   describe('happy path', () => {

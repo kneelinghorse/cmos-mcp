@@ -235,7 +235,9 @@ export const cmosContextSchema = z
     nextStepIds: z
       .array(z.number().int().positive())
       .optional()
-      .describe('Next-step IDs to act on for complete/carry/drop/reopen'),
+      .describe(
+        'Next-step IDs for historical list lookup (includes moved/dropped rows and pointers unless explicitly status-filtered), or complete/carry/drop/reopen'
+      ),
     carryToSprint: z
       .string()
       .optional()
@@ -426,7 +428,8 @@ export const cmosContextToolDefinition = {
       nextStepIds: {
         type: 'array',
         items: { type: 'integer', minimum: 1 },
-        description: 'Next-step IDs to act on for complete/carry/drop/reopen',
+        description:
+          'Next-step IDs for historical list lookup (includes moved/dropped rows and pointers unless explicitly status-filtered), or complete/carry/drop/reopen',
       },
       carryToSprint: {
         type: 'string',

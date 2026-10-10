@@ -309,6 +309,8 @@ describe('router param forwarding gate (s86-m03)', () => {
         '_getNow',
         'advertisedRoots',
         'callerProvidedProjectRoot',
+        // s94-m11: the CLI supplies resolution provenance for printed remedies, never a wire key.
+        'cliSource',
         'client',
         // s93-m12: init's internal `hooks` (`cmos-mcp init --no-hooks` adds the hook-less block).
         'hooks',

@@ -54,6 +54,7 @@
 
 import { afterAll, describe, expect, it } from '@jest/globals';
 import Database from 'better-sqlite3';
+import * as embeddingPipeline from '../../../src/intelligence/embedding-pipeline';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -273,12 +274,22 @@ describe('s86-m02b — a failed learning-reaffirm query is disclosed, not report
     it('classifies NO cited id as missing, and says why in the text an agent reads', async () => {
       const fixture = await makeFixture('102');
       const [existing] = fixture.existingLearningIds;
-      breakTheExistenceSelect(fixture.dbPath);
-
-      const { result, data, text } = await captureCiting(fixture, [
-        existing,
-        DEFINITELY_ABSENT_LEARNING_ID,
-      ]);
+      // m06 prepares required source tables before the capture transaction. Rename only
+      // after that unit commits, at the embedding seam preceding the reaffirm lookup.
+      // The lookup still fails against actual SQLite; no client/query result is mocked.
+      const embedding = jest
+        .spyOn(embeddingPipeline, 'recordEmbedding')
+        .mockImplementationOnce(async () => {
+          breakTheExistenceSelect(fixture.dbPath);
+          return { action: 'skipped-unavailable' };
+        });
+      let captured: Awaited<ReturnType<typeof captureCiting>>;
+      try {
+        captured = await captureCiting(fixture, [existing, DEFINITELY_ABSENT_LEARNING_ID]);
+      } finally {
+        embedding.mockRestore();
+      }
+      const { result, data, text } = captured;
 
       // success stays TRUE: the capture happened. The class is "assert something not so", not
       // "keep going after a failure" (fork f09) — so the answer is kept and corrected, not aborted.

@@ -213,6 +213,26 @@ describe('ensureSprintSummaryView (s86-m08)', () => {
     expect(readSummary(dbPath, 's-mixed')).toMatchObject({ total: 3, parked: 2 });
   });
 
+  it('counts completed mission aliases after upgrading the old view without rewriting rows', async () => {
+    const dbPath = shapesStore(OLD_VIEW_SQL);
+    const db = new Database(dbPath);
+    db.prepare("UPDATE missions SET status='complete' WHERE id='m1'").run();
+    db.close();
+    const client = await clientFor(dbPath);
+    try {
+      ensureSprintSummaryView(client);
+      const counted = client.getOne<{ completed: number }>(
+        "SELECT completed_missions AS completed FROM sprint_summary WHERE sprint_id='s-mixed'"
+      );
+      expect(counted.data?.completed).toBe(1);
+      expect(
+        client.getOne<{ status: string }>("SELECT status FROM missions WHERE id='m1'").data?.status
+      ).toBe('complete');
+    } finally {
+      client.close();
+    }
+  });
+
   it('(b) is a NO-OP on the second call — a read path must not write forever', async () => {
     const dbPath = shapesStore(OLD_VIEW_SQL);
     const client = await clientFor(dbPath);
@@ -415,6 +435,8 @@ PRIVATE.describe(EXISTING_STORE_SUITE, () => {
         { sprint_id: 'sprint-54', total_missions: 3, parked_missions: 2 },
         { sprint_id: 'sprint-79', total_missions: 6, parked_missions: 1 },
         { sprint_id: 'sprint-85', total_missions: 5, parked_missions: 4 },
+        // Three missions held and one dropped at the 2026-10-09 re-scope (#1261).
+        { sprint_id: 'sprint-94', total_missions: 9, parked_missions: 4 },
       ]);
     } finally {
       db.close();

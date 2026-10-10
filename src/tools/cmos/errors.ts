@@ -7,6 +7,7 @@
  * @module tools/cmos/errors
  */
 
+import { normalizeMissionStatus } from './terminal-status';
 import type { CmosToolError, CmosToolResult, MissionStatus, SanitizedFieldReport } from './types';
 
 /**
@@ -139,6 +140,7 @@ export const VALID_STATE_TRANSITIONS: Record<MissionStatus, MissionStatus[]> = {
  * state 'Archived'` about a status the state machine has never heard of.
  */
 export function transitionsFrom(currentStatus: string): MissionStatus[] | undefined {
+  currentStatus = normalizeMissionStatus(currentStatus);
   return Object.prototype.hasOwnProperty.call(VALID_STATE_TRANSITIONS, currentStatus)
     ? (VALID_STATE_TRANSITIONS[currentStatus as MissionStatus] as MissionStatus[])
     : undefined;

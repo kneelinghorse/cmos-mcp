@@ -58,19 +58,21 @@ try {
     `[env-loader] failed to load ${envPath}: ${err instanceof Error ? err.message : String(err)}\n`
   );
 }
-
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { serveStdio, type StdioServerHandle } from '@modelcontextprotocol/server/stdio';
 import {
-  ListToolsRequestSchema,
-  CallToolRequestSchema,
-  RootsListChangedNotificationSchema,
-  ErrorCode,
-  McpError,
+  Server,
+  ProtocolError,
   CallToolResult,
-} from '@modelcontextprotocol/sdk/types.js';
-
+  ProtocolErrorCode,
+  type Tool,
+} from '@modelcontextprotocol/server';
 import { CmosDetector } from './intelligence/cmos-detector';
+import {
+  withServerRequest,
+  clientProjectRootsForCall,
+  clearClientProjectRoots,
+  clientLabelForRequest,
+} from './server-request-context';
 import {
   ProjectGraphRegistry,
   reconfirmDefaultCall,
@@ -98,6 +100,7 @@ import {
 import { classifyAction } from './tools/cmos/action-taxonomy';
 import {
   captureToolCall,
+  setToolProjectResolution,
   currentToolCallActionMode,
   currentWrittenStores,
   projectIdentityDisclosuresForError,
@@ -114,6 +117,11 @@ import {
   runFirstWriteMaintenance,
   storeNeedsFirstWriteMaintenance,
 } from './tools/cmos/first-write-maintenance';
+import {
+  markDashboardUploadOwed,
+  observeDashboardUploadProject,
+} from './tools/cmos/dashboard-upload-scheduler';
+import { CMOS_CHECKPOINT_SYNC_ENV } from './tools/cmos/checkpoint-backfill';
 import {
   CMOS_TOOL_DEFINITIONS,
   // Consolidated entity tools (Sprint 24)
@@ -204,20 +212,25 @@ const SERVER_CONFIG = {
 /**
  * Main server instance
  */
-const server = new Server(
-  {
-    name: SERVER_CONFIG.name,
-    version: SERVER_CONFIG.version,
-  },
-  {
-    capabilities: {
-      tools: {},
-      prompts: {},
+function createProtocolServer(): Server {
+  return new Server(
+    {
+      name: SERVER_CONFIG.name,
+      version: SERVER_CONFIG.version,
     },
-    // s92-m08: the loop, for every client, without a rules file.
-    instructions: SERVER_INSTRUCTIONS,
-  }
-);
+    {
+      capabilities: {
+        tools: {},
+        prompts: {},
+      },
+      // s92-m08: the loop, for every client, without a rules file.
+      instructions: SERVER_INSTRUCTIONS,
+      cacheHints: { 'tools/list': { ttlMs: 60_000, cacheScope: 'private' } },
+    }
+  );
+}
+let server = createProtocolServer();
+let stdioHandle: StdioServerHandle | undefined;
 
 const errorLogger = new ErrorLogger();
 ErrorHandler.useLogger(errorLogger);
@@ -239,7 +252,7 @@ export interface MissionProtocolContext {
 export interface ToolDefinition {
   name: string;
   description: string;
-  inputSchema: object;
+  inputSchema: Tool['inputSchema'];
 }
 
 /**
@@ -251,7 +264,7 @@ export interface ToolDefinition {
  * What tools/list sends: every published definition in its fixed, declared order, with the short
  * wire text (s92-m08). The full text stays on CMOS_TOOL_DEFINITIONS and in TOOL_REFERENCE.md.
  */
-export function getToolDefinitions(): readonly ToolDefinition[] {
+export function getToolDefinitions(): ToolDefinition[] {
   return (CMOS_TOOL_DEFINITIONS as unknown as ToolDefinition[]).map(toWireDefinition);
 }
 
@@ -360,14 +373,6 @@ interface StartupAttributionSelfTestResult {
 }
 
 /**
- * Cached client project roots from MCP roots (all of them, not just the first).
- * Updated lazily on first CMOS tool call and cleared on `notifications/roots/list_changed`.
- *
- * `undefined` means "never probed"; empty array means "probed, none advertised".
- */
-let cachedClientProjectRoots: string[] | undefined;
-
-/**
  * Get ALL client project roots from MCP roots.
  *
  * Sprint 53 m02: changed from `Promise<string | undefined>` (first root only) to
@@ -379,12 +384,8 @@ let cachedClientProjectRoots: string[] | undefined;
  * @returns Array of file-system paths. Empty when the client advertises no roots
  *   or does not support the roots capability.
  */
-async function getClientProjectRoots(): Promise<string[]> {
-  if (cachedClientProjectRoots !== undefined) {
-    return cachedClientProjectRoots;
-  }
-  cachedClientProjectRoots = await probeClientRoots(server);
-  return cachedClientProjectRoots;
+async function getClientProjectRoots(explicitRoot?: string): Promise<string[]> {
+  return clientProjectRootsForCall(server, explicitRoot, probeClientRoots);
 }
 
 /**
@@ -444,13 +445,15 @@ async function resolveToolSenderContext(
   explicitRoot: string | undefined,
   options: { requireSenderIdentity?: boolean } = {}
 ): Promise<SenderContext> {
-  const mcpRoots = await getClientProjectRoots();
+  const mcpRoots = await getClientProjectRoots(explicitRoot);
   const resolved = await resolveSenderContext({
     explicitProjectRoot: explicitRoot,
     mcpRoots,
     requireSenderIdentity: options.requireSenderIdentity ?? false,
   });
+  setToolProjectResolution({ projectRoot: resolved.projectRoot, resolvedBy: resolved.source });
   noteTelemetryProject(resolved.projectRoot);
+  await observeDashboardUploadProject(resolved.projectRoot);
   return resolved;
 }
 
@@ -478,8 +481,14 @@ async function executeWithStoreUpkeep(
     for (const dbPath of currentWrittenStores()) {
       // <root>/cmos/db/cmos.sqlite → <root>
       const root = path.resolve(dbPath, '..', '..', '..');
-      if (!storeNeedsFirstWriteMaintenance(root)) continue;
-      for (const note of await runFirstWriteMaintenance(root)) recordStoreUpkeepNote(note);
+      if (storeNeedsFirstWriteMaintenance(root)) {
+        for (const note of await runFirstWriteMaintenance(root)) recordStoreUpkeepNote(note);
+      }
+      // Every caller write owes an upload, including later writes after upkeep has run.
+      // The scheduler persists only the registry mark here; it never waits for the upload.
+      if (process.env[CMOS_CHECKPOINT_SYNC_ENV] !== 'off') {
+        await markDashboardUploadOwed(root);
+      }
     }
   }
   return result;
@@ -641,75 +650,80 @@ export function registerToolHandlers(
 ): void {
   const targetServer = serverInstance || server;
   // Listen for roots changes and clear cache
-  targetServer.setNotificationHandler(RootsListChangedNotificationSchema, async () => {
+  targetServer.setNotificationHandler('notifications/roots/list_changed', async () => {
     debugLog(`[INFO] Client roots changed, clearing cache`);
-    cachedClientProjectRoots = undefined;
+    clearClientProjectRoots(targetServer);
   });
 
   // List available tools (includes CMOS tools when detected)
-  targetServer.setRequestHandler(ListToolsRequestSchema, async () => {
+  targetServer.setRequestHandler('tools/list', async () => {
     return {
       tools: getToolDefinitions(),
     };
   });
 
   // Handle tool execution
-  targetServer.setRequestHandler(CallToolRequestSchema, async (request) => {
+  targetServer.setRequestHandler('tools/call', async (request, requestContext) => {
     const { name, arguments: args } = request.params;
-    const client = targetServer.getClientVersion?.();
-    return withMcpTelemetry(
-      {
-        name,
-        args,
-        mode: classifyAction(name, extractActionArg(args)),
-        client: client ? `${client.name}/${client.version}` : null,
-      },
-      async () => {
-        try {
-          if (!context) {
-            throw new McpError(ErrorCode.InternalError, 'Server context not initialized');
-          }
+    const client = clientLabelForRequest(targetServer, requestContext);
+    return withServerRequest(targetServer, requestContext, () =>
+      withMcpTelemetry(
+        {
+          name,
+          args,
+          mode: classifyAction(name, extractActionArg(args)),
+          client,
+        },
+        async () => {
+          try {
+            if (!context) {
+              throw new ProtocolError(
+                ProtocolErrorCode.InternalError,
+                'Server context not initialized'
+              );
+            }
 
-          // Establish the outer request carrier here so failures retain this call's disclosures.
-          // executeMissionProtocolTool sees the active ALS context and runs its switch directly.
-          const actionMode = classifyAction(name, extractActionArg(args));
-          const captured = await captureToolCall(actionMode, () =>
-            executeWithStoreUpkeep(name, args, context)
-          );
-          return attachStoreUpkeepNotes(
-            attachProjectIdentityDisclosures(captured.value, captured.projectIdentityDisclosures),
-            captured.storeUpkeepNotes
-          );
-        } catch (error) {
-          const originalError = unwrapCapturedToolCallError(error);
-          if (originalError instanceof SenderResolutionError) {
+            // Establish the outer request carrier here so failures retain this call's disclosures.
+            // executeMissionProtocolTool sees the active ALS context and runs its switch directly.
+            const actionMode = classifyAction(name, extractActionArg(args));
+            const captured = await captureToolCall(actionMode, () =>
+              executeWithStoreUpkeep(name, args, context)
+            );
+            return attachStoreUpkeepNotes(
+              attachProjectIdentityDisclosures(captured.value, captured.projectIdentityDisclosures),
+              captured.storeUpkeepNotes
+            );
+          } catch (error) {
+            const originalError = unwrapCapturedToolCallError(error);
+            if (originalError instanceof SenderResolutionError) {
+              return attachProjectIdentityDisclosures(
+                buildKnownToolErrorResult(
+                  await classifySenderResolutionError(
+                    originalError,
+                    refusalMode(classifyAction(name, extractActionArg(args)))
+                  )
+                ),
+                projectIdentityDisclosuresForError(error)
+              );
+            }
+            // Sprint 74 m03: a tool HANDLER that throws an unhandled exception (a
+            // write-path crash — e.g. cmos_sprint(complete)/cmos_session(capture)
+            // hitting a store-specific failure) is a tool-EXECUTION failure, not a
+            // protocol error. Surface it as a structured CmosToolResult error
+            // (code + real message + suggestion) returned as an isError result —
+            // never a bare JSON-RPC -32603 that swallows the cause (aquex.ai aa124685).
+            // Genuine protocol errors (ProtocolError: unknown tool, uninitialized context)
+            // keep their JSON-RPC error shape — they already carry a clear message.
+            if (originalError instanceof ProtocolError) {
+              throw originalError;
+            }
             return attachProjectIdentityDisclosures(
-              buildKnownToolErrorResult(
-                await classifySenderResolutionError(
-                  originalError,
-                  refusalMode(classifyAction(name, extractActionArg(args)))
-                )
-              ),
+              buildToolExecutionErrorResult(name, args, originalError),
               projectIdentityDisclosuresForError(error)
             );
           }
-          // Sprint 74 m03: a tool HANDLER that throws an unhandled exception (a
-          // write-path crash — e.g. cmos_sprint(complete)/cmos_session(capture)
-          // hitting a store-specific failure) is a tool-EXECUTION failure, not a
-          // protocol error. Surface it as a structured CmosToolResult error
-          // (code + real message + suggestion) returned as an isError result —
-          // never a bare JSON-RPC -32603 that swallows the cause (aquex.ai aa124685).
-          // Genuine protocol errors (McpError: unknown tool, uninitialized context)
-          // keep their JSON-RPC error shape — they already carry a clear message.
-          if (originalError instanceof McpError) {
-            throw originalError;
-          }
-          return attachProjectIdentityDisclosures(
-            buildToolExecutionErrorResult(name, args, originalError),
-            projectIdentityDisclosuresForError(error)
-          );
         }
-      }
+      )
     );
   });
 }
@@ -893,7 +907,7 @@ export async function executeMissionProtocolTool(
           projectIdentityDisclosuresForError(error)
         );
       }
-      // Direct callers retain the established McpError instanceof/code contract. Known sender
+      // Direct callers retain the established protocol error instanceof/code contract. Known sender
       // setup refusals above are the deliberate exception: they now use the same structured
       // result and disclosure carrier as the registered CallTool boundary.
       throw originalError;
@@ -906,7 +920,7 @@ export async function executeMissionProtocolTool(
     (definition) => definition.name === name
   );
   if (!definitionExists) {
-    throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
+    throw new ProtocolError(ProtocolErrorCode.MethodNotFound, `Unknown tool: ${name}`);
   }
 
   const preflightError = preflightMissionProtocolTool(name, args);
@@ -1108,7 +1122,7 @@ export async function executeMissionProtocolTool(
 
     case 'cmos_agent_onboard': {
       const params = args as CmosAgentOnboardParams;
-      const advertisedRoots = await getClientProjectRoots();
+      const advertisedRoots = await getClientProjectRoots(params.projectRoot);
       const ctx = await resolveToolSenderContext(params.projectRoot);
       const projectRoot = ctx.projectRoot;
       const result = await cmosAgentOnboard({
@@ -1126,7 +1140,7 @@ export async function executeMissionProtocolTool(
     // Project-scoped by design — does NOT walk the project registry.
     case 'cmos_review': {
       const params = args as CmosReviewParams;
-      const advertisedRoots = await getClientProjectRoots();
+      const advertisedRoots = await getClientProjectRoots(params.projectRoot);
       const ctx = await resolveToolSenderContext(params.projectRoot);
       const projectRoot = ctx.projectRoot;
       // s92-m01: the digest carries projectRoot/resolvedBy inside its own 4KB budget.
@@ -1147,7 +1161,7 @@ export async function executeMissionProtocolTool(
     // Consolidated message tool (Sprint 28)
     case 'cmos_message': {
       const params = args as CmosMessageParams;
-      const advertisedRoots = await getClientProjectRoots();
+      const advertisedRoots = await getClientProjectRoots(params.projectRoot);
 
       if (params.action === 'whoami') {
         const result = await getWhoamiDiagnostics({
@@ -1246,7 +1260,7 @@ export async function executeMissionProtocolTool(
     }
 
     default:
-      throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
+      throw new ProtocolError(ProtocolErrorCode.MethodNotFound, `Unknown tool: ${name}`);
   }
 }
 
@@ -1678,15 +1692,16 @@ async function main(argv: readonly string[] = process.argv.slice(2)): Promise<vo
     // Initialize all server components
     const context = await initializeServer();
 
-    // Register tool handlers
-    registerToolHandlers(context);
-    registerCmosPromptHandlers(server);
-
-    // Create stdio transport
-    const transport = new StdioServerTransport();
-
-    // Connect server to transport
-    await server.connect(transport);
+    // Each era opening gets a fresh instance; application startup runs once per process.
+    stdioHandle = serveStdio(
+      () => {
+        server = createProtocolServer();
+        registerToolHandlers(context, server);
+        registerCmosPromptHandlers(server);
+        return server;
+      },
+      { legacy: 'serve', onerror: (error) => console.error(`[WARN] MCP stdio: ${error.message}`) }
+    );
 
     // s92-m03: when the client goes away, close this process's implicit sessions. Best effort, and
     // through the session handler, so nothing is uploaded on the way out; whatever is left open is
@@ -1736,7 +1751,10 @@ export const __test__ = {
   initializeServer,
   main,
   runWhoamiCli,
-  server,
+  get server() {
+    return server;
+  },
+  createProtocolServer,
   setContextBuilder: (builder: typeof buildMissionProtocolContext) => {
     contextBuilder = builder;
   },
@@ -1794,7 +1812,7 @@ process.on('SIGINT', async () => {
   debugLog(`[INFO] Received SIGINT, shutting down gracefully...`);
   await closeOwnImplicitSessions().catch(() => undefined);
   try {
-    await server.close();
+    await (stdioHandle ? stdioHandle.close() : server.close());
   } catch (error) {
     ErrorHandler.handle(
       error,
@@ -1818,7 +1836,7 @@ process.on('SIGTERM', async () => {
   debugLog(`[INFO] Received SIGTERM, shutting down gracefully...`);
   await closeOwnImplicitSessions().catch(() => undefined);
   try {
-    await server.close();
+    await (stdioHandle ? stdioHandle.close() : server.close());
   } catch (error) {
     ErrorHandler.handle(
       error,

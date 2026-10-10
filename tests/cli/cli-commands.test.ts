@@ -331,3 +331,84 @@ describe('s93-m01 — the #610 follow-ups', () => {
     expect((await cmosAgentOnboard({ projectRoot })).data?.lastSession?.id).toBe('PS-LATER-WORK');
   });
 });
+
+describe('s94-m04 — shaped decisions use the same owned write path', () => {
+  it('refuses a missing session before any row is written', async () => {
+    const result = await run(['decisions', 'record', '--content', 'Choose the shared writer.']);
+    expect(result.code).toBe(1);
+    expect(result.stderr.join(' ')).toContain('--session-id');
+    expect(query('SELECT id FROM sessions')).toEqual([]);
+  });
+  it('records autonomous reasoning with an explicit root, no project ENV and JSON output', async () => {
+    const result = await run(
+      [
+        'decisions',
+        'record',
+        '--project-root',
+        projectRoot,
+        '--session-id',
+        'shape-cli',
+        '--content',
+        'Choose the shared writer.',
+        '--context',
+        'Keep CLI and MCP consistent.',
+        '--alternatives',
+        '["Duplicate the SQL"]',
+        '--consequences',
+        'One validation path.',
+        '--deciders',
+        '["Agent"]',
+        '--mode',
+        'autonomous',
+        '--format',
+        'json',
+      ],
+      tmp
+    );
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.stdout).success).toBe(true);
+    expect(
+      query(
+        'SELECT context_text, alternatives, consequences, deciders, approval_mode FROM strategic_decisions'
+      )
+    ).toEqual([
+      {
+        context_text: 'Keep CLI and MCP consistent.',
+        alternatives: '["Duplicate the SQL"]',
+        consequences: 'One validation path.',
+        deciders: '["Agent"]',
+        approval_mode: 'autonomous',
+      },
+    ]);
+  });
+  it.each(['{bad', '"not an array"', '[1]'])(
+    'refuses malformed array %s before session creation',
+    async (alternatives) => {
+      const result = await run([
+        'decisions',
+        'record',
+        '--session-id',
+        'shape-cli',
+        '--content',
+        'Do not store.',
+        '--alternatives',
+        alternatives,
+      ]);
+      expect(result.code).toBe(1);
+      expect(query('SELECT id FROM sessions')).toEqual([]);
+      expect(query('SELECT id FROM strategic_decisions')).toEqual([]);
+    }
+  );
+  it('renders the headline budget warning while succeeding', async () => {
+    const result = await run([
+      'decisions',
+      'record',
+      '--session-id',
+      'shape-cli',
+      '--content',
+      'x'.repeat(601),
+    ]);
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain('600');
+  });
+});

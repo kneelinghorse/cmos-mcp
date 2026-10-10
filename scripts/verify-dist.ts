@@ -772,8 +772,9 @@ async function main(): Promise<void> {
 
     // --- s86-m02b: a write the database REJECTED must reach the answer TEXT.
     //
-    //     m02 made the envelope channel renderable; m02b routes real write failures into it and
-    //     into the structured `writeFailures` channel beside it. Both are asserted HERE, over
+    //     m02 made the envelope channel renderable; m02b routes real write failures into it.
+    //     s94-m06 makes decision/learning record+capture+link units atomic, so required failure
+    //     now returns a structured refusal and rolls back the capture. Both channels are asserted over
     //     stdio against the BUILT dist, because handler-only testing is exactly what let
     //     statusFilter, expiresAt and agentFeedback all ship dead. The failures are forced at the
     //     DATABASE (a dangling FK, a RAISE trigger) rather than by stubbing anything, so this
@@ -792,6 +793,25 @@ async function main(): Promise<void> {
     });
 
     const m02bDb = path.join(m02bDir, 'cmos', 'db', 'cmos.sqlite');
+    let m02bMasterContext: Record<string, unknown>;
+    const m02bAtomicState = () => {
+      const db = new Database(m02bDb, { readonly: true });
+      try {
+        const count = (table: string, where = '') =>
+          (db.prepare(`SELECT COUNT(*) AS n FROM ${table} ${where}`).get() as { n: number }).n;
+        const hasLinks = db
+          .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='record_links'")
+          .get();
+        return {
+          sessions: db.prepare('SELECT id,status,captures FROM sessions ORDER BY id').all(),
+          decisions: count('strategic_decisions'),
+          links: hasLinks ? count('record_links') : 0,
+          captureEvents: count('session_events', "WHERE action='capture'"),
+        };
+      } finally {
+        db.close();
+      }
+    };
     {
       // `strategic_decisions.context_id` is NOT NULL DEFAULT 'master_context' with an FK to
       // contexts(id). The capture INSERT never names the column, so every decision row takes
@@ -799,6 +819,9 @@ async function main(): Promise<void> {
       const db = new Database(m02bDb);
       try {
         db.pragma('foreign_keys = ON');
+        m02bMasterContext = db
+          .prepare("SELECT * FROM contexts WHERE id='master_context'")
+          .get() as Record<string, unknown>;
         db.prepare(`DELETE FROM contexts WHERE id = 'master_context'`).run();
         // A RAISE trigger fails the session_events insert without touching anything else,
         // which is the Tier-2 (envelope) half of the same proof.
@@ -811,38 +834,48 @@ async function main(): Promise<void> {
       }
     }
 
-    const m02bCapture = await h.callOk('cmos_session', {
+    const m02bBefore = m02bAtomicState();
+    const m02bCaptureParams = {
       action: 'capture',
       category: 'decision',
       content: 's86-m02b — this decision INSERT is expected to fail its FK',
       projectRoot: m02bDir,
-    });
+    };
+    const m02bCapture = await h.callTool('cmos_session', m02bCaptureParams);
     const m02bCaptureText = h.textOf(m02bCapture);
-    const m02bCaptureData = (
-      m02bCapture as {
-        structuredContent?: {
-          data?: { decisionExtractionFailed?: string; writeFailures?: Array<{ op: string }> };
-        };
-      }
-    ).structuredContent?.data;
-
+    const m02bEnvelope = m02bCapture.structuredContent as
+      | {
+          success?: boolean;
+          data?: unknown;
+          error?: { code?: string; message?: string; suggestion?: string };
+          warnings?: string[];
+        }
+      | undefined;
     check(
-      's86-m02b: a rejected decision INSERT keeps success:true (disclosure, not abortion)',
-      m02bCapture.isError !== true,
-      `isError=${m02bCapture.isError}`
+      's94-m06: a rejected decision INSERT refuses the required atomic unit',
+      m02bCapture.isError === true &&
+        m02bEnvelope?.success === false &&
+        m02bEnvelope.data === undefined,
+      `envelope=${JSON.stringify(m02bEnvelope)}`
     );
     check(
-      's86-m02b: the structured channel names the failed write',
-      (m02bCaptureData?.writeFailures ?? []).some((f) => f.op === 'strategic_decisions.insert') &&
-        typeof m02bCaptureData?.decisionExtractionFailed === 'string',
-      `data=${JSON.stringify(m02bCaptureData?.writeFailures)}`
+      's94-m06: the structured refusal names the DB failure and rollback remedy',
+      m02bEnvelope?.error?.code === 'DB_QUERY_FAILED' &&
+        /FOREIGN KEY|constraint/i.test(m02bEnvelope.error.message ?? '') &&
+        /rolled back/i.test(m02bEnvelope.error.suggestion ?? ''),
+      `error=${JSON.stringify(m02bEnvelope?.error)}`
     );
     check(
-      's86-m02b: content[0].text says the decision was NOT stored, with the DB error',
-      /\*\*Decision Extraction\*\*: FAILED/.test(m02bCaptureText) &&
-        /Write failures/.test(m02bCaptureText) &&
-        /FOREIGN KEY|constraint/i.test(m02bCaptureText),
+      's94-m06: content[0].text discloses failed capture, the DB error and rollback',
+      /Failed to capture/i.test(m02bCaptureText) &&
+        /FOREIGN KEY|constraint/i.test(m02bCaptureText) &&
+        /rolled back/i.test(m02bCaptureText),
       m02bCaptureText.slice(-500)
+    );
+    check(
+      's94-m06: rejected capture preserves session status/captures, canonical records, links and events',
+      JSON.stringify(m02bAtomicState()) === JSON.stringify(m02bBefore),
+      `before=${JSON.stringify(m02bBefore)} after=${JSON.stringify(m02bAtomicState())}`
     );
     check(
       's86-m02b: the "Extraction skipped" lie is gone from that answer',
@@ -851,8 +884,49 @@ async function main(): Promise<void> {
     );
     check(
       's86-m02b: the Tier-2 envelope carries the session_events failure in the SAME answer',
-      /Warnings:/.test(m02bCaptureText) && /capture event logging failed/.test(m02bCaptureText),
+      (m02bEnvelope?.warnings ?? []).some(
+        (warning) =>
+          warning.includes('capture event logging failed') &&
+          warning.includes('verify-dist forced session_events failure')
+      ) &&
+        /Warnings:/.test(m02bCaptureText) &&
+        /capture event logging failed/.test(m02bCaptureText) &&
+        /verify-dist forced session_events failure/.test(m02bCaptureText),
       m02bCaptureText.slice(-500)
+    );
+
+    // The same request must work when both database faults are removed; rollback must not
+    // leave a duplicate capture that makes the retry appear successful without a new record.
+    {
+      const db = new Database(m02bDb);
+      try {
+        const columns = Object.keys(m02bMasterContext!);
+        db.prepare(
+          `INSERT INTO contexts (${columns.join(',')}) VALUES (${columns.map(() => '?').join(',')})`
+        ).run(...columns.map((column) => m02bMasterContext[column]));
+        db.exec('DROP TRIGGER verify_m02b_no_events');
+      } finally {
+        db.close();
+      }
+    }
+    const m02bRetry = await h.callOk('cmos_session', m02bCaptureParams);
+    const m02bAfterRetry = m02bAtomicState();
+    const m02bRetryData = h.dataOf(m02bRetry) as {
+      decisionExtractionCount?: number;
+      decisionId?: number;
+    };
+    check(
+      's94-m06: repaired-store positive control commits exactly one canonical record and capture event',
+      m02bRetryData?.decisionExtractionCount === 1 &&
+        typeof m02bRetryData.decisionId === 'number' &&
+        m02bAfterRetry.decisions === m02bBefore.decisions + 1 &&
+        m02bAfterRetry.captureEvents === m02bBefore.captureEvents + 1 &&
+        (m02bAfterRetry.sessions as Array<{ captures: string | null }>).reduce(
+          (n, row) => n + (JSON.parse(row.captures ?? '[]') as unknown[]).length,
+          0
+        ) === 1 &&
+        !/capture event logging failed|Decision Extraction.*FAILED/.test(h.textOf(m02bRetry)),
+      `state=${JSON.stringify(m02bAfterRetry)} data=${JSON.stringify(m02bRetryData)}`
     );
 
     // Mode (i): from a REAL project cwd, a pin-only read (mission list, no projectRoot)
@@ -1694,10 +1768,42 @@ async function main(): Promise<void> {
     });
     const updText = textOf(updRes);
     check(
-      's87-m01: cmos_mission(update) on an out-of-enum status refuses, never crashes',
-      !/TOOL_EXECUTION_ERROR|internal error/i.test(updText) && /unrecognized status/i.test(updText),
-      updText.slice(0, 240)
+      's94-m05: explicit update repairs an unknown mission status to Queued',
+      updRes.isError !== true &&
+        (h.dataOf(updRes) as { previousStatus?: string; currentStatus?: string })
+          ?.previousStatus === 'Archived' &&
+        (h.dataOf(updRes) as { currentStatus?: string })?.currentStatus === 'Queued' &&
+        !/TOOL_EXECUTION_ERROR|internal error/i.test(updText),
+      updText.slice(0, 400)
     );
+    {
+      const db = new Database(path.join(projectDirM01, 'cmos', 'db', 'cmos.sqlite'), {
+        readonly: true,
+      });
+      try {
+        const mission = db.prepare("SELECT status FROM missions WHERE id='vm-01'").get() as {
+          status: string;
+        };
+        const history = db
+          .prepare("SELECT raw_event FROM session_events WHERE mission='vm-01' AND action='update'")
+          .all() as Array<{ raw_event: string }>;
+        check(
+          's94-m05: repair persists the requested status and its exact historical transition once',
+          mission.status === 'Queued' &&
+            history.length === 1 &&
+            history.some((row) => {
+              const event = JSON.parse(row.raw_event) as {
+                previousStatus?: string;
+                newStatus?: string;
+              };
+              return event.previousStatus === 'Archived' && event.newStatus === 'Queued';
+            }),
+          `status=${mission.status} history=${JSON.stringify(history)}`
+        );
+      } finally {
+        db.close();
+      }
+    }
 
     // ─── s87-m08: the sprint's other answer-shape deltas, on the BUILT artifact ──────────────
     //

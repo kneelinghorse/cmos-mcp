@@ -197,7 +197,7 @@ describe('orphan-detection', () => {
   // ─── Orphaned Missions ─────────────────────────────────────────────────────
 
   describe('orphaned missions (no sprint)', () => {
-    it('should detect missions with null sprint_id', async () => {
+    it('treats NULL sprint missions as valid unscheduled work', async () => {
       const db = new Database(dbPath);
       db.exec(`
         INSERT INTO missions (id, sprint_id, name, status) VALUES ('m01', NULL, 'Orphan Mission', 'Queued');
@@ -205,9 +205,7 @@ describe('orphan-detection', () => {
       db.close();
 
       const result = await runWithClient((client) => detectOrphans(client));
-      expect(result.orphanedMissions).toHaveLength(1);
-      expect(result.orphanedMissions[0].id).toBe('m01');
-      expect(result.orphanedMissions[0].reason).toBe('no_sprint');
+      expect(result.orphanedMissions).toHaveLength(0);
     });
 
     it('should detect missions with empty string sprint_id', async () => {
@@ -252,28 +250,14 @@ describe('orphan-detection', () => {
       expect(noSprint).toHaveLength(0);
     });
 
-    it('DOES flag a Failed mission without sprint — s87-m01 widened this predicate', async () => {
-      // BEHAVIOUR CHANGE, asserted rather than accommodated. Until s87-m01 'Failed' was a member
-      // of MISSION_TERMINAL_STATUSES, so this row was excluded here. #839 assigns 'Failed' to the
-      // SPRINT domain and forbids exactly that copy, and 'Failed' is not a key of
-      // VALID_STATE_TRANSITIONS — so the mission-terminal set was asserting a state the mission
-      // state machine has no entry for. Removing it widens THIS predicate, and the widening gets
-      // its own test so the change is visible rather than inferred from a deleted line.
-      //
-      // UNWITNESSED, not observed: zero 'Failed' mission rows exist in this repo's store
-      // (Archived 1, Completed 363, Dropped 7, In Progress 1, Queued 7) or in the fleet
-      // enumeration. It is reachable through the same unvalidated import/peer-merge paths that
-      // put mission B1.1 at status 'Archived'.
+    it('does not mistake an unknown status for a missing-sprint requirement', async () => {
       const db = new Database(dbPath);
-      db.exec(`
-        INSERT INTO missions (id, sprint_id, name, status) VALUES ('m-fail', NULL, 'Failed Mission', 'Failed');
-      `);
+      db.exec(
+        "INSERT INTO missions (id,sprint_id,name,status) VALUES ('m-fail',NULL,'Failed Mission','Failed')"
+      );
       db.close();
-
       const result = await runWithClient((client) => detectOrphans(client));
-      const noSprint = result.orphanedMissions.filter((m) => m.reason === 'no_sprint');
-      expect(noSprint).toHaveLength(1);
-      expect(noSprint[0].id).toBe('m-fail');
+      expect(result.orphanedMissions.filter((m) => m.reason === 'no_sprint')).toHaveLength(0);
     });
 
     it('should not flag terminal missions with drifted-case status (lowercase "dropped")', async () => {
@@ -288,7 +272,7 @@ describe('orphan-detection', () => {
       expect(noSprint).toHaveLength(0);
     });
 
-    it('should still flag a genuinely live (Blocked) mission without sprint', async () => {
+    it('allows blocked missions to remain unscheduled', async () => {
       const db = new Database(dbPath);
       db.exec(`
         INSERT INTO missions (id, sprint_id, name, status) VALUES ('m-live', NULL, 'Blocked Mission', 'Blocked');
@@ -297,8 +281,7 @@ describe('orphan-detection', () => {
 
       const result = await runWithClient((client) => detectOrphans(client));
       const noSprint = result.orphanedMissions.filter((m) => m.reason === 'no_sprint');
-      expect(noSprint).toHaveLength(1);
-      expect(noSprint[0].id).toBe('m-live');
+      expect(noSprint).toHaveLength(0);
     });
   });
 
@@ -433,9 +416,9 @@ describe('orphan-detection', () => {
       db.close();
 
       const result = await runWithClient((client) => detectOrphans(client));
-      expect(result.totalOrphans).toBe(3);
+      expect(result.totalOrphans).toBe(2);
       expect(result.orphanedSprints).toHaveLength(1);
-      expect(result.orphanedMissions).toHaveLength(1);
+      expect(result.orphanedMissions).toHaveLength(0);
       expect(result.staleSessions).toHaveLength(1);
     });
 
@@ -497,7 +480,7 @@ describe('orphan-detection', () => {
       const warnings = buildOrphanWarnings(result);
       expect(warnings).toHaveLength(1);
       expect(warnings[0]).toContain('m01');
-      expect(warnings[0]).toContain('no parent sprint');
+      expect(warnings[0]).toContain('invalid empty sprint ID');
     });
 
     it('should build warning for stale In Progress missions', () => {

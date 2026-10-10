@@ -1,3 +1,6 @@
+// ABOUTME: Manages next-step state transitions without discarding a carried row's lease anchor.
+// ABOUTME: Reports affected, unmatched and failed IDs explicitly for each lifecycle action.
+
 /**
  * Next-Step Lifecycle Handler
  *
@@ -6,13 +9,19 @@
  * - complete: Mark a next-step as completed
  * - carry: Carry open next-steps to a new sprint
  * - drop: Drop a next-step (no longer relevant)
- * - reopen: Return a completed or dropped next-step to pending
+ * - reopen: Return a completed, dropped or carried next-step to pending
  *
  * Wired into cmos_context(action="next_steps").
  *
  * @module tools/cmos/cmos-next-steps
  */
 
+import {
+  prepareSpinOutRead,
+  spinOutDetails,
+  spinOutPointerLines,
+  type SpinOutDetails,
+} from './spin-out-read';
 import { withClient, type CmosDatabaseClient } from './client';
 import type { CmosToolResult } from './types';
 import { createError, createSuccess, CmosErrors } from './errors';
@@ -33,7 +42,7 @@ import {
 /**
  * A next-step record from the database.
  */
-export interface NextStepRecord {
+export interface NextStepRecord extends SpinOutDetails {
   id: number;
   content: string;
   status: NextStepStatus;
@@ -75,7 +84,7 @@ export const NEXT_STEP_ACTIONS = ['list', 'complete', 'carry', 'drop', 'reopen']
 export type NextStepAction = (typeof NEXT_STEP_ACTIONS)[number];
 
 /** Reopening is intentionally narrower than the ordinary pending/carried transition predicate. */
-const REOPENABLE_STATUS = "status IN ('completed','dropped')";
+const REOPENABLE_STATUS = "status IN ('completed','dropped','carried')";
 
 export interface NextStepsResult {
   /** The sub-action that was performed */
@@ -116,7 +125,7 @@ export interface CmosNextStepsParams {
   nextStepStatus?: NextStepStatus;
   /** s85-m04: filter list to next-steps stamped with this mission (#487 read surface) */
   missionId?: string;
-  /** Next-step ID(s) to act on (for complete/carry/drop/reopen) */
+  /** Next-step IDs for historical list lookup or complete/carry/drop/reopen. Explicit list IDs bypass implicit open-status filtering. */
   nextStepIds?: number[];
   /** Target sprint for carry action */
   carryToSprint?: string;
@@ -145,7 +154,7 @@ export async function cmosNextSteps(
 
       switch (action) {
         case 'list':
-          return listNextSteps(client, params.nextStepStatus, params.missionId);
+          return listNextSteps(client, params.nextStepStatus, params.missionId, params.nextStepIds);
         case 'complete':
           return transitionNextSteps(client, params.nextStepIds ?? [], 'completed');
         case 'carry':
@@ -188,12 +197,29 @@ interface NextStepRow {
 function listNextSteps(
   client: CmosDatabaseClient,
   status: NextStepStatus | undefined,
-  missionId?: string
+  missionId?: string,
+  ids?: number[]
 ): CmosToolResult<NextStepsResult> {
   // s91-m06: with no status filter the list is the lease view — every OPEN row, carried included.
   // Carried rows used to be invisible to every surface but an explicit `carried` filter.
-  const conditions = status === undefined ? [LEASED_STATUS_SQL] : ['n.status = ?'];
+  ids = ids ?? undefined;
+  if (
+    ids !== undefined &&
+    (!Array.isArray(ids) || ids.some((id) => !Number.isSafeInteger(id) || id < 1))
+  )
+    return createError(CmosErrors.invalidParameter('nextStepIds', ids, ['positive integer IDs']));
+  const visibility = prepareSpinOutRead(client);
+  const conditions =
+    status === undefined ? (ids === undefined ? [LEASED_STATUS_SQL] : ['1=1']) : ['n.status = ?'];
   const queryParams: unknown[] = status === undefined ? [] : [status];
+  if (ids !== undefined) {
+    conditions.push(ids.length ? `n.id IN (${ids.map(() => '?').join(',')})` : '0');
+    queryParams.push(...ids);
+  } else {
+    const visible = visibility.predicate('next-step', 'n.id');
+    conditions.push(visible.sql);
+    queryParams.push(...visible.params);
+  }
 
   if (missionId) {
     conditions.push('n.mission_id = ?');
@@ -218,6 +244,7 @@ function listNextSteps(
   }
 
   const items: NextStepRecord[] = result.data.map((row) => ({
+    ...spinOutDetails(visibility, 'next-step', row.id),
     id: row.id,
     content: row.content,
     status: row.status as NextStepStatus,
@@ -240,7 +267,11 @@ function listNextSteps(
     items,
     affected: items.length,
     message: `Found ${items.length} next-step(s) ${
-      status === undefined ? 'open (pending or carried)' : `with status '${status}'`
+      status === undefined
+        ? ids === undefined
+          ? 'open (pending or carried)'
+          : 'by explicit IDs'
+        : `with status '${status}'`
     }${missionId ? ` for mission '${missionId}'` : ''}`,
   });
 }
@@ -298,7 +329,7 @@ function reopenNextSteps(
 
   for (const id of ids) {
     const result = client.execute(
-      `UPDATE next_steps SET status = 'pending', resolved_at = NULL, carried_to_sprint = NULL WHERE id = ? AND ${REOPENABLE_STATUS}`,
+      `UPDATE next_steps SET status = 'pending', resolved_at = CASE WHEN status = 'carried' THEN resolved_at ELSE NULL END, carried_to_sprint = NULL WHERE id = ? AND ${REOPENABLE_STATUS}`,
       [id]
     );
     const changed = countWrite(result, writeSink, `next_steps.reopen #${id}`);
@@ -416,7 +447,7 @@ export function formatNextStepsForLLM(result: CmosToolResult<NextStepsResult>): 
   if (unmatched.length > 0) {
     const reason =
       result.data?.nextStepAction === 'reopen'
-        ? 'not completed/dropped, or no such id'
+        ? 'not completed/dropped/carried, or no such id'
         : 'already resolved, or no such id';
     lines.push('');
     lines.push(`Not matched (${reason}): ${unmatched.map((id) => `#${id}`).join(', ')}`);
@@ -456,6 +487,7 @@ function renderNextStepsBody(result: CmosToolResult<NextStepsResult>): string {
           ? ''
           : ` {closes survived ${item.closesSurvived}${item.lease === 'ok' ? '' : `, ${item.lease}`}}`;
       lines.push(`  #${item.id} [${item.status}]${lease}${sprint}${mission}: ${item.content}`);
+      lines.push(...spinOutPointerLines(item));
     }
     if (d.items.some((item) => item.closesSurvived !== undefined)) {
       lines.push('');

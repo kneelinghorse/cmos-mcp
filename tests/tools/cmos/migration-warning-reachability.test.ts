@@ -1,21 +1,26 @@
 // SPDX-License-Identifier: Apache-2.0
-// ABOUTME: Re-derives calls to MigrationResult-compatible exports from schema-migrations.ts.
+// ABOUTME: Re-derives calls to MigrationResult-compatible exports in the two declared migration roots.
 // ABOUTME: Reachable answers must deliver warnings; carrier-less residuals are named with reasons.
 
 import { describe, expect, it } from '@jest/globals';
 import * as path from 'path';
+import * as fs from 'fs';
 import * as ts from 'typescript';
 
 const REPO_ROOT = path.resolve(__dirname, '../../..');
 const SRC_ROOT = path.join(REPO_ROOT, 'src');
 const MIGRATIONS_FILE = path.join(SRC_ROOT, 'tools/cmos/schema-migrations.ts');
+const PRODUCER_FILES = [
+  MIGRATIONS_FILE,
+  path.join(SRC_ROOT, 'tools/cmos/record-link-migration.ts'),
+];
 
 /**
  * Reproduce with:
  *   npx jest tests/tools/cmos/migration-warning-reachability.test.ts --runInBand --coverage=false
  *
  * Scope is deliberately the exported MigrationResult-compatible helpers declared in
- * schema-migrations.ts and their shipped src/ callers. It is not a claim about every producer
+ * schema-migrations.ts and record-link-migration.ts and their shipped src/ callers. It is not a claim about every producer
  * in the repository (for example, project-identity.ts also exports a MigrationResult producer).
  * Fresh pre-fix RED: 21 producers / 48 calls / 11 consumed / 30 reachable / 7 carrier-less.
  * Fixed contract: 21 producers / 48 calls / 36 direct answer boundaries / 5 verified forwarding
@@ -24,6 +29,10 @@ const MIGRATIONS_FILE = path.join(SRC_ROOT, 'tools/cmos/schema-migrations.ts');
  * Unlike the original owner-level `.warnings` census, this gate correlates each producer read
  * with the exact warning sink carried through the handler's single post-callback return. Four
  * deliberately shared helpers are checked through their result/mutable-sink forwarding chains.
+ * False-negative profile: this proves static symbol/sink routes, not that arbitrary code never
+ * clears or rewrites warning contents. It does not cover migration producers outside the two
+ * declared roots, dynamic dispatch, or formatter behavior; real rendered-warning fixtures are
+ * the explicit complement. Adding a producer root requires an audited denominator change.
  * The paired real-SQLite gate pins representative post-migration error answers:
  *   npx jest tests/tools/cmos/migration-warning-store-compat.test.ts --runInBand --coverage=false
  */
@@ -57,11 +66,13 @@ const EXPECTED_PRODUCERS = [
   'ensureContentPrunedColumn',
   // s93-m06: the approval columns, run only when a draft is recorded; it reaches attachWarnings.
   'ensureDecisionApprovalColumns',
+  'ensureDecisionShapeColumns',
   'ensureDecisionsFts5',
   'ensureFirehoseEventColumns',
   // s92-m03: the implicit-session columns; every call runs at an answer boundary.
   'ensureImplicitSessionColumns',
   'ensureLearningsTable',
+  'ensureRecordLinks',
   'ensureMissionTimestamps',
   'ensureNextStepsTable',
   'ensureRenamedColumn',
@@ -106,6 +117,27 @@ const STRUCTURAL_RESIDUALS: readonly ResidualReason[] = [
  * Each shape has an executable, symbol-aware verifier below; this is not an owner-level allowlist.
  */
 const FORWARDING_CARRIERS: readonly ForwardingCarrier[] = [
+  ...[
+    'ensureFirehoseEventColumns',
+    'ensureAuthorNamespaceColumns',
+    'ensureDecisionShapeColumns',
+    'ensureRecordLinks',
+  ].map((producer) => ({
+    key: `tools/cmos/spin-out-store.ts:prepareSpinOutStore:${producer}`,
+    reason:
+      'the shared mutable sink reaches both spin-out preparation calls and the success/refusal answer arms',
+  })),
+  ...[
+    'ensureAuthorNamespaceColumns',
+    'ensureLearningsTable',
+    'ensureFirehoseEventColumns',
+    'ensureDecisionShapeColumns',
+    'ensureRecordLinks',
+  ].map((producer) => ({
+    key: `tools/cmos/record-link-write.ts:prepareRecordLinkWrite:${producer}`,
+    reason:
+      'the exact mutable warnings parameter reaches all five writer answer boundaries, including refusals',
+  })),
   {
     key: 'tools/cmos/agent-feedback.ts:recordAgentFeedback:ensureAgentFeedbackTable',
     reason:
@@ -138,22 +170,31 @@ const FORWARDING_CARRIERS: readonly ForwardingCarrier[] = [
   },
 ] as const;
 
-function loadProgram(): ts.Program {
+function loadProgram(overrides: ReadonlyMap<string, string> = new Map()): ts.Program {
   const configPath = path.join(REPO_ROOT, 'tsconfig.json');
   const config = ts.readConfigFile(configPath, ts.sys.readFile);
   if (config.error) {
     throw new Error(ts.flattenDiagnosticMessageText(config.error.messageText, '\n'));
   }
   const parsed = ts.parseJsonConfigFileContent(config.config, ts.sys, REPO_ROOT);
-  return ts.createProgram(parsed.fileNames, parsed.options);
+  const host = ts.createCompilerHost(parsed.options);
+  const getSourceFile = host.getSourceFile.bind(host);
+  host.getSourceFile = (fileName, languageVersion, onError, shouldCreateNewSourceFile) => {
+    const replacement = overrides.get(path.resolve(fileName));
+    return replacement === undefined
+      ? getSourceFile(fileName, languageVersion, onError, shouldCreateNewSourceFile)
+      : ts.createSourceFile(fileName, replacement, languageVersion, true);
+  };
+  return ts.createProgram(parsed.fileNames, parsed.options, host);
 }
 
 function migrationResultProducerNames(
   sourceFile: ts.SourceFile,
-  checker: ts.TypeChecker
+  checker: ts.TypeChecker,
+  resultSource: ts.SourceFile = sourceFile
 ): ReadonlySet<string> {
   const names = new Set<string>();
-  const resultDeclaration = sourceFile.statements.find(
+  const resultDeclaration = resultSource.statements.find(
     (node): node is ts.InterfaceDeclaration =>
       ts.isInterfaceDeclaration(node) && node.name.text === 'MigrationResult'
   );
@@ -190,14 +231,20 @@ function collectCallSites(program: ts.Program): {
   const checker = program.getTypeChecker();
   const migrations = program.getSourceFile(MIGRATIONS_FILE);
   if (!migrations) throw new Error(`Missing ${MIGRATIONS_FILE}`);
-  const producerNames = migrationResultProducerNames(migrations, checker);
+  const producerNames = new Set<string>();
+  for (const file of PRODUCER_FILES) {
+    const producerSource = program.getSourceFile(file);
+    if (!producerSource) throw new Error(`Missing ${file}`);
+    for (const name of migrationResultProducerNames(producerSource, checker, migrations))
+      producerNames.add(name);
+  }
   const sites: MigrationCallSite[] = [];
 
   for (const sourceFile of program.getSourceFiles()) {
     const absolute = path.resolve(sourceFile.fileName);
     if (
       !absolute.startsWith(SRC_ROOT + path.sep) ||
-      absolute === MIGRATIONS_FILE ||
+      PRODUCER_FILES.includes(absolute) ||
       absolute.endsWith('.d.ts')
     ) {
       continue;
@@ -209,8 +256,8 @@ function collectCallSites(program: ts.Program): {
         if (symbol && symbol.flags & ts.SymbolFlags.Alias) {
           symbol = checker.getAliasedSymbol(symbol);
         }
-        const declaration = symbol?.declarations?.find(
-          (decl) => path.resolve(decl.getSourceFile().fileName) === MIGRATIONS_FILE
+        const declaration = symbol?.declarations?.find((decl) =>
+          PRODUCER_FILES.includes(path.resolve(decl.getSourceFile().fileName))
         );
         const producer =
           declaration && ts.isFunctionDeclaration(declaration) ? declaration.name?.text : undefined;
@@ -720,9 +767,10 @@ function verifyMissionIdCarrier(
     return false;
   }
   const calls = callsToFunction(program, owner, checker);
-  // s91-m04: the fourth caller is cmos-decisions-record.ts, whose sink reaches attachWarnings.
+  // s94-m06 adds mission-complete preflight; captureDecisions still independently forwards
+  // its compatibility migration warning. All five exact sinks must reach an answer.
   return (
-    calls.length === 4 &&
+    calls.length === 5 &&
     calls.every((call) => {
       const callerSink = warningSinkForCall(call, checker);
       return Boolean(callerSink && mutableSinkReachesAnswers(call, callerSink, program, checker));
@@ -814,12 +862,172 @@ function verifyStoreUpkeepCarrier(
   );
 }
 
+/** The new preflight owns no answer; prove its exact parameter reaches every writer answer. */
+function verifyRecordLinkCarrier(
+  site: MigrationCallSite,
+  program: ts.Program,
+  checker: ts.TypeChecker
+): boolean {
+  const owner = enclosingFunction(site.call);
+  if (!owner || !ts.isFunctionDeclaration(owner)) return false;
+  const sink = warningSinkForCall(site.call, checker);
+  const parameter = identifierSymbol(owner.parameters[1]?.name, checker);
+  return Boolean(
+    sink &&
+    sink === parameter &&
+    callsToFunction(program, owner, checker).length === 5 &&
+    mutableSinkReachesAnswers(site.call, sink, program, checker)
+  );
+}
+
+/** Spin-out carries one mutable sink across both stores, including preparation throws. */
+function verifySpinOutCarrier(
+  site: MigrationCallSite,
+  program: ts.Program,
+  checker: ts.TypeChecker
+): boolean {
+  const helper = enclosingFunction(site.call);
+  const sink = warningSinkForCall(site.call, checker);
+  if (
+    !helper ||
+    !ts.isFunctionDeclaration(helper) ||
+    !sink ||
+    identifierSymbol(helper.parameters[1]?.name, checker) !== sink
+  )
+    return false;
+  // The six array-dispatched producers are the census's named dynamic complement. Verify
+  // their exact population and shared warning sink rather than silently omitting that loop.
+  const loops =
+    helper.body?.statements
+      .filter(ts.isForOfStatement)
+      .filter(
+        (loop) =>
+          ts.isArrayLiteralExpression(loop.expression) &&
+          loop.expression.elements.every(ts.isIdentifier)
+      ) ?? [];
+  if (loops.length !== 1) return false;
+  const loop = loops[0];
+  if (
+    !ts.isArrayLiteralExpression(loop.expression) ||
+    JSON.stringify(loop.expression.elements.map((node) => node.getText()).sort()) !==
+      JSON.stringify(
+        [
+          'ensureStrategicDecisionsSchema',
+          'ensureMissionTimestamps',
+          'ensureLearningsTable',
+          'ensureNextStepsTable',
+          'ensureConstraintsTable',
+          'ensureReviewTimestamps',
+        ].sort()
+      ) ||
+    !ts.isVariableDeclarationList(loop.initializer)
+  )
+    return false;
+  const dispatch = identifierSymbol(loop.initializer.declarations[0]?.name, checker);
+  let loopWarningRead = false;
+  const inspect = (node: ts.Node): void => {
+    if (
+      ts.isCallExpression(node) &&
+      identifierSymbol(node.expression, checker) === dispatch &&
+      warningSinkForCall(node, checker) === sink &&
+      callReadsWarnings({ ...site, call: node }, checker)
+    )
+      loopWarningRead = true;
+    ts.forEachChild(node, inspect);
+  };
+  inspect(loop.statement);
+  if (!dispatch || !loopWarningRead) return false;
+  const calls = callsToFunction(program, helper, checker);
+  if (calls.length !== 2) return false;
+  return calls.every((call) => {
+    const outer = enclosingFunction(call);
+    const answerSink = identifierSymbol(call.arguments[1], checker);
+    if (!outer || !answerSink || !ts.isIdentifier(call.arguments[1])) return false;
+    let protectedByCatch = false;
+    for (let node: ts.Node | undefined = call.parent; node && node !== outer; node = node.parent)
+      if (ts.isTryStatement(node) && node.catchClause && nodeContains(node.tryBlock, call))
+        protectedByCatch = true;
+    if (!protectedByCatch) return false;
+    const carries = (expression: ts.Expression | undefined): boolean => {
+      if (!expression) return false;
+      if (ts.isIdentifier(expression)) {
+        const declaration = resolvedSymbol(expression, checker)?.valueDeclaration;
+        return (
+          !!declaration &&
+          ts.isVariableDeclaration(declaration) &&
+          !!declaration.initializer &&
+          ts.isCallExpression(declaration.initializer) &&
+          carries(declaration.initializer)
+        );
+      }
+      if (ts.isCallExpression(expression)) {
+        const declaration = resolvedSymbol(expression.expression, checker)?.valueDeclaration;
+        if (
+          !declaration ||
+          !ts.isVariableDeclaration(declaration) ||
+          !declaration.initializer ||
+          !ts.isArrowFunction(declaration.initializer)
+        )
+          return false;
+        const returns = directReturns(declaration.initializer);
+        return (
+          returns.length === 1 &&
+          returns.every((statement) => {
+            const value = statement.expression;
+            return (
+              !!value &&
+              ts.isCallExpression(value) &&
+              callNameIs(value, 'createSuccess', checker) &&
+              identifierSymbol(value.arguments[1], checker) === answerSink
+            );
+          })
+        );
+      }
+      if (!ts.isObjectLiteralExpression(expression)) return false;
+      return expression.properties.some((property) => {
+        if (!ts.isSpreadAssignment(property) || !ts.isParenthesizedExpression(property.expression))
+          return false;
+        const conditional = property.expression.expression;
+        if (
+          !ts.isConditionalExpression(conditional) ||
+          !ts.isPropertyAccessExpression(conditional.condition) ||
+          conditional.condition.name.text !== 'length' ||
+          identifierSymbol(conditional.condition.expression, checker) !== answerSink ||
+          !ts.isObjectLiteralExpression(conditional.whenTrue) ||
+          !ts.isObjectLiteralExpression(conditional.whenFalse) ||
+          conditional.whenFalse.properties.length !== 0
+        )
+          return false;
+        return conditional.whenTrue.properties.some(
+          (field) =>
+            ts.isShorthandPropertyAssignment(field) &&
+            field.name.text === 'warnings' &&
+            checker.getShorthandAssignmentValueSymbol(field) === answerSink
+        );
+      });
+    };
+    const returns = directReturns(outer).filter((statement) => statement.getStart() > call.end);
+    return returns.length > 0 && returns.every((statement) => carries(statement.expression));
+  });
+}
+
 function forwardingCarrierIsVerified(
   site: MigrationCallSite,
   program: ts.Program,
   checker: ts.TypeChecker
 ): boolean {
   switch (siteKey(site)) {
+    case 'tools/cmos/spin-out-store.ts:prepareSpinOutStore:ensureFirehoseEventColumns':
+    case 'tools/cmos/spin-out-store.ts:prepareSpinOutStore:ensureAuthorNamespaceColumns':
+    case 'tools/cmos/spin-out-store.ts:prepareSpinOutStore:ensureDecisionShapeColumns':
+    case 'tools/cmos/spin-out-store.ts:prepareSpinOutStore:ensureRecordLinks':
+      return verifySpinOutCarrier(site, program, checker);
+    case 'tools/cmos/record-link-write.ts:prepareRecordLinkWrite:ensureAuthorNamespaceColumns':
+    case 'tools/cmos/record-link-write.ts:prepareRecordLinkWrite:ensureLearningsTable':
+    case 'tools/cmos/record-link-write.ts:prepareRecordLinkWrite:ensureFirehoseEventColumns':
+    case 'tools/cmos/record-link-write.ts:prepareRecordLinkWrite:ensureDecisionShapeColumns':
+    case 'tools/cmos/record-link-write.ts:prepareRecordLinkWrite:ensureRecordLinks':
+      return verifyRecordLinkCarrier(site, program, checker);
     case 'tools/cmos/agent-feedback.ts:recordAgentFeedback:ensureAgentFeedbackTable':
       return verifyAgentFeedbackCarrier(site, program, checker);
     case 'tools/cmos/learning-reaffirm.ts:reaffirmLearningsByIds:ensureReviewTimestamps':
@@ -878,7 +1086,12 @@ describe('s88-m09 MigrationResult warning reachability census', () => {
     // (ensureDecisionsFts5, ensureVectorStorage); both forward to the Store upkeep section.
     // s93-m06: 59 -> 60 — decisions record runs ensureDecisionApprovalColumns before a draft's
     // transaction; it reaches attachWarnings.
-    expect(census.sites.length).toBe(60);
+    // s94-m04: replace the draft-only approval migration (-1) with six guarded shape calls (+6).
+    // s94-m06: three inline author calls move into one shared preflight (-3 +4 producer
+    // calls); the scoped producer universe now also covers ensureRecordLinks (+3 callers).
+    // s94-m08: four directly named preparation producers join the forwarding paths.
+    // Six array-dispatched preparations are the declared dynamic-dispatch complement below.
+    expect(census.sites.length).toBe(73);
   });
 
   it('carries every reachable producer through its exact answer boundary', () => {
@@ -904,7 +1117,9 @@ describe('s88-m09 MigrationResult warning reachability census', () => {
     // snapshot prune).
     // s93-m11: +2 (the review-timestamp migration in decisions update and batch update).
     // s93-m06: +1 (the approval columns in decisions record).
-    expect(directlyBounded).toHaveLength(49);
+    // s94-m04: six shape-call boundaries replace the draft-only approval boundary (+5 net).
+    // Three author boundaries move to the shared helper; pull/bootstrap add two link boundaries.
+    expect(directlyBounded).toHaveLength(53);
     expect(forwarded.map(siteKey).sort()).toEqual([...expectedForwarders.keys()].sort());
   });
 
@@ -921,6 +1136,74 @@ describe('s88-m09 MigrationResult warning reachability census', () => {
     expect(reachesAttachBoundary(forwardingOwner!.call, localSink!, checker)).toBe(false);
     expect(forwardingCarrierIsVerified(forwardingOwner!, program, checker)).toBe(true);
   });
+
+  it.each(['producer-read', 'caller-sink', 'answer-boundary'])(
+    'rejects a broken record-link warning forwarding %s',
+    (mutation) => {
+      const helperFile = path.join(SRC_ROOT, 'tools/cmos/record-link-write.ts');
+      const callerFile = path.join(SRC_ROOT, 'tools/cmos/cmos-decisions-update.ts');
+      const file = mutation === 'producer-read' ? helperFile : callerFile;
+      const original = fs.readFileSync(file, 'utf8');
+      const changed =
+        mutation === 'producer-read'
+          ? original.replace('warnings.push(...(author.warnings ?? []));', 'void author;')
+          : mutation === 'caller-sink'
+            ? original.replace(
+                'prepareRecordLinkWrite(client, warnings)',
+                'prepareRecordLinkWrite(client, [])'
+              )
+            : original.replace('return attachWarnings(result, warnings);', 'return result;');
+      expect(changed).not.toBe(original);
+      const mutant = loadProgram(new Map([[file, changed]]));
+      const mutantChecker = mutant.getTypeChecker();
+      const site = collectCallSites(mutant).sites.find(
+        (candidate) =>
+          siteKey(candidate) ===
+          'tools/cmos/record-link-write.ts:prepareRecordLinkWrite:ensureAuthorNamespaceColumns'
+      );
+      expect(site).toBeDefined();
+      expect(verifyRecordLinkCarrier(site!, mutant, mutantChecker)).toBe(false);
+    }
+  );
+
+  it.each(['producer-read', 'dynamic-read', 'caller-sink', 'success-answer', 'refusal-answer'])(
+    'rejects broken spin-out warning forwarding %s',
+    (mutation) => {
+      const file = path.join(
+        SRC_ROOT,
+        ['producer-read', 'dynamic-read'].includes(mutation)
+          ? 'tools/cmos/spin-out-store.ts'
+          : 'tools/cmos/spin-out.ts'
+      );
+      const original = fs.readFileSync(file, 'utf8');
+      const changed =
+        mutation === 'producer-read'
+          ? original.replace('warnings.push(...(shape.warnings ?? []));', 'void shape;')
+          : mutation === 'dynamic-read'
+            ? original.replace(
+                'warnings.push(...(ensure(client).warnings ?? []));',
+                'void ensure(client);'
+              )
+            : mutation === 'caller-sink'
+              ? original.replace(
+                  'prepareSpinOutStore(target, warnings)',
+                  'prepareSpinOutStore(target, [])'
+                )
+              : mutation === 'success-answer'
+                ? original.replace('      warnings\n    );', '      []\n    );')
+                : original.replace('...(warnings.length ? { warnings } : {})', '...({})');
+      expect(changed).not.toBe(original);
+      const mutant = loadProgram(new Map([[file, changed]]));
+      const checker = mutant.getTypeChecker();
+      const site = collectCallSites(mutant).sites.find(
+        (row) =>
+          siteKey(row) ===
+          'tools/cmos/spin-out-store.ts:prepareSpinOutStore:ensureDecisionShapeColumns'
+      );
+      expect(site).toBeDefined();
+      expect(verifySpinOutCarrier(site!, mutant, checker)).toBe(false);
+    }
+  );
 
   it('leaves only named, structurally carrier-less residuals', () => {
     const expected = new Map(
@@ -941,7 +1224,10 @@ describe('s88-m09 MigrationResult warning reachability census', () => {
     expect(actual.map((row) => row.key).sort()).toEqual([...expected.keys()].sort());
     // s92-m03: +5, s92-m09: +3, s93-m11: +2 directly bounded and +2 forwarded (the upkeep).
     // s93-m06: +1 (ensureDecisionApprovalColumns in decisions record).
-    expect(consumed).toHaveLength(56);
+    // s94-m04: all six shape callers carry warnings through their final answer (+5 net).
+    // s94-m06: 53 direct + 12 structurally verified forwarded warning reads.
+    // s94-m08: 53 direct + 16 verified forwarded reads; four residuals remain unchanged.
+    expect(consumed).toHaveLength(69);
     expect(unconsumed).toHaveLength(STRUCTURAL_RESIDUALS.length);
   });
 });

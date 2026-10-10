@@ -352,7 +352,7 @@ describe('s88-m04 cmos_session(capture) public receipt contract', () => {
     ).toEqual({ count: 0 });
   });
 
-  it('reports a failed immediate decision projection without inventing an ID or success', async () => {
+  it('rolls back the capture when its required decision projection fails', async () => {
     const projectRoot = await makeActiveStore('failed decision projection');
     withDb(projectRoot, (db) => {
       db.exec(`
@@ -364,36 +364,29 @@ describe('s88-m04 cmos_session(capture) public receipt contract', () => {
       `);
     });
 
+    const before = withDb(projectRoot, (db) =>
+      db.prepare('SELECT id,captures FROM sessions ORDER BY id').all()
+    );
     const result = await capture(projectRoot, {
       category: 'decision',
-      content: 'This capture blob survives while its decision projection is rejected',
+      content: 'This required capture and decision must commit together',
     });
-    const receipt = receiptOf(result);
-
-    expect(receipt.decisionId).toBeUndefined();
-    expect(receipt.decisionExtractionFailed).toContain('forced s88 decision insert failure');
-    expect(receipt.writeFailures).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          op: 'strategic_decisions.insert',
-          message: expect.stringContaining('forced s88 decision insert failure'),
-        }),
-      ])
-    );
-    expectMaterialization(receipt, {
-      target: 'strategic_decisions',
-      timing: 'immediate',
-      outcome: 'failed',
-    });
+    expect(result.success).toBe(false);
+    expect(result.data).toBeUndefined();
+    expect(result.error?.message).toContain('forced s88 decision insert failure');
+    expect(result.error?.suggestion).toBeTruthy();
+    expect(
+      withDb(projectRoot, (db) => db.prepare('SELECT id,captures FROM sessions ORDER BY id').all())
+    ).toEqual(before);
 
     const rendered = formatSessionForLLM('capture', result);
-    expect(rendered).toContain('FAILED');
+    expect(rendered).toContain('Failed');
     expect(rendered).not.toContain('Decision ID:');
     expect(
       withDb(projectRoot, (db) =>
         db
           .prepare('SELECT COUNT(*) AS count FROM strategic_decisions WHERE decision_text = ?')
-          .get('This capture blob survives while its decision projection is rejected')
+          .get('This required capture and decision must commit together')
       )
     ).toEqual({ count: 0 });
   });
