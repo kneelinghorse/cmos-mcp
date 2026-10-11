@@ -14,7 +14,7 @@ Requires Node.js 20 or newer.
 1. Install the pinned CLI:
 
    ```sh
-   npm install -g @aquex/cmos-mcp@3.4.0
+   npm install -g @aquex/cmos-mcp@3.5.0
    ```
 
    Ensure the global npm bin directory is on your PATH.
@@ -52,6 +52,78 @@ record, `/cmos:start` to read it, `/cmos:close-out` to finish work, `/cmos:plan`
 and `/cmos:build` to execute. [Plugin installation](https://code.claude.com/docs/en/discover-plugins).
 Other tools use the [harness adapters and coverage guide](docs/harnesses.md).
 
+## Codex plugins — 3.5.0
+
+The developer plugin `cmos` supplies the server, seven skills and five lifecycle hooks.
+The conversation-focused `cmos-chat` supplies the same server and six distinct chat skills,
+with no hooks. Plugin loading, installation and project calls are verified in the bundled
+Codex CLI and app-server. **ChatGPT Work remains unverified**; this is not a hosted plugin
+for ChatGPT web or phone.
+
+Install the developer plugin:
+
+```sh
+codex plugin marketplace add kneelinghorse/cmos-mcp
+codex plugin add cmos@cmos
+```
+
+For chat workflows, install `cmos-chat@cmos` instead:
+
+```sh
+codex plugin add cmos-chat@cmos
+```
+
+For local development, replace the marketplace repository with this checkout's absolute path.
+Both plugins can be enabled together: Codex loads one server named `cmos`, and both sets of
+skills remain visible. Choose the developer plugin for building; choose the chat plugin for
+setup, catch-up, recall, proposing decisions, capturing notes and discussing next steps.
+
+Node.js 20 or newer is required. The plugins install their exact CMOS version into
+`~/.config/cmos-mcp/plugins`. On a first install, CMOS connects with an installing message;
+start a new session when installation finishes to load the project tools. The developer hooks
+share that runtime. The developer plugin supports an **absolute** `CMOS_CONFIG_DIR`; empty or
+relative values are refused. The tested portable loader cannot forward that optional variable
+for `cmos-chat`, so use the default root for both plugins or configure a manual server for a
+custom root. See [the harness guide](docs/harnesses.md#codex).
+
+In the Codex CLI, run `/hooks` and review the five developer-plugin commands once. If the desktop
+app does not expose that review, use its bundled Codex CLI with the same Codex home. Restart the
+app after installation if it has not loaded the plugin. A changed hook definition needs review
+again. The chat plugin has no hook review step.
+
+Before replacing a CMOS 3.3.0 adapter, remove only its CMOS entries from project
+`.codex/hooks.json` and any user-level `~/.codex/hooks.json`; keep unrelated hooks. Remove any
+other imported CMOS hook registration too. Keep one answering MCP server: remove a duplicate
+manual entry, or deliberately retain it and set `"pluginServer": "off"` in
+`~/.config/cmos-mcp/config.json` (under your custom config root when using one).
+
+CMOS uses the working folder supplied on each supported Codex call, so a conversation in a
+project can call `cmos_review()` without naming a path. Outside that folder, choose a registered
+address from `cmos_project(action="list")` and pass it as `projectRoot`, for example
+`cmos_review(projectRoot="cmos://you/project")`. Unknown or ambiguous addresses refuse;
+local-only projects need their folder. Tool hints conservatively include telemetry deletion,
+so Codex Auto mode can still ask for approval for any CMOS tool.
+
+## Propose a decision, then approve it
+
+When a choice needs your approval, the agent ends its reply with one concrete line:
+
+> Would record: Use a weekly review because it keeps the reading list useful without daily upkeep.
+
+With the developer hooks enabled and linked to that conversation, the Stop hook keeps this as a
+draft. Your next reply can approve it, decline it, ask a question or amend the wording. The agent
+records an approved draft with its returned `P<n>` id; a draft is not yet a decision. Inspect drafts
+from the project folder with:
+
+```sh
+cmos-mcp drafts list
+```
+
+`cmos-chat` asks for approval in the conversation and makes a direct record, preserving your
+observed words in its context. CMOS cannot independently verify that approval; it does not claim
+hook-verified approval for a chat-only record. An explicit approval already given for the exact
+wording counts, so the agent need not ask again.
+
 ## The method
 
 - One project, one record of decisions, lessons, constraints and next steps.
@@ -75,7 +147,7 @@ shared-collaboration pushes. Implicit process-exit closes do not upload. [Full n
 
 ## What it is
 
-cmos-mcp is the protocol + client. It runs locally on your machine, owns a SQLite database under `cmos/db/cmos.sqlite`, and exposes 15 typed tools to any MCP-capable agent (Claude Code, Claude Desktop, Cursor, Zed, VS Code, Windsurf).
+cmos-mcp is the protocol + client. It runs locally on your machine, owns a SQLite database under `cmos/db/cmos.sqlite`, and exposes 15 typed tools to any MCP-capable agent (including Codex, Claude Code, Claude Desktop, Cursor, Zed, VS Code and Windsurf).
 
 Out of the box you get:
 
@@ -95,14 +167,14 @@ Recommended: a global install of this release. The server then starts from disk,
 lookup on launch:
 
 ```bash
-npm install -g @aquex/cmos-mcp@3.4.0
+npm install -g @aquex/cmos-mcp@3.5.0
 ```
 
 Or run it on demand with `npx`. Pin the version and prefer the local cache: an unpinned `npx -y`
 can look the package up again on every launch.
 
 ```bash
-npx --prefer-offline -y @aquex/cmos-mcp@3.4.0
+npx --prefer-offline -y @aquex/cmos-mcp@3.5.0
 ```
 
 Semantic (vector) search is optional. Without it, retrieval is keyword-only, and the install is
@@ -120,7 +192,7 @@ arguments (keep `--project-root` where an example has it).
 ### Claude Code
 
 ```bash
-claude mcp add-json cmos-mcp '{"command":"npx","args":["--prefer-offline","-y","@aquex/cmos-mcp@3.4.0"]}'
+claude mcp add-json cmos-mcp '{"command":"npx","args":["--prefer-offline","-y","@aquex/cmos-mcp@3.5.0"]}'
 ```
 
 ### Claude Desktop
@@ -135,7 +207,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS)
       "args": [
         "--prefer-offline",
         "-y",
-        "@aquex/cmos-mcp@3.4.0",
+        "@aquex/cmos-mcp@3.5.0",
         "--project-root",
         "/absolute/path/to/your/project"
       ]
@@ -159,7 +231,7 @@ Add to `~/.cursor/mcp.json`:
   "mcpServers": {
     "cmos-mcp": {
       "command": "npx",
-      "args": ["--prefer-offline", "-y", "@aquex/cmos-mcp@3.4.0"]
+      "args": ["--prefer-offline", "-y", "@aquex/cmos-mcp@3.5.0"]
     }
   }
 }
@@ -172,7 +244,7 @@ Add to `~/.cursor/mcp.json`:
   "context_servers": {
     "cmos-mcp": {
       "command": "npx",
-      "args": ["--prefer-offline", "-y", "@aquex/cmos-mcp@3.4.0"]
+      "args": ["--prefer-offline", "-y", "@aquex/cmos-mcp@3.5.0"]
     }
   }
 }
@@ -193,7 +265,7 @@ your terminal PATH, so the terminal route needs the standalone Claude CLI.
   "mcpServers": {
     "cmos-mcp": {
       "command": "npx",
-      "args": ["--prefer-offline", "-y", "@aquex/cmos-mcp@3.4.0"]
+      "args": ["--prefer-offline", "-y", "@aquex/cmos-mcp@3.5.0"]
     }
   }
 }
@@ -273,17 +345,24 @@ Upload results and failures appear in `cmos_status` and `cmos_review`. HTTP 401,
 cmos-mcp never acts on a project you did not name. For each tool call it picks one project, in this
 order, and refuses rather than falling back when that project cannot be used:
 
-1. The `projectRoot` parameter on the call. A folder that is not a CMOS project is refused.
-2. The workspace roots your MCP client advertises: the first one inside a CMOS project.
-3. The working directory, or the nearest folder above it that is a CMOS project — one holding
+1. The `projectRoot` parameter on the call: a project folder or an exact registered
+   `cmos://owner/project` address. Address discovery reads stored identities without repairing
+   them; no match, duplicate matches or an unreadable registered identity refuse.
+2. For a supported Codex request, its conversation working folder. An invalid supplied folder
+   refuses instead of falling back to the server's folder.
+3. The workspace roots your MCP client advertises: the first one inside a CMOS project.
+4. The working directory, or the nearest folder above it that is a CMOS project — one holding
    `cmos/db/`; a plain folder named `cmos` does not count (the search stops below your home
    directory).
-4. Only when the server has no project context at all — no `projectRoot`, no roots, and a working
+5. Only when the server has no project context at all — no `projectRoot`, no roots, and a working
    directory of `/`, your home directory or the server's install directory (how Claude Desktop starts
    servers): the `--project-root <dir>` argument in that server's config, then a registry default set
    with `cmos_project(action="register", projectRoot="...", setAsDefault=true)`.
-5. Otherwise the call is refused. In a folder that is not a CMOS project, a write names
+6. Otherwise the call is refused. In a folder that is not a CMOS project, a write names
    `cmos_project(action="init")` and a read answers "No CMOS project in '<dir>'".
+
+`cmos_project(action="list")` includes stored ids, addresses and folders. `init`, `register` and
+`unregister` require folders; an address never becomes a filesystem path.
 
 Every successful response names the project it used (`projectRoot` and `resolvedBy` in its data), and
 says so in its text whenever the project came from workspace roots, `--project-root` or the registry

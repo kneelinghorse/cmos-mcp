@@ -9,20 +9,20 @@ File friction when the behavior and evidence are fresh. A feedback entry needs n
 session; do not open or complete one just to report it. Do not wait for a closeout or treat a
 feedback report as permission to fix unrelated code.
 
-Use the CLI in the affected project:
+Call onboard in the affected project with the feedback as its own structured parameter:
 
-```bash
-node "${CLAUDE_PLUGIN_ROOT}/hooks/run.mjs" feedback --project-root /absolute/project --content 'Observed behavior; expected behavior; trigger and impact.'
+```text
+cmos_agent_onboard(projectRoot="<affected project folder>", offline=true,
+  agentFeedback="Observed behavior; expected behavior; trigger and impact.")
 ```
 
 Include the tool or command, the smallest useful reproduction, what happened, what was expected,
 and a concrete consequence. Keep credentials and unrelated private content out of the report.
-Use `--dry-run` to preview the sanitized content and `--format json` for a structured receipt.
-The command returns the feedback ID on success; a refusal or failed write exits 1. If sanitation
-changed the content, read that warning before claiming the report is complete. If the command
+The tool returns `feedbackId` when the entry was stored. If sanitation
+changed the content, read that warning before claiming the report is complete. If the tool
 failed, report the failure and retain the evidence in the conversation; do not invent a receipt.
 
-Existing `agentFeedback` parameters on onboard and closeout tools also file feedback. Use them
+Other existing `agentFeedback` parameters on closeout tools also file feedback. Use them
 when already performing that operation, but keep feedback separate from large notes blocks so
 parameter marshalling cannot consume it.
 

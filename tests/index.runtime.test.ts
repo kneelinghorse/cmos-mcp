@@ -1090,7 +1090,13 @@ describe('Mission Protocol entry lifecycle', () => {
       expect(mockServer.setRequestHandler).toHaveBeenCalled();
       expect(moduleData.serverCtor.mock.calls).toContainEqual([
         expect.anything(),
-        expect.objectContaining({ capabilities: { tools: {}, prompts: {} } }),
+        expect.objectContaining({
+          capabilities: {
+            tools: {},
+            prompts: {},
+            experimental: { 'codex/sandbox-state-meta': {} },
+          },
+        }),
       ]);
       expect(mockServer.setRequestHandler.mock.calls.map(([schema]) => schema)).toEqual(
         expect.arrayContaining(['prompts/list', 'prompts/get'])

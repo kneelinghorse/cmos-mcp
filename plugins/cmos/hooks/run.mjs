@@ -10,11 +10,12 @@ import {
   createContext,
   findReady,
   findPathPackage,
-  readJson,
+  readPluginVersion,
   writePointer,
 } from './install-state.mjs';
 import { packageManager, runCommand } from './package-manager.mjs';
 import { disabledServer } from './disabled-server.mjs';
+import { installingServer } from './installing-server.mjs';
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 
@@ -53,6 +54,7 @@ export function startInstaller(ctx, env = process.env) {
   );
   child.once('error', () => {});
   child.unref();
+  return child;
 }
 
 export async function run(
@@ -61,25 +63,40 @@ export async function run(
     env = process.env,
     launch = runCommand,
     startInstaller: install = startInstaller,
+    serveInstalling = installingServer,
     writeOut = (text) => process.stdout.write(text),
     writeError = (text) => process.stderr.write(text),
   } = {}
 ) {
   const hook = args[0] === 'hook';
   try {
+    const installFlag = args.indexOf('--install-root');
+    const shared = installFlag !== -1;
+    if (shared) {
+      if (args[installFlag + 1] !== 'shared' || args.lastIndexOf('--install-root') !== installFlag)
+        throw new Error(
+          '--install-root must be shared. Reinstall the plugin to restore its entrypoints.'
+        );
+      args = [...args.slice(0, installFlag), ...args.slice(installFlag + 2)];
+    }
+    if (shared && env.CMOS_CONFIG_DIR !== undefined && !path.isAbsolute(env.CMOS_CONFIG_DIR))
+      throw new Error(
+        'CMOS_CONFIG_DIR must be an absolute path; set an absolute folder or unset it to use the default.'
+      );
     const configDir = configDirectory(env);
     // This is deliberately before manifest/runtime discovery, native loading or any process spawn.
     if (args[0] === 'serve' && serverDisabled(configDir)) {
       await disabledServer();
       return 0;
     }
-    const manifest = readJson(path.join(directory, '..', '.claude-plugin', 'plugin.json'));
     const ctx = createContext({
-      version: manifest?.version,
-      dataRoot: env.CLAUDE_PLUGIN_DATA || configDir,
+      version: readPluginVersion(path.join(directory, '..')),
+      dataRoot: shared ? path.join(configDir, 'plugins') : env.CLAUDE_PLUGIN_DATA || configDir,
       configDir,
+      shared,
     });
-    const ready = env.CLAUDE_PLUGIN_DATA ? findReady(ctx, env) : findPathPackage(ctx, env);
+    const managedInstall = shared || Boolean(env.CLAUDE_PLUGIN_DATA);
+    const ready = managedInstall ? findReady(ctx, env) : findPathPackage(ctx, env);
     if (ready) {
       if (ready.installRoot) writePointer(ctx);
       const silent = hook && ['stop', 'pre-compact', 'session-end'].includes(args[1]);
@@ -91,7 +108,7 @@ export async function run(
       return hook ? 0 : code;
     }
     if (hook) {
-      if (args[1] === 'session-start' && env.CLAUDE_PLUGIN_DATA) {
+      if (args[1] === 'session-start' && managedInstall) {
         install(ctx, env);
         writeOut(
           JSON.stringify({
@@ -103,6 +120,9 @@ export async function run(
         );
       }
       return 0;
+    }
+    if (shared && args[0] === 'serve') {
+      return (await serveInstalling(ctx, { env, startInstaller: install })) ?? 0;
     }
     const npx = packageManager('npx', [
       '-y',

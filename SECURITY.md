@@ -14,6 +14,40 @@ calls can, and startup may conditionally recover a missing project key when a re
 usable stored user credential make that recovery possible. Authentication bootstrap can use the
 baked default host without an environment setting.
 
+## MCP tool annotations
+
+Every published tool has a human-readable title and all four MCP effect hints. The explicit
+action inventory in [tool-effects.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/tool-effects.ts)
+is checked against the published actions and the security read/write taxonomy. Hints describe the
+union of every action's effects and the common MCP dispatch effects, following
+[OpenAI's annotation definitions](https://developers.openai.com/plugins/plugin-guidelines#correct-annotation).
+Deletion, overwriting content or status, cancellation, revoking access and sending messages count
+as destructive. An undo path does not turn an overwrite into an additive operation.
+
+**All current tools advertise `readOnlyHint: false`, `destructiveHint: true` and
+`idempotentHint: false`.** Every MCP call, including a read or refusal, can append local telemetry;
+the same append expires old monthly telemetry files. That deletion counts conservatively as
+destructive, with no exemption for operational logs. Opening a project can also let the configured
+upload scheduler pay upload debt from an earlier write. A configured upload may therefore follow
+a read; its destination is the user's bounded dashboard account.
+
+Only `cmos_message` and `cmos_sprint` advertise `openWorldHint: true`, because messaging and sprint
+`carry_forward` can send to other people's projects. Their hints apply to every action, including
+list and show. Access to the user's own bounded dashboard account alone does not make a tool
+open-world.
+
+These hints are different from [action-taxonomy.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/action-taxonomy.ts),
+which governs a review agent's access to project records. A security-classified read can leave the
+record unchanged while writing telemetry outside the store. Tests check prepared store and
+registry snapshot hashes for enumerated actions with no action-owned mutation; separate tests
+exercise telemetry append and expiration through the registered MCP boundary. Those fixtures do
+not prove every argument combination, legacy migration or remote server behavior; effect labels
+also require code review.
+
+Codex Auto mode can require approval for every current tool. These annotations do not promise
+fewer prompts or a passed plugin-directory review. Reducing approvals requires separately scoped
+runtime or tool-surface changes, rather than inaccurate hints.
+
 ## Reporting a vulnerability
 
 Please report security issues via the GitHub issue tracker
@@ -36,7 +70,7 @@ network surface.
 
 ## Outbound network
 
-CMOS makes outbound requests in exactly two situations, both optional:
+CMOS runtime and plugin installation make outbound requests in these situations:
 
 1. **The dashboard, once you have a credential, or when you ask for it.** The URL resolves from
    `CMOS_DASHBOARD_URL`, then the baked `https://cmos.aquex.ai` default (`DEFAULT_DASHBOARD_URL` in
@@ -91,6 +125,15 @@ CMOS makes outbound requests in exactly two situations, both optional:
    fetch (`getEmbedder` in [embedding-pipeline.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/intelligence/embedding-pipeline.ts)). The token
    counter's tokenizer (`Xenova/claude-tokenizer`) loads only when something counts tokens, and no
    tool does. A local-forever install never _hard-requires_ a network fetch.
+
+3. **Plugin installation.** A cold plugin launch runs npm to install the plugin's exact CMOS
+   version and its dependencies. This contacts the configured npm registry; dependency install
+   scripts may also download native packages from their suppliers. This installation is separate
+   from dashboard sync and does not upload the project database. The launcher validates package
+   identity, CLI version and native SQLite before publishing the install
+   ([install-worker.mjs](https://github.com/kneelinghorse/cmos-mcp/blob/main/plugins/cmos/hooks/install-worker.mjs)).
+   `pluginServer: "off"` disables the plugin's MCP server before package discovery or installation;
+   enabled developer hooks can still need their runtime.
 
 ## Authentication model
 
@@ -290,6 +333,34 @@ next write would store. [tests/tools/cmos/reads-never-write.test.ts](https://git
 calls every read-classified action against stores seeded so each old write was possible, in both
 roles, and fails on any committed row change.
 
+**Codex input boundary.** The developer plugin wires SessionStart, UserPromptSubmit, Stop,
+PreCompact and SessionEnd. Its hook parser consumes `session_id`, `cwd`, `prompt`, and
+`last_assistant_message`; Codex's `turn_id` becomes the shared `prompt_id`. The shared parser also
+accepts `source` and `reason`. The prompt can be searched for recall and observed for draft approval;
+the latest assistant reply can produce the draft and its bounded excerpt described below. Codex
+`transcript_path` is discarded before the shared parser, so CMOS does not scan a Codex transcript
+as if it were a Claude transcript. Other stdin fields are ignored
+([hook-adapters.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/cli/hook-adapters.ts),
+[core.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/cli/core.ts)). The chat plugin has no hooks.
+
+For MCP calls, CMOS advertises `codex/sandbox-state-meta` and reads only the presence and object
+shape of `_meta["x-codex-turn-metadata"]`, the nonempty `_meta.sessionId`, and
+`_meta["codex/sandbox-state-meta"].sandboxCwd` as a `file://` URI. It ignores the marker's contents
+and every other sandbox-state field; those fields are not copied into the CMOS request context.
+An explicit `projectRoot` remains the first choice. Without it, malformed supplied metadata
+refuses project resolution. The folder and conversation id live only for the request; background upload work
+clears this context
+([codex-request-context.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/codex-request-context.ts)).
+
+The metadata is caller context, not authentication or proof of approval. CMOS uses a conversation
+session key only when its folder resolves to the same physical store and that session has actual
+hook state there. Otherwise it uses a process-owned session; merely supplying a session id cannot
+manufacture hook approval. SessionEnd removes that session's hook evidence
+([session-owner.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/session-owner.ts),
+[draft-runtime.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/draft-runtime.ts)).
+A chat-only direct decision can put observed approval words in `context`; CMOS cannot verify those
+words and does not label that direct record as hook-approved.
+
 **Hook runtime files.** The hook CLI keeps per-machine state under the config directory, never in a
 project or the store ([src/tools/cmos/harness-session.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/harness-session.ts)):
 `<configDir>/runtime/harness/<pid>.json` links a harness process to its sessions, each by a
@@ -339,9 +410,13 @@ completed first-prompt receipts plus delivered typed IDs under `runtime/recall/`
 survive session end so duplicate adapters or resumed conversations do not replay completed work.
 Transient `runtime/lifecycle/` files hold the initial Git commit, dirty paths and compact marker;
 successful session end removes only that conversation's transient files. Git summaries describe
-repository observations, not agent authorship. The installer stores an exact runtime/version
-marker with its package in `CLAUDE_PLUGIN_DATA` and an installation pointer under the config
-directory. `pluginServer: off` is checked before package discovery or installation and exposes
+repository observations, not agent authorship. The Claude plugin installer stores an exact
+runtime/version marker with its package in `CLAUDE_PLUGIN_DATA` and an installation pointer under
+the config directory. The Codex developer hooks and both Codex plugin servers instead share
+`<configDir>/plugins`, with an exact version, platform, architecture and Node ABI in the install
+identity. The developer entry forwards an optional absolute `CMOS_CONFIG_DIR`; empty or relative
+values are refused. The portable chat loader cannot forward that optional variable, so its supported
+shared root is the default `~/.config/cmos-mcp`. Both entries use the same installation validation. `pluginServer: off` is checked before package discovery or installation and exposes
 no tools or instructions. None of this external runtime state is uploaded with the project store.
 
 **The operator profile.** `<configDir>/profile.md` holds the operator's working preferences, for
@@ -362,4 +437,4 @@ subagent type (e.g. the `Explore` agent) — that is a mitigation, not the machi
 
 ---
 
-_Last verified against the source for release 3.4.0._
+_Last verified against the source for release 3.5.0._

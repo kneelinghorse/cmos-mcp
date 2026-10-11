@@ -16,6 +16,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { getServerVersion } from './server-version';
 import { debugEnabled, debugLog } from './debug-log';
+import { isProjectAddress } from './intelligence/project-address';
+import { currentCodexRequest, withCodexRequest } from './codex-request-context';
 
 export { getServerVersion };
 
@@ -98,6 +100,7 @@ import {
   ReadOnlyAgentGuardError,
 } from './tools/cmos/read-only-agent-guard';
 import { classifyAction } from './tools/cmos/action-taxonomy';
+import { toolEffectMetadata } from './tools/cmos/tool-effects';
 import {
   captureToolCall,
   setToolProjectResolution,
@@ -222,6 +225,7 @@ function createProtocolServer(): Server {
       capabilities: {
         tools: {},
         prompts: {},
+        experimental: { 'codex/sandbox-state-meta': {} },
       },
       // s92-m08: the loop, for every client, without a rules file.
       instructions: SERVER_INSTRUCTIONS,
@@ -251,8 +255,10 @@ export interface MissionProtocolContext {
 
 export interface ToolDefinition {
   name: string;
+  title?: string;
   description: string;
   inputSchema: Tool['inputSchema'];
+  annotations?: Tool['annotations'];
 }
 
 /**
@@ -265,7 +271,10 @@ export interface ToolDefinition {
  * wire text (s92-m08). The full text stays on CMOS_TOOL_DEFINITIONS and in TOOL_REFERENCE.md.
  */
 export function getToolDefinitions(): ToolDefinition[] {
-  return (CMOS_TOOL_DEFINITIONS as unknown as ToolDefinition[]).map(toWireDefinition);
+  return (CMOS_TOOL_DEFINITIONS as unknown as ToolDefinition[]).map((definition) => ({
+    ...toWireDefinition(definition),
+    ...toolEffectMetadata(definition.name),
+  }));
 }
 
 /**
@@ -503,6 +512,7 @@ function callerNamedProject(explicitRoot: unknown, source: ResolvedBy): boolean 
   return (
     typeof explicitRoot === 'string' ||
     source === 'explicit' ||
+    source === 'client-cwd' ||
     source === 'mcp-roots' ||
     source === 'server-project-root'
   );
@@ -514,6 +524,7 @@ function callerNamedProject(explicitRoot: unknown, source: ResolvedBy): boolean 
  */
 export interface ResolutionStamp {
   readonly projectRoot: string | null;
+  readonly projectAddress?: string;
   readonly resolvedBy: ResolvedBy;
   /** Rendered instead of the plain "resolved by" label when the route needs saying out loud. */
   readonly note?: string;
@@ -536,7 +547,11 @@ function stampOf(ctx: SenderContext | null): ResolutionStamp {
         resolvedBy: ctx.source,
         note: "resolved by the server's working directory — the client's MCP roots hold no CMOS project",
       }
-    : { projectRoot: ctx.projectRoot, resolvedBy: ctx.source };
+    : {
+        projectRoot: ctx.projectRoot,
+        resolvedBy: ctx.source,
+        ...(ctx.requestedAddress ? { projectAddress: ctx.requestedAddress } : {}),
+      };
 }
 
 /**
@@ -544,6 +559,7 @@ function stampOf(ctx: SenderContext | null): ResolutionStamp {
  * named it) and `cwd` (the caller is standing in it) stay silent.
  */
 const RESOLVED_BY_LABELS: Partial<Record<ResolvedBy, string>> = {
+  'client-cwd': "the client's working folder",
   'mcp-roots': "the client's MCP roots",
   'server-project-root': "--project-root in this server's config",
   'registry-default': 'the registry default project',
@@ -593,10 +609,12 @@ export function buildResolvedToolResult(
         projectRoot:
           typeof record.projectRoot === 'string' ? record.projectRoot : stamp.projectRoot,
         resolvedBy: stamp.resolvedBy,
+        ...(stamp.projectAddress ? { projectAddress: stamp.projectAddress } : {}),
       };
     } else {
       structured.projectRoot = stamp.projectRoot;
       structured.resolvedBy = stamp.resolvedBy;
+      if (stamp.projectAddress) structured.projectAddress = stamp.projectAddress;
     }
   }
   // s93-m11 (#606 c): every text answer names the project it touched, an error included: a call
@@ -605,7 +623,7 @@ export function buildResolvedToolResult(
   const label = RESOLVED_BY_LABELS[stamp.resolvedBy];
   const reason = stamp.note ?? (label ? `resolved by ${label}` : null);
   if (stamp.projectRoot) {
-    text = `Project: ${inertProjectRoot(stamp.projectRoot)}${reason ? ` (${reason})` : ''}\n\n${formatted}`;
+    text = `Project: ${stamp.projectAddress ? `${inertProjectRoot(stamp.projectAddress)} — ` : ''}${inertProjectRoot(stamp.projectRoot)}${reason ? ` (${reason})` : ''}\n\n${formatted}`;
   }
   return {
     content: [{ type: 'text', text }],
@@ -616,11 +634,17 @@ export function buildResolvedToolResult(
 
 /** whoami reports resolution itself; its stamp is the local project its resolution found. */
 function whoamiStamp(result: {
-  data?: { resolved?: { projectRoot: string | null; source: ResolvedBy | null } };
+  data?: {
+    resolved?: { projectRoot: string | null; source: ResolvedBy | null; requestedAddress?: string };
+  };
 }): ResolutionStamp {
   const resolved = result.data?.resolved;
   return resolved?.projectRoot && resolved.source
-    ? { projectRoot: resolved.projectRoot, resolvedBy: resolved.source }
+    ? {
+        projectRoot: resolved.projectRoot,
+        resolvedBy: resolved.source,
+        ...(resolved.requestedAddress ? { projectAddress: resolved.requestedAddress } : {}),
+      }
     : NO_PROJECT;
 }
 
@@ -636,7 +660,7 @@ async function resolveOptionalSenderContext(
   try {
     return await resolveToolSenderContext(undefined);
   } catch (error) {
-    if (error instanceof SenderResolutionError) return null;
+    if (error instanceof SenderResolutionError && !currentCodexRequest()) return null;
     throw error;
   }
 }
@@ -666,63 +690,68 @@ export function registerToolHandlers(
   targetServer.setRequestHandler('tools/call', async (request, requestContext) => {
     const { name, arguments: args } = request.params;
     const client = clientLabelForRequest(targetServer, requestContext);
-    return withServerRequest(targetServer, requestContext, () =>
-      withMcpTelemetry(
-        {
-          name,
-          args,
-          mode: classifyAction(name, extractActionArg(args)),
-          client,
-        },
-        async () => {
-          try {
-            if (!context) {
-              throw new ProtocolError(
-                ProtocolErrorCode.InternalError,
-                'Server context not initialized'
-              );
-            }
+    return withCodexRequest(request.params._meta, () =>
+      withServerRequest(targetServer, requestContext, () =>
+        withMcpTelemetry(
+          {
+            name,
+            args,
+            mode: classifyAction(name, extractActionArg(args)),
+            client,
+          },
+          async () => {
+            try {
+              if (!context) {
+                throw new ProtocolError(
+                  ProtocolErrorCode.InternalError,
+                  'Server context not initialized'
+                );
+              }
 
-            // Establish the outer request carrier here so failures retain this call's disclosures.
-            // executeMissionProtocolTool sees the active ALS context and runs its switch directly.
-            const actionMode = classifyAction(name, extractActionArg(args));
-            const captured = await captureToolCall(actionMode, () =>
-              executeWithStoreUpkeep(name, args, context)
-            );
-            return attachStoreUpkeepNotes(
-              attachProjectIdentityDisclosures(captured.value, captured.projectIdentityDisclosures),
-              captured.storeUpkeepNotes
-            );
-          } catch (error) {
-            const originalError = unwrapCapturedToolCallError(error);
-            if (originalError instanceof SenderResolutionError) {
-              return attachProjectIdentityDisclosures(
-                buildKnownToolErrorResult(
-                  await classifySenderResolutionError(
-                    originalError,
-                    refusalMode(classifyAction(name, extractActionArg(args)))
-                  )
+              // Establish the outer request carrier here so failures retain this call's disclosures.
+              // executeMissionProtocolTool sees the active ALS context and runs its switch directly.
+              const actionMode = classifyAction(name, extractActionArg(args));
+              const captured = await captureToolCall(actionMode, () =>
+                executeWithStoreUpkeep(name, args, context)
+              );
+              return attachStoreUpkeepNotes(
+                attachProjectIdentityDisclosures(
+                  captured.value,
+                  captured.projectIdentityDisclosures
                 ),
+                captured.storeUpkeepNotes
+              );
+            } catch (error) {
+              const originalError = unwrapCapturedToolCallError(error);
+              if (originalError instanceof SenderResolutionError) {
+                return attachProjectIdentityDisclosures(
+                  buildKnownToolErrorResult(
+                    await classifySenderResolutionError(
+                      originalError,
+                      refusalMode(classifyAction(name, extractActionArg(args)))
+                    )
+                  ),
+                  projectIdentityDisclosuresForError(error)
+                );
+              }
+              // Sprint 74 m03: a tool HANDLER that throws an unhandled exception (a
+              // write-path crash — e.g. cmos_sprint(complete)/cmos_session(capture)
+              // hitting a store-specific failure) is a tool-EXECUTION failure, not a
+              // protocol error. Surface it as a structured CmosToolResult error
+              // (code + real message + suggestion) returned as an isError result —
+              // never a bare JSON-RPC -32603 that swallows the cause (aquex.ai aa124685).
+              // Genuine protocol errors (ProtocolError: unknown tool, uninitialized context)
+              // keep their JSON-RPC error shape — they already carry a clear message.
+              if (originalError instanceof ProtocolError) {
+                throw originalError;
+              }
+              return attachProjectIdentityDisclosures(
+                buildToolExecutionErrorResult(name, args, originalError),
                 projectIdentityDisclosuresForError(error)
               );
             }
-            // Sprint 74 m03: a tool HANDLER that throws an unhandled exception (a
-            // write-path crash — e.g. cmos_sprint(complete)/cmos_session(capture)
-            // hitting a store-specific failure) is a tool-EXECUTION failure, not a
-            // protocol error. Surface it as a structured CmosToolResult error
-            // (code + real message + suggestion) returned as an isError result —
-            // never a bare JSON-RPC -32603 that swallows the cause (aquex.ai aa124685).
-            // Genuine protocol errors (ProtocolError: unknown tool, uninitialized context)
-            // keep their JSON-RPC error shape — they already carry a clear message.
-            if (originalError instanceof ProtocolError) {
-              throw originalError;
-            }
-            return attachProjectIdentityDisclosures(
-              buildToolExecutionErrorResult(name, args, originalError),
-              projectIdentityDisclosuresForError(error)
-            );
           }
-        }
+        )
       )
     );
   });
@@ -1213,7 +1242,10 @@ export async function executeMissionProtocolTool(
           });
           projectRoot = ctx.projectRoot;
           stamp = stampOf(ctx);
-        } catch {
+        } catch (error) {
+          // A caller-named Codex folder is final, including a malformed/missing field. The
+          // historical contextless inbox fallback must not widen a refused Codex request.
+          if (currentCodexRequest()) throw error;
           // fail-open — user-scoped auth returns the operator's full inbox
         }
       }
@@ -1243,6 +1275,19 @@ export async function executeMissionProtocolTool(
       let stamp: ResolutionStamp = NO_PROJECT;
       let projectRoot: string | undefined = params.projectRoot;
       if (isLiteralPathAction) {
+        if (typeof projectRoot === 'string' && isProjectAddress(projectRoot)) {
+          const action = typeof params.action === 'string' ? params.action : '';
+          const result = {
+            success: false,
+            error: {
+              code: 'PROJECT_FOLDER_REQUIRED',
+              message: `cmos_project(action="${action}") requires a filesystem folder, not a project address.`,
+              suggestion:
+                'Pass projectRoot as a project folder. Call cmos_project(action="list") to find an existing project path.',
+            },
+          };
+          return buildResolvedToolResult(result, formatProjectForLLM(action, result), NO_PROJECT);
+        }
         if (typeof projectRoot === 'string' && projectRoot.trim() !== '') {
           stamp = { projectRoot: path.resolve(projectRoot), resolvedBy: 'explicit' };
         }

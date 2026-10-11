@@ -1,0 +1,11 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "cmos": {
+      "type": "stdio",
+      "command": "./server/launch.sh",
+      "args": ["serve", "--install-root", "shared"],
+      "cwd": "./"
+    }
+  }
+}

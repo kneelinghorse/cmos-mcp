@@ -3,7 +3,7 @@
 // ABOUTME: Proves the production entrypoints publish native-ready installs without touching the network or dist.
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { copiedPlugin, fixture, packageCode, version } from './fixtures';
 
 test('cold SessionStart detaches one worker, then the next session uses its fully marked install', async () => {
@@ -75,6 +75,119 @@ test('cold SessionStart detaches one worker, then the next session uses its full
         process.kill(owner.pid, 'SIGKILL');
       } catch {
         /* Worker already exited. */
+      }
+    }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('shared hook and MCP starters install once even after the MCP process group ends', async () => {
+  const root = fixture();
+  const configDir = path.join(root, 'config');
+  const data = path.join(configDir, 'plugins');
+  const installRoot = path.join(
+    data,
+    `${version}-${process.platform}-${process.arch}-abi${process.versions.modules}`
+  );
+  let server: ReturnType<typeof spawn> | undefined;
+  try {
+    const plugin = copiedPlugin(root);
+    const localNode = path.join(root, process.platform === 'win32' ? 'node.exe' : 'node');
+    fs.copyFileSync(process.execPath, localNode);
+    fs.chmodSync(localNode, 0o755);
+    const npmScript = path.join(root, 'npm-fixture.js');
+    const calls = path.join(root, 'calls');
+    fs.writeFileSync(
+      npmScript,
+      `const fs=require('node:fs');const path=require('node:path');
+      const prefix=process.argv[process.argv.indexOf('--prefix')+1];
+      fs.appendFileSync(${JSON.stringify(calls)},'install'+String.fromCharCode(10));
+      setTimeout(()=>{${packageCode('prefix')}},750);`
+    );
+    if (process.platform === 'win32')
+      fs.writeFileSync(path.join(root, 'npm.cmd'), `@"${localNode}" "${npmScript}" %*\r\n`);
+    else fs.symlinkSync(npmScript, path.join(root, 'npm'));
+    const env = {
+      ...process.env,
+      PATH: '',
+      CMOS_CONFIG_DIR: configDir,
+      CLAUDE_PLUGIN_DATA: path.join(root, '.codex/plugins/data'),
+    };
+    const script = path.join(plugin, 'hooks/run.mjs');
+    server = spawn(localNode, [script, 'serve', '--install-root', 'shared'], {
+      env,
+      detached: true,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let output = '';
+    server.stdout!.on('data', (chunk) => {
+      output += String(chunk);
+    });
+    server.stdin!.write(
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: {
+          protocolVersion: '2025-06-18',
+          capabilities: {},
+          clientInfo: { name: 'fixture', version: '1' },
+        },
+      }) + '\n'
+    );
+    const waitFor = async (predicate: () => boolean) => {
+      const deadline = Date.now() + 10000;
+      while (!predicate() && Date.now() < deadline)
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(predicate()).toBe(true);
+    };
+    await waitFor(() => output.includes('cmos-installing') && fs.existsSync(calls));
+    const hookArgs = [
+      script,
+      'hook',
+      'session-start',
+      '--harness',
+      'codex',
+      '--install-root',
+      'shared',
+    ];
+    const hook = spawnSync(localNode, hookArgs, {
+      env,
+      input: '{}',
+      encoding: 'utf8',
+      timeout: 2000,
+    });
+    expect(hook.status).toBe(0);
+    expect(hook.stdout).toContain('CMOS is installing');
+    if (process.platform === 'win32') server.kill('SIGKILL');
+    else process.kill(-server.pid!, 'SIGKILL');
+    await waitFor(
+      () =>
+        fs.existsSync(path.join(installRoot, '.cmos-ready.json')) &&
+        !fs.existsSync(installRoot + '.lock')
+    );
+    const ready = spawnSync(localNode, hookArgs, {
+      env,
+      input: '{}',
+      encoding: 'utf8',
+      timeout: 2000,
+    });
+    expect(ready.status).toBe(0);
+    expect(JSON.parse(ready.stdout).args).toEqual(['hook', 'session-start', '--harness', 'codex']);
+    expect(fs.readFileSync(calls, 'utf8').trim().split('\n')).toHaveLength(1);
+    expect(fs.existsSync(path.join(root, '.codex'))).toBe(false);
+    expect(
+      JSON.parse(fs.readFileSync(path.join(data, 'runtime/plugin-install.json'), 'utf8'))
+        .installRoot
+    ).toBe(installRoot);
+  } finally {
+    if (server?.exitCode === null) server.kill('SIGKILL');
+    if (fs.existsSync(installRoot + '.lock')) {
+      const owner = JSON.parse(fs.readFileSync(installRoot + '.lock', 'utf8'));
+      try {
+        process.kill(owner.pid, 'SIGKILL');
+      } catch {
+        /* This isolated worker already exited. */
       }
     }
     fs.rmSync(root, { recursive: true, force: true });

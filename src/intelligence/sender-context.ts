@@ -31,6 +31,7 @@
  */
 
 import path from 'path';
+import { currentCodexRequest } from '../codex-request-context';
 
 import {
   backfillUnknownCmosAddress,
@@ -43,6 +44,7 @@ import { withClientAsync } from '../tools/cmos/client';
 import { asLazyRepair, callMayWrite } from '../tools/cmos/tool-call-context';
 import { CmosDetector } from './cmos-detector';
 import { ProjectGraphRegistry } from './project-graph-registry';
+import { isProjectAddress, resolveRegisteredAddress } from './project-address';
 import {
   SERVER_INSTALL_ROOT,
   findEnclosingStore,
@@ -63,6 +65,7 @@ const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 /** Candidate source labels, ordered highest-to-lowest priority. */
 export type SenderResolutionSource =
   | 'explicit'
+  | 'client-cwd'
   | 'mcp-roots'
   | 'cwd'
   | 'server-project-root'
@@ -118,6 +121,7 @@ export interface AddressHeal {
 /** Resolved sender identity plus the full audit trail. */
 export interface SenderContext {
   readonly projectRoot: string;
+  readonly requestedAddress?: string;
   readonly source: SenderResolutionSource;
   readonly dashboardProjectId: string | null;
   readonly cmosAddress: string | null;
@@ -402,7 +406,54 @@ export async function resolveSenderContext(
 
   // ─── Step 1: explicit — always final ───────────────────────────────────
   if (opts.explicitProjectRoot) {
+    if (isProjectAddress(opts.explicitProjectRoot)) {
+      let selected: ReturnType<typeof resolveRegisteredAddress>;
+      try {
+        const registry = opts.registryOverride ?? (await ProjectGraphRegistry.create());
+        selected = resolveRegisteredAddress(opts.explicitProjectRoot, registry);
+      } catch (error) {
+        selected = {
+          error: `Registered project scan failed: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+      if ('error' in selected) {
+        throw new SenderResolutionError(selected.error, candidates, 'PROJECT_ADDRESS_UNRESOLVABLE');
+      }
+      return {
+        ...(await settle('explicit', selected.projectRoot)),
+        requestedAddress: opts.explicitProjectRoot,
+      };
+    }
     return settle('explicit', path.resolve(opts.explicitProjectRoot));
+  }
+
+  // A Codex call names its own folder, independently of the plugin server's launch directory.
+  // A missing/changed opaque field refuses rather than silently routing to the server's store.
+  const codex = currentCodexRequest();
+  if (codex) {
+    if (codex.error || !codex.cwd) {
+      throw new SenderResolutionError(
+        `${codex.error ?? 'Codex did not provide a working folder.'} Pass projectRoot explicitly.`,
+        [{ source: 'client-cwd', accepted: false, rejectReason: codex.error }],
+        'CODEX_CONTEXT_REQUIRED'
+      );
+    }
+    const enclosing = findEnclosingStore(codex.cwd, { homeDir });
+    if (enclosing) return settle('client-cwd', enclosing.root);
+    candidates.push({
+      source: 'client-cwd',
+      projectRoot: codex.cwd,
+      accepted: false,
+      rejectReason: 'no CMOS database at projectRoot',
+    });
+    if (!isContextlessDirectory(codex.cwd, { homeDir, installRoot })) {
+      throw new SenderResolutionError(
+        `No CMOS project in the client's working folder '${codex.cwd}'. Pass projectRoot explicitly.`,
+        candidates,
+        undefined,
+        { outcome: 'no-project-here', workingDir: codex.cwd }
+      );
+    }
   }
 
   // ─── Step 2: MCP client roots — the first root inside a store ──────────
@@ -422,7 +473,7 @@ export async function resolveSenderContext(
   }
 
   // ─── Step 3: cwd walk-up — the nearest enclosing store ─────────────────
-  const cwd = path.resolve(opts.cwdOverride ?? process.cwd());
+  const cwd = path.resolve(codex?.cwd ?? opts.cwdOverride ?? process.cwd());
   const enclosing = findEnclosingStore(cwd, { homeDir });
   if (enclosing) return settle('cwd', enclosing.root);
   candidates.push({
@@ -501,6 +552,8 @@ export function describeSource(source: SenderResolutionSource): string {
   switch (source) {
     case 'explicit':
       return 'projectRoot you passed';
+    case 'client-cwd':
+      return "project enclosing the client's working folder";
     case 'mcp-roots':
       return 'MCP root';
     case 'cwd':

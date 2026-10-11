@@ -1,6 +1,6 @@
 {
   "name": "@aquex/cmos-mcp",
-  "version": "3.4.0",
+  "version": "3.5.0",
   "description": "Decisions that survive the session. A local project record that AI agents keep through MCP, skills and hooks.",
   "repository": {
     "type": "git",
@@ -30,6 +30,9 @@
     "dist",
     "cmos-seed",
     "plugins/cmos",
+    "plugins/cmos-chat",
+    ".agents/plugins/marketplace.json",
+    ".claude-plugin/marketplace.json",
     "adapters",
     "LICENSE",
     "NOTICE",
@@ -137,7 +140,7 @@
     "protobufjs": "^7.6.5"
   },
   "lint-staged": {
-    "!(*.config).{js,ts,mjs}": [
+    "{!(*.config),!(cmos)/**/!(*.config)}.{js,ts,mjs}": [
       "eslint --cache --fix --max-warnings=0",
       "prettier --cache --write"
     ],

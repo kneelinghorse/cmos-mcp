@@ -55,8 +55,8 @@
  *     ledger below: a real loopback HTTP server plus synthetic credential/config state reaches 21,
  *     while 3 are named construction-masked residuals. UNTYPED 1 remains at
  *     `sprint-summary-read.ts:45`, whose helper has zero production callers and inherits an
- *     arbitrary error code. `errors.ts:384` is consumer-resolved to SENDER_UNRESOLVABLE and its
- *     explicit-projectRoot remedy is exercised over stdio. The EXTERNAL arm uses mirrored routers,
+ *     arbitrary error code. `errors.ts:386` has a bounded resolver-code family, proven STATE
+ *     below, and its explicit-projectRoot remedy is exercised over stdio. The EXTERNAL arm uses mirrored routers,
  *     no operator credential and no MCP stdio wire; it therefore takes no credit for the first-run
  *     wire matrix in `tests/e2e/wire-preflight.e2e.ts`.
  *  3. THE ANSWER-BODY CHANNEL IS DECLARED, NOT CLOSED. 87 `format*ForLLM` declarations in src/,
@@ -74,8 +74,9 @@
  *  6. SQL-FORCED TRIGGER STATES (UA-5). Several axes establish their state by SQL on a private
  *     store copy rather than by a supported call sequence. Every such value carries a
  *     reachability note saying how a supported sequence could produce it.
- *  7. IN-PROCESS ROUTERS, NOT `dist/` OVER STDIO. This gate drives the mirrored routers in
- *     process. The ARTIFACT-level assertion for the same class lives in `scripts/verify-dist.ts`.
+ *  7. IN-PROCESS ROUTERS, NOT `dist/` OVER STDIO. This gate drives the mirrored routers and
+ *     one narrow project-folder refusal at the in-process dispatcher. It does not establish
+ *     broad dispatcher preflight coverage. The ARTIFACT-level assertion for the same class lives in `scripts/verify-dist.ts`.
  *  8. T6'S SCOPE ARM TESTS THE ROUTER GUARD, NOT THE WIRE PREFLIGHT. It establishes no pre-guard
  *     outcome baseline, so "not refused" does not mean success or byte-identical output. Both its
  *     expected set and the guard's applicable list consume `CMOS_ACTION_PARAMS`; the independent
@@ -279,6 +280,11 @@ const SITES_BY_MISSION = {
     'src/tools/cmos/sync-pull.ts:230',
   ],
   // s94-m08: four mandatory mission-drop fault remedies and two CLI spin-out refusals.
+  's95-m13': [
+    'src/index.ts:1286',
+    'src/tools/cmos/cmos-message.ts:790',
+    'src/tools/cmos/sender-refusal.ts:96',
+  ],
   's94-m08': [
     'src/tools/cmos/cmos-mission-drop.ts:69',
     'src/tools/cmos/cmos-mission-drop.ts:92',
@@ -330,17 +336,18 @@ const EXTERNAL_PREFIXES = ['DASHBOARD_', 'DEVICE_CODE_', 'CREDENTIAL_'];
 
 /**
  * Sites whose object literal carries no sibling `code:` because the literal is a HELPER RETURN
- * VALUE rather than the error itself. The bucket is resolved from the SINGLE consumer that turns
- * that return value into an error — the code a caller actually sees on the wire.
+ * VALUE rather than the error itself. The bucket is resolved from the proven consumer code
+ * or code family that reaches callers; nonliteral families retain the `<expr>` label.
  *
  * `cmos-context-update.ts:780/790/799/818` are the four returns of `applyNestedFieldUpdate`, whose
  * ONLY consumer (`cmos-context-update.ts:543-549`) stamps `CMOS_ERROR_CODES.INVALID_PARAMETER` and
  * forwards `updateResult.suggestion` verbatim. The census arm PROVES that single-consumer premise
  * rather than trusting this comment.
  *
- * `errors.ts:384` is produced by `senderUnresolvable`. Its only production error source is
- * `SenderResolutionError`, whose sole production construction uses the SENDER_UNRESOLVABLE
- * default; the proof below makes that premise executable. `sprint-summary-read.ts:45` remains
+ * `errors.ts:386` is produced by `senderUnresolvable`. Its production code now varies between
+ * the resolver's default and its explicit Codex/address refusals. The proof below enumerates
+ * every constructor code and proves all belong to STATE; `<expr>` names this nonliteral code.
+ * `sprint-summary-read.ts:45` remains
  * absent: `withViewContext` spreads `...error`, so its code is arbitrary, and it has ZERO callers.
  */
 const CONSUMER_RESOLVED_CODES: Readonly<Record<string, string>> = {
@@ -348,7 +355,7 @@ const CONSUMER_RESOLVED_CODES: Readonly<Record<string, string>> = {
   'src/tools/cmos/cmos-context-update.ts:790': 'INVALID_PARAMETER',
   'src/tools/cmos/cmos-context-update.ts:799': 'INVALID_PARAMETER',
   'src/tools/cmos/cmos-context-update.ts:818': 'INVALID_PARAMETER',
-  'src/tools/cmos/errors.ts:386': 'SENDER_UNRESOLVABLE',
+  'src/tools/cmos/errors.ts:386': '<expr>',
 };
 
 type TriggerClass = 'VALIDATION' | 'STATE' | 'FAULT' | 'EXTERNAL' | 'UNTYPED';
@@ -614,6 +621,14 @@ function loadMirrorRouters(): MirrorRouters {
       if (code !== (result.success ? 0 : 1) || stderr.length > 0)
         throw new Error(`Feedback CLI receipt disagrees with exit ${code}: ${stderr.join(' ')}`);
       return result;
+    },
+    // Narrow dispatcher witness for the folder-only address refusal. The general matrix
+    // still drives routers; this does not claim wire/stdio or broad preflight coverage.
+    dispatch_project: async (params) => {
+      const dispatcher = require(`${mirror.root}/index.js`) as typeof import('../../../src/index');
+      const context = await dispatcher.buildMissionProtocolContext();
+      const result = await dispatcher.executeMissionProtocolTool('cmos_project', params, context);
+      return result.structuredContent;
     },
     cmos_mission: load('cmos-mission', 'cmosMission'),
     cmos_mission_transition: load('cmos-mission-transition', 'cmosMissionTransition'),
@@ -2040,7 +2055,7 @@ const HTTP_EXTERNAL_SITES = new Set([
   'src/tools/cmos/cmos-auth.ts:1183',
   'src/tools/cmos/cmos-auth.ts:1192',
   'src/tools/cmos/cmos-auth.ts:1200',
-  'src/tools/cmos/cmos-message.ts:1078',
+  'src/tools/cmos/cmos-message.ts:1087',
   'src/tools/cmos/errors.ts:430',
   'src/tools/cmos/errors.ts:446',
   'src/tools/cmos/errors.ts:465',
@@ -2146,19 +2161,21 @@ describe('s89-m08 CENSUS — the universe re-derives at build time, never from a
       ts.forEachChild(node, visit);
     };
     visit(senderSource);
-    // s92-m01: the resolver now refuses at three points (a selected store that fails its bar, a
-    // real working folder with no store, a contextless call with no default) and passes each one's
-    // outcome as a fourth argument. The premise is unchanged and still proven here: NO
-    // construction supplies the code argument, so every error carries the SENDER_UNRESOLVABLE
-    // default that `errors.ts:384` is bucketed by.
-    expect(constructions.length).toBeGreaterThan(0);
-    for (const construction of constructions) {
-      const codeArgument = construction.arguments?.[2];
-      expect(
-        codeArgument === undefined ||
-          (ts.isIdentifier(codeArgument) && codeArgument.text === 'undefined')
-      ).toBe(true);
-    }
+    // s95: explicit Codex/address errors invalidate the old all-default premise. Enumerate
+    // every construction, rejecting unknown expressions/codes instead of widening the bucket.
+    const codes = constructions.map((construction) => {
+      const argument = construction.arguments?.[2];
+      if (!argument || (ts.isIdentifier(argument) && argument.text === 'undefined'))
+        return 'SENDER_UNRESOLVABLE';
+      expect(ts.isStringLiteralLike(argument)).toBe(true);
+      return ts.isStringLiteralLike(argument) ? argument.text : '<unresolved>';
+    });
+    expect([...new Set(codes)].sort()).toEqual([
+      'CODEX_CONTEXT_REQUIRED',
+      'PROJECT_ADDRESS_UNRESOLVABLE',
+      'SENDER_UNRESOLVABLE',
+    ]);
+    expect(codes.every((code) => triggerClassOf(code) === 'STATE')).toBe(true);
     expect(senderSource.text).toContain("code = 'SENDER_UNRESOLVABLE'");
     expect(fs.readFileSync(path.join(SRC_ROOT, 'tools', 'cmos', 'errors.ts'), 'utf8')).toContain(
       'code: string = CMOS_ERROR_CODES.SENDER_UNRESOLVABLE'
@@ -2725,7 +2742,8 @@ async function runPortableCase(options: {
   tool: string;
   params: (state: ExternalCaseState) => Record<string, unknown>;
   setup?: (state: ExternalCaseState) => void;
-  /** Additional CLI efficacy probe: correct the named input from the same established state. */
+  /** Efficacy probe: execute the named remedy from the same established state. */
+  remedyTool?: string;
   remedyParams?: (state: ExternalCaseState) => Record<string, unknown>;
 }): Promise<void> {
   const state = seedPortableState(options.name, options.seed);
@@ -2763,7 +2781,7 @@ async function runPortableCase(options: {
     const remedy = await driveMirrored(
       `${options.name} remedy`,
       options.family,
-      options.tool,
+      options.remedyTool ?? options.tool,
       options.remedyParams(state)
     );
     expect({ caseName: options.name, outcome: remedy.outcome }).toEqual({
@@ -2784,6 +2802,8 @@ async function runMirroredResolutionCase(options: {
   name: string;
   expectedCode: string;
   mode: 'read' | 'write';
+  checkRemedy?: boolean;
+  metadata?: Record<string, unknown>;
   resolveOptions: (state: ExternalCaseState) => Record<string, unknown>;
 }): Promise<void> {
   const state = seedPortableState(options.name, { seedProject: false });
@@ -2808,10 +2828,15 @@ async function runMirroredResolutionCase(options: {
       mode: 'read' | 'write'
     ): Promise<{ code?: string; suggestion?: string }>;
   };
+  const requestContext = require(
+    `${mirror.root}/codex-request-context.js`
+  ) as typeof import('../../../src/codex-request-context');
   /* eslint-enable @typescript-eslint/no-var-requires */
   let call: DrivenCall;
   try {
-    await senderModule.resolveSenderContext(options.resolveOptions(state));
+    await requestContext.withCodexRequest(options.metadata, () =>
+      senderModule.resolveSenderContext(options.resolveOptions(state))
+    );
     call = {
       caseName: options.name,
       axis: 'first-run',
@@ -2844,6 +2869,19 @@ async function runMirroredResolutionCase(options: {
     fired,
     requests: [],
   });
+  if (options.checkRemedy) {
+    const prescriptions = extractPrescribedCalls(call.suggestion ?? '');
+    expect(prescriptions).toHaveLength(1);
+    for (const prescription of prescriptions) {
+      const remedy = await driveMirrored(
+        `${options.name} remedy`,
+        'resolution-remedy',
+        prescription.tool,
+        { action: prescription.action, projectRoot: state.projectRoot }
+      );
+      expect(remedy.outcome).toBe('SUCCEEDS');
+    }
+  }
 }
 
 interface DirectDashboardUrlRead {
@@ -3445,6 +3483,47 @@ describe('s90-m07 PORTABLE EXTERNAL + FIRST-RUN LEDGER — loopback, never live 
         fs.mkdirSync(path.join(projectRoot, 'cmos', 'db'), { recursive: true }),
       tool: 'cmos_db',
       params: ({ projectRoot }) => ({ action: 'health', projectRoot }),
+    });
+
+    // s95-m13: these are constructible local refusals. Exercise their published list remedy
+    // in the same isolated registry, rather than declaring new residuals just for the census.
+    await runPortableCase({
+      name: 'whoami refuses an unregistered address',
+      family: 'driveable',
+      expectedCode: 'PROJECT_ADDRESS_UNRESOLVABLE',
+      expectsHttp: false,
+      scenario: noHttpScenario,
+      tool: 'cmos_message',
+      params: () => ({ action: 'whoami', projectRoot: 'cmos://oracle/missing' }),
+      remedyTool: 'cmos_project',
+      remedyParams: () => ({ action: 'list' }),
+    });
+    await runPortableCase({
+      name: 'project register requires a folder even when an address is well formed',
+      family: 'driveable',
+      expectedCode: 'PROJECT_FOLDER_REQUIRED',
+      expectsHttp: false,
+      scenario: noHttpScenario,
+      tool: 'dispatch_project',
+      params: () => ({ action: 'register', projectRoot: 'cmos://oracle/missing' }),
+      remedyParams: () => ({ action: 'list' }),
+    });
+    await runMirroredResolutionCase({
+      name: 'dispatch resolves an unregistered address to its list remedy',
+      expectedCode: 'PROJECT_ADDRESS_UNRESOLVABLE',
+      mode: 'read',
+      checkRemedy: true,
+      resolveOptions: () => ({
+        explicitProjectRoot: 'cmos://oracle/missing',
+        requireSenderIdentity: false,
+      }),
+    });
+    await runMirroredResolutionCase({
+      name: 'malformed Codex metadata preserves its distinct state refusal',
+      expectedCode: 'CODEX_CONTEXT_REQUIRED',
+      mode: 'read',
+      metadata: { 'x-codex-turn-metadata': {}, sessionId: 'oracle-codex' },
+      resolveOptions: () => ({ mcpRoots: [], requireSenderIdentity: false }),
     });
 
     // s92-m01 — the no-project refusal, in each situation the dispatcher can reach it from.
@@ -4290,7 +4369,7 @@ const RESIDUAL_REASONS: Readonly<Record<string, string>> = {
   // ── CONSTRUCTION-MASKED PRECONDITIONS inside a VALIDATION/STATE-coded site ───────────────────
   // Driveable by CODE, but dispatcher and collab gates mask the triggers from every supported
   // construction the portable m07 instrument can establish. Four former entries moved to E.
-  'src/tools/cmos/cmos-message.ts:1055':
+  'src/tools/cmos/cmos-message.ts:1064':
     'A defensive branch whose own message says the dispatcher should have caught the condition via ' +
     'resolveSenderContext. Reaching it means reaching a state the dispatcher forbids.',
   'src/tools/cmos/sync-mutable-push.ts:111':

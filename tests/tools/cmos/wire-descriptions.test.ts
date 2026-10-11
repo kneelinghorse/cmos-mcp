@@ -59,8 +59,11 @@ describe('s92-m08 — tools/list', () => {
     expect(JSON.stringify(longForm).length / CHARS_PER_TOKEN).toBeGreaterThan(TOKEN_CEILING);
   });
 
-  it('keeps every schema exactly: only the description text differs from the long form', () => {
-    expect(withoutDescriptions(wire())).toEqual(withoutDescriptions(longForm));
+  it('keeps every input schema exactly apart from description text', () => {
+    // s95-m12 adds wire-only effect metadata; the input contract is still the declared schema.
+    const schemas = (definitions: Definition[]) =>
+      definitions.map(({ name, inputSchema }) => ({ name, inputSchema }));
+    expect(withoutDescriptions(schemas(wire()))).toEqual(withoutDescriptions(schemas(longForm)));
   });
 
   it('lists the tools in one fixed order, the order they are declared in', () => {

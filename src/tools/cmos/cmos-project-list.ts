@@ -1,3 +1,5 @@
+// ABOUTME: Lists active registered projects with their stored identity and address.
+// ABOUTME: Raw readonly reads disclose unavailable identities without seeding or repairing stores.
 /**
  * cmos_project_list Tool
  *
@@ -10,6 +12,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { z } from 'zod';
+import { readStoredProjectAddress } from '../../intelligence/project-address';
 import { ProjectGraphRegistry } from '../../intelligence/project-graph-registry';
 import type { CmosToolResult } from './types';
 import { createError, createSuccess } from './errors';
@@ -19,6 +22,10 @@ import { appendWarnings } from './format-warnings';
  * Project summary for list output.
  */
 export interface ProjectListItem {
+  /** Stored identity; null when the store could not be read. */
+  id: string | null;
+  address: string | null;
+  identityError?: string;
   /** Project path */
   projectRoot: string;
 
@@ -105,26 +112,38 @@ export async function cmosProjectList(
     const defaultStatus = graph.getDefaultStatus();
     const defaultId = defaultStatus.entry?.project_id;
 
-    const items: ProjectListItem[] = rows.map((row) => ({
-      projectRoot: row.store_path,
-      name: row.name ?? row.store_path,
-      isDefault: row.project_id === defaultId,
-      defaultApplied: row.project_id === defaultId && defaultStatus.applied,
-      dbExists: fs.existsSync(path.join(row.store_path, 'cmos', 'db', 'cmos.sqlite')),
-      registeredAt: new Date(row.registered_at).toISOString(),
-      lastAccessedAt: new Date(row.last_seen_at).toISOString(),
-    }));
+    const warnings: string[] = [];
+    const items: ProjectListItem[] = rows.map((row) => {
+      const stored = readStoredProjectAddress(row.store_path);
+      if (!stored.identity)
+        warnings.push(`Identity unavailable for '${row.store_path}': ${stored.error}`);
+      return {
+        id: stored.identity?.id ?? null,
+        address: stored.identity?.address ?? null,
+        ...(!stored.identity ? { identityError: stored.error } : {}),
+        projectRoot: row.store_path,
+        name: row.name ?? row.store_path,
+        isDefault: row.project_id === defaultId,
+        defaultApplied: row.project_id === defaultId && defaultStatus.applied,
+        dbExists: fs.existsSync(path.join(row.store_path, 'cmos', 'db', 'cmos.sqlite')),
+        registeredAt: new Date(row.registered_at).toISOString(),
+        lastAccessedAt: new Date(row.last_seen_at).toISOString(),
+      };
+    });
 
     const missingCount = items.filter((p) => !p.dbExists).length;
 
-    return createSuccess({
-      projects: items,
-      missingCount,
-      summary: {
-        total: items.length,
+    return createSuccess(
+      {
+        projects: items,
+        missingCount,
+        summary: {
+          total: items.length,
+        },
+        registryPath: graph.path,
       },
-      registryPath: graph.path,
-    });
+      warnings.length ? warnings : undefined
+    );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return createError({
@@ -177,6 +196,9 @@ export function formatProjectListForLLM(result: CmosToolResult<ProjectListResult
         : '';
       const missingMarker = project.dbExists ? '' : ' [MISSING]';
       lines.push(`   ${project.name}${defaultMarker}${missingMarker}`);
+      lines.push(
+        `   ${project.identityError ? 'identity unavailable' : `${project.id}: ${project.address ?? 'local-only'}`}`
+      );
       lines.push(`   └─ ${project.projectRoot}`);
       lines.push('');
     }

@@ -180,11 +180,15 @@ const EXPECTED_TOTALS = {
   // Their inline helper results add no named Error/Result root or MCP answer declaration.
   // s94-m08: thirteen modules, one CLI result root, and eleven reachable helper/pointer
   // declarations. Forty-four property rows add copy provenance, historical pointers and sprint reports.
-  files: 193,
+  // s95-m12/m13: tool-effects.ts joins the root without a named answer type. ProjectListItem
+  // gains id/address/identityError (three rows); whoami's resolved object gains requestedAddress,
+  // and SenderResolutionSource/ResolvedBy gain client-cwd inside existing rows. All additive,
+  // with the public fields and source label disclosed in the 3.5.0 CHANGELOG.
+  files: 194,
   roots: 143,
   declarations: 312,
   compositions: 312,
-  rows: 1756,
+  rows: 1759,
 } as const;
 const EXPLICIT_OPAQUE_LEDGER = [
   'CmosToolError.providedValue = ANY',

@@ -1,15 +1,16 @@
 # CMOS in your harness
 
-Coverage checked against vendor documentation on **2026-10-09**. These adapters were introduced in
-**CMOS 3.3.0**; their hook maps are unchanged in **CMOS 3.4.0**. Every
-non-Claude adapter below is **UNVERIFIED in a live harness**. Local fixture tests check
-the CLI contract and package contents; they do not prove that a vendor loads the file
-or delivers its output to a model.
+The Codex developer plugin was verified in a live bundled Codex app-server on **2026-10-11**,
+using `codex-cli 0.159.0-alpha.12.1` and an isolated candidate installation. ChatGPT Work remains
+**UNVERIFIED**. The other non-Claude adapters below remain **UNVERIFIED in a live harness**;
+their vendor documentation was checked on **2026-10-09**. Local fixtures alone check the CLI
+contract and package contents, not whether a vendor delivers hook output to a model.
 
-Install the CLI before enabling hooks:
+The Codex plugin below installs its own pinned runtime. For the other adapters,
+install the CLI before enabling hooks:
 
 ```sh
-npm install -g @aquex/cmos-mcp@3.4.0
+npm install -g @aquex/cmos-mcp@3.5.0
 cmos-mcp --version
 npm root -g
 ```
@@ -20,7 +21,7 @@ existing destination instead of replacing unrelated hooks. Make `cmos-mcp` avail
 on the harness process's PATH. Hooks call the installed CLI directly: invoking `npx`
 inside a hook would spend its short deadline finding or downloading the package.
 
-Configure the CMOS MCP server in your harness separately; an adapter adds lifecycle
+Configure the CMOS MCP server in your harness separately when using an adapter; it adds lifecycle
 hooks, not an MCP server. See [getting started](getting-started.md).
 
 ## Coverage
@@ -30,15 +31,15 @@ inject recall and a pending draft offer before a user turn. “Reply” means it
 read the next user reply through a hook. These describe the implemented adapter
 contract, subject to the live-verification limitation above.
 
-| Harness                                      | Start         | Prompt / draft offer                                        | Reply observation                | Close                          | Decision approval through MCP                                         |
-| -------------------------------------------- | ------------- | ----------------------------------------------------------- | -------------------------------- | ------------------------------ | --------------------------------------------------------------------- |
-| Claude Code plugin                           | Yes           | Yes                                                         | Yes                              | SessionEnd                     | Hook evidence when the MCP server shares the verified harness session |
-| Codex adapter                                | Yes           | Yes; Stop can capture a draft from `last_assistant_message` | Yes                              | Hook cleanup; manual MCP close | Agent-attested; MCP session linkage is unverified                     |
-| Cursor IDE / CLI adapter                     | Yes           | No                                                          | No                               | Manual                         | Agent-attested                                                        |
-| Devin CLI / Devin Local adapter              | Yes           | Yes for existing drafts; no automatic Stop draft capture    | Observed; no named-draft binding | Hook cleanup; manual MCP close | Agent-attested; MCP session linkage is unverified                     |
-| Copilot CLI / cloud adapter                  | Yes           | No                                                          | No                               | Manual                         | Agent-attested                                                        |
-| VS Code Local adapter                        | Yes           | No                                                          | No                               | Manual                         | Agent-attested                                                        |
-| Zed / Warp / goose, using the fallback below | Agent-invoked | Agent-invoked                                               | Agent judgment                   | Agent-invoked                  | Agent-attested                                                        |
+| Harness                                      | Start         | Prompt / draft offer                                     | Reply observation                | Close                          | Decision approval through MCP                                         |
+| -------------------------------------------- | ------------- | -------------------------------------------------------- | -------------------------------- | ------------------------------ | --------------------------------------------------------------------- |
+| Claude Code plugin                           | Yes           | Yes                                                      | Yes                              | SessionEnd                     | Hook evidence when the MCP server shares the verified harness session |
+| Codex developer plugin                       | Yes           | Yes; Stop captures a draft from `last_assistant_message` | Yes                              | SessionEnd                     | Hook evidence bound to the MCP conversation and enclosing project     |
+| Cursor IDE / CLI adapter                     | Yes           | No                                                       | No                               | Manual                         | Agent-attested                                                        |
+| Devin CLI / Devin Local adapter              | Yes           | Yes for existing drafts; no automatic Stop draft capture | Observed; no named-draft binding | Hook cleanup; manual MCP close | Agent-attested; MCP session linkage is unverified                     |
+| Copilot CLI / cloud adapter                  | Yes           | No                                                       | No                               | Manual                         | Agent-attested                                                        |
+| VS Code Local adapter                        | Yes           | No                                                       | No                               | Manual                         | Agent-attested                                                        |
+| Zed / Warp / goose, using the fallback below | Agent-invoked | Agent-invoked                                            | Agent judgment                   | Agent-invoked                  | Agent-attested                                                        |
 
 Agent-attested decisions mean the agent states that the operator approved the text.
 Constraint, rule and profile drafts require verified hook approval and cannot use
@@ -51,18 +52,66 @@ MCP. Stop, compaction and end hooks never request an extra model turn.
 
 ## Codex
 
-Merge [`adapters/codex/hooks.json`](../adapters/codex/hooks.json) into project
-`.codex/hooks.json`. In the Codex CLI, use `/hooks` to inspect the loaded commands
-and review/trust their definitions. Trust applies to the exact definition; changed
-definitions require review again. Do not bypass this review or write trust records
-on the operator's behalf. Project configuration must be in a trusted, active
-configuration layer. [Codex hooks](https://learn.chatgpt.com/docs/hooks)
+Install the developer plugin from the CMOS marketplace:
 
-The adapter maps `session_id`, `cwd`, `turn_id` and `last_assistant_message` into the
-shared CLI. It wires SessionStart, UserPromptSubmit, Stop, PreCompact and SessionEnd;
+```sh
+codex plugin marketplace add kneelinghorse/cmos-mcp
+codex plugin add cmos@cmos
+```
+
+It includes the MCP server, skills and five lifecycle hooks. Node 20 or newer is
+required. The server launcher checks PATH, the login shell and the usual Homebrew
+folders. The plugin installs its exact CMOS version in
+`~/.config/cmos-mcp/plugins`. Both Codex plugins and the developer hooks share that
+default installation; no package is installed in Codex's private plugin data directory.
+The developer plugin also forwards `CMOS_CONFIG_DIR` to its server, so its hooks and
+server can share `$CMOS_CONFIG_DIR/plugins`. Set it to an absolute folder; shared
+entries refuse empty or relative values because hooks and servers run in different
+folders. The current portable loader used by
+`cmos-chat` cannot forward that optional environment variable: use the default root
+for both plugins, or a manually configured server when you need a custom root.
+During a cold install the server answers immediately
+with an installing message. Start a new session after installation finishes: the
+tested Codex app-server does not refresh an existing session's tools after
+`tools/list_changed`. A new session in the same app does load them.
+
+In the Codex CLI, use `/hooks` to inspect and review the five commands from
+[`hooks/codex.json`](../plugins/cmos/hooks/codex.json). For the desktop app, use its
+bundled Codex CLI with the same Codex home if the app does not expose hook review.
+Trust applies to the exact definition. The commands contain no release version,
+and an isolated version-update probe preserved their trust. Changed definitions
+require review again. Do not bypass review or write trust records on the
+operator's behalf. [Codex hooks](https://learn.chatgpt.com/docs/hooks)
+
+If you enabled the CMOS 3.3.0 adapter, remove its five CMOS entries from
+`.codex/hooks.json` before enabling the plugin. Preserve unrelated entries. Also
+remove any other imported CMOS hook registration: the adapter and plugin can both
+run, and duplicate delivery is not prevented without verified process identity.
+The plugin supplies its own MCP server; remove a duplicate manual CMOS server or
+set `pluginServer` to `off` in the CMOS user config when deliberately retaining the
+manual server.
+
+The hooks map `session_id`, `cwd`, `turn_id` and `last_assistant_message` into the
+shared CLI. They wire SessionStart, UserPromptSubmit, Stop, PreCompact and SessionEnd;
 start and prompt use the nested `hookSpecificOutput.additionalContext` envelope.
-Codex MCP prompt support has not been established: use its skills or the fallback
-instructions below. **Live runtime: UNVERIFIED.**
+Use the plugin's skills for the guided workflows. Bootstrap, hook-trust updates and
+tool refresh were probed with `codex-cli 0.159.0-alpha.12.1`.
+
+The live two-turn acceptance separately verified a project digest, a trailing
+`Would record:` draft captured by Stop, and a literal `yes` on the next turn. The
+model recorded that draft through MCP with `approval_mode=approved` and
+`approval_words=yes`. Its author session belonged to the hash of that Codex
+conversation, and SessionEnd completed it. The run used actual plugin hooks, with
+no manually supplied hook events. This establishes the tested Codex boundary;
+VS Code extension-host and Claude Desktop linkage remain unverified.
+
+For an ordinary call without `projectRoot`, Codex supplies the client folder and
+CMOS reports `resolvedBy=client-cwd`. Approval linkage additionally requires hook
+evidence for that conversation in the same physical project store. A call naming
+a different project or lacking that evidence keeps process ownership; a decision
+may be agent-attested, while constraint, rule and profile drafts still require
+hook-bound approval. The [boundary fixtures](../tests/integration/codex-request-dispatch.test.ts)
+cover missing metadata, first drafts, other projects and SessionEnd cleanup.
 
 ## Cursor IDE and CLI
 

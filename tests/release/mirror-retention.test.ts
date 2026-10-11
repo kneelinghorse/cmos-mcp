@@ -57,6 +57,10 @@ function fixture(leak = false, shellFault = '') {
   fs.writeFileSync(path.join(source, '.claude-plugin', 'marketplace.json'), '{}\n');
   fs.mkdirSync(path.join(source, 'plugins', 'cmos'), { recursive: true });
   fs.writeFileSync(path.join(source, 'plugins', 'cmos', 'plugin.txt'), 'public plugin\n');
+  fs.mkdirSync(path.join(source, '.agents', 'plugins'), { recursive: true });
+  fs.writeFileSync(path.join(source, '.agents', 'plugins', 'marketplace.json'), '{}\n');
+  fs.mkdirSync(path.join(source, 'plugins', 'cmos-chat'), { recursive: true });
+  fs.writeFileSync(path.join(source, 'plugins', 'cmos-chat', 'plugin.json'), '{}\n');
   if (leak) fs.writeFileSync(path.join(source, 'accidental.sqlite'), 'must trip guard\n');
   git(source, 'add', '.');
   git(source, 'commit', '-qm', 'private fixture');
@@ -94,6 +98,8 @@ it('retains only the sanitized public checkout and leaves remote refs unchanged'
   expect(fs.readFileSync(path.join(tree, 'README.md'), 'utf8')).toBe('committed public content\n');
   expect(fs.existsSync(path.join(tree, '.claude-plugin', 'marketplace.json'))).toBe(true);
   expect(fs.existsSync(path.join(tree, 'plugins', 'cmos', 'plugin.txt'))).toBe(true);
+  expect(fs.existsSync(path.join(tree, '.agents', 'plugins', 'marketplace.json'))).toBe(true);
+  expect(fs.existsSync(path.join(tree, 'plugins', 'cmos-chat', 'plugin.json'))).toBe(true);
   expect(fs.existsSync(path.join(tree, 'cmos'))).toBe(false);
   expect(git(tree, 'status', '--porcelain')).toBe('');
   expect(git(tree, 'rev-parse', 'v1.2.3^{commit}')).toBe(git(tree, 'rev-parse', 'HEAD'));

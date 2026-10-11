@@ -7,6 +7,7 @@ jest.mock('../../../src/tools/cmos/checkpoint-backfill', () => ({
   triggerCheckpointBackfill: jest.fn(async () => {}),
 }));
 import { triggerCheckpointBackfill } from '../../../src/tools/cmos/checkpoint-backfill';
+import { currentCodexRequest, withCodexRequest } from '../../../src/codex-request-context';
 import {
   observeDashboardUploadProject,
   markDashboardUploadOwed,
@@ -66,6 +67,24 @@ it('drops the initiating request context and its tracked writes', async () => {
     ['write', []],
     ['write', []],
   ]);
+});
+
+it('drops Codex identity for both immediate work and the timer created inside a call', async () => {
+  const observed: unknown[] = [];
+  trigger.mockImplementation(async () => {
+    observed.push(currentCodexRequest());
+  });
+  await withCodexRequest(
+    {
+      'x-codex-turn-metadata': {},
+      sessionId: 'caller',
+      'codex/sandbox-state-meta': { sandboxCwd: 'file:///tmp/caller' },
+    },
+    () => observeDashboardUploadProject('/tmp/one')
+  );
+  await __drainDashboardUploads();
+  await jest.advanceTimersByTimeAsync(60000);
+  expect(observed).toEqual([undefined, undefined]);
 });
 
 it.each(['off', 'review'])(

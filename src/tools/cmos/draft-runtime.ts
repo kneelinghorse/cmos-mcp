@@ -183,6 +183,19 @@ export function sessionStartedAt(runtime: DraftRuntime, session: string): number
   return row?.started_at ?? null;
 }
 
+/**
+ * Only drafts-hook creates these rows; SessionEnd removes them. A first draft has no start marker,
+ * so shown/words/window also prove hook presence. Query failures propagate, never attest approval.
+ */
+export function hasHookSession(runtime: DraftRuntime, session: string): boolean {
+  const present = tables(runtime);
+  return ['session_state', 'shown', 'windows', 'excerpts'].some(
+    (table) =>
+      present.has(table) &&
+      Boolean(runtime.db.prepare(`SELECT 1 FROM ${table} WHERE session = ? LIMIT 1`).get(session))
+  );
+}
+
 export function offerCounts(runtime: DraftRuntime, session: string): Map<number, number> {
   if (!has(runtime, 'offers')) return new Map();
   return new Map(

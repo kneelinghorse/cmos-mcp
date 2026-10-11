@@ -11,6 +11,7 @@ import { seedCmosDb } from './helpers/seedCmosDb';
 import { RawStdioServer } from './helpers/raw-stdio-server';
 import { readTelemetry, targetForStore } from '../src/tools/cmos/local-telemetry';
 import { ProjectGraphRegistry } from '../src/intelligence/project-graph-registry';
+import { pathToFileURL } from 'url';
 
 const repo = path.resolve(__dirname, '..');
 const modern = (name: string) => ({
@@ -120,6 +121,31 @@ async function legacy(child: RawStdioServer): Promise<void> {
   expect(result.protocolVersion).toBe('2025-11-25');
   child.notify('notifications/initialized');
 }
+
+it('advertises Codex metadata and carries its folder through an actual MCP process', async () => {
+  const child = start(other);
+  const initialized = await child.request('initialize', {
+    protocolVersion: '2025-06-18',
+    capabilities: {},
+    clientInfo: { name: 'codex', version: 'test' },
+  });
+  expect(initialized.capabilities.experimental).toMatchObject({ 'codex/sandbox-state-meta': {} });
+  child.notify('notifications/initialized');
+  const result = await child.request('tools/call', {
+    name: 'cmos_review',
+    arguments: {},
+    _meta: {
+      'x-codex-turn-metadata': {},
+      sessionId: 'codex-protocol-session',
+      'codex/sandbox-state-meta': { sandboxCwd: pathToFileURL(project).href },
+    },
+  });
+  expect(result.structuredContent).toMatchObject({
+    success: true,
+    data: { projectRoot: project, resolvedBy: 'client-cwd' },
+  });
+  expect(child.rootsCalls).toBe(0);
+});
 
 it('opens with a modern tool call, preserves request identity, and caches tools without changing order', async () => {
   const child = start();

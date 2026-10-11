@@ -4,6 +4,7 @@
 
 import path from 'path';
 
+import { ADDRESS_REMEDY } from '../../intelligence/project-address';
 import { CmosDetector } from '../../intelligence/cmos-detector';
 import { findEnclosingStore, isSameDirectory, storeAt } from '../../intelligence/resolution-policy';
 import type { ResolutionCandidate, SenderResolutionError } from '../../intelligence/sender-context';
@@ -91,6 +92,9 @@ export async function classifySenderResolutionError(
   error: SenderResolutionError,
   mode: 'read' | 'write' = 'write'
 ): Promise<CmosToolError> {
+  if (error.code === 'PROJECT_ADDRESS_UNRESOLVABLE') {
+    return { code: error.code, message: error.message, suggestion: ADDRESS_REMEDY };
+  }
   if (error.outcome === 'no-project-here' && error.workingDir) {
     return CmosErrors.noProjectForCall({ situation: 'not-a-project', dir: error.workingDir, mode });
   }

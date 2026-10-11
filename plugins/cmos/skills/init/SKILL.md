@@ -13,17 +13,16 @@ track here: Ledger for decisions and learnings, Planner for those plus next step
 those plus sprints and missions?” Use the stated answer; do not infer Builder from the presence
 of code. For an existing CMOS project, preserve its level unless a change was requested.
 
-Run the plugin's pinned CLI:
+Call the project's initialization tool:
 
-```bash
-node "${CLAUDE_PLUGIN_ROOT}/hooks/run.mjs" init --project-root /absolute/project --level ledger
+```text
+cmos_project(action="init", projectRoot="<chosen project folder>", projectType="general")
 ```
 
-Replace `ledger` with the chosen `planner` or `builder` answer. Omit `--level` when rerunning init
-without a requested level change. Add `--no-hooks` only when preparing a project for a harness
-that has no hooks; Claude Code with this plugin already has hooks.
+Map Ledger to `general`, Planner to `managed` and Builder to `build`. Omit `projectType` when
+rerunning init without a requested level change. The plugin already provides lifecycle hooks.
 
-Read the command's receipt, including the effective level, generated or preserved files and any
+Read the tool's receipt, including the effective level, generated or preserved files and any
 warnings. On failure, report the actual error and remedy; do not claim the record exists. Existing
 project instructions stay authoritative. Initialization does not authorize changing the user's
 global MCP configuration or creating a mission unrelated to the requested project.

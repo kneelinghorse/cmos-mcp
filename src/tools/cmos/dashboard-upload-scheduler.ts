@@ -8,6 +8,7 @@ import { triggerCheckpointBackfill } from './checkpoint-backfill';
 import { readUploadProject, uploadLog } from './dashboard-upload';
 import { isReadOnlyAgentSession } from './read-only-agent-guard';
 import { captureToolCall } from './tool-call-context';
+import { withoutCodexRequest } from '../../codex-request-context';
 
 const opened = new Set<string>();
 const pending = new Set<Promise<unknown>>();
@@ -18,9 +19,12 @@ const enabled = (): boolean =>
 function launch(projectRoot: string): void {
   // setInterval inherits its creator's AsyncLocalStorage. Replace that context so later uploads
   // never write into the read/write call that happened to open this project first.
-  const job = captureToolCall('write', async () => {
-    if (enabled()) await triggerCheckpointBackfill({ projectRoot, force: false, automatic: true });
-  }).catch((error: unknown) =>
+  const job = withoutCodexRequest(() =>
+    captureToolCall('write', async () => {
+      if (enabled())
+        await triggerCheckpointBackfill({ projectRoot, force: false, automatic: true });
+    })
+  ).catch((error: unknown) =>
     uploadLog(`Automatic upload failed: ${error instanceof Error ? error.message : String(error)}`)
   );
   pending.add(job);

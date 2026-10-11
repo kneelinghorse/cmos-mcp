@@ -13,6 +13,7 @@
 
 import { z } from 'zod';
 import path from 'path';
+import { ADDRESS_REMEDY, isProjectAddress } from '../../intelligence/project-address';
 import { createError, createSuccess, CmosErrors } from './errors';
 import { findWrongTypedStringParam } from './param-type-guard';
 import type { ActionParamMap, CmosToolResult } from './types';
@@ -282,6 +283,7 @@ export interface MessageDirectoryResult {
 
 export interface MessageWhoamiResult {
   resolved: {
+    requestedAddress?: string;
     projectRoot: string | null;
     source: SenderResolutionSource | null;
     dashboardProjectId: string | null;
@@ -558,6 +560,7 @@ function resolvedFromContext(context: SenderContext | undefined): MessageWhoamiR
 
   return {
     projectRoot: context.projectRoot,
+    ...(context.requestedAddress ? { requestedAddress: context.requestedAddress } : {}),
     source: context.source,
     dashboardProjectId: context.dashboardProjectId,
     cmosAddress: context.cmosAddress,
@@ -708,7 +711,10 @@ export async function getWhoamiDiagnostics(
   let authState: AuthState | undefined;
   try {
     const authProjectRoot =
-      resolvedContext?.projectRoot ?? options.explicitProjectRoot ?? undefined;
+      resolvedContext?.projectRoot ??
+      (options.explicitProjectRoot && !isProjectAddress(options.explicitProjectRoot)
+        ? options.explicitProjectRoot
+        : undefined);
     authState = await computeAuthState(authProjectRoot ? { projectRoot: authProjectRoot } : {});
   } catch {
     authState = undefined;
@@ -779,11 +785,14 @@ export async function getWhoamiDiagnostics(
   return {
     success: false,
     data,
-    error: CmosErrors.senderUnresolvable(
-      strictError?.message ??
-        'Could not authoritatively resolve sender context for the next outbound send.',
-      strictError?.code
-    ),
+    error:
+      strictError?.code === 'PROJECT_ADDRESS_UNRESOLVABLE'
+        ? { code: strictError.code, message: strictError.message, suggestion: ADDRESS_REMEDY }
+        : CmosErrors.senderUnresolvable(
+            strictError?.message ??
+              'Could not authoritatively resolve sender context for the next outbound send.',
+            strictError?.code
+          ),
     warnings,
   };
 }

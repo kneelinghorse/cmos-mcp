@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "cmos": {
+      "command": "/bin/sh",
+      "args": ["./hooks/launch.sh", "serve", "--install-root", "shared"],
+      "cwd": ".",
+      "env_vars": ["CMOS_CONFIG_DIR"]
+    }
+  }
+}

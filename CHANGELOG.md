@@ -2,6 +2,33 @@
 
 All notable changes to cmos-mcp are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 3.5.0 — 2026-10-11
+
+- Two Codex plugins share one local CMOS runtime: `cmos` adds seven developer skills and five
+  lifecycle hooks; `cmos-chat` adds six conversation skills without hooks. A portable chat entry
+  and the developer compatibility entry coexist with the unchanged Claude Code plugin layout.
+  Cold starts answer while npm installs the exact version; a new session loads the project tools.
+  The default runtime root is shared. Developer custom roots must be absolute; the portable
+  chat loader requires the default root or a manually configured server for custom roots.
+- Codex requests select the project from the conversation's folder and can link to the session
+  established by its hooks. Explicit `projectRoot` still wins. Invalid Codex metadata refuses
+  instead of borrowing another project; background uploads do not inherit a caller's folder.
+- Project tools accept exact registered `cmos://owner/project` addresses. Discovery reads every
+  active registered store without migrations or repairs and refuses unknown, duplicate or
+  unreadable identities. Project listing includes stored ids and addresses. Folder-only actions
+  reject addresses rather than interpreting them as paths.
+  Freshly initialized stores with a valid canonical id and no identity row remain local-only
+  and do not block other registered addresses; corrupt or unreadable stores still refuse.
+  `ResolvedBy` and `SenderResolutionSource` add `client-cwd`, including the review and whoami
+  source fields. `MessageWhoamiResult.resolved` adds optional `requestedAddress`;
+  `ProjectListItem` adds nullable `id` and `address`, plus optional `identityError`.
+- Every MCP tool publishes a title and complete effect hints. Common telemetry expiration makes
+  all current tools non-read-only, destructive and non-idempotent; message and sprint tools also
+  advertise open-world effects. These honest hints do not promise fewer approval prompts.
+- The README explains the `Would record:` approval convention, draft inspection and replacement
+  of the older Codex adapter. Security documentation names the hook inputs and the narrow MCP
+  metadata read by CMOS. Codex CLI and app-server are exercised; **ChatGPT Work remains unverified**.
+
 ## 3.4.0 — 2026-10-10
 
 - Retrieval follows explicit stored decision citations and uses measured ranking defaults.

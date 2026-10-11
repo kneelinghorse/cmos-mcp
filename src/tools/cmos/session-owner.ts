@@ -6,6 +6,7 @@ import { createHash } from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import { performance } from 'perf_hooks';
+import { currentCodexRequest } from '../../codex-request-context';
 
 import type { CmosDatabaseClient } from './client';
 import { CMOS_ERROR_CODES } from './errors';
@@ -14,6 +15,7 @@ import { harnessKeyAppliesTo, harnessSessionHash, linkedHarness } from './harnes
 import type { CmosToolError } from './types';
 import { checkWrite } from './write-guard';
 import { storedTimeMs } from './stored-time';
+import { hasHookSession, openDraftRuntime } from './draft-runtime';
 
 /**
  * WHY (aquex.ai message 9b183348 item 4; s92 design, m03). A capture with no open session was
@@ -116,6 +118,23 @@ export function currentSessionOwner(dbPath?: string): SessionOwner {
   if (ownerOverride) return ownerOverride;
   if (externalOwnerId) {
     return { key: `ext:${externalOwnerId}`, kind: 'external', pid: process.pid };
+  }
+  const codex = currentCodexRequest();
+  if (codex) {
+    // Hook-less requests and requests into another store keep the process owner. Never borrow
+    // an inherited Claude link from a shell that happened to start this Codex server.
+    if (!dbPath || !codex.cwd || !codex.sessionId) return processSessionOwner();
+    const hash = harnessSessionHash(codex.sessionId);
+    if (!harnessKeyAppliesTo({ hash, projectDir: codex.cwd }, dbPath)) return processSessionOwner();
+    const runtime = openDraftRuntime(dbPath, process.env, { readonly: true });
+    try {
+      if (runtime && hasHookSession(runtime, hash)) {
+        return { key: `ext:${hash}`, kind: 'external', pid: process.pid };
+      }
+    } finally {
+      runtime?.close();
+    }
+    return processSessionOwner();
   }
   const linked = linkedHarness();
   if (linked && (dbPath === undefined || harnessKeyAppliesTo(linked, dbPath))) {

@@ -14,6 +14,22 @@ export function configDirectory(env = process.env) {
   return path.resolve(env.CMOS_CONFIG_DIR || path.join(os.homedir(), '.config', 'cmos-mcp'));
 }
 
+export function readPluginVersion(pluginRoot) {
+  for (const relative of [
+    '.claude-plugin/plugin.json',
+    '.codex-plugin/plugin.json',
+    'plugin.json',
+  ]) {
+    const file = path.join(pluginRoot, relative);
+    if (!fs.existsSync(file)) continue;
+    const manifest = readJson(file);
+    if (!/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(manifest?.version))
+      throw new Error(`Invalid plugin version in ${file}; reinstall the plugin.`);
+    return manifest.version;
+  }
+  throw new Error('Plugin manifest missing; reinstall the plugin.');
+}
+
 export function createContext({
   version,
   dataRoot,
@@ -21,10 +37,11 @@ export function createContext({
   platform = process.platform,
   arch = process.arch,
   abi = process.versions.modules,
+  shared = false,
 }) {
   if (!/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(version)) throw new Error('Invalid plugin version');
   if (!dataRoot || !path.isAbsolute(dataRoot))
-    throw new Error('CLAUDE_PLUGIN_DATA must be absolute');
+    throw new Error('The selected plugin install data root must be absolute');
   for (const value of [platform, arch, abi]) {
     if (!/^[\w-]+$/.test(value)) throw new Error('Invalid plugin runtime identity');
   }
@@ -36,8 +53,13 @@ export function createContext({
     identity,
     dataRoot: root,
     configDir: path.resolve(configDir),
+    shared,
     installRoot: path.join(root, leaf),
-    pointerPath: path.join(path.resolve(configDir), 'runtime', 'plugin-install.json'),
+    pointerPath: path.join(
+      shared ? root : path.resolve(configDir),
+      'runtime',
+      'plugin-install.json'
+    ),
   };
 }
 
@@ -176,5 +198,5 @@ export function findReady(ctx, env = process.env) {
     const ready = validateInstall(ctx, pointer.installRoot);
     if (ready) return ready;
   }
-  return validateInstall(ctx) || findPathPackage(ctx, env);
+  return validateInstall(ctx) || (ctx.shared ? undefined : findPathPackage(ctx, env));
 }
