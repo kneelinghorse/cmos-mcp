@@ -11,20 +11,20 @@
  * `parentKeyId`).
  *
  * File: `<configDir>/credentials.json` where `configDir` defaults to
- * `~/.config/cmos-mcp` and can be overridden by the `CMOS_CONFIG_DIR`
+ * `~/.config/rbook` and can be overridden by the `RBOOK_CONFIG_DIR`
  * environment variable (same override the ProjectRegistry uses for test
  * isolation).
  *
  * @module intelligence/credential-store
  */
 
-import os from 'os';
+import { assertConfigDirectoryAvailable, resolveConfigDirectory } from './legacy-compat';
 import path from 'path';
 import { promises as fs } from 'fs';
 import { pathExists, ensureDir, writeFileAtomic } from '../utils/fs';
 
-/** Same CMOS_CONFIG_DIR env var used by ProjectRegistry — single source of truth. */
-export const CMOS_CONFIG_DIR_ENV = 'CMOS_CONFIG_DIR';
+/** Same RBOOK_CONFIG_DIR env var used by ProjectRegistry — single source of truth. */
+export const RBOOK_CONFIG_DIR_ENV = 'RBOOK_CONFIG_DIR';
 
 /** Default on-disk filename. */
 export const DEFAULT_CREDENTIALS_FILENAME = 'credentials.json';
@@ -54,7 +54,7 @@ export type KeySource = 'project-scoped' | 'user-scoped' | 'legacy-env' | 'passw
 export interface UserScopedKeyRecord {
   /** Plaintext `cmk_...` key. */
   key: string;
-  /** Dashboard-assigned label (e.g. `"device: cmos-mcp/1.x (darwin; host) @ 2026-..."`). */
+  /** Dashboard-assigned label (e.g. `"device: reasonbook/1.x (darwin; host) @ 2026-..."`). */
   label: string;
   /** ISO timestamp when the dashboard issued the key. */
   issuedAt: string;
@@ -65,7 +65,7 @@ export interface UserScopedKeyRecord {
 /**
  * Grace-window slot holding a previously-active project key during a rotation
  * so in-flight requests using the old key don't 401 before `revokeAt`.
- * Sprint 57 m03 — populated by `cmos_auth(action=rotate)`; purged on read when
+ * Sprint 57 m03 — populated by `rbook_auth(action=rotate)`; purged on read when
  * `revokeAt` has passed.
  */
 export interface PendingRevokeRecord {
@@ -102,13 +102,18 @@ export interface CredentialStoreFile {
 }
 
 export interface CredentialStoreOptions {
-  /** Override config directory (default: `CMOS_CONFIG_DIR` env var or `~/.config/cmos-mcp`). */
+  /** Override config directory (default: `RBOOK_CONFIG_DIR` env var or `~/.config/rbook`). */
   configDir?: string;
   /** Override filename (default: `credentials.json`). */
   credentialsFilename?: string;
 }
 
 const CURRENT_VERSION = 1;
+
+/** The folder a caller that names none asks for: `RBOOK_CONFIG_DIR`, else `~/.config/rbook`. */
+function envConfigDir(): string {
+  return resolveConfigDirectory();
+}
 
 function emptyStore(): CredentialStoreFile {
   return {
@@ -129,6 +134,8 @@ export class CredentialStore {
   private static instance: CredentialStore | undefined;
 
   private readonly configDir: string;
+  /** True when an explicit `configDir` chose the folder; such a store is kept by calls naming none. */
+  private readonly pinned: boolean;
   private readonly credentialsPath: string;
   private cache: CredentialStoreFile | null = null;
   /**
@@ -140,16 +147,25 @@ export class CredentialStore {
   private cacheMtimeMs: number | null = null;
 
   private constructor(options: CredentialStoreOptions = {}) {
-    this.configDir =
-      options.configDir ??
-      process.env[CMOS_CONFIG_DIR_ENV] ??
-      path.join(os.homedir(), '.config', 'cmos-mcp');
+    this.pinned = options.configDir !== undefined;
+    this.configDir = options.configDir ?? envConfigDir();
     const filename = options.credentialsFilename ?? DEFAULT_CREDENTIALS_FILENAME;
     this.credentialsPath = path.join(this.configDir, filename);
   }
 
-  /** Singleton — one store per process by default. */
+  /**
+   * Singleton — one store per process by default. s95-m09: the store serves the folder its caller
+   * asks for. An explicit `configDir` wins; a call naming none keeps a store an explicit folder
+   * pinned, and otherwise follows `RBOOK_CONFIG_DIR`. A store bound to another folder is replaced,
+   * so it never reads a stale folder's credentials or recreates a folder its owner removed.
+   */
   static getInstance(options?: CredentialStoreOptions): CredentialStore {
+    const current = CredentialStore.instance;
+    const wanted = options?.configDir ?? (current?.pinned ? current.configDir : envConfigDir());
+    assertConfigDirectoryAvailable(wanted);
+    if (current && path.resolve(current.configDir) !== path.resolve(wanted)) {
+      CredentialStore.resetInstance();
+    }
     if (!CredentialStore.instance) {
       CredentialStore.instance = new CredentialStore(options);
     }
@@ -164,7 +180,9 @@ export class CredentialStore {
   /** Async factory — ensures the config directory exists before any read/write. */
   static async create(options?: CredentialStoreOptions): Promise<CredentialStore> {
     const store = CredentialStore.getInstance(options);
+    assertConfigDirectoryAvailable(store.configDir);
     await ensureDir(store.configDir);
+    assertConfigDirectoryAvailable(store.configDir);
     return store;
   }
 
@@ -200,7 +218,7 @@ export class CredentialStore {
 
   /**
    * Return all user-scoped keys. Keyed by `keyId`; values are records.
-   * Used by `fromEnvForProject()` fallback + m03's `cmos_auth(action=list)`.
+   * Used by `fromEnvForProject()` fallback + m03's `rbook_auth(action=list)`.
    */
   async listUserScopedKeys(): Promise<Record<string, UserScopedKeyRecord>> {
     const store = await this.load();
@@ -210,7 +228,7 @@ export class CredentialStore {
   /**
    * Insert or replace a project-scoped key keyed by absolute `projectRoot`.
    * The caller supplies `parentKeyId` — the user-scoped keyId that authenticated
-   * the register (or reissue) call, so m03's `cmos_auth(action=list)` can filter
+   * the register (or reissue) call, so m03's `rbook_auth(action=list)` can filter
    * "mine-only" keys by matching against the local `userScopedKeys` map.
    */
   async upsertProjectKey(projectRoot: string, record: ProjectKeyRecord): Promise<void> {
@@ -235,7 +253,7 @@ export class CredentialStore {
 
   /**
    * Return all project-scoped keys keyed by absolute `projectRoot`.
-   * Used by m03's `cmos_auth(action=list)` and by the m02 startup recovery
+   * Used by m03's `rbook_auth(action=list)` and by the m02 startup recovery
    * hook to detect "registered in dashboard but missing locally" projects.
    */
   async listProjectKeys(): Promise<Record<string, ProjectKeyRecord>> {
@@ -245,7 +263,7 @@ export class CredentialStore {
 
   /**
    * Remove a user-scoped key by `keyId`. No-op when the key isn't present.
-   * Sprint 57 m03 — used by `cmos_auth(action=revoke)` for user-scoped keys.
+   * Sprint 57 m03 — used by `rbook_auth(action=revoke)` for user-scoped keys.
    */
   async removeUserScopedKey(keyId: string): Promise<void> {
     if (!keyId) return;
@@ -258,7 +276,7 @@ export class CredentialStore {
 
   /**
    * Remove a project-scoped key by `projectRoot`. No-op when the key isn't
-   * present. Sprint 57 m03 — used by `cmos_auth(action=revoke)`.
+   * present. Sprint 57 m03 — used by `rbook_auth(action=revoke)`.
    */
   async removeProjectKey(projectRoot: string): Promise<void> {
     if (!projectRoot) return;
@@ -275,7 +293,7 @@ export class CredentialStore {
    * new record's `pendingRevoke` slot so in-flight requests survive the
    * `graceSeconds` window before dashboard revokes the old key.
    *
-   * Sprint 57 m03 — called atomically from `cmos_auth(action=rotate)` so
+   * Sprint 57 m03 — called atomically from `rbook_auth(action=rotate)` so
    * readers never observe a split (old gone, new not yet written) state.
    */
   async swapProjectKey(
@@ -309,7 +327,9 @@ export class CredentialStore {
   }
 
   private async load(): Promise<CredentialStoreFile> {
+    assertConfigDirectoryAvailable(this.configDir);
     if (this.cache && (await this.isCacheFresh())) {
+      assertConfigDirectoryAvailable(this.configDir);
       return this.cache;
     }
 
@@ -319,12 +339,14 @@ export class CredentialStore {
 
     try {
       const exists = await pathExists(this.credentialsPath);
+      assertConfigDirectoryAvailable(this.configDir);
       if (!exists) {
         this.cache = emptyStore();
         return this.cache;
       }
       const raw = await fs.readFile(this.credentialsPath, 'utf-8');
       const stat = await fs.stat(this.credentialsPath);
+      assertConfigDirectoryAvailable(this.configDir);
       const parsed = JSON.parse(raw) as Partial<CredentialStoreFile>;
       if (
         !parsed ||
@@ -346,6 +368,8 @@ export class CredentialStore {
       this.cacheMtimeMs = stat.mtimeMs;
       return this.cache;
     } catch {
+      // Migration refusals must not become a successful empty credential store.
+      assertConfigDirectoryAvailable(this.configDir);
       this.cache = emptyStore();
       this.cacheMtimeMs = null;
       return this.cache;
@@ -365,11 +389,16 @@ export class CredentialStore {
   }
 
   private async save(store: CredentialStoreFile): Promise<void> {
+    // A failed save must not leave the caller's unpersisted changes in the read cache.
+    this.clearCache();
+    assertConfigDirectoryAvailable(this.configDir);
     store.updatedAt = new Date().toISOString();
-    this.cache = store;
     await ensureDir(this.configDir);
+    assertConfigDirectoryAvailable(this.configDir);
     const content = JSON.stringify(store, null, 2);
     await writeFileAtomic(this.credentialsPath, content, { mode: 0o600 });
+    assertConfigDirectoryAvailable(this.configDir);
+    this.cache = store;
     // Capture post-write mtime so our own write doesn't fail the freshness check.
     try {
       const stat = await fs.stat(this.credentialsPath);

@@ -3,16 +3,17 @@
  *
  * The assertion deliberately lives in this test: s88-m04 requires callers to reject
  * receipts from an already-running pre-m02 process without adding another production
- * export to cmos-sprint-complete.ts.
+ * export to rbook-sprint-complete.ts.
  */
 
+import { LEGACY } from '../../src/intelligence/legacy-compat';
 import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import { requiresPrivateEvidence } from '../helpers/public-mirror';
 
 const ROOT = path.resolve(__dirname, '../..');
-const CLOSE_SOURCE = 'src/tools/cmos/cmos-sprint-complete.ts';
+const CLOSE_SOURCE = 'src/tools/rbook/rbook-sprint-complete.ts';
 const PRE_M02_PARENT = '7843dfcc9aaebe7eeb482b5dbf9566eab425e4e8';
 const PRIVATE = requiresPrivateEvidence({
   reason: 'private closeout instructions and private source-history boundary',
@@ -125,7 +126,7 @@ describe('sprint-close caller protocol', () => {
 
   it('ships the array audit and no-repeat rule in the close-out skill', () => {
     const skill = fs.readFileSync(
-      path.join(ROOT, 'plugins/cmos/skills/close-out/SKILL.md'),
+      path.join(ROOT, 'plugins/reasonbook/skills/close-out/SKILL.md'),
       'utf8'
     );
     expect(skill).toContain('data.lifecycle.archivedDecisionIds');
@@ -141,7 +142,10 @@ PRIVATE.describe('private sprint-close caller protocol evidence', () => {
 
     const oldSource = execFileSync(
       'git',
-      ['show', `${PRIVATE.revisions.preM02Parent}:${CLOSE_SOURCE}`],
+      [
+        'show',
+        `${PRIVATE.revisions.preM02Parent}:src/tools/${LEGACY.recordDirectory}/${LEGACY.recordDirectory}-sprint-complete.ts`,
+      ],
       {
         cwd: ROOT,
         encoding: 'utf8',
@@ -164,7 +168,7 @@ PRIVATE.describe('private sprint-close caller protocol evidence', () => {
     expect(closeoutProtocolIssues(section)).toStrictEqual([]);
     expect(section).toMatch(/release runbook §7/);
     expect(document).toContain('scripts/restart-session-server.sh --pid <serverHealth.pid>');
-    expect(document).toContain('node scripts/cmos-call-current.js');
+    expect(document).toContain('node scripts/rbook-call-current.js');
     expect(section).not.toMatch(/Start a new IDE\/host session or reconnect/);
   });
 });

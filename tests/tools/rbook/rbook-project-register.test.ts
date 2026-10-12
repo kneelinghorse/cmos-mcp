@@ -1,0 +1,267 @@
+/**
+ * rbook_project_register Tool Tests
+ *
+ * Tests for the MCP tool that registers Reasonbook projects.
+ *
+ * @module tests/tools/rbook/rbook-project-register
+ */
+
+import { promises as fs } from 'fs';
+import Database from 'better-sqlite3';
+import os from 'os';
+import path from 'path';
+import { RbookDetector } from '../../../src/intelligence/rbook-detector';
+import {
+  ProjectGraphRegistry,
+  readStoreIdentity,
+} from '../../../src/intelligence/project-graph-registry';
+import {
+  rbookProjectRegister,
+  rbookProjectRegisterToolDefinition,
+  formatProjectRegisterForLLM,
+  type RbookProjectRegisterParams,
+} from '../../../src/tools/rbook/rbook-project-register';
+import { RBOOK_ERROR_CODES } from '../../../src/tools/rbook/errors';
+
+async function createTempWorkspace(prefix: string): Promise<string> {
+  return fs.mkdtemp(path.join(os.tmpdir(), prefix));
+}
+
+async function ensureRbookDatabase(workspace: string): Promise<string> {
+  const dbPath = path.join(workspace, 'rbook', 'db');
+  await fs.mkdir(dbPath, { recursive: true });
+  const sqlitePath = path.join(dbPath, 'rbook.sqlite');
+  const db = new Database(sqlitePath);
+  db.exec(`CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
+  db.close();
+  return sqlitePath;
+}
+
+describe('rbook_project_register', () => {
+  let workspace: string;
+  let configDir: string;
+
+  beforeEach(async () => {
+    workspace = await createTempWorkspace('rbook-project-register-');
+    configDir = await createTempWorkspace('config-');
+    RbookDetector.resetInstance();
+    ProjectGraphRegistry.resetInstance();
+    // Initialize with test config dir
+    await ProjectGraphRegistry.create({ configDir });
+  });
+
+  afterEach(async () => {
+    await fs.rm(workspace, { recursive: true, force: true });
+    await fs.rm(configDir, { recursive: true, force: true });
+  });
+
+  describe('s92-m01: ephemeral locations and default confirmation', () => {
+    it('flags a store under an ephemeral location and warns that prune will archive it', async () => {
+      await ensureRbookDatabase(workspace); // under os.tmpdir(), an ephemeral location
+      const result = await rbookProjectRegister({ projectRoot: workspace });
+
+      expect(result.success).toBe(true);
+      expect(result.data?.ephemeral).toBe(true);
+      expect(result.warnings?.join('\n')).toContain('ephemeral location');
+      expect(formatProjectRegisterForLLM(result)).toContain('Ephemeral: Yes');
+    });
+
+    it('does not flag a store outside every ephemeral location', async () => {
+      ProjectGraphRegistry.resetInstance();
+      await ProjectGraphRegistry.create({ configDir, ephemeralRoots: [] });
+      await ensureRbookDatabase(workspace);
+      const result = await rbookProjectRegister({ projectRoot: workspace });
+
+      expect(result.data?.ephemeral).toBe(false);
+      expect(result.warnings ?? []).toEqual([]);
+    });
+
+    it('confirms the default with setAsDefault, and shows a pre-3.2.0 default as not applied', async () => {
+      await ensureRbookDatabase(workspace);
+      const graph = ProjectGraphRegistry.getInstance({ configDir });
+      const entry = graph.registerStore(workspace);
+      graph.setDefault(entry.project_id); // the pre-3.2.0 way: no confirmation
+
+      const unconfirmed = await rbookProjectRegister({ projectRoot: workspace });
+      expect(unconfirmed.data).toMatchObject({ isDefault: true, defaultApplied: false });
+      expect(formatProjectRegisterForLLM(unconfirmed)).toContain('Yes, not applied');
+
+      const confirmed = await rbookProjectRegister({ projectRoot: workspace, setAsDefault: true });
+      expect(confirmed.data).toMatchObject({ isDefault: true, defaultApplied: true });
+      expect(graph.getDefaultStatus().applied).toBe(true);
+    });
+  });
+
+  describe('basic functionality', () => {
+    it('should register a project with Reasonbook database', async () => {
+      await ensureRbookDatabase(workspace);
+      const result = await rbookProjectRegister({ projectRoot: workspace });
+
+      expect(result.success).toBe(true);
+      expect(result.data?.projectRoot).toBe(workspace);
+      expect(result.data?.wasAlreadyRegistered).toBe(false);
+      expect(result.data?.message).toContain('Registered');
+    });
+
+    it('should use provided name', async () => {
+      await ensureRbookDatabase(workspace);
+      const result = await rbookProjectRegister({
+        projectRoot: workspace,
+        name: 'My Project',
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.data?.name).toBe('My Project');
+    });
+
+    it('should set project as default when requested', async () => {
+      await ensureRbookDatabase(workspace);
+      const result = await rbookProjectRegister({
+        projectRoot: workspace,
+        setAsDefault: true,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.data?.isDefault).toBe(true);
+    });
+
+    it('should indicate when project was already registered', async () => {
+      await ensureRbookDatabase(workspace);
+
+      // First registration
+      await rbookProjectRegister({ projectRoot: workspace });
+
+      // Second registration
+      const result = await rbookProjectRegister({
+        projectRoot: workspace,
+        name: 'Updated Name',
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.data?.wasAlreadyRegistered).toBe(true);
+      expect(result.data?.message).toContain('Updated');
+    });
+  });
+
+  describe('validation', () => {
+    it('should fail for project without Reasonbook database', async () => {
+      const result = await rbookProjectRegister({ projectRoot: workspace });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('RBOOK_NOT_DETECTED');
+      expect(result.error?.suggestion).toBeDefined();
+    });
+
+    it('should fail for missing projectRoot', async () => {
+      const result = await rbookProjectRegister({
+        projectRoot: '',
+      } as RbookProjectRegisterParams);
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(RBOOK_ERROR_CODES.MISSING_PARAMETER);
+      expect(result.error?.field).toBe('projectRoot');
+    });
+
+    it('should fail for whitespace-only projectRoot', async () => {
+      const result = await rbookProjectRegister({ projectRoot: '   ' });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe(RBOOK_ERROR_CODES.MISSING_PARAMETER);
+    });
+
+    it('fails loud and creates no graph row when project identity cannot be persisted', async () => {
+      const dbDir = path.join(workspace, 'rbook', 'db');
+      await fs.mkdir(dbDir, { recursive: true });
+      const db = new Database(path.join(dbDir, 'rbook.sqlite'));
+      db.exec(`CREATE TABLE metadata (key TEXT PRIMARY KEY)`);
+      db.close();
+      RbookDetector.resetInstance();
+
+      const result = await rbookProjectRegister({ projectRoot: workspace });
+
+      expect(result.success).toBe(false);
+      expect(readStoreIdentity(workspace)).toBeNull();
+      const graph = await ProjectGraphRegistry.create();
+      expect(graph.getByStorePath(workspace)).toBeNull();
+    });
+  });
+
+  describe('stale cache bypass', () => {
+    it('should register successfully even when detector has a stale negative cache entry', async () => {
+      // Prime the cache with a negative result before the DB exists
+      const detector = RbookDetector.getInstance();
+      await detector.detect(workspace); // hasDatabase: false — now cached
+
+      // Create the DB after the negative result is cached
+      await ensureRbookDatabase(workspace);
+
+      // Register should bypass the cache (forceRefresh: true) and succeed
+      const result = await rbookProjectRegister({ projectRoot: workspace });
+      expect(result.success).toBe(true);
+      expect(result.data?.projectRoot).toBe(workspace);
+    });
+  });
+
+  describe('tool definition', () => {
+    it('should have correct tool name', () => {
+      expect(rbookProjectRegisterToolDefinition.name).toBe('rbook_project_register');
+    });
+
+    it('should require projectRoot', () => {
+      expect(rbookProjectRegisterToolDefinition.inputSchema.required).toContain('projectRoot');
+    });
+
+    it('should have optional name and setAsDefault', () => {
+      const props = rbookProjectRegisterToolDefinition.inputSchema.properties;
+      expect(props.name).toBeDefined();
+      expect(props.setAsDefault).toBeDefined();
+    });
+
+    it('should have descriptive description', () => {
+      expect(rbookProjectRegisterToolDefinition.description).toContain('Register');
+      expect(rbookProjectRegisterToolDefinition.description).toContain('Reasonbook');
+    });
+  });
+
+  describe('formatProjectRegisterForLLM', () => {
+    it('should format success result', async () => {
+      await ensureRbookDatabase(workspace);
+      const result = await rbookProjectRegister({ projectRoot: workspace });
+      const formatted = formatProjectRegisterForLLM(result);
+
+      expect(formatted).toContain('✓');
+      expect(formatted).toContain('registered');
+      expect(formatted).toContain(workspace);
+    });
+
+    it('should format updated result differently', async () => {
+      await ensureRbookDatabase(workspace);
+      await rbookProjectRegister({ projectRoot: workspace });
+      const result = await rbookProjectRegister({ projectRoot: workspace });
+      const formatted = formatProjectRegisterForLLM(result);
+
+      expect(formatted).toContain('✓');
+      expect(formatted).toContain('updated');
+    });
+
+    it('should format error result', async () => {
+      const result = await rbookProjectRegister({ projectRoot: workspace });
+      const formatted = formatProjectRegisterForLLM(result);
+
+      expect(formatted).toContain('❌');
+      expect(formatted).toContain('Failed');
+      expect(formatted).toContain('Suggestion');
+    });
+
+    it('should show default status', async () => {
+      await ensureRbookDatabase(workspace);
+      const result = await rbookProjectRegister({
+        projectRoot: workspace,
+        setAsDefault: true,
+      });
+      const formatted = formatProjectRegisterForLLM(result);
+
+      expect(formatted).toContain('Default: Yes');
+    });
+  });
+});

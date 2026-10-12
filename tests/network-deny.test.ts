@@ -32,8 +32,8 @@ describe('s92-m10 — the unit suite denies outbound network by default', () => 
   });
 
   it('blocks fetch too, which reaches the network through the same socket layer', async () => {
-    await expect(fetch('https://cmos.aquex.ai/api/health')).rejects.toThrow();
-    expect(takeBlockedAttempts().map((a) => a.host)).toEqual(['cmos.aquex.ai']);
+    await expect(fetch('https://reasonbook.ai/api/health')).rejects.toThrow();
+    expect(takeBlockedAttempts().map((a) => a.host)).toEqual(['reasonbook.ai']);
   });
 
   it('lets a loopback double through', async () => {

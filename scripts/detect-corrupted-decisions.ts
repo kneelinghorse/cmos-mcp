@@ -1,6 +1,7 @@
-// ABOUTME: Reports (does NOT fix) CMOS rows containing XML marshalling artifacts from past corruption events.
+// ABOUTME: Reports (does NOT fix) Reasonbook rows containing XML marshalling artifacts from past corruption events.
 // ABOUTME: Sprint 56 m02 — audit-only companion to content-sanitizer.ts; operator runs it to triage historical damage.
 
+import { getSetting, resolveRecordPaths } from '../src/intelligence/legacy-compat';
 import * as path from 'path';
 import Database from 'better-sqlite3';
 import { ProjectGraphRegistry } from '../src/intelligence/project-graph-registry';
@@ -66,13 +67,13 @@ async function resolveDbPath(): Promise<string> {
   const graph = await ProjectGraphRegistry.create();
   const defaultProject = graph.getDefault();
   if (defaultProject) {
-    return path.join(defaultProject.store_path, 'cmos', 'db', 'cmos.sqlite');
+    return resolveRecordPaths(defaultProject.store_path).dbPath;
   }
-  return path.resolve(process.cwd(), 'cmos', 'db', 'cmos.sqlite');
+  return resolveRecordPaths(process.cwd()).dbPath;
 }
 
 async function main(): Promise<number> {
-  const dbPath = process.env['CMOS_DB_PATH'] ?? (await resolveDbPath());
+  const dbPath = getSetting('RBOOK_DB_PATH') ?? (await resolveDbPath());
   console.log(`[detect] scanning ${dbPath}`);
 
   const db = new Database(dbPath, { readonly: true });

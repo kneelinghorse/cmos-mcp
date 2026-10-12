@@ -5,7 +5,7 @@ import { npmPackInvocation, toPackagePath } from './npm-pack-inspection';
 
 describe('npm pack inspection command', () => {
   it('normalizes platform-relative paths to npm package paths', () => {
-    expect(toPackagePath('cmos-seed\\docs\\README.md', '\\')).toBe('cmos-seed/docs/README.md');
+    expect(toPackagePath('rbook-seed\\docs\\README.md', '\\')).toBe('rbook-seed/docs/README.md');
   });
 
   it('runs npm through its JavaScript CLI when npm exposes that path', () => {

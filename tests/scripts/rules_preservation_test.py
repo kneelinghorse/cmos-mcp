@@ -20,21 +20,21 @@ SPEC.loader.exec_module(gate)
 
 class RulesPreservationTest(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix='cmos-rules-gate-')
+        self.temp = tempfile.TemporaryDirectory(prefix='rbook-rules-gate-')
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name) / 'project'
         self.root.mkdir()
         self.originals = {
             'agents.md': b'# App\r\n\r\nKEEP  exact spaces.\r\nOld procedure.\r\nKEEP order.\r\n',
-            'cmos/agents.md': b'# Legacy\nProject thesis remains.\nOld call. Keep this exact remainder.\nSee root agents.md\n',
-            'cmos/templates/agents.md': b'Template stays byte-for-byte.\n',
+            'rbook/agents.md': b'# Legacy\nProject thesis remains.\nOld call. Keep this exact remainder.\nSee root agents.md\n',
+            'rbook/templates/agents.md': b'Template stays byte-for-byte.\n',
         }
         for name, content in self.originals.items():
             target = self.root / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(content)
-        (self.root / 'cmos/db').mkdir()
-        with sqlite3.connect(self.root / 'cmos/db/cmos.sqlite') as db:
+        (self.root / 'rbook/db').mkdir()
+        with sqlite3.connect(self.root / 'rbook/db/rbook.sqlite') as db:
             db.execute('CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT)')
             db.execute("INSERT INTO metadata VALUES ('project_type','general')")
         self.spec = {
@@ -46,7 +46,7 @@ class RulesPreservationTest(unittest.TestCase):
             } for name, content in self.originals.items()],
         }
         self.spec['files'][0]['classifications'] = [
-            {'start': 4, 'end': 4, 'class': 'REPLACE', 'reason': 'Old CMOS procedure.'},
+            {'start': 4, 'end': 4, 'class': 'REPLACE', 'reason': 'Old Reasonbook procedure.'},
         ]
         self.spec['files'][1]['classifications'] = [
             {'start': 3, 'end': 3, 'class': 'MIXED', 'reason': 'Retain project-specific remainder.',
@@ -59,11 +59,45 @@ class RulesPreservationTest(unittest.TestCase):
         content = {f['path']: gate.expected_bytes(f, ledger['pointer']) for f in ledger['files']}
         return ledger, content
 
+    def test_live_tier_reads_legacy_store_when_new_folder_is_absent(self):
+        current = self.root / 'rbook/db/rbook.sqlite'
+        legacy = self.root / gate.LEGACY_RECORD_PATH
+        legacy.parent.mkdir(parents=True)
+        current.rename(legacy)
+        (self.root / 'rbook').rename(self.root / 'unused-current')
+        self.assertEqual(gate.live_tier(self.root), 'general')
+        self.assertFalse(current.exists())
+
+    def test_live_tier_refuses_missing_new_database_instead_of_reading_legacy(self):
+        current = self.root / 'rbook/db/rbook.sqlite'
+        legacy = self.root / gate.LEGACY_RECORD_PATH
+        legacy.parent.mkdir(parents=True)
+        current.rename(legacy)
+        with self.assertRaises(sqlite3.OperationalError):
+            gate.live_tier(self.root)
+
+    def test_live_tier_refuses_an_active_or_interrupted_record_migration(self):
+        for name in ('.rbook-migration.json', '.rbook-migration.lock'):
+            with self.subTest(marker=name):
+                marker = self.root / name
+                marker.touch()
+                with self.assertRaisesRegex(ValueError, 'migration'):
+                    gate.live_tier(self.root)
+                marker.unlink()
+
+    def test_live_tier_prefers_new_store_when_both_layouts_exist(self):
+        legacy = self.root / gate.LEGACY_RECORD_PATH
+        legacy.parent.mkdir(parents=True)
+        with sqlite3.connect(legacy) as db:
+            db.execute('CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT)')
+            db.execute("INSERT INTO metadata VALUES ('project_type','build')")
+        self.assertEqual(gate.live_tier(self.root), 'general')
+
     def test_keeps_legacy_project_content_and_every_original_line_is_classified(self):
         ledger, content = self.candidate()
         self.assertEqual(sum(len(f['lines']) for f in ledger['files']), 10)
-        self.assertEqual(content['cmos/agents.md'], b'# Legacy\nProject thesis remains.\nKeep this exact remainder.\nSee root agents.md\n')
-        self.assertEqual(content['cmos/templates/agents.md'], self.originals['cmos/templates/agents.md'])
+        self.assertEqual(content['rbook/agents.md'], b'# Legacy\nProject thesis remains.\nKeep this exact remainder.\nSee root agents.md\n')
+        self.assertEqual(content['rbook/templates/agents.md'], self.originals['rbook/templates/agents.md'])
         self.assertIn(b'**Ledger**', content['agents.md'])
         self.assertIn(b'KEEP  exact spaces.\r\n', content['agents.md'])
         self.assertEqual(gate.candidate_issues(ledger, content), [])
@@ -83,7 +117,7 @@ class RulesPreservationTest(unittest.TestCase):
                 content = {**original, 'agents.md': changed}
                 self.assertTrue(gate.candidate_issues(ledger, content))
         for old in [b'Project thesis remains.\n', b'Keep this exact remainder.\n']:
-            self.assertTrue(gate.candidate_issues(ledger, {**original, 'cmos/agents.md': original['cmos/agents.md'].replace(old, b'')}))
+            self.assertTrue(gate.candidate_issues(ledger, {**original, 'rbook/agents.md': original['rbook/agents.md'].replace(old, b'')}))
 
     def test_backup_hash_and_reviewed_ledger_rows_are_independent_checks(self):
         ledger, content = self.candidate()
@@ -126,7 +160,7 @@ class RulesPreservationTest(unittest.TestCase):
         for name, original in self.originals.items():
             self.assertEqual((out / 'backup' / (name + '.bytes')).read_bytes(), original)
         self.assertEqual(gate.check(out / 'ledger.json', preflight=True)['issues'], [])
-        target = out / 'candidate/cmos/agents.md.bytes'
+        target = out / 'candidate/rbook/agents.md.bytes'
         target.write_bytes(target.read_bytes().replace(b'Project thesis remains.\n', b''))
         self.assertTrue(gate.check(out / 'ledger.json')['issues'])
         target.write_bytes(gate.expected_bytes(ledger['files'][1], ledger['pointer']))

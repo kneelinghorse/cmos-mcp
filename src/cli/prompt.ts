@@ -8,11 +8,11 @@ import {
   isForeignProject,
   provenanceTag,
 } from '../intelligence/provenance-frame';
-import { recallFirstPrompt, type RecallResult } from '../tools/cmos/first-prompt-recall';
-import type { RenderedContext } from '../tools/cmos/rendered-context';
-import { previewText } from '../tools/cmos/text-preview';
+import { recallFirstPrompt, type RecallResult } from '../tools/rbook/first-prompt-recall';
+import type { RenderedContext } from '../tools/rbook/rendered-context';
+import { previewText } from '../tools/rbook/text-preview';
 import { CliStoreError, hookStore, HOOK_CAPS } from './core';
-import { captureToolCall } from '../tools/cmos/tool-call-context';
+import { captureToolCall } from '../tools/rbook/tool-call-context';
 import { deliverPromptRecall } from './recall-runtime';
 import { recallLaterPrompt, skipLaterPrompt } from './later-prompt-recall';
 import type { PreparedOffer } from './drafts-hook';
@@ -26,7 +26,7 @@ export function renderFirstPrompt(
   const items = result.items.slice(0, 5);
   if (!items.length) return { text: '', returnedIds: [], items: [] };
   const header = 'Relevant decisions:\n';
-  const pointer = '\nRead with cmos_decisions(action="show", decisionId=N).';
+  const pointer = '\nRead with rbook_decisions(action="show", decisionId=N).';
   const perItem = Math.floor(
     (cap - header.length - pointer.length - (items.length - 1)) / items.length
   );

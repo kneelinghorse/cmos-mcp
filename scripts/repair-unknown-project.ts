@@ -38,6 +38,7 @@
  *   … --project-id <id>   override the identity (default: the store's own metadata.project_id)
  */
 
+import { resolveRecordPaths } from '../src/intelligence/legacy-compat';
 import Database from 'better-sqlite3';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -81,7 +82,7 @@ function fail(message: string): never {
 }
 
 export function storeDbPath(storeRoot: string): string {
-  return path.join(storeRoot, 'cmos', 'db', 'cmos.sqlite');
+  return resolveRecordPaths(storeRoot).dbPath;
 }
 
 function hasTable(db: Database.Database, table: string): boolean {
@@ -103,7 +104,7 @@ const SENTINEL_WHERE = `project_id IN (${SENTINELS.map(() => '?').join(', ')})`;
  */
 export function buildPlan(storeRoot: string, projectIdOverride?: string): RepairPlan {
   const dbPath = storeDbPath(storeRoot);
-  if (!fs.existsSync(dbPath)) fail(`no CMOS store at ${dbPath}`);
+  if (!fs.existsSync(dbPath)) fail(`no Reasonbook store at ${dbPath}`);
 
   const db = new Database(dbPath, { readonly: true, fileMustExist: true });
   try {
@@ -207,7 +208,7 @@ export function applyPlan(plan: RepairPlan): TableCount[] {
  */
 async function probeDashboard(storeRoot: string): Promise<string> {
   try {
-    const { DashboardClient } = await import('../src/tools/cmos/dashboard-client');
+    const { DashboardClient } = await import('../src/tools/rbook/dashboard-client');
     const resolved = await DashboardClient.fromEnvForProject(storeRoot);
     if (!resolved.success || !resolved.data) {
       return `unreachable — no dashboard client resolved (${resolved.error?.message ?? 'no client'})`;

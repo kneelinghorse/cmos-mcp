@@ -33,7 +33,7 @@ test('cold SessionStart detaches one worker, then the next session uses its full
       ...process.env,
       PATH: '',
       CLAUDE_PLUGIN_DATA: data,
-      CMOS_CONFIG_DIR: path.join(root, 'config'),
+      RBOOK_CONFIG_DIR: path.join(root, 'config'),
     };
     const invoke = () =>
       spawnSync(
@@ -43,28 +43,28 @@ test('cold SessionStart detaches one worker, then the next session uses its full
           'hook',
           'session-start',
           '--hook-source',
-          'cmos-plugin',
+          'rbook-plugin',
         ],
         { env, input: '{}', encoding: 'utf8', timeout: 5000 }
       );
     const first = invoke();
     expect(first.status).toBe(0);
-    expect(first.stdout).toContain('CMOS is installing');
+    expect(first.stdout).toContain('Reasonbook is installing');
     const deadline = Date.now() + 10000;
     while (
-      (!fs.existsSync(path.join(installRoot, '.cmos-ready.json')) ||
+      (!fs.existsSync(path.join(installRoot, '.rbook-ready.json')) ||
         fs.existsSync(installRoot + '.lock')) &&
       Date.now() < deadline
     )
       await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(fs.existsSync(path.join(installRoot, '.cmos-ready.json'))).toBe(true);
+    expect(fs.existsSync(path.join(installRoot, '.rbook-ready.json'))).toBe(true);
     const second = invoke();
     expect(second.status).toBe(0);
     expect(JSON.parse(second.stdout).args).toEqual([
       'hook',
       'session-start',
       '--hook-source',
-      'cmos-plugin',
+      'rbook-plugin',
     ]);
     expect(fs.readFileSync(path.join(root, 'calls'), 'utf8').trim().split('\n')).toHaveLength(1);
   } finally {
@@ -110,7 +110,7 @@ test('shared hook and MCP starters install once even after the MCP process group
     const env = {
       ...process.env,
       PATH: '',
-      CMOS_CONFIG_DIR: configDir,
+      RBOOK_CONFIG_DIR: configDir,
       CLAUDE_PLUGIN_DATA: path.join(root, '.codex/plugins/data'),
     };
     const script = path.join(plugin, 'hooks/run.mjs');
@@ -141,7 +141,7 @@ test('shared hook and MCP starters install once even after the MCP process group
         await new Promise((resolve) => setTimeout(resolve, 20));
       expect(predicate()).toBe(true);
     };
-    await waitFor(() => output.includes('cmos-installing') && fs.existsSync(calls));
+    await waitFor(() => output.includes('rbook-installing') && fs.existsSync(calls));
     const hookArgs = [
       script,
       'hook',
@@ -158,12 +158,12 @@ test('shared hook and MCP starters install once even after the MCP process group
       timeout: 2000,
     });
     expect(hook.status).toBe(0);
-    expect(hook.stdout).toContain('CMOS is installing');
+    expect(hook.stdout).toContain('Reasonbook is installing');
     if (process.platform === 'win32') server.kill('SIGKILL');
     else process.kill(-server.pid!, 'SIGKILL');
     await waitFor(
       () =>
-        fs.existsSync(path.join(installRoot, '.cmos-ready.json')) &&
+        fs.existsSync(path.join(installRoot, '.rbook-ready.json')) &&
         !fs.existsSync(installRoot + '.lock')
     );
     const ready = spawnSync(localNode, hookArgs, {

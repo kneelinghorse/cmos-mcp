@@ -17,7 +17,7 @@ afterAll(() => {
 });
 
 function runGuard(initial: string | null, final: string | null, removeGuard = false) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-manifest-guard-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-manifest-guard-'));
   fixtures.push(dir);
   // Preserve the exact module layout so the production helper's normal __dirname resolves
   // dist beneath this temporary root. No env override can disable the parent run's guard.
@@ -55,7 +55,7 @@ function runGuard(initial: string | null, final: string | null, removeGuard = fa
     fs.mkdirSync(path.dirname(helper.DIST_MANIFEST_PATH), { recursive: true });
     if (initial !== null) fs.writeFileSync(helper.DIST_MANIFEST_PATH, initial);
     process.env[helper.DIST_MANIFEST_FINGERPRINT_ENV] = helper.distManifestFingerprint();
-    globalThis.__CMOS_JEST_CONFIG_DIR__ = ${JSON.stringify(configDir)};
+    globalThis.__RBOOK_JEST_CONFIG_DIR__ = ${JSON.stringify(configDir)};
     if (final === null) fs.rmSync(helper.DIST_MANIFEST_PATH, { force: true });
     else fs.writeFileSync(helper.DIST_MANIFEST_PATH, final);
     teardown().catch(error => { console.error(error.message); process.exitCode = 1; });

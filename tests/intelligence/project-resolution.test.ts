@@ -16,7 +16,7 @@ import os from 'os';
 import path from 'path';
 import Database from 'better-sqlite3';
 
-import { CmosDetector } from '../../src/intelligence/cmos-detector';
+import { RbookDetector } from '../../src/intelligence/rbook-detector';
 import { ProjectGraphRegistry } from '../../src/intelligence/project-graph-registry';
 import {
   resolveProjectRootEnhanced,
@@ -24,16 +24,16 @@ import {
   ProjectResolutionError,
 } from '../../src/intelligence/project-resolution';
 import { setServerProjectRoot } from '../../src/intelligence/resolution-policy';
-import { seedCmosDb } from '../helpers/seedCmosDb';
+import { seedRbookDb } from '../helpers/seedRbookDb';
 
 async function createTempWorkspace(prefix: string): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), prefix));
 }
 
-async function ensureCmosDatabase(workspace: string): Promise<string> {
-  const dbPath = path.join(workspace, 'cmos', 'db');
+async function ensureRbookDatabase(workspace: string): Promise<string> {
+  const dbPath = path.join(workspace, 'rbook', 'db');
   await fs.mkdir(dbPath, { recursive: true });
-  const sqlitePath = path.join(dbPath, 'cmos.sqlite');
+  const sqlitePath = path.join(dbPath, 'rbook.sqlite');
   await fs.writeFile(sqlitePath, 'pragma user_version = 1;\n');
   return sqlitePath;
 }
@@ -47,12 +47,12 @@ describe('resolveProjectRootEnhanced (graph-native)', () => {
   beforeEach(async () => {
     workspace = await createTempWorkspace('resolve-');
     configDir = await createTempWorkspace('config-resolve-');
-    CmosDetector.resetInstance();
+    RbookDetector.resetInstance();
     // Reset the graph singleton so its one-time backfill (which reads the legacy
     // project-registry.json) binds to THIS test's configDir, not a stale one.
     ProjectGraphRegistry.resetInstance();
     process.env = { ...originalEnv };
-    delete process.env['CMOS_PROJECT_ROOT'];
+    delete process.env['RBOOK_PROJECT_ROOT'];
     await ProjectGraphRegistry.create({ configDir });
   });
 
@@ -70,20 +70,20 @@ describe('resolveProjectRootEnhanced (graph-native)', () => {
     expect(result.projectRoot).toBe(workspace);
   });
 
-  it('Sprint 53 m02: CMOS_PROJECT_ROOT env var is NOT consulted', async () => {
+  it('Sprint 53 m02: RBOOK_PROJECT_ROOT env var is NOT consulted', async () => {
     // Env Step 2 was removed in Sprint 53 m02 — the env var is retained only
     // for .env bootstrap at src/index.ts:17, never at resolution time. With
-    // only the env set and no cwd CMOS / no graph default, resolution fails.
-    process.env['CMOS_PROJECT_ROOT'] = workspace;
-    await ensureCmosDatabase(workspace);
-    process.cwd = () => '/tmp/definitely-no-cmos-here-' + Date.now();
+    // only the env set and no cwd Reasonbook / no graph default, resolution fails.
+    process.env['RBOOK_PROJECT_ROOT'] = workspace;
+    await ensureRbookDatabase(workspace);
+    process.cwd = () => '/tmp/definitely-no-rbook-here-' + Date.now();
     await expect(resolveProjectRootEnhanced(undefined, { silent: true })).rejects.toThrow(
       ProjectResolutionError
     );
   });
 
   it('step 3: auto-discovers from cwd', async () => {
-    await ensureCmosDatabase(workspace);
+    await ensureRbookDatabase(workspace);
     process.cwd = () => workspace;
 
     const result = await resolveProjectRootEnhanced(undefined, {
@@ -95,7 +95,7 @@ describe('resolveProjectRootEnhanced (graph-native)', () => {
   });
 
   it('step 3: auto-registers a discovered store that already records identity into the GRAPH', async () => {
-    seedCmosDb(workspace, { projectId: 'resolver-id', projectName: 'resolver-project' });
+    seedRbookDb(workspace, { projectId: 'resolver-id', projectName: 'resolver-project' });
     process.cwd = () => workspace;
 
     const result = await resolveProjectRootEnhanced(undefined, {
@@ -111,7 +111,7 @@ describe('resolveProjectRootEnhanced (graph-native)', () => {
   });
 
   it('step 3: auto-discovery does not mint or register an identity-less store', async () => {
-    const dbPath = seedCmosDb(workspace, { projectId: '', projectName: 'identityless' });
+    const dbPath = seedRbookDb(workspace, { projectId: '', projectName: 'identityless' });
     process.cwd = () => workspace;
 
     const result = await resolveProjectRootEnhanced(undefined, {
@@ -137,7 +137,7 @@ describe('resolveProjectRootEnhanced (graph-native)', () => {
   it('step 4: a contextless cwd falls back to a CONFIRMED graph default', async () => {
     // s92-m01: a default only serves a contextless call (cwd of /, $HOME or the install root).
     const defaultWorkspace = await createTempWorkspace('default-');
-    await ensureCmosDatabase(defaultWorkspace);
+    await ensureRbookDatabase(defaultWorkspace);
 
     const graph = ProjectGraphRegistry.getInstance({ configDir });
     graph.registerStore(defaultWorkspace, { setAsDefault: true });
@@ -153,7 +153,7 @@ describe('resolveProjectRootEnhanced (graph-native)', () => {
 
   it('step 4: an unconfirmed (pre-3.2.0) default is never applied', async () => {
     const defaultWorkspace = await createTempWorkspace('unconfirmed-default-');
-    await ensureCmosDatabase(defaultWorkspace);
+    await ensureRbookDatabase(defaultWorkspace);
 
     const graph = ProjectGraphRegistry.getInstance({ configDir });
     const entry = graph.registerStore(defaultWorkspace);
@@ -169,14 +169,14 @@ describe('resolveProjectRootEnhanced (graph-native)', () => {
 
   it('step 4: a real working folder never falls back to a default, even a confirmed one', async () => {
     const defaultWorkspace = await createTempWorkspace('confirmed-default-');
-    await ensureCmosDatabase(defaultWorkspace);
+    await ensureRbookDatabase(defaultWorkspace);
     ProjectGraphRegistry.getInstance({ configDir }).registerStore(defaultWorkspace, {
       setAsDefault: true,
     });
 
     process.cwd = () => workspace; // a store-less working folder, not contextless
     await expect(resolveProjectRootEnhanced(undefined, { silent: true })).rejects.toThrow(
-      `No CMOS project in '${workspace}'`
+      `No Reasonbook project in '${workspace}'`
     );
 
     await fs.rm(defaultWorkspace, { recursive: true, force: true });
@@ -184,7 +184,7 @@ describe('resolveProjectRootEnhanced (graph-native)', () => {
 
   it('step 4: a contextless cwd uses the server --project-root before the registry', async () => {
     const pinned = await createTempWorkspace('pinned-');
-    await ensureCmosDatabase(pinned);
+    await ensureRbookDatabase(pinned);
     setServerProjectRoot(pinned);
     try {
       process.cwd = () => '/';
@@ -198,7 +198,7 @@ describe('resolveProjectRootEnhanced (graph-native)', () => {
   });
 
   it('step 3: a cwd inside a project resolves to the enclosing store', async () => {
-    await ensureCmosDatabase(workspace);
+    await ensureRbookDatabase(workspace);
     const nested = path.join(workspace, 'src', 'deep');
     await fs.mkdir(nested, { recursive: true });
     process.cwd = () => nested;
@@ -213,14 +213,14 @@ describe('resolveProjectRootEnhanced (graph-native)', () => {
 
   it('step 4: skips a stale graph default and throws', async () => {
     const defaultWorkspace = await createTempWorkspace('stale-default-');
-    await ensureCmosDatabase(defaultWorkspace);
+    await ensureRbookDatabase(defaultWorkspace);
 
     const graph = ProjectGraphRegistry.getInstance({ configDir });
     graph.registerStore(defaultWorkspace, { setAsDefault: true });
 
-    // Remove the store's CMOS so the default no longer detects.
-    await fs.rm(path.join(defaultWorkspace, 'cmos'), { recursive: true, force: true });
-    CmosDetector.resetInstance();
+    // Remove the store's Reasonbook so the default no longer detects.
+    await fs.rm(path.join(defaultWorkspace, 'rbook'), { recursive: true, force: true });
+    RbookDetector.resetInstance();
     process.cwd = () => '/';
 
     await expect(resolveProjectRootEnhanced(undefined, { silent: true })).rejects.toThrow(
@@ -231,7 +231,7 @@ describe('resolveProjectRootEnhanced (graph-native)', () => {
   });
 
   it('step 5: throws error when no project found', async () => {
-    // Point cwd to empty directory (no CMOS); graph has no default.
+    // Point cwd to empty directory (no Reasonbook); graph has no default.
     process.cwd = () => workspace;
 
     await expect(resolveProjectRootEnhanced(undefined, { silent: true })).rejects.toThrow(
@@ -255,23 +255,23 @@ describe('resolveProjectRootEnhanced (graph-native)', () => {
     const fromFolder = await suggestionFrom(workspace);
     expect(fromFolder).toContain('projectRoot');
     expect(fromFolder).toContain(
-      `cmos_project(action="init", projectRoot=${JSON.stringify(workspace)})`
+      `rbook_project(action="init", projectRoot=${JSON.stringify(workspace)})`
     );
-    expect(fromFolder).not.toContain('CMOS_PROJECT_ROOT');
+    expect(fromFolder).not.toContain('RBOOK_PROJECT_ROOT');
     // s92-m01: a default cannot serve a real working folder, so none is offered there…
     expect(fromFolder).not.toContain('setAsDefault');
 
     // …while a contextless cwd is offered both default routes.
     const fromRoot = await suggestionFrom('/');
     expect(fromRoot).toContain('--project-root');
-    expect(fromRoot).toContain('cmos_project(action="register"');
+    expect(fromRoot).toContain('rbook_project(action="register"');
   });
 
   it('respects priority order', async () => {
-    await ensureCmosDatabase(workspace);
+    await ensureRbookDatabase(workspace);
 
     const explicitPath = '/explicit/path';
-    process.env['CMOS_PROJECT_ROOT'] = '/env/path';
+    process.env['RBOOK_PROJECT_ROOT'] = '/env/path';
     process.cwd = () => workspace;
 
     // Explicit wins over env and cwd
@@ -289,7 +289,7 @@ describe('resolveProjectRootPath (graph-native)', () => {
   beforeEach(async () => {
     workspace = await createTempWorkspace('resolve-path-');
     configDir = await createTempWorkspace('config-resolve-path-');
-    CmosDetector.resetInstance();
+    RbookDetector.resetInstance();
     ProjectGraphRegistry.resetInstance();
     await ProjectGraphRegistry.create({ configDir });
   });
@@ -302,7 +302,7 @@ describe('resolveProjectRootPath (graph-native)', () => {
   });
 
   it('returns string path', async () => {
-    await ensureCmosDatabase(workspace);
+    await ensureRbookDatabase(workspace);
     process.cwd = () => workspace;
 
     const result = await resolveProjectRootPath();
@@ -311,7 +311,7 @@ describe('resolveProjectRootPath (graph-native)', () => {
   });
 
   it('throws on failure', async () => {
-    process.cwd = () => workspace; // No CMOS here
+    process.cwd = () => workspace; // No Reasonbook here
 
     await expect(resolveProjectRootPath()).rejects.toThrow();
   });

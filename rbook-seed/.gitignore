@@ -1,0 +1,18 @@
+# Reasonbook-local ignores (do not affect host project root)
+# Runtime artifacts inside rbook/
+db/*.sqlite
+db/*.sqlite-wal
+db/*.sqlite-shm
+db/snapshots/pre-migrate-*.sqlite
+SESSIONS.jsonl
+dist/
+telemetry/events/*.jsonl
+telemetry/events/*.json
+runtime/boomerang/
+
+# Python caches within rbook
+**/__pycache__/
+**/*.pyc
+
+# OS noise
+.DS_Store

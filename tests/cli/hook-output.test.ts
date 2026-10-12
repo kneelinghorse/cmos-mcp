@@ -10,7 +10,7 @@ import * as path from 'path';
 
 import { writeHookOutput } from '../../src/cli/hook-output';
 import { recallStatePath } from '../../src/cli/recall-runtime';
-import { seedCmosDb } from '../helpers/seedCmosDb';
+import { seedRbookDb } from '../helpers/seedRbookDb';
 
 it('retries partial byte writes and EINTR without splitting or losing UTF-8 output', () => {
   const chunks: Buffer[] = [];
@@ -47,9 +47,9 @@ it('refuses expired output and zero-progress writes', () => {
 });
 
 it('a real broken stdout pipe leaves no completed runtime receipt', async () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-hook-pipe-'));
-  const dbPath = seedCmosDb(path.join(tmp, 'project'));
-  const env = { ...process.env, CMOS_CONFIG_DIR: path.join(tmp, 'config') };
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-hook-pipe-'));
+  const dbPath = seedRbookDb(path.join(tmp, 'project'));
+  const env = { ...process.env, RBOOK_CONFIG_DIR: path.join(tmp, 'config') };
   const sourceRoot = path.resolve(__dirname, '../../src');
   // Only transpile the child's source modules in memory. No build or dist writes.
   const program = `

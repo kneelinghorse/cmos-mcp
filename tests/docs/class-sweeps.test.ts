@@ -57,7 +57,7 @@ describe('public class-sweep contract', () => {
       'public fixture'
     );
     expect(() => git('cat-file', '-e', 'a'.repeat(40))).toThrow();
-    expect(fs.existsSync(path.join(root, 'cmos'))).toBe(false);
+    expect(fs.existsSync(path.join(root, 'rbook'))).toBe(false);
     expect(check()).toMatchObject({
       ok: true,
       issues: [],

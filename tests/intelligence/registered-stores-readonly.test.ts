@@ -14,7 +14,7 @@ let configDir: string;
 let file: string;
 
 beforeEach(() => {
-  root = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-registry-read-'));
+  root = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-registry-read-'));
   configDir = path.join(root, 'config');
   file = path.join(configDir, 'project-graph.sqlite');
 });
@@ -37,17 +37,17 @@ function seed(): void {
 }
 
 it('an absent registry produces an empty snapshot without creating a directory or database', () => {
-  expect(listRegisteredStoresReadOnly({ CMOS_CONFIG_DIR: configDir })).toEqual([]);
+  expect(listRegisteredStoresReadOnly({ RBOOK_CONFIG_DIR: configDir })).toEqual([]);
   expect(fs.existsSync(configDir)).toBe(false);
 });
 
 it('explicit environment wins with the process environment unset; legacy columns do not require migration', () => {
   seed();
-  const previous = process.env.CMOS_CONFIG_DIR;
-  delete process.env.CMOS_CONFIG_DIR;
+  const previous = process.env.RBOOK_CONFIG_DIR;
+  delete process.env.RBOOK_CONFIG_DIR;
   try {
     const before = fs.readFileSync(file);
-    const rows = listRegisteredStoresReadOnly({ CMOS_CONFIG_DIR: configDir });
+    const rows = listRegisteredStoresReadOnly({ RBOOK_CONFIG_DIR: configDir });
     expect(rows.map((row) => row.project_id)).toEqual(['recent', 'older']);
     expect(rows.every((row) => row.last_synced_at === null)).toBe(true);
     expect(fs.readFileSync(file)).toEqual(before);
@@ -56,20 +56,20 @@ it('explicit environment wins with the process environment unset; legacy columns
     expect(verify.prepare('PRAGMA table_info(projects)').all()).toHaveLength(7);
     verify.close();
   } finally {
-    if (previous !== undefined) process.env.CMOS_CONFIG_DIR = previous;
+    if (previous !== undefined) process.env.RBOOK_CONFIG_DIR = previous;
   }
 });
 
 it('does not cache absence when a registry is created later', () => {
-  expect(listRegisteredStoresReadOnly({ CMOS_CONFIG_DIR: configDir })).toEqual([]);
+  expect(listRegisteredStoresReadOnly({ RBOOK_CONFIG_DIR: configDir })).toEqual([]);
   seed();
-  expect(listRegisteredStoresReadOnly({ CMOS_CONFIG_DIR: configDir })).toHaveLength(2);
+  expect(listRegisteredStoresReadOnly({ RBOOK_CONFIG_DIR: configDir })).toHaveLength(2);
 });
 
 it('a malformed existing registry surfaces failure instead of an authoritative empty fleet', () => {
   fs.mkdirSync(configDir);
   fs.writeFileSync(file, 'not a SQLite database');
-  expect(() => listRegisteredStoresReadOnly({ CMOS_CONFIG_DIR: configDir })).toThrow();
+  expect(() => listRegisteredStoresReadOnly({ RBOOK_CONFIG_DIR: configDir })).toThrow();
 });
 
 it('a registry held by another process fails promptly without waiting out the hook deadline', async () => {
@@ -97,7 +97,7 @@ it('a registry held by another process fails promptly without waiting out the ho
       child!.once('exit', (code) => reject(new Error(`Lock holder exited early: ${code}`)));
     });
     const start = Date.now();
-    expect(() => listRegisteredStoresReadOnly({ CMOS_CONFIG_DIR: configDir })).toThrow(
+    expect(() => listRegisteredStoresReadOnly({ RBOOK_CONFIG_DIR: configDir })).toThrow(
       /locked|busy/i
     );
     expect(Date.now() - start).toBeLessThan(500);

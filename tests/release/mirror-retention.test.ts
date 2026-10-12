@@ -11,10 +11,10 @@ const root = path.resolve(__dirname, '../..');
 const fixtures: string[] = [];
 const gitEnv = {
   ...process.env,
-  GIT_AUTHOR_NAME: 'CMOS Test',
-  GIT_AUTHOR_EMAIL: 'cmos-test@example.invalid',
-  GIT_COMMITTER_NAME: 'CMOS Test',
-  GIT_COMMITTER_EMAIL: 'cmos-test@example.invalid',
+  GIT_AUTHOR_NAME: 'Reasonbook Test',
+  GIT_AUTHOR_EMAIL: 'rbook-test@example.invalid',
+  GIT_COMMITTER_NAME: 'Reasonbook Test',
+  GIT_COMMITTER_EMAIL: 'rbook-test@example.invalid',
 };
 
 function git(cwd: string, ...args: string[]): string {
@@ -27,7 +27,7 @@ function git(cwd: string, ...args: string[]): string {
 }
 
 function fixture(leak = false, shellFault = '') {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-mirror-retain-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-mirror-retain-'));
   fixtures.push(dir);
   const source = path.join(dir, 'source');
   const publicSeed = path.join(dir, 'public-seed');
@@ -51,16 +51,16 @@ function fixture(leak = false, shellFault = '') {
   }
   fs.writeFileSync(path.join(source, 'package.json'), JSON.stringify({ version: '1.2.3' }));
   fs.writeFileSync(path.join(source, 'README.md'), 'committed public content\n');
-  fs.mkdirSync(path.join(source, 'cmos'));
-  fs.writeFileSync(path.join(source, 'cmos', 'private.txt'), 'PRIVATE fixture bytes\n');
+  fs.mkdirSync(path.join(source, 'rbook'));
+  fs.writeFileSync(path.join(source, 'rbook', 'private.txt'), 'PRIVATE fixture bytes\n');
   fs.mkdirSync(path.join(source, '.claude-plugin'));
   fs.writeFileSync(path.join(source, '.claude-plugin', 'marketplace.json'), '{}\n');
-  fs.mkdirSync(path.join(source, 'plugins', 'cmos'), { recursive: true });
-  fs.writeFileSync(path.join(source, 'plugins', 'cmos', 'plugin.txt'), 'public plugin\n');
+  fs.mkdirSync(path.join(source, 'plugins', 'reasonbook'), { recursive: true });
+  fs.writeFileSync(path.join(source, 'plugins', 'reasonbook', 'plugin.txt'), 'public plugin\n');
   fs.mkdirSync(path.join(source, '.agents', 'plugins'), { recursive: true });
   fs.writeFileSync(path.join(source, '.agents', 'plugins', 'marketplace.json'), '{}\n');
-  fs.mkdirSync(path.join(source, 'plugins', 'cmos-chat'), { recursive: true });
-  fs.writeFileSync(path.join(source, 'plugins', 'cmos-chat', 'plugin.json'), '{}\n');
+  fs.mkdirSync(path.join(source, 'plugins', 'reasonbook-chat'), { recursive: true });
+  fs.writeFileSync(path.join(source, 'plugins', 'reasonbook-chat', 'plugin.json'), '{}\n');
   if (leak) fs.writeFileSync(path.join(source, 'accidental.sqlite'), 'must trip guard\n');
   git(source, 'add', '.');
   git(source, 'commit', '-qm', 'private fixture');
@@ -97,10 +97,10 @@ it('retains only the sanitized public checkout and leaves remote refs unchanged'
   const tree = retained!;
   expect(fs.readFileSync(path.join(tree, 'README.md'), 'utf8')).toBe('committed public content\n');
   expect(fs.existsSync(path.join(tree, '.claude-plugin', 'marketplace.json'))).toBe(true);
-  expect(fs.existsSync(path.join(tree, 'plugins', 'cmos', 'plugin.txt'))).toBe(true);
+  expect(fs.existsSync(path.join(tree, 'plugins', 'reasonbook', 'plugin.txt'))).toBe(true);
   expect(fs.existsSync(path.join(tree, '.agents', 'plugins', 'marketplace.json'))).toBe(true);
-  expect(fs.existsSync(path.join(tree, 'plugins', 'cmos-chat', 'plugin.json'))).toBe(true);
-  expect(fs.existsSync(path.join(tree, 'cmos'))).toBe(false);
+  expect(fs.existsSync(path.join(tree, 'plugins', 'reasonbook-chat', 'plugin.json'))).toBe(true);
+  expect(fs.existsSync(path.join(tree, 'rbook'))).toBe(false);
   expect(git(tree, 'status', '--porcelain')).toBe('');
   expect(git(tree, 'rev-parse', 'v1.2.3^{commit}')).toBe(git(tree, 'rev-parse', 'HEAD'));
   expect(fs.readdirSync(f.scratch)).toEqual([path.basename(path.dirname(tree))]);

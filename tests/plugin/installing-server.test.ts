@@ -100,7 +100,7 @@ test('the installing responder switches to the real server without another clien
     expect((await take((m) => m.id === 3)).result.tools[0].name).toBe('actual_tool');
     const params = {
       name: 'actual_tool',
-      arguments: { projectRoot: 'cmos://fixture/project' },
+      arguments: { projectRoot: 'rbook://fixture/project' },
       _meta: {
         sessionId: 'fixture-session',
         'codex/sandbox-state-meta': { sandboxCwd: 'file:///fixture' },

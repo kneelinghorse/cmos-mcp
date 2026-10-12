@@ -26,7 +26,7 @@ export function installPackedArtifact(
   const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf8')) as {
     name: string;
   };
-  const packDir = mkTmp('cmos-e2e-pack-');
+  const packDir = mkTmp('rbook-e2e-pack-');
   const pack = runNpm(['pack', '--ignore-scripts', '--pack-destination', packDir], repoRoot);
   if (pack.status !== 0) throw new Error(`npm pack failed:\n${pack.stdout}\n${pack.stderr}`);
   const tarballs = fs.readdirSync(packDir).filter((file) => file.endsWith('.tgz'));
@@ -34,10 +34,10 @@ export function installPackedArtifact(
     throw new Error(`Expected one packed tarball, found ${tarballs.length}.`);
   const tarball = path.join(packDir, tarballs[0]);
 
-  const hostDir = mkTmp('cmos-e2e-host-');
+  const hostDir = mkTmp('rbook-e2e-host-');
   fs.writeFileSync(
     path.join(hostDir, 'package.json'),
-    JSON.stringify({ name: 'cmos-e2e-host', version: '1.0.0', private: true }) + '\n'
+    JSON.stringify({ name: 'rbook-e2e-host', version: '1.0.0', private: true }) + '\n'
   );
   const install = runNpm(
     ['install', tarball, '--prefer-offline', '--no-audit', '--no-fund'],
@@ -46,8 +46,8 @@ export function installPackedArtifact(
   if (install.status !== 0)
     throw new Error(`npm install failed:\n${install.stdout}\n${install.stderr}`);
   const serverPath = path.join(hostDir, 'node_modules', pkg.name, 'dist', 'index.js');
-  const binPath = path.join(hostDir, 'node_modules', '.bin', 'cmos-mcp');
-  if (!fs.existsSync(serverPath) || !fs.existsSync(binPath)) {
+  const binPath = path.join(hostDir, 'node_modules', '.bin', 'reasonbook');
+  if (![serverPath, binPath].every((file) => fs.existsSync(file))) {
     throw new Error('The installed tarball is missing its MCP server or CLI entry point.');
   }
   return { hostDir, tarball, serverPath, binPath };

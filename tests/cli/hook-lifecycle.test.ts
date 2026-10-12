@@ -16,26 +16,26 @@ import { ensureHarnessSession } from '../../src/cli/harness-ops';
 import * as harnessOps from '../../src/cli/harness-ops';
 import * as lifecycle from '../../src/cli/lifecycle-runtime';
 import { recallStatePath } from '../../src/cli/recall-runtime';
-import { setExternalSessionOwner } from '../../src/tools/cmos/session-owner';
-import { seedCmosDb } from '../helpers/seedCmosDb';
+import { setExternalSessionOwner } from '../../src/tools/rbook/session-owner';
+import { seedRbookDb } from '../helpers/seedRbookDb';
 let tmp: string;
 let root: string;
 let dbPath: string;
 let env: NodeJS.ProcessEnv;
-const savedConfig = process.env.CMOS_CONFIG_DIR;
+const savedConfig = process.env.RBOOK_CONFIG_DIR;
 const text = '  • d:7 A concrete delivered decision.';
 beforeEach(() => {
-  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-hook-lifecycle-'));
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-hook-lifecycle-'));
   root = path.join(tmp, 'project');
-  dbPath = seedCmosDb(root, { projectId: 'lifecycle' });
+  dbPath = seedRbookDb(root, { projectId: 'lifecycle' });
   env = {
     ...process.env,
-    CMOS_CONFIG_DIR: path.join(tmp, 'config'),
+    RBOOK_CONFIG_DIR: path.join(tmp, 'config'),
     CLAUDE_PROJECT_DIR: root,
     CLAUDE_PID: String(process.pid),
     CLAUDE_CODE_SESSION_ID: '',
   };
-  process.env.CMOS_CONFIG_DIR = env.CMOS_CONFIG_DIR;
+  process.env.RBOOK_CONFIG_DIR = env.RBOOK_CONFIG_DIR;
   jest.spyOn(digest, 'buildDigest').mockImplementation(async (_root, io) => {
     observeRenderedContext(io, {
       text,
@@ -48,8 +48,8 @@ beforeEach(() => {
 afterEach(() => {
   jest.restoreAllMocks();
   setExternalSessionOwner(null);
-  if (savedConfig === undefined) delete process.env.CMOS_CONFIG_DIR;
-  else process.env.CMOS_CONFIG_DIR = savedConfig;
+  if (savedConfig === undefined) delete process.env.RBOOK_CONFIG_DIR;
+  else process.env.RBOOK_CONFIG_DIR = savedConfig;
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 function key() {
@@ -62,7 +62,7 @@ async function hook(
 ) {
   let stdout = '';
   const stderr: string[] = [];
-  const code = await runCli(['hook', event, '--format', 'text', '--hook-source', 'cmos-plugin'], {
+  const code = await runCli(['hook', event, '--format', 'text', '--hook-source', 'rbook-plugin'], {
     cwd: root,
     env,
     readStdin: async () => JSON.stringify({ session_id: 'lifecycle-session', cwd: root, ...input }),
@@ -121,7 +121,7 @@ it('closes only existing owned sessions with honest observations, preserving rec
   after.close();
   expect(fs.readFileSync(recallStatePath('lifecycle-session', env))).toEqual(recallBefore);
 });
-it('never creates an empty CMOS session solely for exit observations', async () => {
+it('never creates an empty Reasonbook session solely for exit observations', async () => {
   await hook('session-start', { source: 'startup' });
   expect(await hook('session-end')).toEqual({ code: 0, stdout: '', stderr: [] });
   const db = new Database(dbPath, { readonly: true });

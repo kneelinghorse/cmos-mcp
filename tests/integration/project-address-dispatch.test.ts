@@ -9,9 +9,9 @@ import * as fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { buildMissionProtocolContext, registerToolHandlers } from '../../src/index';
-import { CmosDetector } from '../../src/intelligence/cmos-detector';
+import { RbookDetector } from '../../src/intelligence/rbook-detector';
 import { ProjectGraphRegistry } from '../../src/intelligence/project-graph-registry';
-import { reidentifyCmosTestStore, seedCmosDb } from '../helpers/seedCmosDb';
+import { reidentifyRbookTestStore, seedRbookDb } from '../helpers/seedRbookDb';
 
 type Result = {
   isError?: boolean;
@@ -23,8 +23,8 @@ type Result = {
   };
 };
 type Call = (request: { params: Record<string, unknown> }) => Promise<Result>;
-const ADDRESS = 'cmos://operator/address-target';
-const saved = { config: process.env.CMOS_CONFIG_DIR, sync: process.env.CMOS_CHECKPOINT_SYNC };
+const ADDRESS = 'rbook://operator/address-target';
+const saved = { config: process.env.RBOOK_CONFIG_DIR, sync: process.env.RBOOK_CHECKPOINT_SYNC };
 let temp: string;
 let target: string;
 let sibling: string;
@@ -36,21 +36,21 @@ beforeAll(async () => {
   context = await buildMissionProtocolContext();
 });
 beforeEach(async () => {
-  temp = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-address-dispatch-'));
-  process.env.CMOS_CONFIG_DIR = path.join(temp, 'config');
-  process.env.CMOS_CHECKPOINT_SYNC = 'off';
+  temp = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-address-dispatch-'));
+  process.env.RBOOK_CONFIG_DIR = path.join(temp, 'config');
+  process.env.RBOOK_CHECKPOINT_SYNC = 'off';
   target = path.join(temp, 'target');
   sibling = path.join(temp, 'sibling');
-  seedCmosDb(target, {
+  seedRbookDb(target, {
     projectName: 'target',
-    cmosAddress: ADDRESS,
+    rbookAddress: ADDRESS,
     dashboardProjectId: '11111111-1111-4111-8111-111111111111',
   });
-  seedCmosDb(sibling, { projectName: 'sibling', cmosAddress: 'cmos://unknown/sibling' });
-  reidentifyCmosTestStore(target, 'target');
-  reidentifyCmosTestStore(sibling, 'sibling');
+  seedRbookDb(sibling, { projectName: 'sibling', rbookAddress: 'rbook://unknown/sibling' });
+  reidentifyRbookTestStore(target, 'target');
+  reidentifyRbookTestStore(sibling, 'sibling');
   ProjectGraphRegistry.resetInstance();
-  CmosDetector.resetInstance();
+  RbookDetector.resetInstance();
   graph = await ProjectGraphRegistry.create();
   graph.register({ project_id: 'target', store_path: target, name: 'target' });
   graph.register({ project_id: 'sibling', store_path: sibling, name: 'sibling' });
@@ -67,11 +67,11 @@ beforeEach(async () => {
 afterEach(() => {
   jest.restoreAllMocks();
   ProjectGraphRegistry.resetInstance();
-  CmosDetector.resetInstance();
-  if (saved.config === undefined) delete process.env.CMOS_CONFIG_DIR;
-  else process.env.CMOS_CONFIG_DIR = saved.config;
-  if (saved.sync === undefined) delete process.env.CMOS_CHECKPOINT_SYNC;
-  else process.env.CMOS_CHECKPOINT_SYNC = saved.sync;
+  RbookDetector.resetInstance();
+  if (saved.config === undefined) delete process.env.RBOOK_CONFIG_DIR;
+  else process.env.RBOOK_CONFIG_DIR = saved.config;
+  if (saved.sync === undefined) delete process.env.RBOOK_CHECKPOINT_SYNC;
+  else process.env.RBOOK_CHECKPOINT_SYNC = saved.sync;
   fs.rmSync(temp, { recursive: true, force: true });
 });
 function invoke(name: string, args: Record<string, unknown> = {}) {
@@ -80,8 +80,19 @@ function invoke(name: string, args: Record<string, unknown> = {}) {
 function textOf(result: Result): string {
   return result.content.map((item) => item.text ?? '').join('\n');
 }
+
+it('resolves the new address scheme at dispatch before selecting a real legacy store', async () => {
+  const result = await call({
+    params: {
+      name: 'rbook_review',
+      arguments: { projectRoot: ADDRESS.replace('rbook://', 'rbook://') },
+    },
+  });
+  expect(result.structuredContent.success).toBe(true);
+  expect(result.structuredContent.data?.projectRoot).toBe(target);
+});
 async function snapshotHash(root: string, label: string): Promise<string> {
-  const db = new Database(path.join(root, 'cmos/db/cmos.sqlite'), { readonly: true });
+  const db = new Database(path.join(root, 'rbook/db/rbook.sqlite'), { readonly: true });
   const witness = path.join(temp, `${label}.sqlite`);
   try {
     await db.backup(witness);
@@ -94,7 +105,7 @@ async function snapshotHash(root: string, label: string): Promise<string> {
 // Pre-edit ten-line census: two roots reads + two caller-named checks (onboard/review),
 // whoami roots + resolver, send resolver, explicit message branch, omitted list resolver,
 // and project action raw passthrough. These cases drive each category at the MCP boundary.
-it.each(['cmos_agent_onboard', 'cmos_review'])(
+it.each(['rbook_agent_onboard', 'rbook_review'])(
   '%s treats an address as named and stamps address plus folder',
   async (name) => {
     const result = await invoke(name);
@@ -109,12 +120,12 @@ it.each(['cmos_agent_onboard', 'cmos_review'])(
   }
 );
 it('whoami resolves the address before diagnostics and includes it in the project line', async () => {
-  const result = await invoke('cmos_message', { action: 'whoami' });
+  const result = await invoke('rbook_message', { action: 'whoami' });
   expect(result.structuredContent.success).toBe(true);
   expect(result.structuredContent.data?.resolved).toMatchObject({
     projectRoot: target,
     source: 'explicit',
-    cmosAddress: ADDRESS,
+    rbookAddress: ADDRESS,
   });
   expect(textOf(result).split('\n')[0]).toContain(ADDRESS);
 });
@@ -123,16 +134,16 @@ it.each(['send', 'list', 'directory'])(
   async (action) => {
     const refused = await call({
       params: {
-        name: 'cmos_message',
-        arguments: { action, projectRoot: 'cmos://operator/missing' },
+        name: 'rbook_message',
+        arguments: { action, projectRoot: 'rbook://operator/missing' },
       },
     });
     expect(refused.structuredContent.error).toMatchObject({ code: 'PROJECT_ADDRESS_UNRESOLVABLE' });
-    expect(refused.structuredContent.error?.suggestion).toContain('cmos_project(action="list")');
+    expect(refused.structuredContent.error?.suggestion).toContain('rbook_project(action="list")');
   }
 );
 it('send resolves a known address before parameter validation and stamps the selected folder', async () => {
-  const result = await invoke('cmos_message', {
+  const result = await invoke('rbook_message', {
     action: 'send',
     targetAddress: 'invalid',
     type: 'question',
@@ -143,25 +154,25 @@ it('send resolves a known address before parameter validation and stamps the sel
   expect(textOf(result).split('\n')[0]).toContain(ADDRESS);
 });
 it('message list without an explicit root keeps cwd resolution (the omitted raw resolver site)', async () => {
-  const result = await call({ params: { name: 'cmos_message', arguments: { action: 'list' } } });
+  const result = await call({ params: { name: 'rbook_message', arguments: { action: 'list' } } });
   expect(textOf(result).split('\n')[0]).toContain(sibling);
 });
 it.each(['init', 'register', 'unregister'])(
   '%s requires a folder and never interprets an address as a relative path',
   async (action) => {
     const before = graph.list();
-    const result = await invoke('cmos_project', { action });
+    const result = await invoke('rbook_project', { action });
     expect(result.structuredContent.error).toMatchObject({ code: 'PROJECT_FOLDER_REQUIRED' });
     expect(result.structuredContent.error?.suggestion).toMatch(/projectRoot.*folder/);
     expect(graph.list()).toEqual(before);
-    expect(fs.existsSync(path.join(sibling, 'cmos:'))).toBe(false);
+    expect(fs.existsSync(path.join(sibling, 'rbook:'))).toBe(false);
   }
 );
 it('project update uses the shared resolver and project list reports raw identities', async () => {
-  const updated = await invoke('cmos_project', { action: 'update', projectType: 'general' });
+  const updated = await invoke('rbook_project', { action: 'update', projectType: 'general' });
   expect(updated.structuredContent.success).toBe(true);
   expect(updated.structuredContent.data?.projectRoot).toBe(target);
-  const listed = await invoke('cmos_project', { action: 'list' });
+  const listed = await invoke('rbook_project', { action: 'list' });
   expect(listed.structuredContent.data?.projects).toEqual(
     expect.arrayContaining([
       expect.objectContaining({ id: 'target', address: ADDRESS, projectRoot: target }),
@@ -174,7 +185,7 @@ it('an addressed write preserves every sibling snapshot and records in the selec
   const before = await snapshotHash(sibling, 'before');
   const result = await call({
     params: {
-      name: 'cmos_decisions',
+      name: 'rbook_decisions',
       arguments: {
         action: 'record',
         projectRoot: address,
@@ -186,7 +197,7 @@ it('an addressed write preserves every sibling snapshot and records in the selec
   });
   expect(result.structuredContent.success).toBe(true);
   expect(result.structuredContent.data?.projectRoot).toBe(root);
-  const written = new Database(path.join(root, 'cmos/db/cmos.sqlite'), { readonly: true });
+  const written = new Database(path.join(root, 'rbook/db/rbook.sqlite'), { readonly: true });
   try {
     expect(
       (

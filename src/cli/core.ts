@@ -2,6 +2,7 @@
 // ABOUTME: s93-m01 — what every CLI verb shares: I/O, flags, the hook output contract, project resolution,
 // ABOUTME: the ambient switch and the fail-open log. Node built-ins and better-sqlite3 only; hooks load it.
 
+import { getSetting, resolveRecordPaths } from '../intelligence/legacy-compat';
 import Database from 'better-sqlite3';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -13,9 +14,9 @@ import {
   isContextlessDirectory,
   storeAt,
 } from '../intelligence/resolution-policy';
-import { runtimeDir } from '../tools/cmos/harness-session';
-import { safeDestination } from '../tools/cmos/local-telemetry';
-import { AMBIENT_METADATA_KEY } from '../tools/cmos/rules-files';
+import { runtimeDir } from '../tools/rbook/harness-session';
+import { safeDestination } from '../tools/rbook/local-telemetry';
+import { AMBIENT_METADATA_KEY } from '../tools/rbook/rules-files';
 import { writeHookOutput } from './hook-output';
 import { nativeHookInput, type HookFormat, type HookHarness } from './hook-adapters';
 
@@ -212,8 +213,8 @@ export type CliResolution =
   | { readonly kind: 'none'; readonly workingDir: string; readonly contextless: boolean }
   | { readonly kind: 'explicit-missing'; readonly dir: string }
   /**
-   * A CMOS layout (`cmos/db/`) whose database file is gone. The MCP path refuses it by name (the
-   * client's dbNotFound), so the CLI never treats it as a folder without CMOS: no init offer, which
+   * A Reasonbook layout (`rbook/db/`) whose database file is gone. The MCP path refuses it by name (the
+   * client's dbNotFound), so the CLI never treats it as a folder without Reasonbook: no init offer, which
    * would create an empty store where the real one is missing (the m01 build critic, B3).
    */
   | { readonly kind: 'store-missing'; readonly projectRoot: string; readonly dbPath: string };
@@ -232,7 +233,7 @@ export function resolveCliProject(options: {
   readonly homeDir?: string;
 }): CliResolution {
   const homeDir = options.homeDir ?? os.homedir();
-  const withDb = (root: string): string => path.join(root, 'cmos', 'db', 'cmos.sqlite');
+  const withDb = (root: string): string => resolveRecordPaths(root).dbPath;
   if (options.projectRootArg) {
     const dir = path.resolve(options.projectRootArg);
     const store = storeAt(dir);
@@ -279,7 +280,7 @@ export function resolutionDir(resolution: CliResolution): string {
 export class CliStoreError extends Error {}
 
 /**
- * The store a hook verb works on: the resolved one, null when the folder has no CMOS layout at all,
+ * The store a hook verb works on: the resolved one, null when the folder has no Reasonbook layout at all,
  * or a {@link CliStoreError} when the caller named a folder without one or the database is gone.
  */
 export function hookStore(
@@ -291,9 +292,9 @@ export function hookStore(
     case 'none':
       return null;
     case 'explicit-missing':
-      throw new CliStoreError(`no CMOS project at ${resolution.dir}`);
+      throw new CliStoreError(`no Reasonbook project at ${resolution.dir}`);
     case 'store-missing':
-      throw new CliStoreError(`the CMOS store is missing: ${resolution.dbPath}`);
+      throw new CliStoreError(`the Reasonbook store is missing: ${resolution.dbPath}`);
   }
 }
 
@@ -312,15 +313,15 @@ export function assertStoreReadable(dbPath: string, busyTimeoutMs: number): void
     const message = error instanceof Error ? error.message : String(error);
     throw new CliStoreError(
       /busy|locked/i.test(message)
-        ? 'the CMOS store is locked by another process'
-        : `the CMOS store cannot be read: ${message}`
+        ? 'the Reasonbook store is locked by another process'
+        : `the Reasonbook store cannot be read: ${message}`
     );
   } finally {
     db?.close();
   }
 }
 
-/** How present CMOS is in a project's sessions (#1183). */
+/** How present Reasonbook is in a project's sessions (#1183). */
 export type AmbientMode = 'on' | 'off' | 'digest-off';
 export const AMBIENT_MODES: readonly AmbientMode[] = ['on', 'off', 'digest-off'];
 /** The metadata key the project's setting is stored under (rules-files.ts, which init reads too). */
@@ -332,11 +333,11 @@ function asAmbient(value: string | undefined | null): AmbientMode | null {
 }
 
 /**
- * The ambient mode for a store: CMOS_AMBIENT for this session, else the project's stored setting,
+ * The ambient mode for a store: RBOOK_AMBIENT for this session, else the project's stored setting,
  * else on. Read-only; a store that cannot be read counts as on.
  */
 export function readAmbient(dbPath: string, env: NodeJS.ProcessEnv): AmbientMode {
-  const fromEnv = asAmbient(env.CMOS_AMBIENT);
+  const fromEnv = asAmbient(getSetting('RBOOK_AMBIENT', env));
   if (fromEnv) return fromEnv;
   let db: Database.Database | null = null;
   try {

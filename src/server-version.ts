@@ -6,7 +6,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 /**
- * Resolve the server version from package.json at runtime — shared by both bins.
+ * Resolve the server version from package.json at runtime — shared by the CLI and MCP entry points.
  *
  * s77-m04: a sync fs read of the sibling package.json (dist/ sits one level below
  * package.json in both the repo and the installed tarball) with a hardcoded

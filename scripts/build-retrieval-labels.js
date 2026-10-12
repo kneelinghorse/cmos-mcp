@@ -127,7 +127,7 @@ function main(argv) {
     );
   };
   try {
-    const extractor = require('../src/tools/cmos/record-link-extractor.ts');
+    const extractor = require('../src/tools/rbook/record-link-extractor.ts');
     const labels = buildLabels(corpus, extractor);
     for (const [file, hash] of Object.entries(hashes)) {
       if (sha(fs.readFileSync(path.join(root, file))) !== hash)

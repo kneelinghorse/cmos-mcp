@@ -1,19 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
-// ABOUTME: s93-m01 — opening and closing a harness session's CMOS sessions from the CLI (`session ensure|close`
+// ABOUTME: s93-m01 — opening and closing a harness session's Reasonbook sessions from the CLI (`session ensure|close`
 // ABOUTME: and SessionEnd). The link itself lives in harness-session.ts, which session start loads alone.
 
-import { withClientAsync } from '../tools/cmos/client';
-import { createSuccess } from '../tools/cmos/errors';
-import { tableHasColumn } from '../tools/cmos/genesis-columns';
+import { withClientAsync } from '../tools/rbook/client';
+import { createSuccess } from '../tools/rbook/errors';
+import { tableHasColumn } from '../tools/rbook/genesis-columns';
 import {
   closeHarnessSession,
   type ClosedSessionReceipt,
-} from '../tools/cmos/implicit-session-lifecycle';
+} from '../tools/rbook/implicit-session-lifecycle';
 import {
   currentSessionOwner,
   resolveCallerSession,
   setExternalSessionOwner,
-} from '../tools/cmos/session-owner';
+} from '../tools/rbook/session-owner';
 
 export interface HarnessSession {
   readonly sessionId: string;
@@ -26,8 +26,8 @@ export interface HarnessSession {
 /**
  * `session ensure`: the session a harness session writes into, opened when it has none: its own
  * explicit session, a keyless explicit one, or its own implicit session (session-owner.ts). Hooks
- * never call it: a harness session's CMOS session opens at its first write, so a conversation that
- * never uses CMOS leaves no row (the m01 build critic). A store no 3.2.0+ server has migrated (no
+ * never call it: a harness session's Reasonbook session opens at its first write, so a conversation that
+ * never uses Reasonbook leaves no row (the m01 build critic). A store no 3.2.0+ server has migrated (no
  * `owner_key` column) is left alone; the server's first write migrates it. Null when nothing could
  * be resolved.
  */

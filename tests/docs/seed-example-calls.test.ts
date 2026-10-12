@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// ABOUTME: s93-m12 — every CMOS call the shipped seed shows runs on a fresh store without a refusal: the sweep
+// ABOUTME: s93-m12 — every Reasonbook call the shipped seed shows runs on a fresh store without a refusal: the sweep
 // ABOUTME: for "a shipped example call the server refuses", with placeholders filled from a published table.
 
 /**
@@ -9,8 +9,8 @@
  * README's session start left out title. An agent that copies a shipped example should never meet
  * a refusal.
  *
- * THE PREDICATE (the class, as a search): every `cmos_<name>(…)` call inside a fenced code block
- * (``` or ~~~) or an inline code span in a Markdown file under cmos-seed/. The census below pins the count: 142
+ * THE PREDICATE (the class, as a search): every `rbook_<name>(…)` call inside a fenced code block
+ * (``` or ~~~) or an inline code span in a Markdown file under rbook-seed/. The census below pins the count: 142
  * after s93-m12 (89 fenced, 53 inline), 137 on 2026-10-08 before it rewrote the seed. A `//`
  * comment inside a call is skipped to its line end, so an apostrophe there cannot hide the call.
  *
@@ -50,18 +50,18 @@ import * as os from 'os';
 import * as path from 'path';
 
 import { buildMissionProtocolContext, executeMissionProtocolTool } from '../../src/index';
-import { CmosDetector } from '../../src/intelligence/cmos-detector';
+import { RbookDetector } from '../../src/intelligence/rbook-detector';
 import { CredentialStore } from '../../src/intelligence/credential-store';
 import { ProjectGraphRegistry } from '../../src/intelligence/project-graph-registry';
 import {
   buildFirstSessionPrompt,
   buildTierSelectionPrompt,
-} from '../../src/tools/cmos/cmos-agent-onboard';
-import { cmosDbSnapshot } from '../../src/tools/cmos/cmos-db-snapshot';
-import { cmosProjectInit } from '../../src/tools/cmos/cmos-project-init';
+} from '../../src/tools/rbook/rbook-agent-onboard';
+import { rbookDbSnapshot } from '../../src/tools/rbook/rbook-db-snapshot';
+import { rbookProjectInit } from '../../src/tools/rbook/rbook-project-init';
 
 const REPO_ROOT = path.resolve(__dirname, '../..');
-const SEED = path.join(REPO_ROOT, 'cmos-seed');
+const SEED = path.join(REPO_ROOT, 'rbook-seed');
 
 // ─── The predicate ─────────────────────────────────────────────────────────────────────────────
 
@@ -85,7 +85,7 @@ function markdownFiles(dir: string): string[] {
     .sort();
 }
 
-/** The balanced call starting at `start` (text there begins `cmos_name(`), or null if unclosed. */
+/** The balanced call starting at `start` (text there begins `rbook_name(`), or null if unclosed. */
 function balancedCall(text: string, start: number): string | null {
   let depth = 0;
   let quote: string | null = null;
@@ -116,7 +116,7 @@ function balancedCall(text: string, start: number): string | null {
 
 function callsIn(text: string): string[] {
   const found: string[] = [];
-  const pattern = /\bcmos_[a-z_]+\(/g;
+  const pattern = /\brbook_[a-z_]+\(/g;
   for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
     const call = balancedCall(text, match.index);
     if (!call) continue;
@@ -238,7 +238,7 @@ export interface ParsedCall {
 }
 
 export function parseCall(source: string): ParsedCall {
-  const tool = /^cmos_[a-z_]+/.exec(source)![0];
+  const tool = /^rbook_[a-z_]+/.exec(source)![0];
   const tokens = tokenize(source.slice(tool.length));
   let at = 0;
   const peek = (): Token | undefined => tokens[at];
@@ -353,11 +353,11 @@ interface Fixture {
  * the document teaches the step that produces it (the m12 build critic, B2).
  */
 const FILL: Readonly<Record<string, (fixture: Fixture) => unknown>> = {
-  'cmos_mission.update.fields': () => ({ objective: 'An example objective.' }),
-  'cmos_db.restore.snapshotId': (fixture) => fixture.snapshotId,
-  'cmos_message.respond.messageId': (fixture) => fixture.messageId,
-  'cmos_project.init.projectRoot': (fixture) => fixture.emptyFolder(),
-  'cmos_project.update.projectType': () => 'general',
+  'rbook_mission.update.fields': () => ({ objective: 'An example objective.' }),
+  'rbook_db.restore.snapshotId': (fixture) => fixture.snapshotId,
+  'rbook_message.respond.messageId': (fixture) => fixture.messageId,
+  'rbook_project.init.projectRoot': (fixture) => fixture.emptyFolder(),
+  'rbook_project.update.projectType': () => 'general',
   missionId: () => 's01-m01',
   sprintId: () => 'sprint-01',
   type: () => 'planning',
@@ -391,39 +391,39 @@ const PRECONDITIONS: Readonly<
   >
 > = {
   // Completing "your" session presupposes you have one: a capture opens it.
-  'cmos_session.complete': {
-    taughtBy: ['cmos_session.start', 'cmos_session.capture'],
+  'rbook_session.complete': {
+    taughtBy: ['rbook_session.start', 'rbook_session.capture'],
     setUp: async (args, root) => {
       if (args.sessionId === undefined) {
         await setUp(
-          'cmos_session',
+          'rbook_session',
           { action: 'capture', category: 'context', content: 'Earlier work.' },
           root
         );
       }
     },
   },
-  'cmos_mission_transition.complete': {
-    taughtBy: ['cmos_mission_transition.start'],
+  'rbook_mission_transition.complete': {
+    taughtBy: ['rbook_mission_transition.start'],
     setUp: (args, root) => missionIs(args.missionId, 'In Progress', root),
   },
-  'cmos_mission_transition.block': {
-    taughtBy: ['cmos_mission_transition.start'],
+  'rbook_mission_transition.block': {
+    taughtBy: ['rbook_mission_transition.start'],
     setUp: (args, root) => missionIs(args.missionId, 'In Progress', root),
   },
-  'cmos_mission_transition.unblock': {
-    taughtBy: ['cmos_mission_transition.block'],
+  'rbook_mission_transition.unblock': {
+    taughtBy: ['rbook_mission_transition.block'],
     setUp: (args, root) => missionIs(args.missionId, 'Blocked', root),
   },
   // Closing a sprint presupposes its work is done, which the document shows as completions.
-  'cmos_sprint.complete': {
-    taughtBy: ['cmos_mission_transition.complete'],
+  'rbook_sprint.complete': {
+    taughtBy: ['rbook_mission_transition.complete'],
     setUp: (args, root) => sprintWorkDone(args.sprintId, root),
   },
 };
 
 function readStore<T>(root: string, read: (db: Database.Database) => T): T {
-  const db = new Database(path.join(root, 'cmos', 'db', 'cmos.sqlite'), { readonly: true });
+  const db = new Database(path.join(root, 'rbook', 'db', 'rbook.sqlite'), { readonly: true });
   try {
     return read(db);
   } finally {
@@ -450,11 +450,11 @@ async function missionIs(
 ): Promise<void> {
   if (typeof missionId !== 'string') return;
   if (missionStatus(missionId, root) === 'Queued') {
-    await setUp('cmos_mission_transition', { action: 'start', missionId }, root);
+    await setUp('rbook_mission_transition', { action: 'start', missionId }, root);
   }
   if (status === 'Blocked' && missionStatus(missionId, root) === 'In Progress') {
     await setUp(
-      'cmos_mission_transition',
+      'rbook_mission_transition',
       { action: 'block', missionId, reason: 'Waiting on review', blockers: ['review'] },
       root
     );
@@ -475,11 +475,11 @@ async function sprintWorkDone(sprintId: unknown, root: string): Promise<void> {
   );
   for (const { id } of open) {
     if (missionStatus(id, root) === 'Blocked') {
-      await setUp('cmos_mission_transition', { action: 'unblock', missionId: id }, root);
+      await setUp('rbook_mission_transition', { action: 'unblock', missionId: id }, root);
     }
     await missionIs(id, 'In Progress', root);
     await setUp(
-      'cmos_mission_transition',
+      'rbook_mission_transition',
       { action: 'complete', missionId: id, notes: 'Done.' },
       root
     );
@@ -494,12 +494,12 @@ async function setUp(tool: string, args: Record<string, unknown>, root: string):
 
 /** What an elided `...` supplies: the call's required parameters it leaves out. */
 const ELIDED_FILL: Readonly<Record<string, (fixture: Fixture) => Record<string, unknown>>> = {
-  'cmos_project.init': (fixture) => ({ projectRoot: fixture.emptyFolder() }),
-  'cmos_mission.add': () => ({ missionId: 's01-m09', sprintId: 'sprint-01', name: 'An example' }),
-  'cmos_mission.depends': () => ({ fromId: 's01-m02', toId: 's01-m01', type: 'Requires' }),
-  'cmos_sprint.add': () => ({ sprintId: 'sprint-02', title: 'An example sprint' }),
-  'cmos_sprint.update': () => ({ sprintId: 'sprint-01', fields: { focus: 'An example focus' } }),
-  'cmos_context.snapshot': () => ({ source: 'example' }),
+  'rbook_project.init': (fixture) => ({ projectRoot: fixture.emptyFolder() }),
+  'rbook_mission.add': () => ({ missionId: 's01-m09', sprintId: 'sprint-01', name: 'An example' }),
+  'rbook_mission.depends': () => ({ fromId: 's01-m02', toId: 's01-m01', type: 'Requires' }),
+  'rbook_sprint.add': () => ({ sprintId: 'sprint-02', title: 'An example sprint' }),
+  'rbook_sprint.update': () => ({ sprintId: 'sprint-01', fields: { focus: 'An example focus' } }),
+  'rbook_context.snapshot': () => ({ source: 'example' }),
 };
 
 function fill(tool: string, action: string | undefined, param: string, fixture: Fixture): unknown {
@@ -546,7 +546,7 @@ export function documentScope(calls: readonly SeedCall[]): DocumentScope {
     const parsed = parseCall(call.source);
     const action = actionOf(parsed);
     taught.add(`${parsed.tool}.${action}`);
-    if (parsed.tool === 'cmos_project' && action === 'init') {
+    if (parsed.tool === 'rbook_project' && action === 'init') {
       const sprint = parsed.args.get('initialSprint') as Record<string, unknown> | undefined;
       const sprintId = literalString(sprint?.id);
       if (sprintId) creates.set(`sprint:${sprintId}`, null);
@@ -555,11 +555,11 @@ export function documentScope(calls: readonly SeedCall[]): DocumentScope {
         if (missionId) creates.set(`mission:${missionId}`, null);
       }
     }
-    if (parsed.tool === 'cmos_sprint' && action === 'add') {
+    if (parsed.tool === 'rbook_sprint' && action === 'add') {
       const sprintId = literalString(parsed.args.get('sprintId'));
       if (sprintId) creates.set(`sprint:${sprintId}`, parsed);
     }
-    if (parsed.tool === 'cmos_mission' && action === 'add') {
+    if (parsed.tool === 'rbook_mission' && action === 'add') {
       const missionId = literalString(parsed.args.get('missionId'));
       if (missionId) creates.set(`mission:${missionId}`, parsed);
     }
@@ -619,7 +619,7 @@ let stubUrl = '';
 let fixture: Fixture;
 let context: Awaited<ReturnType<typeof buildMissionProtocolContext>>;
 const savedEnv: Record<string, string | undefined> = {};
-const ENV_KEYS = ['CMOS_CONFIG_DIR', 'CMOS_DASHBOARD_URL', 'CMOS_DASHBOARD_API_KEY'] as const;
+const ENV_KEYS = ['RBOOK_CONFIG_DIR', 'RBOOK_DASHBOARD_URL', 'RBOOK_DASHBOARD_API_KEY'] as const;
 
 /** A loopback dashboard that accepts what the seed's messaging examples send. */
 function startStub(): Promise<void> {
@@ -636,7 +636,7 @@ function startStub(): Promise<void> {
         createdAt: new Date().toISOString(),
       };
       if (req.method === 'GET' && req.url?.startsWith('/api/messages/resolve')) {
-        res.end(JSON.stringify({ address: 'cmos://user/project', projectId: 'project' }));
+        res.end(JSON.stringify({ address: 'rbook://user/project', projectId: 'project' }));
       } else if (req.method === 'GET' && req.url?.startsWith('/api/messages')) {
         res.end(JSON.stringify({ messages: [message], total: 1 }));
       } else if (req.method === 'POST' && req.url === '/api/messages') {
@@ -673,7 +673,7 @@ async function dispatch(
  * address. Messaging sends under that identity.
  */
 function connectToDashboard(root: string): void {
-  const db = new Database(path.join(root, 'cmos', 'db', 'cmos.sqlite'));
+  const db = new Database(path.join(root, 'rbook', 'db', 'rbook.sqlite'));
   try {
     const setMeta = db.prepare('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)');
     setMeta.run('dashboard_project_id', '7b0e9f3c-2d4a-4c1e-9a6b-5f8d2e1c0a47');
@@ -683,7 +683,7 @@ function connectToDashboard(root: string): void {
       | undefined;
     if (!row) throw new Error('the fixture has no project_identity row to connect');
     const identity = JSON.parse(row.content) as Record<string, unknown>;
-    identity.cmos_address = 'cmos://example-owner/seed-example-fixture';
+    identity.rbook_address = 'rbook://example-owner/seed-example-fixture';
     db.prepare(`UPDATE contexts SET content = ? WHERE id = 'project_identity'`).run(
       JSON.stringify(identity)
     );
@@ -694,23 +694,23 @@ function connectToDashboard(root: string): void {
 
 /** Use a fresh config directory, so no call meets another's registry rows. */
 function freshConfig(): void {
-  process.env.CMOS_CONFIG_DIR = mkTmp('cmos-seed-calls-config-');
+  process.env.RBOOK_CONFIG_DIR = mkTmp('rbook-seed-calls-config-');
   ProjectGraphRegistry.resetInstance();
-  CmosDetector.resetInstance();
+  RbookDetector.resetInstance();
   CredentialStore.resetInstance();
 }
 
 beforeAll(async () => {
   for (const key of ENV_KEYS) savedEnv[key] = process.env[key];
   await startStub();
-  process.env.CMOS_DASHBOARD_URL = stubUrl;
-  process.env.CMOS_DASHBOARD_API_KEY = 'cmk_seed_example_stub';
+  process.env.RBOOK_DASHBOARD_URL = stubUrl;
+  process.env.RBOOK_DASHBOARD_API_KEY = 'cmk_seed_example_stub';
   context = await buildMissionProtocolContext();
   freshConfig();
 
-  const root = path.join(mkTmp('cmos-seed-calls-fixture-'), 'project');
+  const root = path.join(mkTmp('rbook-seed-calls-fixture-'), 'project');
   fs.mkdirSync(root);
-  const init = await cmosProjectInit({
+  const init = await rbookProjectInit({
     projectRoot: root,
     projectName: 'Seed example fixture',
     projectType: 'build',
@@ -720,11 +720,11 @@ beforeAll(async () => {
   // creates, and s01-m02 is the second mission a dependency example needs.
   const setup: Array<[string, Record<string, unknown>]> = [
     [
-      'cmos_sprint',
+      'rbook_sprint',
       { action: 'add', sprintId: 'sprint-01', title: 'Example sprint', status: 'Active' },
     ],
     ...['s01-m01', 's01-m02'].map((missionId): [string, Record<string, unknown>] => [
-      'cmos_mission',
+      'rbook_mission',
       { action: 'add', missionId, sprintId: 'sprint-01', name: `Mission ${missionId}` },
     ]),
   ];
@@ -733,21 +733,21 @@ beforeAll(async () => {
     if (ran.isError) throw new Error(`fixture ${tool}.${String(args.action)} failed: ${ran.text}`);
   }
   connectToDashboard(root);
-  const snapshot = await cmosDbSnapshot({ projectRoot: root });
+  const snapshot = await rbookDbSnapshot({ projectRoot: root });
   if (!snapshot.success) throw new Error(`fixture snapshot failed: ${snapshot.error?.message}`);
   fixture = {
     root,
     snapshotId: snapshot.data!.createdSnapshot!.id,
     messageId: STUB_MESSAGE_ID,
-    emptyFolder: () => mkTmp('cmos-seed-calls-init-'),
+    emptyFolder: () => mkTmp('rbook-seed-calls-init-'),
   };
 }, 60_000);
 
 // The suite's setup clears dashboard credentials before every test (tests/jest-setup-after-env.ts),
 // so the stub's key is set again after it, for each call.
 beforeEach(() => {
-  process.env.CMOS_DASHBOARD_URL = stubUrl;
-  process.env.CMOS_DASHBOARD_API_KEY = 'cmk_seed_example_stub';
+  process.env.RBOOK_DASHBOARD_URL = stubUrl;
+  process.env.RBOOK_DASHBOARD_API_KEY = 'cmk_seed_example_stub';
 });
 
 afterAll(async () => {
@@ -764,15 +764,16 @@ describe('s93-m12 — the seed shows no call the server refuses', () => {
   it('finds the calls the predicate names, and says how many', () => {
     const fenced = SEED_CALLS.filter((call) => call.kind === 'fenced').length;
     // The count, published beside its rule (the docblock). 137 on 2026-10-08 (88 fenced, 49
-    // inline) before s93-m12 rewrote the seed. Since then: AGENTS.md lost its three CMOS calls and
+    // inline) before s93-m12 rewrote the seed. Since then: AGENTS.md lost its three Reasonbook calls and
     // the hook-less block has three; the general guide traded its session start and close for one
     // capture and gained the review and the step-up call (+1); the managed guide's cycle and its
     // start step added two; the agents-file guide gained the step-up call and the init call that
-    // takes the level. A change in the seed's calls changes this number on purpose.
+    // takes the level. s95-m06: the Ledger and Planner READMEs each name their step-up call (+2
+    // inline). A change in the seed's calls changes this number on purpose.
     expect({ total: SEED_CALLS.length, fenced, inline: SEED_CALLS.length - fenced }).toEqual({
-      total: 142,
+      total: 144,
       fenced: 89,
-      inline: 53,
+      inline: 55,
     });
   });
 
@@ -792,12 +793,15 @@ describe('s93-m12 — the seed shows no call the server refuses', () => {
         .filter((call) => call.file === file)
         .map((c) => [c, parseCall(c.source)] as const);
       const teachesWork = calls.some(([, parsed]) =>
-        ['cmos_sprint', 'cmos_mission', 'cmos_mission_transition'].includes(parsed.tool)
+        ['rbook_sprint', 'rbook_mission', 'rbook_mission_transition'].includes(parsed.tool)
       );
       if (!teachesWork) continue;
       teachingFiles.push(file);
       for (const [call, parsed] of calls) {
-        if (parsed.tool !== 'cmos_project' || literalString(parsed.args.get('action')) !== 'init') {
+        if (
+          parsed.tool !== 'rbook_project' ||
+          literalString(parsed.args.get('action')) !== 'init'
+        ) {
           continue;
         }
         checked += 1;
@@ -807,8 +811,10 @@ describe('s93-m12 — the seed shows no call the server refuses', () => {
         }
       }
     }
-    // The CLI's init too (the second confirming critic): a `cmos-mcp init` line in a fence or an
-    // inline code span of such a document names a level that keeps sprints or missions.
+    // The CLI's init too (the second confirming critic): an init line in a fence or an inline code
+    // span of such a document names a level that keeps sprints or missions. s99-m02: the command is
+    // reasonbook, cmos-mcp (its former name) or @aquex/reasonbook@<version> run through npx, npm exec
+    // or npm x with any flags.
     for (const file of teachingFiles) {
       const lines = fs.readFileSync(path.join(REPO_ROOT, file), 'utf8').split('\n');
       let fence: string | null = null;
@@ -820,10 +826,14 @@ describe('s93-m12 — the seed shows no call the server refuses', () => {
         }
         const fenced = fence !== null;
         const commands = fenced ? [line] : [...line.matchAll(/`([^`]+)`/g)].map((span) => span[1]);
-        for (const command of commands.filter((text) => /\bcmos-mcp init\b/.test(text))) {
+        for (const command of commands.filter((text) =>
+          /(?:\bcmos-mcp|\breasonbook|\b(?:npx|npm\s+(?:exec|x))(?:\s+-{1,2}[\w-]+)*\s+@aquex\/reasonbook@\S+(?:\s+--)?) init\b/.test(
+            text
+          )
+        )) {
           checked += 1;
           if (!/--level(?:\s+|=)\S*\b(builder|planner)\b/.test(command)) {
-            offenders.push(`${file}:${index + 1} runs cmos-mcp init with no level that keeps them`);
+            offenders.push(`${file}:${index + 1} runs init with no level that keeps them`);
           }
         }
       });
@@ -838,7 +848,7 @@ describe('s93-m12 — the seed shows no call the server refuses', () => {
       const parsed = parseCall(call.source);
       const args = callArguments(parsed, fixture);
       const scope = SCOPES.get(call.file)!;
-      const copy = path.join(mkTmp('cmos-seed-calls-run-'), 'project');
+      const copy = path.join(mkTmp('rbook-seed-calls-run-'), 'project');
       fs.cpSync(fixture.root, copy, { recursive: true });
       freshConfig();
 
@@ -870,7 +880,7 @@ describe('s93-m12 — the seed shows no call the server refuses', () => {
       }
 
       // An agent standing in the project resolves it; init alone never infers its folder.
-      const isInit = parsed.tool === 'cmos_project' && args.action === 'init';
+      const isInit = parsed.tool === 'rbook_project' && args.action === 'init';
       const ran = await dispatch(
         parsed.tool,
         isInit || 'projectRoot' in args ? args : { ...args, projectRoot: copy }

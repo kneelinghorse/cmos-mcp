@@ -25,10 +25,11 @@ async function main() {
     });
     mod._compile(outputText, file);
   };
-  const { readDigestV2 } = require('../src/tools/cmos/digest-v2-store.ts');
-  const { renderDigestV2, digestHeadline } = require('../src/tools/cmos/digest-v2.ts');
-  const { readProfile } = require('../src/tools/cmos/operator-profile.ts');
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-m05-render-'));
+  const { resolveRecordPaths } = require('../src/intelligence/legacy-compat.ts');
+  const { readDigestV2 } = require('../src/tools/rbook/digest-v2-store.ts');
+  const { renderDigestV2, digestHeadline } = require('../src/tools/rbook/digest-v2.ts');
+  const { readProfile } = require('../src/tools/rbook/operator-profile.ts');
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-m05-render-'));
   const hash = (file) => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
   const report = [
     '# m05 real-store digest verification',
@@ -50,9 +51,9 @@ async function main() {
     for (const [index, input] of roots.entries()) {
       const original = path.resolve(input);
       const root = path.join(temp, String(index));
-      const destination = path.join(root, 'cmos', 'db', 'cmos.sqlite');
+      const destination = path.join(root, 'rbook', 'db', 'rbook.sqlite');
       fs.mkdirSync(path.dirname(destination), { recursive: true });
-      const source = new Database(path.join(original, 'cmos', 'db', 'cmos.sqlite'), {
+      const source = new Database(resolveRecordPaths(original).dbPath, {
         readonly: true,
         fileMustExist: true,
       });
@@ -62,7 +63,7 @@ async function main() {
         source.close();
       }
       const before = hash(destination);
-      const env = { ...process.env, CMOS_CONFIG_DIR: config };
+      const env = { ...process.env, RBOOK_CONFIG_DIR: config };
       const model = await readDigestV2(root, env);
       const first = renderDigestV2(model);
       const second = renderDigestV2(await readDigestV2(root, env));

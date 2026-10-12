@@ -6,10 +6,10 @@
  * Sprint 86 m04 — the defect this gate closes was IN the file this mission rewrites, and it is the
  * sprint's own class.
  *
- * scripts/lib/render-tool-reference.js emitted, verbatim: "The CMOS MCP server exposes 15 tools.
- * Most select an operation with an `action` parameter; `cmos_agent_onboard`, `cmos_status`, and
- * `cmos_review` take only `projectRoot`." That was published at TOOL_REFERENCE.md:7 — three lines
- * above the cmos_agent_onboard table listing its OTHER parameter, `agentFeedback`. The
+ * scripts/lib/render-tool-reference.js emitted, verbatim: "The Reasonbook MCP server exposes 15 tools.
+ * Most select an operation with an `action` parameter; `rbook_agent_onboard`, `rbook_status`, and
+ * `rbook_review` take only `projectRoot`." That was published at TOOL_REFERENCE.md:7 — three lines
+ * above the rbook_agent_onboard table listing its OTHER parameter, `agentFeedback`. The
  * authoritative public reference contradicted itself on the same page, and had done so since
  * `agentFeedback` was added in Sprint 56.
  *
@@ -28,7 +28,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { CMOS_ACTION_PARAMS, CMOS_TOOL_DEFINITIONS } from '../../src/tools/cmos';
+import { RBOOK_ACTION_PARAMS, RBOOK_TOOL_DEFINITIONS } from '../../src/tools/rbook';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { renderToolReference } = require('../../scripts/lib/render-tool-reference.js') as {
@@ -43,7 +43,7 @@ type ToolDef = {
   inputSchema?: { properties?: Record<string, { enum?: readonly string[] } | undefined> };
 };
 
-const DEFS = CMOS_TOOL_DEFINITIONS as unknown as readonly ToolDef[];
+const DEFS = RBOOK_TOOL_DEFINITIONS as unknown as readonly ToolDef[];
 const TOOL_REFERENCE_PATH = path.resolve(__dirname, '../../TOOL_REFERENCE.md');
 
 function actionEnumOf(def: ToolDef): readonly string[] | undefined {
@@ -83,8 +83,8 @@ function sectionOf(markdown: string, toolName: string): string {
 
 describe('TOOL_REFERENCE.md header states only the partition (s86-m04)', () => {
   const rendered = renderToolReference(
-    CMOS_TOOL_DEFINITIONS as unknown as unknown[],
-    CMOS_ACTION_PARAMS
+    RBOOK_TOOL_DEFINITIONS as unknown as unknown[],
+    RBOOK_ACTION_PARAMS
   );
 
   it('makes no claim about any tool\u2019s parameter set', () => {
@@ -94,10 +94,10 @@ describe('TOOL_REFERENCE.md header states only the partition (s86-m04)', () => {
   it('is RED against the pre-fix sentence, which claimed one', () => {
     // The exact string the renderer emitted before this mission, at TOOL_REFERENCE.md:7.
     const preFix =
-      '# CMOS MCP Tool Reference\n\n' +
-      'The CMOS MCP server exposes 15 tools. Most select an operation with an `action` parameter; ' +
-      '`cmos_agent_onboard`, `cmos_status`, and `cmos_review` take only `projectRoot`.\n\n' +
-      '## cmos_mission\n';
+      '# Reasonbook MCP Tool Reference\n\n' +
+      'The Reasonbook MCP server exposes 15 tools. Most select an operation with an `action` parameter; ' +
+      '`rbook_agent_onboard`, `rbook_status`, and `rbook_review` take only `projectRoot`.\n\n' +
+      '## rbook_mission\n';
     expect(unlicensedClaims(preFix)).toEqual(['projectRoot']);
   });
 
@@ -110,9 +110,9 @@ describe('TOOL_REFERENCE.md header states only the partition (s86-m04)', () => {
     for (const def of actionLess) expect(header).toContain(`\`${def.name}\``);
     // Measured today: 15 tools, 12 with an action, 3 without.
     expect(actionLess.map((d) => d.name)).toEqual([
-      'cmos_agent_onboard',
-      'cmos_status',
-      'cmos_review',
+      'rbook_agent_onboard',
+      'rbook_status',
+      'rbook_review',
     ]);
   });
 
@@ -124,15 +124,15 @@ describe('TOOL_REFERENCE.md header states only the partition (s86-m04)', () => {
     const header = headerOf(rendered);
     expect(header).toContain('the tool for a top-level parameter, the sub-shape for a dotted row');
     // Proof the claim it disclaims is real: at least one action needs a parameter the schema does
-    // not require. cmos_mission(show) cannot work without missionId, which is not in `required`.
-    const mission = DEFS.find((d) => d.name === 'cmos_mission') as ToolDef & {
+    // not require. rbook_mission(show) cannot work without missionId, which is not in `required`.
+    const mission = DEFS.find((d) => d.name === 'rbook_mission') as ToolDef & {
       inputSchema?: { required?: readonly string[] };
     };
     expect(mission.inputSchema?.required ?? []).not.toContain('missionId');
-    expect(sectionOf(rendered, 'cmos_mission')).toContain('| `missionId` | string | no |');
+    expect(sectionOf(rendered, 'rbook_mission')).toContain('| `missionId` | string | no |');
     // And the sub-shape half of the same sentence: a dotted row's requirement comes from its own
     // block, not the tool's, so the wording had to cover both (build-time critic finding).
-    expect(sectionOf(rendered, 'cmos_context')).toContain(
+    expect(sectionOf(rendered, 'rbook_context')).toContain(
       '| `fieldUpdates[].path` | string | yes |'
     );
   });

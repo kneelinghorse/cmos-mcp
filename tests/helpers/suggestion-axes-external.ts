@@ -269,7 +269,7 @@ function assertTempDescendant(candidate: string, label: string): string {
 export async function startDashboardDouble(
   initialScenario?: DashboardScenario
 ): Promise<DashboardDouble> {
-  const scratchRoot = fs.mkdtempSync(path.join(realTempRoot(), 'cmos-suggestion-external-'));
+  const scratchRoot = fs.mkdtempSync(path.join(realTempRoot(), 'rbook-suggestion-external-'));
   const requests: DashboardRequest[] = [];
   const sockets = new Set<Socket>();
   let scenario = initialScenario;

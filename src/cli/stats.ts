@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// ABOUTME: cmos-mcp stats reports local G1 evidence and sprint-close measurements without changing the store.
+// ABOUTME: reasonbook stats reports local G1 evidence and sprint-close measurements without changing the store.
 // ABOUTME: Explicit extra projects enable pooling; export emits aggregate counts and fixed measurement rules.
 
 import * as path from 'path';
@@ -9,8 +9,8 @@ import {
   exportTelemetryStats,
   type StatsWindow,
   type TelemetryStatistics,
-} from '../tools/cmos/telemetry-stats';
-import { storedTimeMs, timeBound } from '../tools/cmos/stored-time';
+} from '../tools/rbook/telemetry-stats';
+import { storedTimeMs, timeBound } from '../tools/rbook/stored-time';
 
 /** Repeated includes are intentionally not reduced by parseArgs, whose normal flags use last wins. */
 function includedProjects(argv: readonly string[]): string[] {
@@ -56,7 +56,7 @@ function readWindow(flags: Readonly<Record<string, string>>): StatsWindow {
 function humanReport(report: TelemetryStatistics): string {
   const counts = exportTelemetryStats(report);
   const lines = [
-    `CMOS stats: ${report.window.since} through ${report.window.until}`,
+    `Reasonbook stats: ${report.window.since} through ${report.window.until}`,
     `Baseline: ${report.window.baselineSince} through ${report.window.baselineUntil}`,
     'Coverage is not established by a best-effort event file; zero observed matches is not a G1 pass.',
     'G1 prompting and rules files, decision timing, prompt cite-through, and friction:',
@@ -134,7 +134,7 @@ export async function runStats(argv: readonly string[], io: CliIo): Promise<numb
       cwd: io.cwd,
     });
     if (resolution.kind !== 'store')
-      throw new Error('No readable CMOS project was selected; pass --project-root <folder>');
+      throw new Error('No readable Reasonbook project was selected; pass --project-root <folder>');
     const roots = [
       resolution.projectRoot,
       ...includedProjects(argv).map((root) => path.resolve(io.cwd, root)),
@@ -147,7 +147,7 @@ export async function runStats(argv: readonly string[], io: CliIo): Promise<numb
     );
     return 0;
   } catch (error) {
-    io.stderr(`cmos-mcp stats: ${error instanceof Error ? error.message : String(error)}`);
+    io.stderr(`reasonbook stats: ${error instanceof Error ? error.message : String(error)}`);
     return 1;
   }
 }

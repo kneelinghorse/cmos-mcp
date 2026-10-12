@@ -6,15 +6,33 @@ import { afterEach, expect, it } from '@jest/globals';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { scanFile } from '../../src/cli/transcript-scan';
+import { scanFile, entryMarkers } from '../../src/cli/transcript-scan';
 
 const dirs: string[] = [];
+
+it.each(['rbook', 'rbook'])(
+  'recognizes %s tools in old and new transcripts as outside content',
+  (prefix) => {
+    for (const [suffix, input] of [
+      ['message', {}],
+      ['review', { acrossProjects: true }],
+    ] as const) {
+      expect(
+        entryMarkers({
+          message: {
+            content: [{ type: 'tool_use', name: `mcp__server__${prefix}_${suffix}`, input }],
+          },
+        }).outside
+      ).toBe(true);
+    }
+  }
+);
 afterEach(() => {
   for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
 
 it('leaves an incomplete final line unknown, then reads it once the writer finishes', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-transcript-partial-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-transcript-partial-'));
   dirs.push(dir);
   const file = path.join(dir, 'transcript.jsonl');
   const first = JSON.stringify({ type: 'assistant', message: { content: 'Local work.' } }) + '\n';

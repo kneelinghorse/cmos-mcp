@@ -1,8 +1,8 @@
 // ABOUTME: Sprint 69 m01 — cross-store baseline measurement. Walks the active
-// per-project CMOS SQLite stores and reports how close the portfolio is to the
+// per-project Reasonbook SQLite stores and reports how close the portfolio is to the
 // s68 ADR App-View migration triggers: current store count N, mutable-write
 // share vs the 25% CRDT threshold, and fan-in p95 latency for the four named
-// CMOS queries via application-level fan-out. Re-runnable; emits a stable JSON
+// Reasonbook queries via application-level fan-out. Re-runnable; emits a stable JSON
 // report + a markdown summary upserted into cmos/planning/phase-2-master-plan.md
 // (s77-m09 Fork D repointed the writeback from the superseded pro-expansion-roadmap.md).
 //
@@ -31,14 +31,15 @@
 // The schema is stable across runs so future tooling can diff baseline reports
 // for trend analysis. Bump schemaVersion only on a breaking shape change.
 
+import { resolveRecordPaths } from '../src/intelligence/legacy-compat';
 import * as fs from 'fs';
 import * as path from 'path';
 import { performance } from 'perf_hooks';
-import { CmosDatabaseClient } from '../src/tools/cmos/client';
-import type { CmosToolError } from '../src/tools/cmos/types';
+import { RbookDatabaseClient } from '../src/tools/rbook/client';
+import type { RbookToolError } from '../src/tools/rbook/types';
 import { ProjectGraphRegistry } from '../src/intelligence/project-graph-registry';
 
-// ─── Thresholds (from s68 ADR Section 5.1 + CMOS-MULTIUSER-COLLAB-01-01) ──────
+// ─── Thresholds (from s68 ADR Section 5.1 + Reasonbook-MULTIUSER-COLLAB-01-01) ──────
 const CRDT_THRESHOLD_PCT = 25; // 25% mutable-write share → revisit CRDT layering
 const CRDT_APPROACHING_PCT = 15;
 const FANIN_TRIGGER_MS = 200; // p95 > 200ms → App-View Trigger A
@@ -213,8 +214,8 @@ export function sumTransitionWrites(c: StoreWriteCounts): number {
  * Reports TWO complementary metrics:
  *  - `overall`: transitionWrites / (appendWrites + transitionWrites) — the
  *    "fraction of recorded writes that are mutations vs appends", the direct
- *    analog to "append-mostly, CMOS at 5-10%, revisit CRDT at 25%"
- *    (CMOS-MULTIUSER-COLLAB-01-01 / decision #689). HEADLINE, gated at 25%.
+ *    analog to "append-mostly, Reasonbook at 5-10%, revisit CRDT at 25%"
+ *    (Reasonbook-MULTIUSER-COLLAB-01-01 / decision #689). HEADLINE, gated at 25%.
  *  - `softLock`: the strict ADR 6.3 contested surface — only sprint status
  *    (Active↔Completed) is a durably-recordable contested transition. Mission
  *    WORKFLOW transitions (started/completed — "Queued → In Progress is a
@@ -301,7 +302,7 @@ type TablePresence =
   | { state: 'absent' }
   | { state: 'error'; reason: string };
 
-function probeTable(client: CmosDatabaseClient, name: string): TablePresence {
+function probeTable(client: RbookDatabaseClient, name: string): TablePresence {
   const row = client.getOne<{ name: string }>(
     "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
     [name]
@@ -312,7 +313,7 @@ function probeTable(client: CmosDatabaseClient, name: string): TablePresence {
   return row.data ? { state: 'present' } : { state: 'absent' };
 }
 
-function describeError(error: CmosToolError | undefined): string {
+function describeError(error: RbookToolError | undefined): string {
   return `${error?.code ?? 'DB_ERROR'} — ${error?.message ?? 'unknown'}`;
 }
 
@@ -333,7 +334,7 @@ function noteAbsent(diag: StoreReadDiagnostics, table: string): void {
  * but cannot be queried.
  */
 export function safeCount(
-  client: CmosDatabaseClient,
+  client: RbookDatabaseClient,
   table: string,
   where: string,
   diag: StoreReadDiagnostics
@@ -397,7 +398,7 @@ export function evaluateStrict(unreliable: ReadonlyArray<{ projectRoot: string }
  * (see `readStoreCounts`), so no aggregate is ever built from unread diagnostics.
  */
 export function countStoreWrites(
-  client: CmosDatabaseClient,
+  client: RbookDatabaseClient,
   diag: StoreReadDiagnostics = newReadDiagnostics()
 ): StoreWriteCounts {
   return {
@@ -429,7 +430,7 @@ export function countStoreWrites(
 }
 
 /** Read a store's write counts from an already-open read-only client. */
-export function readStoreCounts(projectRoot: string, client: CmosDatabaseClient): PerStoreCounts {
+export function readStoreCounts(projectRoot: string, client: RbookDatabaseClient): PerStoreCounts {
   const diag = newReadDiagnostics();
   const counts = countStoreWrites(client, diag);
   return {
@@ -452,10 +453,10 @@ export function readStoreCounts(projectRoot: string, client: CmosDatabaseClient)
  */
 export type StoreOpener = (
   dbPath: string
-) => Promise<{ client: CmosDatabaseClient } | { error: string }>;
+) => Promise<{ client: RbookDatabaseClient } | { error: string }>;
 
 const defaultOpener: StoreOpener = async (dbPath) => {
-  const res = await CmosDatabaseClient.create({ dbPath, readonly: true });
+  const res = await RbookDatabaseClient.create({ dbPath, readonly: true });
   if (res.success && res.data) return { client: res.data };
   return { error: res.error?.message ?? 'failed to open' };
 };
@@ -475,7 +476,7 @@ interface FanInResult {
  * counted and excluded, never failing the whole query.
  */
 export function runFanIn(
-  clients: { projectRoot: string; client: CmosDatabaseClient }[],
+  clients: { projectRoot: string; client: RbookDatabaseClient }[],
   q: QuerySpec
 ): FanInResult {
   const merged: Record<string, unknown>[] = [];
@@ -500,7 +501,7 @@ export function runFanIn(
   return { resultCount: merged.length, storesQueried, storeErrors };
 }
 
-/** The four named CMOS queries (s68 ADR Section 5.4), materialized against `now`. */
+/** The four named Reasonbook queries (s68 ADR Section 5.4), materialized against `now`. */
 export function materializeDefaultQueries(now: number): QuerySpec[] {
   const thirtyDaysAgo = new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString();
   return [
@@ -548,7 +549,7 @@ interface QueryLatency {
 }
 
 function measureQuery(
-  clients: { projectRoot: string; client: CmosDatabaseClient }[],
+  clients: { projectRoot: string; client: RbookDatabaseClient }[],
   q: QuerySpec,
   runs: number
 ): QueryLatency {
@@ -586,7 +587,7 @@ export interface BaselineReport {
     openErrors: { projectRoot: string; reason: string }[];
     /** Opened, but a count query errored on an existing table — counts UNKNOWN, excluded. */
     unreliable: { projectRoot: string; queryErrors: CountQueryError[] }[];
-    /** Opened, missing one or more CMOS tables — a genuine 0, recorded not swallowed. */
+    /** Opened, missing one or more Reasonbook tables — a genuine 0, recorded not swallowed. */
     absentTables: { projectRoot: string; tables: string[] }[];
   };
   mutableWriteShare: ReturnType<typeof computeMutableShare> & {
@@ -633,7 +634,7 @@ export async function buildReport(
   const openStore = opts.openStore ?? defaultOpener;
 
   // Open every reachable store once (read-only); isolate open failures.
-  const open: { projectRoot: string; client: CmosDatabaseClient }[] = [];
+  const open: { projectRoot: string; client: RbookDatabaseClient }[] = [];
   const openErrors: { projectRoot: string; reason: string }[] = [];
   for (const { projectRoot, dbPath } of reachable) {
     const opened = await openStore(dbPath);
@@ -810,7 +811,7 @@ export function renderMarkdownSummary(report: BaselineReport): string {
     `- **Soft-lock contested share (ADR §6.3 strict lower bound):** ${m.softLock.sharePct}% ` +
       `(${m.softLock.surfaceWrites}/${m.softLock.totalWrites}; sprint completions only)`,
     `- **Contested mutable surface** (what the ${m.thresholds.crdtPct}% CRDT trigger targets) is **bracketed ` +
-      `[${m.softLock.sharePct}%, ${m.overall.sharePct}%]** — the research (CMOS-MULTIUSER-COLLAB-01-01) estimated 5-10%. ` +
+      `[${m.softLock.sharePct}%, ${m.overall.sharePct}%]** — the research (Reasonbook-MULTIUSER-COLLAB-01-01) estimated 5-10%. ` +
       `Not precisely measurable until durable transition logging (event_log) lands.`,
     `- **Worst-case fan-in p95 (slowest of 4 named queries, ${f.runsPerQuery} runs):** ${f.aggregateP95Ms}ms ` +
       `(threshold ${f.thresholds.triggerMs}ms, approaching ${f.thresholds.approachingMs}ms) — **${f.status}**`,
@@ -875,11 +876,11 @@ async function enumerateStores(): Promise<{
   const reachable: { projectRoot: string; dbPath: string }[] = [];
   const unreachable: { projectRoot: string; reason: string }[] = [];
   for (const p of projects) {
-    const dbPath = path.join(p.store_path, 'cmos', 'db', 'cmos.sqlite');
+    const dbPath = resolveRecordPaths(p.store_path).dbPath;
     if (fs.existsSync(dbPath)) {
       reachable.push({ projectRoot: p.store_path, dbPath });
     } else {
-      unreachable.push({ projectRoot: p.store_path, reason: 'cmos/db/cmos.sqlite not found' });
+      unreachable.push({ projectRoot: p.store_path, reason: `${dbPath} not found` });
     }
   }
   return { reachable, unreachable, registered: projects.length };

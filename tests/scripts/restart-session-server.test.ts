@@ -3,14 +3,14 @@
 // ABOUTME: own host started from this checkout, leaves another host's alone, and fails loud otherwise.
 
 /**
- * The MCP host starts the CMOS server once per session, and that process keeps the code it loaded,
- * so after `npm run build` every CMOS call still runs the old build. Sprint-92's build session ran
+ * The MCP host starts the Reasonbook server once per session, and that process keeps the code it loaded,
+ * so after `npm run build` every Reasonbook call still runs the old build. Sprint-92's build session ran
  * on a server nine and a half hours older than its last build. The script stops the session's own
  * server, and Claude Code starts it again, on the current build, at the next tool call.
  *
  * Each case builds the process shape an agent session has: a host process with the server as its
  * child, and the script run by that same host. Every server path is under a temporary checkout, so
- * no case can match a real CMOS server.
+ * no case can match a real Reasonbook server.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
@@ -225,7 +225,7 @@ describe('scripts/restart-session-server.sh', () => {
     const report = await runHost(true);
 
     expect(report.status).toBe(0);
-    expect(report.stdout).toContain(`Stopped CMOS server ${report.serverPid} `);
+    expect(report.stdout).toContain(`Stopped Reasonbook server ${report.serverPid} `);
     expect(report.serverExit).toEqual({ code: null, signal: 'SIGTERM' });
     expect(isAlive(otherServer)).toBe(true);
   });
@@ -245,7 +245,7 @@ describe('scripts/restart-session-server.sh', () => {
 
     expect(report.status).toBe(1);
     expect(report.stderr).toContain(
-      `not a CMOS server running ${path.join(checkout, 'dist')} under this session.`
+      `not a Reasonbook server running ${path.join(checkout, 'dist')} under this session.`
     );
     expect(isAlive(otherServer)).toBe(true);
   });
@@ -271,7 +271,7 @@ describe('scripts/restart-session-server.sh', () => {
       if (report.hookPid) heldServers.push(report.hookPid);
 
       expect(report.status).toBe(0);
-      expect(report.stdout).toContain(`Stopped CMOS server ${report.serverPid} `);
+      expect(report.stdout).toContain(`Stopped Reasonbook server ${report.serverPid} `);
       expect(report.serverExit).toEqual({ code: null, signal: 'SIGTERM' });
       expect(report.hookAlive).toBe(true);
     }

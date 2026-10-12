@@ -7,7 +7,7 @@ import { existsSync, readFileSync } from 'fs';
 import path from 'path';
 
 /** The env var globalSetup stamps and globalTeardown checks; both run in jest's main process. */
-export const DIST_MANIFEST_FINGERPRINT_ENV = 'CMOS_JEST_DIST_MANIFEST_SHA256';
+export const DIST_MANIFEST_FINGERPRINT_ENV = 'JEST_RECORD_DIST_MANIFEST_SHA256';
 
 export const DIST_MANIFEST_PATH = path.resolve(
   __dirname,

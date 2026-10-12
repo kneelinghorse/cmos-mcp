@@ -13,9 +13,9 @@ import {
   harnessSessionHash,
   linkHarness,
   readHarnessLink,
-} from '../../src/tools/cmos/harness-session';
-import { readTelemetry, targetForStore } from '../../src/tools/cmos/local-telemetry';
-import { seedCmosDb } from '../helpers/seedCmosDb';
+} from '../../src/tools/rbook/harness-session';
+import { readTelemetry, targetForStore } from '../../src/tools/rbook/local-telemetry';
+import { seedRbookDb } from '../helpers/seedRbookDb';
 
 const PORTABLE = ['codex', 'cursor', 'devin', 'copilot', 'vscode'];
 let tmp: string;
@@ -25,13 +25,13 @@ let nativeDb: string;
 let env: NodeJS.ProcessEnv;
 
 beforeEach(() => {
-  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-hook-isolation-'));
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-hook-isolation-'));
   parentRoot = path.join(tmp, 'parent-claude');
   nativeRoot = path.join(tmp, 'native-project');
-  seedCmosDb(parentRoot, { projectId: 'parent-project' });
-  nativeDb = seedCmosDb(nativeRoot, { projectId: 'native-project' });
+  seedRbookDb(parentRoot, { projectId: 'parent-project' });
+  nativeDb = seedRbookDb(nativeRoot, { projectId: 'native-project' });
   env = {
-    CMOS_CONFIG_DIR: path.join(tmp, 'config'),
+    RBOOK_CONFIG_DIR: path.join(tmp, 'config'),
     CLAUDE_PID: String(process.pid),
     CLAUDE_PROJECT_DIR: parentRoot,
     CLAUDE_CODE_SESSION_ID: 'parent-session',
@@ -104,7 +104,7 @@ it.each(PORTABLE)(
 );
 
 it.each(PORTABLE)('%s telemetry names the real harness instead of Claude Code', async (harness) => {
-  const isolatedEnv = { CMOS_CONFIG_DIR: env.CMOS_CONFIG_DIR };
+  const isolatedEnv = { RBOOK_CONFIG_DIR: env.RBOOK_CONFIG_DIR };
   await run(harness, true, isolatedEnv);
   const records = readTelemetry(targetForStore(nativeDb)!, isolatedEnv);
   expect(records).toHaveLength(1);
@@ -122,7 +122,7 @@ it('a refused native event cannot attribute its failure to the parent Claude pro
   const records = readTelemetry(targetForStore(nativeDb)!, env);
   expect(records).toHaveLength(1);
   expect(records[0]).toMatchObject({ client: 'cursor', ok: false });
-  const parentDb = path.join(parentRoot, 'cmos', 'db', 'cmos.sqlite');
+  const parentDb = path.join(parentRoot, 'rbook', 'db', 'rbook.sqlite');
   expect(readTelemetry(targetForStore(parentDb)!, env)).toEqual([]);
 });
 

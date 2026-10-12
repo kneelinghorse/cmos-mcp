@@ -5,7 +5,7 @@
  * Sender Context Resolution (Sprint 53 m01; rewritten s92-m01)
  *
  * Every recurrence of cross-project mis-attribution has had the same shape: when the caller's
- * project was unclear, the server picked one anyway. Sprint 53 removed the `CMOS_PROJECT_ROOT`
+ * project was unclear, the server picked one anyway. Sprint 53 removed the `RBOOK_PROJECT_ROOT`
  * fallback; s92-m01 removes the rest — the registry-singleton auto-pick (the clean-room run wrote
  * a decision and a session from an uninitialised folder B into the only registered project A,
  * learning #387) and the fall-through from a rejected explicit root to the cwd project.
@@ -14,9 +14,9 @@
  * detection, in priority order, and the selected store is final — when it fails the acceptance
  * bar, the call is refused; it never falls through to a different project.
  *
- *   1. Explicit `explicitProjectRoot` — always final. A folder with no CMOS store is refused.
- *   2. MCP client roots — the first advertised root inside a CMOS store (walked up like the cwd).
- *   3. cwd walk-up — the nearest enclosing directory holding a CMOS store, `cmos/db/` (see
+ *   1. Explicit `explicitProjectRoot` — always final. A folder with no Reasonbook store is refused.
+ *   2. MCP client roots — the first advertised root inside a Reasonbook store (walked up like the cwd).
+ *   3. cwd walk-up — the nearest enclosing directory holding a Reasonbook store, `rbook/db/` (see
  *      `findEnclosingStore`), including when the cwd is the server's own install root.
  *   4. Defaults, for a CONTEXTLESS call only (no explicit root, no MCP roots, no store on the
  *      walk-up, and a cwd of `/`, `$HOME` or the install root): the server's `--project-root`,
@@ -24,7 +24,7 @@
  *      3.2.0 is never applied until re-confirmed.
  *   5. Otherwise throw `SenderResolutionError` with the full candidate trace.
  *
- * The `CMOS_PROJECT_ROOT` env var is NOT consulted here — it is retained only as a
+ * The `RBOOK_PROJECT_ROOT` env var is NOT consulted here — it is retained only as a
  * bootstrap hint at `src/index.ts` so the server can locate its own `.env`.
  *
  * @module intelligence/sender-context
@@ -34,15 +34,15 @@ import path from 'path';
 import { currentCodexRequest } from '../codex-request-context';
 
 import {
-  backfillUnknownCmosAddress,
+  backfillUnknownRbookAddress,
   getProjectIdentity,
-  previewUnknownCmosAddressHeal,
+  previewUnknownRbookAddressHeal,
   readProjectIdentity,
-} from '../tools/cmos/project-identity';
-import type { CmosDatabaseClient } from '../tools/cmos/client';
-import { withClientAsync } from '../tools/cmos/client';
-import { asLazyRepair, callMayWrite } from '../tools/cmos/tool-call-context';
-import { CmosDetector } from './cmos-detector';
+} from '../tools/rbook/project-identity';
+import type { RbookDatabaseClient } from '../tools/rbook/client';
+import { withClientAsync } from '../tools/rbook/client';
+import { asLazyRepair, callMayWrite } from '../tools/rbook/tool-call-context';
+import { RbookDetector } from './rbook-detector';
 import { ProjectGraphRegistry } from './project-graph-registry';
 import { isProjectAddress, resolveRegisteredAddress } from './project-address';
 import {
@@ -81,7 +81,7 @@ export type ResolvedBy = SenderResolutionSource | 'none';
 /**
  * One step in the priority chain. Every attempted source is recorded, whether
  * accepted or rejected, so `SenderResolutionError.candidates` gives operators a
- * complete audit trail (echoed by `cmos_message(action='whoami')` in m03).
+ * complete audit trail (echoed by `rbook_message(action='whoami')` in m03).
  */
 export interface ResolutionCandidate {
   readonly source: SenderResolutionSource;
@@ -95,20 +95,20 @@ export interface ResolutionCandidate {
  *
  * `hasValidSenderIdentity` encodes the fail-closed rule: a project is only a
  * valid implicit sender when it owns a UUID `dashboard_project_id` AND a non-stale
- * canonical `cmos_address` (neither empty nor `cmos://unknown/*`). A one-shot
- * heal via `backfillUnknownCmosAddress` is attempted before rejection.
+ * canonical `rbook_address` (neither empty nor `rbook://unknown/*`). A one-shot
+ * heal via `backfillUnknownRbookAddress` is attempted before rejection.
  */
 export interface ValidateProjectResult {
   readonly hasDatabase: boolean;
   readonly dashboardProjectId: string | null;
-  readonly cmosAddress: string | null;
+  readonly rbookAddress: string | null;
   readonly healed?: AddressHeal;
   readonly hasValidSenderIdentity: boolean;
   readonly rejectReason?: string;
 }
 
 /**
- * A cmos://unknown/* address repaired for this resolution. s93-m11: `preview` marks one computed
+ * A rbook://unknown/* address repaired for this resolution. s93-m11: `preview` marks one computed
  * without writing (heal: 'preview'): the address the next write will store, which a diagnostic
  * resolves with so that it predicts what that write does.
  */
@@ -124,7 +124,7 @@ export interface SenderContext {
   readonly requestedAddress?: string;
   readonly source: SenderResolutionSource;
   readonly dashboardProjectId: string | null;
-  readonly cmosAddress: string | null;
+  readonly rbookAddress: string | null;
   readonly healed?: AddressHeal;
   readonly candidates: ReadonlyArray<ResolutionCandidate>;
 }
@@ -158,7 +158,7 @@ export interface ResolveSenderContextOptions {
    */
   readonly serverProjectRootOverride?: string | null;
   /**
-   * s93-m11 — whether the selected store's cmos://unknown/* address may be repaired. Omitted:
+   * s93-m11 — whether the selected store's rbook://unknown/* address may be repaired. Omitted:
    * only when the call may write (a read-classified call never writes the record, decision
    * #1182). `'preview'` resolves with the address the next write would store and writes nothing:
    * a diagnostic (whoami, the startup lines) predicts what a write-classified call would do.
@@ -169,9 +169,9 @@ export interface ResolveSenderContextOptions {
 /**
  * Why resolution refused (s92-m01), so the dispatcher can name the right remedy:
  * - `selected-store-rejected`: a store was selected (explicit root, MCP root, cwd walk-up or a
- *   default) and failed the acceptance bar — no CMOS database, unreadable, or no valid sender
+ *   default) and failed the acceptance bar — no Reasonbook database, unreadable, or no valid sender
  *   identity. The call names that store and never falls through to another.
- * - `no-project-here`: the caller is in a real working folder that is not a CMOS project.
+ * - `no-project-here`: the caller is in a real working folder that is not a Reasonbook project.
  * - `contextless-no-default`: the server has no project context and no default applies.
  */
 export type SenderResolutionOutcome =
@@ -189,7 +189,7 @@ export interface UnappliedRegistryDefault {
 /**
  * Thrown when no candidate in the priority chain produced a project that satisfied
  * the caller's acceptance bar. Carries the full candidate trace for operator
- * debugging — exposed via `cmos_message(action='whoami')`.
+ * debugging — exposed via `rbook_message(action='whoami')`.
  */
 export class SenderResolutionError extends Error {
   readonly code: string;
@@ -224,10 +224,10 @@ export class SenderResolutionError extends Error {
 /**
  * Read the sender-identity facts for a given project root.
  *
- * Opens the CMOS SQLite for `projectRoot` (via `withClientAsync({ projectRoot })`,
+ * Opens the Reasonbook SQLite for `projectRoot` (via `withClientAsync({ projectRoot })`,
  * which bypasses the env-based fallback because the projectRoot is explicit),
- * reads `metadata.dashboard_project_id` and `project_identity.cmos_address`, and
- * attempts a one-shot heal when the address is `cmos://unknown/*` and an owner
+ * reads `metadata.dashboard_project_id` and `project_identity.rbook_address`, and
+ * attempts a one-shot heal when the address is `rbook://unknown/*` and an owner
  * exists in metadata.
  *
  * Returns the gathered facts plus `hasValidSenderIdentity`, the resolver-facing
@@ -241,21 +241,21 @@ export async function validateProject(
   const heal = options.heal ?? callMayWrite();
   const resolved = path.resolve(projectRoot);
 
-  const detector = CmosDetector.getInstance();
+  const detector = RbookDetector.getInstance();
   const detection = await detector.detect(resolved, { forceRefresh: true });
   if (!detection.hasDatabase || !detection.databasePath) {
     return {
       hasDatabase: false,
       dashboardProjectId: null,
-      cmosAddress: null,
+      rbookAddress: null,
       hasValidSenderIdentity: false,
-      rejectReason: 'no CMOS database at projectRoot',
+      rejectReason: 'no Reasonbook database at projectRoot',
     };
   }
 
   try {
     const result = await withClientAsync(
-      async (db: CmosDatabaseClient) => {
+      async (db: RbookDatabaseClient) => {
         const pidRow = db.getOne<{ value: string }>(
           "SELECT value FROM metadata WHERE key = 'dashboard_project_id'"
         );
@@ -266,31 +266,31 @@ export async function validateProject(
         // an explicit heal:false derive it in memory and write nothing, even outside a dispatched
         // call (whoami from the CLI, the startup lines).
         let identity = heal === true ? getProjectIdentity(db) : readProjectIdentity(db);
-        let cmosAddress = identity?.cmos_address?.trim() ?? '';
-        const initialStale = !cmosAddress || cmosAddress.startsWith('cmos://unknown/');
+        let rbookAddress = identity?.rbook_address?.trim() ?? '';
+        const initialStale = !rbookAddress || rbookAddress.startsWith('rbook://unknown/');
 
         let healed: AddressHeal | undefined;
         if (initialStale && heal === 'preview') {
-          const preview = previewUnknownCmosAddressHeal(db);
+          const preview = previewUnknownRbookAddressHeal(db);
           if (preview.next) {
             healed = { previous: preview.previous ?? '', next: preview.next, preview: true };
-            cmosAddress = preview.next;
+            rbookAddress = preview.next;
           }
         } else if (initialStale && heal) {
           // A lazy repair, not the caller's write: it never starts first-write upkeep.
-          const outcome = asLazyRepair(() => backfillUnknownCmosAddress(db));
+          const outcome = asLazyRepair(() => backfillUnknownRbookAddress(db));
           if (outcome.rewritten && outcome.next && outcome.next !== outcome.previous) {
             healed = {
               previous: outcome.previous ?? '',
               next: outcome.next,
             };
             identity = getProjectIdentity(db);
-            cmosAddress = identity?.cmos_address?.trim() ?? '';
+            rbookAddress = identity?.rbook_address?.trim() ?? '';
           }
         }
 
         const hasCanonicalAddress =
-          cmosAddress.length > 0 && !cmosAddress.startsWith('cmos://unknown/');
+          rbookAddress.length > 0 && !rbookAddress.startsWith('rbook://unknown/');
         const hasValidUuid = dashboardProjectId !== null && UUID_REGEX.test(dashboardProjectId);
         const hasValidSenderIdentity = hasValidUuid && hasCanonicalAddress;
 
@@ -298,13 +298,13 @@ export async function validateProject(
         if (!hasValidUuid) {
           rejectReason = 'dashboard_project_id missing or not a UUID';
         } else if (!hasCanonicalAddress) {
-          rejectReason = 'project_identity.cmos_address is empty or cmos://unknown/*';
+          rejectReason = 'project_identity.rbook_address is empty or rbook://unknown/*';
         }
 
         const payload: ValidateProjectResult = {
           hasDatabase: true,
           dashboardProjectId,
-          cmosAddress: hasCanonicalAddress ? cmosAddress : null,
+          rbookAddress: hasCanonicalAddress ? rbookAddress : null,
           healed,
           hasValidSenderIdentity,
           rejectReason,
@@ -323,15 +323,15 @@ export async function validateProject(
     return {
       hasDatabase: true,
       dashboardProjectId: null,
-      cmosAddress: null,
+      rbookAddress: null,
       hasValidSenderIdentity: false,
-      rejectReason: 'failed to open CMOS database',
+      rejectReason: 'failed to open Reasonbook database',
     };
   } catch (err) {
     return {
       hasDatabase: true,
       dashboardProjectId: null,
-      cmosAddress: null,
+      rbookAddress: null,
       hasValidSenderIdentity: false,
       rejectReason: `DB read error: ${err instanceof Error ? err.message : 'unknown'}`,
     };
@@ -369,7 +369,7 @@ export async function resolveSenderContext(
       projectRoot,
       source,
       dashboardProjectId: v.dashboardProjectId,
-      cmosAddress: v.cmosAddress,
+      rbookAddress: v.rbookAddress,
       healed: v.healed,
       candidates,
     };
@@ -444,11 +444,11 @@ export async function resolveSenderContext(
       source: 'client-cwd',
       projectRoot: codex.cwd,
       accepted: false,
-      rejectReason: 'no CMOS database at projectRoot',
+      rejectReason: 'no Reasonbook database at projectRoot',
     });
     if (!isContextlessDirectory(codex.cwd, { homeDir, installRoot })) {
       throw new SenderResolutionError(
-        `No CMOS project in the client's working folder '${codex.cwd}'. Pass projectRoot explicitly.`,
+        `No Reasonbook project in the client's working folder '${codex.cwd}'. Pass projectRoot explicitly.`,
         candidates,
         undefined,
         { outcome: 'no-project-here', workingDir: codex.cwd }
@@ -468,7 +468,7 @@ export async function resolveSenderContext(
       source: 'mcp-roots',
       projectRoot: root,
       accepted: false,
-      rejectReason: 'no CMOS database at projectRoot',
+      rejectReason: 'no Reasonbook database at projectRoot',
     });
   }
 
@@ -480,18 +480,18 @@ export async function resolveSenderContext(
     source: 'cwd',
     projectRoot: cwd,
     accepted: false,
-    rejectReason: 'no CMOS database at projectRoot',
+    rejectReason: 'no Reasonbook database at projectRoot',
   });
 
   // ─── Step 4: defaults — contextless calls only ─────────────────────────
   const contextless =
     mcpRoots.length === 0 && isContextlessDirectory(cwd, { homeDir, installRoot });
   if (!contextless) {
-    // A real working folder that is not a CMOS project. Name the folder the client advertised
+    // A real working folder that is not a Reasonbook project. Name the folder the client advertised
     // when it advertised one; otherwise the server's cwd.
     throw new SenderResolutionError(
-      `No CMOS project in '${mcpRoots[0] ?? cwd}'. No projectRoot was passed and no enclosing ` +
-        'folder holds cmos/db/cmos.sqlite.',
+      `No Reasonbook project in '${mcpRoots[0] ?? cwd}'. No projectRoot was passed and no enclosing ` +
+        'folder holds rbook/db/rbook.sqlite.',
       candidates,
       undefined,
       { outcome: 'no-project-here', workingDir: mcpRoots[0] ?? cwd }
@@ -539,7 +539,7 @@ export async function resolveSenderContext(
 
   // ─── Step 5: fail closed ────────────────────────────────────────────────
   throw new SenderResolutionError(
-    `No CMOS project for this call: the server's working directory '${cwd}' carries no project ` +
+    `No Reasonbook project for this call: the server's working directory '${cwd}' carries no project ` +
       'context, no projectRoot was passed, and no default applies.',
     candidates,
     undefined,

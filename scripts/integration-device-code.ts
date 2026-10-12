@@ -1,14 +1,15 @@
 // ABOUTME: One-shot integration: run the real device code flow against the live cmos-dashboard.
-// ABOUTME: Sprint 57 m01 live validation; Sprint 58 m03 aligned under CMOS_LIVE_DASHBOARD=1 flag.
+// ABOUTME: Sprint 57 m01 live validation; Sprint 58 m03 aligned under RBOOK_LIVE_DASHBOARD=1 flag.
 
 /**
  * Manual smoke script for the device-code flow.
  *
  * Prefer the jest live-mode blocks for reproducible assertions — this
  * script is a quick sanity shot for contract drift. Both paths honor the
- * same `CMOS_LIVE_DASHBOARD=1` opt-in so no one runs it accidentally.
+ * same `RBOOK_LIVE_DASHBOARD=1` opt-in so no one runs it accidentally.
  */
 
+import { getSetting } from '../src/intelligence/legacy-compat';
 import { promises as fs } from 'fs';
 import os from 'os';
 import path from 'path';
@@ -16,19 +17,19 @@ import { runDeviceCodeFlow } from '../src/auth/device-code';
 import { CredentialStore } from '../src/intelligence/credential-store';
 
 async function main(): Promise<void> {
-  if (process.env.CMOS_LIVE_DASHBOARD !== '1') {
+  if (getSetting('RBOOK_LIVE_DASHBOARD') !== '1') {
     throw new Error(
-      'CMOS_LIVE_DASHBOARD=1 must be set to run the live device-code script ' +
+      'RBOOK_LIVE_DASHBOARD=1 must be set to run the live device-code script ' +
         '(safety rail — prevents accidental live hits from test tooling).'
     );
   }
 
-  const baseUrl = process.env.CMOS_DASHBOARD_URL;
+  const baseUrl = getSetting('RBOOK_DASHBOARD_URL');
   if (!baseUrl) {
-    throw new Error('CMOS_DASHBOARD_URL must be set');
+    throw new Error('RBOOK_DASHBOARD_URL must be set');
   }
 
-  // Ephemeral credential store so we don't pollute real ~/.config/cmos-mcp/credentials.json.
+  // Ephemeral credential store so we don't pollute real ~/.config/rbook/credentials.json.
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'live-device-code-'));
   CredentialStore.resetInstance();
   const store = await CredentialStore.create({ configDir: tempDir });

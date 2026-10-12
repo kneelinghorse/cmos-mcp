@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-// ABOUTME: s86-m07 — cmos_message send/list/directory over real MCP stdio against the BUILT dist/,
+// ABOUTME: s86-m07 — rbook_message send/list/directory over real MCP stdio against the BUILT dist/,
 // ABOUTME: driven by a loopback stub serving the dashboard's verbatim recorded bodies.
 
 /**
  * Sprint 86 m07 — the address-and-inbox surfaces, proven through the transport they ship over.
  *
- * WHY THIS EXISTS ALONGSIDE tests/tools/cmos/message-address-collision.test.ts. A handler-only
+ * WHY THIS EXISTS ALONGSIDE tests/tools/rbook/message-address-collision.test.ts. A handler-only
  * test is exactly what let `statusFilter`, `expiresAt` and `agentFeedback` each ship
  * declared-but-dead: the handler was right and nothing reached it. Three of this mission's
  * claims are only true if they survive the MCP dispatch boundary AND the formatter:
@@ -16,16 +16,17 @@
  *   - the inbox scope warning is gated on which CREDENTIAL ARM fired, and the arm is chosen by
  *     `DashboardClient.fromEnvForProject` reading the real CredentialStore off disk. Stubbing
  *     that predicate would assert the gate against itself, so instead each leg selects its arm
- *     hermetically via CMOS_CONFIG_DIR + CMOS_DASHBOARD_API_KEY and lets resolution really run.
+ *     hermetically via RBOOK_CONFIG_DIR + RBOOK_DASHBOARD_API_KEY and lets resolution really run.
  *
  * NO NETWORK, NO OPERATOR CREDENTIALS. Every leg binds an HTTP stub to 127.0.0.1 on an ephemeral
- * port and writes its own CMOS_CONFIG_DIR under os.tmpdir(). The real
- * ~/.config/cmos-mcp/credentials.json holds live `cmk_` secrets and is never read or written.
+ * port and writes its own RBOOK_CONFIG_DIR under os.tmpdir(). The real
+ * ~/.config/rbook/credentials.json holds live `cmk_` secrets and is never read or written.
  *
  * NO SILENT FAIL-OPEN. A missing dist/ or live store FAILS in the private tree. Only a
  * structurally identified public mirror skips, and the shared helper prints why.
  */
 
+import { LEGACY } from '../../src/intelligence/legacy-compat';
 import { afterAll, beforeAll, expect, it } from '@jest/globals';
 import Database from 'better-sqlite3';
 import * as http from 'http';
@@ -40,7 +41,7 @@ const REPO_ROOT = path.resolve(__dirname, '../..');
 const DIST_ENTRY = path.join(REPO_ROOT, 'dist', 'index.js');
 const PRIVATE = requiresPrivateEvidence({
   reason:
-    'This built-server messaging E2E derives its scratch project from the private live CMOS store.',
+    'This built-server messaging E2E derives its scratch project from the private live Reasonbook store.',
   paths: { liveDb: 'cmos/db/cmos.sqlite' },
 });
 
@@ -60,13 +61,13 @@ function mkTmp(prefix: string): string {
  */
 function scratchProject(prefix: string): string {
   const projectRoot = mkTmp(prefix);
-  const dbDir = path.join(projectRoot, 'cmos', 'db');
+  const dbDir = path.join(projectRoot, 'rbook', 'db');
   fs.mkdirSync(dbDir, { recursive: true });
   for (const suffix of ['', '-wal', '-shm']) {
     const src = `${PRIVATE.paths.liveDb}${suffix}`;
-    if (fs.existsSync(src)) fs.copyFileSync(src, path.join(dbDir, `cmos.sqlite${suffix}`));
+    if (fs.existsSync(src)) fs.copyFileSync(src, path.join(dbDir, `rbook.sqlite${suffix}`));
   }
-  const db = new Database(path.join(dbDir, 'cmos.sqlite'));
+  const db = new Database(path.join(dbDir, 'rbook.sqlite'));
   db.prepare(
     `INSERT OR REPLACE INTO metadata (key, value) VALUES ('dashboard_registered', 'true')`
   ).run();
@@ -132,7 +133,7 @@ const DIRECTORY_BODY = {
       slug: 'cmos-mcp',
       owner: 'derek',
       ownerDisplayName: 'Derek',
-      cmosAddress: 'cmos://derek/cmos-mcp',
+      [LEGACY.wireAddressKey]: `${LEGACY.addressScheme}derek/cmos-mcp`,
       createdAt: '2025-11-13T00:01:41.000Z',
     },
     {
@@ -141,16 +142,16 @@ const DIRECTORY_BODY = {
       slug: 'cmos-mcp-pro',
       owner: 'derek',
       ownerDisplayName: 'Derek',
-      cmosAddress: 'cmos://derek/cmos-mcp-pro',
+      [LEGACY.wireAddressKey]: `${LEGACY.addressScheme}derek/cmos-mcp-pro`,
       createdAt: '2026-01-04T18:22:10.000Z',
     },
     {
       id: '9566f5ce-f171-4e95-a24e-ad756c2b8807',
-      name: 'CMOS Dashboard',
+      name: `${LEGACY.proseName} Dashboard`,
       slug: 'cmos-dashboard',
       owner: 'derek',
       ownerDisplayName: 'Derek',
-      cmosAddress: 'cmos://derek/cmos-dashboard',
+      [LEGACY.wireAddressKey]: `${LEGACY.addressScheme}derek/cmos-dashboard`,
       createdAt: '2025-12-01T00:00:00.000Z',
     },
   ],
@@ -164,7 +165,7 @@ const MY_PROJECTS_BODY = {
       id: PRO_ID,
       name: 'CMOS-MCP Pro',
       slug: 'cmos-mcp-pro',
-      cmosAddress: 'cmos://derek/cmos-mcp-pro',
+      [LEGACY.wireAddressKey]: `${LEGACY.addressScheme}derek/cmos-mcp-pro`,
       isOwner: true,
     },
   ],
@@ -209,7 +210,7 @@ async function startStub(): Promise<StubServer> {
     if (url.startsWith('/api/messages/resolve')) {
       // The verbatim recorded shape: `resolved` is an OBJECT.
       const address = decodeURIComponent(url.split('address=')[1] ?? '');
-      const slug = address.replace('cmos://', '').split('/')[1] ?? '';
+      const slug = address.replace(LEGACY.addressScheme, '').split('/')[1] ?? '';
       const row = DIRECTORY_BODY.projects.find((p) => p.slug === slug);
       if (!row) return send(404, { error: 'not found' });
       return send(200, {
@@ -246,19 +247,19 @@ async function connect(opts: {
     cwd: opts.projectRoot,
     env: {
       ...(process.env as Record<string, string>),
-      CMOS_PROJECT_ROOT: opts.projectRoot,
-      CMOS_CONFIG_DIR: opts.configDir,
-      CMOS_DASHBOARD_URL: `http://127.0.0.1:${opts.port}`,
-      CMOS_CHECKPOINT_SYNC: 'off',
-      CMOS_DASHBOARD_API_KEY: opts.apiKeyEnv ?? '',
-      CMOS_DASHBOARD_USER: '',
-      CMOS_DASHBOARD_PASSWORD: '',
+      RBOOK_PROJECT_ROOT: opts.projectRoot,
+      RBOOK_CONFIG_DIR: opts.configDir,
+      RBOOK_DASHBOARD_URL: `http://127.0.0.1:${opts.port}`,
+      RBOOK_CHECKPOINT_SYNC: 'off',
+      RBOOK_DASHBOARD_API_KEY: opts.apiKeyEnv ?? '',
+      RBOOK_DASHBOARD_USER: '',
+      RBOOK_DASHBOARD_PASSWORD: '',
     },
     clientName: opts.clientName,
   });
 }
 
-PRIVATE.describe('cmos_message address collision + unread badge over stdio (s86-m07)', () => {
+PRIVATE.describe('rbook_message address collision + unread badge over stdio (s86-m07)', () => {
   beforeAll(() => {
     if (!fs.existsSync(DIST_ENTRY)) {
       throw new Error(
@@ -280,8 +281,8 @@ PRIVATE.describe('cmos_message address collision + unread badge over stdio (s86-
   // ─── send: the advisory reaches the text, exactly once, and never blocks ──
 
   it('sends to the ambiguous address, SUCCEEDS, and names the sibling once in the rendered text', async () => {
-    const projectRoot = scratchProject('cmos-m07-send-');
-    const configDir = scratchConfigDir('cmos-m07-send-cfg-', {
+    const projectRoot = scratchProject('rbook-m07-send-');
+    const configDir = scratchConfigDir('rbook-m07-send-cfg-', {
       userScopedKeys: { 'user-1': { key: 'cmk_user_live' } },
     });
     const stub = await startStub();
@@ -292,12 +293,12 @@ PRIVATE.describe('cmos_message address collision + unread badge over stdio (s86-
         projectRoot,
         configDir,
         port: stub.port,
-        clientName: 'cmos-m07-send',
+        clientName: 'rbook-m07-send',
       });
 
-      const res = await harness.callTool('cmos_message', {
+      const res = await harness.callTool('rbook_message', {
         action: 'send',
-        targetAddress: 'cmos://derek/cmos-mcp',
+        targetAddress: 'rbook://derek/cmos-mcp',
         type: 'question',
         summary: 'is this the project I meant?',
         projectRoot,
@@ -311,7 +312,7 @@ PRIVATE.describe('cmos_message address collision + unread badge over stdio (s86-
 
       // The resolved project name AND the prefix sibling reach the channel an agent reads.
       expect(text).toContain("target resolves to project 'cmos-mcp'");
-      expect(text).toContain('cmos://derek/cmos-mcp-pro');
+      expect(text).toContain('rbook://derek/cmos-mcp-pro');
 
       // EXACTLY once — a count, not a presence. One channel renders it; nothing renders it twice.
       expect(text.split('shares a slug prefix with').length - 1).toBe(1);
@@ -327,8 +328,8 @@ PRIVATE.describe('cmos_message address collision + unread badge over stdio (s86-
   }, 120000);
 
   it('adds no warning line to an unambiguous send', async () => {
-    const projectRoot = scratchProject('cmos-m07-clean-');
-    const configDir = scratchConfigDir('cmos-m07-clean-cfg-', {
+    const projectRoot = scratchProject('rbook-m07-clean-');
+    const configDir = scratchConfigDir('rbook-m07-clean-cfg-', {
       userScopedKeys: { 'user-1': { key: 'cmk_user_live' } },
     });
     const stub = await startStub();
@@ -339,12 +340,12 @@ PRIVATE.describe('cmos_message address collision + unread badge over stdio (s86-
         projectRoot,
         configDir,
         port: stub.port,
-        clientName: 'cmos-m07-clean',
+        clientName: 'rbook-m07-clean',
       });
 
-      const res = await harness.callTool('cmos_message', {
+      const res = await harness.callTool('rbook_message', {
         action: 'send',
-        targetAddress: 'cmos://derek/cmos-dashboard',
+        targetAddress: 'rbook://derek/cmos-dashboard',
         type: 'question',
         summary: 'no collision here',
         projectRoot,
@@ -363,8 +364,8 @@ PRIVATE.describe('cmos_message address collision + unread badge over stdio (s86-
   // ─── directory: ambiguity + a real ownership signal ───────────────────────
 
   it('renders the ambiguity pair and marks the operator’s own project', async () => {
-    const projectRoot = scratchProject('cmos-m07-dir-');
-    const configDir = scratchConfigDir('cmos-m07-dir-cfg-', {
+    const projectRoot = scratchProject('rbook-m07-dir-');
+    const configDir = scratchConfigDir('rbook-m07-dir-cfg-', {
       userScopedKeys: { 'user-1': { key: 'cmk_user_live' } },
     });
     const stub = await startStub();
@@ -375,18 +376,18 @@ PRIVATE.describe('cmos_message address collision + unread badge over stdio (s86-
         projectRoot,
         configDir,
         port: stub.port,
-        clientName: 'cmos-m07-dir',
+        clientName: 'rbook-m07-dir',
       });
 
-      const res = await harness.callTool('cmos_message', { action: 'directory', projectRoot });
+      const res = await harness.callTool('rbook_message', { action: 'directory', projectRoot });
       const text = harness.textOf(res);
 
-      expect(text).toContain('AMBIGUOUS with cmos://derek/cmos-mcp-pro');
-      expect(text).toContain('AMBIGUOUS with cmos://derek/cmos-mcp');
+      expect(text).toContain('AMBIGUOUS with rbook://derek/cmos-mcp-pro');
+      expect(text).toContain('AMBIGUOUS with rbook://derek/cmos-mcp');
       // The dashboard row for cmos-dashboard has no prefix sibling and must not claim one.
       const dashboardLine = text
         .split('\n')
-        .find((l) => l.includes('cmos://derek/cmos-dashboard'))!;
+        .find((l) => l.includes('rbook://derek/cmos-dashboard'))!;
       expect(dashboardLine).not.toContain('AMBIGUOUS');
 
       const data = harness.dataOf(res) as {
@@ -419,9 +420,9 @@ PRIVATE.describe('cmos_message address collision + unread badge over stdio (s86-
         configDir: seed.configDir,
         port: stub.port,
         apiKeyEnv: seed.apiKeyEnv,
-        clientName: `cmos-m07-list-${leg}`,
+        clientName: `rbook-m07-list-${leg}`,
       });
-      const res = await harness.callTool('cmos_message', {
+      const res = await harness.callTool('rbook_message', {
         action: 'list',
         tab: 'inbox',
         status: 'pending',
@@ -438,8 +439,8 @@ PRIVATE.describe('cmos_message address collision + unread badge over stdio (s86-
   }
 
   it('user-scoped: warns, and the header no longer contradicts itself', async () => {
-    const projectRoot = scratchProject('cmos-m07-user-');
-    const configDir = scratchConfigDir('cmos-m07-user-cfg-', {
+    const projectRoot = scratchProject('rbook-m07-user-');
+    const configDir = scratchConfigDir('rbook-m07-user-cfg-', {
       userScopedKeys: { 'user-1': { key: 'cmk_user_live' } },
     });
 
@@ -461,9 +462,9 @@ PRIVATE.describe('cmos_message address collision + unread badge over stdio (s86-
   }, 120000);
 
   it('legacy-env: warns too — the predicate is a rule over KeySource, not an equality test', async () => {
-    const projectRoot = scratchProject('cmos-m07-legacy-');
+    const projectRoot = scratchProject('rbook-m07-legacy-');
     // An EMPTY credential store, so arms 2 and 3 miss and the env key is what fires.
-    const configDir = scratchConfigDir('cmos-m07-legacy-cfg-', {});
+    const configDir = scratchConfigDir('rbook-m07-legacy-cfg-', {});
 
     const { data } = await listWith('legacy', {
       configDir,
@@ -477,8 +478,8 @@ PRIVATE.describe('cmos_message address collision + unread badge over stdio (s86-
   }, 120000);
 
   it('project-scoped: does NOT warn — this view really is scoped to one project', async () => {
-    const projectRoot = scratchProject('cmos-m07-proj-');
-    const configDir = scratchConfigDir('cmos-m07-proj-cfg-', {
+    const projectRoot = scratchProject('rbook-m07-proj-');
+    const configDir = scratchConfigDir('rbook-m07-proj-cfg-', {
       userScopedKeys: { 'user-1': { key: 'cmk_user_live' } },
       projectKeys: {
         [projectRoot]: { key: 'cmk_project_live', keyId: 'p-1', parentKeyId: 'user-1' },

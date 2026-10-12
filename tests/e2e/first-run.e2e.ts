@@ -8,7 +8,7 @@
  *
  * This is NOT a unit test — it packs the existing build, installs the tarball into
  * an isolated temp host, and speaks the Model Context Protocol over stdio to the
- * installed dist. It asserts the published artifact announces `cmos-mcp` @ the
+ * installed dist. It asserts the published artifact announces `rbook` @ the
  * package version (what siblings consume, not just the repo dist) and that every
  * documented quickstart command works end-to-end.
  *
@@ -17,8 +17,8 @@
  * it with `npm run test:e2e-firstrun` (its own jest.e2e.config.js) and in CI.
  *
  * s92-m07: a normal start writes two stderr lines (the version, and the project resolved at
- * startup); every other diagnostic is behind CMOS_DEBUG=1. The stderr test below spawns its own
- * servers with a literal environment and pins that budget, with CMOS_DEBUG as its positive control.
+ * startup); every other diagnostic is behind RBOOK_DEBUG=1. The stderr test below spawns its own
+ * servers with a literal environment and pins that budget, with RBOOK_DEBUG as its positive control.
  *
  * @module tests/e2e/first-run.e2e
  */
@@ -50,7 +50,7 @@ function mkTmp(prefix: string): string {
 let installedServer = ''; // absolute path to the installed dist/index.js
 let hostDir = ''; // the consumer project the tarball was installed into
 let projectDir = ''; // fresh project cwd for the server
-let configDir = ''; // isolated CMOS_CONFIG_DIR
+let configDir = ''; // isolated RBOOK_CONFIG_DIR
 let client: Client;
 let transport: StdioClientTransport;
 
@@ -75,11 +75,11 @@ describe('first-run E2E: pack -> install -> drive quickstart over stdio (s77-m10
     installedServer = artifact.serverPath;
 
     // 3. Spawn the INSTALLED server over real MCP stdio from a fresh project cwd,
-    //    with an isolated config dir and CMOS_PROJECT_ROOT deleted (auto-discovery).
-    projectDir = mkTmp('cmos-e2e-project-');
-    configDir = mkTmp('cmos-e2e-config-');
-    const env = { ...process.env, CMOS_CONFIG_DIR: configDir } as Record<string, string>;
-    delete env.CMOS_PROJECT_ROOT;
+    //    with an isolated config dir and RBOOK_PROJECT_ROOT deleted (auto-discovery).
+    projectDir = mkTmp('rbook-e2e-project-');
+    configDir = mkTmp('rbook-e2e-config-');
+    const env = { ...process.env, RBOOK_CONFIG_DIR: configDir } as Record<string, string>;
+    delete env.RBOOK_PROJECT_ROOT;
 
     // s80-m01: connect via the shared stdio bootstrap (also used by verify:dist).
     const harness = await connectStdioServer({
@@ -103,29 +103,29 @@ describe('first-run E2E: pack -> install -> drive quickstart over stdio (s77-m10
     }
   });
 
-  it('announces cmos-mcp @ the package version and exposes all 15 tools', async () => {
+  it('announces rbook @ the package version and exposes all 15 tools', async () => {
     const info = client.getServerVersion();
-    expect(info?.name).toBe('cmos-mcp');
+    expect(info?.name).toBe('rbook');
     expect(info?.version).toBe(PKG.version);
 
     const tools = await client.listTools();
     expect(tools.tools).toHaveLength(15);
   });
 
-  it('s92-m07: a clean-room start writes at most two stderr lines; CMOS_DEBUG=1 brings the rest back', async () => {
+  it('s92-m07: a clean-room start writes at most two stderr lines; RBOOK_DEBUG=1 brings the rest back', async () => {
     const startupStderr = async (debug: boolean): Promise<string[]> => {
       // A literal environment: nothing inherited from the developer's shell.
       const env: Record<string, string> = {
-        HOME: mkTmp('cmos-e2e-quiet-home-'),
-        CMOS_CONFIG_DIR: mkTmp('cmos-e2e-quiet-config-'),
-        CMOS_CHECKPOINT_SYNC: 'off',
+        HOME: mkTmp('rbook-e2e-quiet-home-'),
+        RBOOK_CONFIG_DIR: mkTmp('rbook-e2e-quiet-config-'),
+        RBOOK_CHECKPOINT_SYNC: 'off',
         PATH: process.env.PATH ?? path.dirname(process.execPath),
-        ...(debug ? { CMOS_DEBUG: '1' } : {}),
+        ...(debug ? { RBOOK_DEBUG: '1' } : {}),
       };
       const quietTransport = new StdioClientTransport({
         command: process.execPath,
         args: [installedServer],
-        cwd: mkTmp('cmos-e2e-quiet-cwd-'),
+        cwd: mkTmp('rbook-e2e-quiet-cwd-'),
         env,
         stderr: 'pipe',
       });
@@ -150,8 +150,8 @@ describe('first-run E2E: pack -> install -> drive quickstart over stdio (s77-m10
 
     const quiet = await startupStderr(false);
     expect(quiet.length).toBeLessThanOrEqual(2);
-    expect(quiet[0]).toBe(`[cmos-mcp] v${PKG.version} ready on stdio (15 tools)`);
-    expect(quiet[1]).toMatch(/^\[cmos-mcp\] project: none at startup/);
+    expect(quiet[0]).toBe(`[reasonbook] v${PKG.version} ready on stdio (15 tools)`);
+    expect(quiet[1]).toMatch(/^\[reasonbook\] project: none at startup/);
     // Positive control: the diagnostics still exist; they are gated, not deleted.
     const verbose = await startupStderr(true);
     expect(verbose.length).toBeGreaterThan(10);
@@ -166,13 +166,13 @@ describe('first-run E2E: pack -> install -> drive quickstart over stdio (s77-m10
     expect(fs.existsSync(path.join(hostDir, 'node_modules', 'onnxruntime-node'))).toBe(false);
     expect(fs.existsSync(path.join(hostDir, 'node_modules', 'fast-xml-parser'))).toBe(false);
 
-    const healthProject = mkTmp('cmos-e2e-health-project-');
-    await callOk('cmos_project', {
+    const healthProject = mkTmp('rbook-e2e-health-project-');
+    await callOk('rbook_project', {
       action: 'init',
       projectRoot: healthProject,
       projectName: 'e2e-health',
     });
-    const health = await callOk('cmos_db', { action: 'health', projectRoot: healthProject });
+    const health = await callOk('rbook_db', { action: 'health', projectRoot: healthProject });
     expect(dataOf(health)?.semanticSearch).toMatchObject({
       enabled: false,
       state: 'not-installed',
@@ -180,10 +180,10 @@ describe('first-run E2E: pack -> install -> drive quickstart over stdio (s77-m10
     expect(textOf(health)).toMatch(/Semantic search\*\*: off/);
   });
 
-  it('`--version` on the installed dist prints cmos-mcp <version> and exits 0', () => {
+  it('`--version` on the installed dist prints reasonbook <version> and exits 0', () => {
     const res = spawnSync(process.execPath, [installedServer, '--version'], { encoding: 'utf8' });
     expect(res.status).toBe(0);
-    expect(res.stdout.trim()).toBe(`cmos-mcp ${PKG.version}`);
+    expect(res.stdout.trim()).toBe(`reasonbook ${PKG.version}`);
   });
 
   it('drives the documented quickstart lifecycle end-to-end', async () => {
@@ -191,46 +191,46 @@ describe('first-run E2E: pack -> install -> drive quickstart over stdio (s77-m10
     // s93-m12: a new project defaults to the Ledger level, where onboard hides the mission queue.
     // The documented quick starts teach sprints and missions, so they init at the Builder level,
     // and so does this; the queued-mission check below fails for a Ledger project.
-    await callOk('cmos_project', {
+    await callOk('rbook_project', {
       action: 'init',
       projectRoot: projectDir,
       projectName: 'e2e-first-run',
       projectType: 'build',
     });
-    expect(fs.existsSync(path.join(projectDir, 'cmos', 'db', 'cmos.sqlite'))).toBe(true);
+    expect(fs.existsSync(path.join(projectDir, 'rbook', 'db', 'rbook.sqlite'))).toBe(true);
 
     // The documented opener (m07) works against the freshly-initialized store.
-    const review = await callOk('cmos_review', { projectRoot: projectDir });
+    const review = await callOk('rbook_review', { projectRoot: projectDir });
     expect(textOf(review).length).toBeGreaterThan(0);
 
     // Cold-start onboard shows the fresh project + its name.
-    const onboard1 = await callOk('cmos_agent_onboard', { projectRoot: projectDir });
+    const onboard1 = await callOk('rbook_agent_onboard', { projectRoot: projectDir });
     const onboard1Data = dataOf(onboard1);
     expect(onboard1Data?.project?.name).toBe('e2e-first-run');
     expect(onboard1Data?.freshProject).toBe(true);
 
     // Sprint -> session -> capture -> mission -> transitions -> complete.
-    await callOk('cmos_sprint', {
+    await callOk('rbook_sprint', {
       action: 'add',
       sprintId: 'sprint-01',
       title: 'First sprint',
       focus: 'Ship the first feature',
       projectRoot: projectDir,
     });
-    await callOk('cmos_session', {
+    await callOk('rbook_session', {
       action: 'start',
       type: 'planning',
       title: 'Plan sprint 01',
       sprintId: 'sprint-01',
       projectRoot: projectDir,
     });
-    await callOk('cmos_session', {
+    await callOk('rbook_session', {
       action: 'capture',
       category: 'decision',
       content: 'Use device-code auth for the dashboard handshake',
       projectRoot: projectDir,
     });
-    await callOk('cmos_mission', {
+    await callOk('rbook_mission', {
       action: 'add',
       missionId: 's01-m01',
       name: 'First mission',
@@ -240,22 +240,22 @@ describe('first-run E2E: pack -> install -> drive quickstart over stdio (s77-m10
       projectRoot: projectDir,
     });
     // A Builder project's onboard lists the queued mission; a Ledger project's leaves it out.
-    const queued = dataOf(await callOk('cmos_agent_onboard', { projectRoot: projectDir }));
+    const queued = dataOf(await callOk('rbook_agent_onboard', { projectRoot: projectDir }));
     expect((queued?.pendingMissions ?? []).map((mission: { id: string }) => mission.id)).toContain(
       's01-m01'
     );
-    await callOk('cmos_mission_transition', {
+    await callOk('rbook_mission_transition', {
       action: 'start',
       missionId: 's01-m01',
       projectRoot: projectDir,
     });
-    await callOk('cmos_mission_transition', {
+    await callOk('rbook_mission_transition', {
       action: 'complete',
       missionId: 's01-m01',
       notes: 'Shipped the feature end-to-end',
       projectRoot: projectDir,
     });
-    await callOk('cmos_session', {
+    await callOk('rbook_session', {
       action: 'complete',
       summary: 'Sprint 01 first mission shipped',
       projectRoot: projectDir,
@@ -265,15 +265,15 @@ describe('first-run E2E: pack -> install -> drive quickstart over stdio (s77-m10
     // completed mission leaves the pending queue and shows up as real completion
     // activity (onboard doesn't echo completed-mission ids, so assert the signals it
     // actually surfaces).
-    const onboard2 = await callOk('cmos_agent_onboard', { projectRoot: projectDir });
+    const onboard2 = await callOk('rbook_agent_onboard', { projectRoot: projectDir });
     const onboard2Data = dataOf(onboard2);
     const onboard2Text = textOf(onboard2) + JSON.stringify(onboard2Data ?? {});
     expect(onboard2Data?.contextFreshness?.latestMissionCompletionAt).toBeTruthy();
     expect(onboard2Data?.pendingMissions ?? []).toHaveLength(0);
     expect(onboard2Text.toLowerCase()).toContain('device-code auth');
 
-    // cmos_status: 5-field health snapshot, local-only auth tier.
-    const status = await callOk('cmos_status', { projectRoot: projectDir });
+    // rbook_status: 5-field health snapshot, local-only auth tier.
+    const status = await callOk('rbook_status', { projectRoot: projectDir });
     const statusText = textOf(status) + JSON.stringify(dataOf(status) ?? {});
     expect(statusText).toContain('auth_tier');
     expect(statusText).toContain('none');
@@ -293,8 +293,8 @@ describe('first-run E2E: pack -> install -> drive quickstart over stdio (s77-m10
     let cleanConfig = '';
 
     beforeAll(() => {
-      cleanHome = mkTmp('cmos-e2e-clean-home-');
-      cleanConfig = mkTmp('cmos-e2e-clean-config-');
+      cleanHome = mkTmp('rbook-e2e-clean-home-');
+      cleanConfig = mkTmp('rbook-e2e-clean-config-');
     });
 
     afterAll(async () => {
@@ -307,8 +307,8 @@ describe('first-run E2E: pack -> install -> drive quickstart over stdio (s77-m10
         cwd,
         env: {
           HOME: cleanHome,
-          CMOS_CONFIG_DIR: cleanConfig,
-          CMOS_CHECKPOINT_SYNC: 'off',
+          RBOOK_CONFIG_DIR: cleanConfig,
+          RBOOK_CHECKPOINT_SYNC: 'off',
           PATH: process.env.PATH ?? path.dirname(process.execPath),
           NODE_ENV: 'test',
         },
@@ -320,7 +320,7 @@ describe('first-run E2E: pack -> install -> drive quickstart over stdio (s77-m10
 
     /** Row counts that any write to the project would change. */
     function rows(root: string): Record<string, number> {
-      const db = new Database(path.join(root, 'cmos', 'db', 'cmos.sqlite'), { readonly: true });
+      const db = new Database(path.join(root, 'rbook', 'db', 'rbook.sqlite'), { readonly: true });
       try {
         const count = (table: string): number =>
           (db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
@@ -336,14 +336,14 @@ describe('first-run E2E: pack -> install -> drive quickstart over stdio (s77-m10
     }
 
     it('singleton: with one registered project, calls from an unrelated folder write nothing anywhere', async () => {
-      const projectA = mkTmp('cmos-e2e-clean-a-');
+      const projectA = mkTmp('rbook-e2e-clean-a-');
       const setup = await server(projectA);
-      await setup.callOk('cmos_project', {
+      await setup.callOk('rbook_project', {
         action: 'init',
         projectRoot: projectA,
         projectName: 'Clean A',
       });
-      await setup.callOk('cmos_decisions', {
+      await setup.callOk('rbook_decisions', {
         action: 'record',
         content: 'Project A decision: use Rust for the CLI.',
         projectRoot: projectA,
@@ -351,59 +351,59 @@ describe('first-run E2E: pack -> install -> drive quickstart over stdio (s77-m10
       await setup.close();
       const before = rows(projectA);
 
-      const elsewhere = mkTmp('cmos-e2e-clean-elsewhere-');
+      const elsewhere = mkTmp('rbook-e2e-clean-elsewhere-');
       const stranger = await server(elsewhere);
       const calls: Array<[string, Record<string, unknown>]> = [
-        ['cmos_review', {}],
+        ['rbook_review', {}],
         [
-          'cmos_decisions',
+          'rbook_decisions',
           { action: 'record', content: 'Project B decision: use Go for the API.' },
         ],
-        ['cmos_session', { action: 'start', title: 'B work' }],
-        ['cmos_session', { action: 'capture', category: 'decision', content: 'B capture' }],
+        ['rbook_session', { action: 'start', title: 'B work' }],
+        ['rbook_session', { action: 'capture', category: 'decision', content: 'B capture' }],
       ];
       for (const [tool, args] of calls) {
         const result = await stranger.callTool(tool, args);
         expect({ tool, refused: result.isError === true }).toEqual({ tool, refused: true });
-        expect(stranger.textOf(result)).toContain('No CMOS project in');
+        expect(stranger.textOf(result)).toContain('No Reasonbook project in');
         expect(stranger.textOf(result)).toContain(path.basename(elsewhere));
       }
       await stranger.close();
       expect(rows(projectA)).toEqual(before);
-      expect(fs.existsSync(path.join(elsewhere, 'cmos'))).toBe(false);
+      expect(fs.existsSync(path.join(elsewhere, 'rbook'))).toBe(false);
     });
 
-    it('an explicit root that is not a CMOS project is refused by name, and nothing is written', async () => {
-      const projectA = mkTmp('cmos-e2e-clean-explicit-a-');
+    it('an explicit root that is not a Reasonbook project is refused by name, and nothing is written', async () => {
+      const projectA = mkTmp('rbook-e2e-clean-explicit-a-');
       const a = await server(projectA);
-      await a.callOk('cmos_project', { action: 'init', projectRoot: projectA, projectName: 'A' });
+      await a.callOk('rbook_project', { action: 'init', projectRoot: projectA, projectName: 'A' });
       const before = rows(projectA);
-      const plain = mkTmp('cmos-e2e-clean-plain-');
-      const result = await a.callTool('cmos_decisions', {
+      const plain = mkTmp('rbook-e2e-clean-plain-');
+      const result = await a.callTool('rbook_decisions', {
         action: 'record',
         content: 'This must land nowhere.',
         projectRoot: plain,
       });
       expect(result.isError).toBe(true);
-      expect(result.structuredContent?.error?.code).toBe('CMOS_NOT_DETECTED');
+      expect(result.structuredContent?.error?.code).toBe('RBOOK_NOT_DETECTED');
       expect(a.textOf(result)).toContain(path.basename(plain));
-      expect(a.textOf(result)).toContain('cmos_project(action="init"');
+      expect(a.textOf(result)).toContain('rbook_project(action="init"');
       expect(rows(projectA)).toEqual(before);
-      expect(fs.existsSync(path.join(plain, 'cmos'))).toBe(false);
+      expect(fs.existsSync(path.join(plain, 'rbook'))).toBe(false);
     });
 
     it('a fresh project opens with the onboard flow and nothing misleading', async () => {
-      const fresh = mkTmp('cmos-e2e-clean-fresh-');
+      const fresh = mkTmp('rbook-e2e-clean-fresh-');
       const s = await server(fresh);
-      await s.callOk('cmos_project', { action: 'init', projectRoot: fresh, projectName: 'Fresh' });
-      const review = await s.callOk('cmos_review', { projectRoot: fresh });
+      await s.callOk('rbook_project', { action: 'init', projectRoot: fresh, projectName: 'Fresh' });
+      const review = await s.callOk('rbook_review', { projectRoot: fresh });
       const actions = (s.dataOf(review)?.next_actions ?? []) as Array<{ command: string }>;
-      expect(actions[0]?.command).toBe('cmos_agent_onboard()');
+      expect(actions[0]?.command).toBe('rbook_agent_onboard()');
       const said = JSON.stringify(actions) + s.textOf(review);
       for (const misleading of [
         'tierSelectionPrompt',
-        'cmos_auth(action="login")',
-        'cmos_message(action="whoami")',
+        'rbook_auth(action="login")',
+        'rbook_message(action="whoami")',
       ]) {
         expect({ misleading, present: said.includes(misleading) }).toEqual({
           misleading,
@@ -413,17 +413,17 @@ describe('first-run E2E: pack -> install -> drive quickstart over stdio (s77-m10
     });
 
     it('record, then start, then complete: no false warning, and the recorded decision is counted', async () => {
-      const root = mkTmp('cmos-e2e-clean-loop-');
+      const root = mkTmp('rbook-e2e-clean-loop-');
       const s = await server(root);
-      await s.callOk('cmos_project', { action: 'init', projectRoot: root, projectName: 'Loop' });
-      await s.callOk('cmos_sprint', {
+      await s.callOk('rbook_project', { action: 'init', projectRoot: root, projectName: 'Loop' });
+      await s.callOk('rbook_sprint', {
         action: 'add',
         sprintId: 'sprint-01',
         title: 'First sprint',
         focus: 'The first feature',
         projectRoot: root,
       });
-      await s.callOk('cmos_mission', {
+      await s.callOk('rbook_mission', {
         action: 'add',
         missionId: 's01-m01',
         name: 'First mission',
@@ -431,18 +431,18 @@ describe('first-run E2E: pack -> install -> drive quickstart over stdio (s77-m10
         objective: 'Deliver the first feature',
         projectRoot: root,
       });
-      await s.callOk('cmos_decisions', {
+      await s.callOk('rbook_decisions', {
         action: 'record',
         missionId: 's01-m01',
         content: 'Chose event sourcing for the audit trail',
         projectRoot: root,
       });
-      await s.callOk('cmos_mission_transition', {
+      await s.callOk('rbook_mission_transition', {
         action: 'start',
         missionId: 's01-m01',
         projectRoot: root,
       });
-      const done = await s.callOk('cmos_mission_transition', {
+      const done = await s.callOk('rbook_mission_transition', {
         action: 'complete',
         missionId: 's01-m01',
         notes: 'Shipped',
@@ -453,7 +453,7 @@ describe('first-run E2E: pack -> install -> drive quickstart over stdio (s77-m10
     });
 
     it('tools/list from the installed package stays under its 24,000-character ceiling', async () => {
-      const s = await server(mkTmp('cmos-e2e-clean-list-'));
+      const s = await server(mkTmp('rbook-e2e-clean-list-'));
       const tools = await s.client.listTools();
       expect(tools.tools).toHaveLength(15);
       expect(JSON.stringify(tools.tools).length).toBeLessThanOrEqual(24_000);

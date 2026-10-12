@@ -16,7 +16,7 @@
  * failure.
  *
  * OPT-IN: `allowNetworkOrigins(['host:port'])` in a test or its `beforeEach`; the list is cleared
- * after every test. `CMOS_LIVE_DASHBOARD=1` (the deliberate live-dashboard runs) disables the deny.
+ * after every test. `RBOOK_LIVE_DASHBOARD=1` (the deliberate live-dashboard runs) disables the deny.
  *
  * NOT COVERED: child processes (a spawned server opens its own sockets; the packed-tarball E2E lane
  * owns those) and raw UDP, which no code here uses.
@@ -36,8 +36,8 @@ export interface BlockedAttempt {
  * alive (the in-band run then exhausted a 2 GB heap, as CI's does). The patch is installed once,
  * marked on the shared prototype, and its state lives on the shared `net` module object.
  */
-const STATE_KEY = Symbol.for('cmos-mcp.tests.network-deny.state');
-const PATCHED_KEY = Symbol.for('cmos-mcp.tests.network-deny.patched');
+const STATE_KEY = Symbol.for('rbook.tests.network-deny.state');
+const PATCHED_KEY = Symbol.for('rbook.tests.network-deny.patched');
 
 interface DenyState {
   blocked: BlockedAttempt[];
@@ -86,7 +86,7 @@ function targetOf(args: unknown[]): { host?: string; port?: number | string; pat
 /** Whether a `Socket#connect` call with these arguments may proceed. */
 export function connectionDecision(args: unknown[]): 'allow' | 'block' {
   const target = targetOf(args);
-  return process.env.CMOS_LIVE_DASHBOARD === '1' ||
+  return process.env.RBOOK_LIVE_DASHBOARD === '1' ||
     // A pipe exactly when net would use one: a non-empty string path (http passes path: null).
     (typeof target.path === 'string' && target.path !== '') ||
     isLoopback(target.host) ||

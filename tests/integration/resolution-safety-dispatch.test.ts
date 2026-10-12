@@ -4,7 +4,7 @@
 
 /**
  * These drive `executeMissionProtocolTool` — the same entry the MCP CallTool handler uses — against
- * stores created by `cmos_project(init)` itself, with `process.cwd()` pointed at the folder the
+ * stores created by `rbook_project(init)` itself, with `process.cwd()` pointed at the folder the
  * scenario stands in. Every refusal is checked for its effect on the store it must NOT touch:
  * project A's decision and session rows are counted before and after.
  */
@@ -16,7 +16,7 @@ import * as os from 'os';
 import * as path from 'path';
 
 import { buildMissionProtocolContext, executeMissionProtocolTool } from '../../src/index';
-import { CmosDetector } from '../../src/intelligence/cmos-detector';
+import { RbookDetector } from '../../src/intelligence/rbook-detector';
 import { ProjectGraphRegistry } from '../../src/intelligence/project-graph-registry';
 
 type Context = Awaited<ReturnType<typeof buildMissionProtocolContext>>;
@@ -39,18 +39,18 @@ describe('s92-m01 resolution safety at the dispatch boundary', () => {
   });
 
   beforeEach(async () => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-s92m01-dispatch-'));
-    savedConfigDir = process.env.CMOS_CONFIG_DIR;
-    process.env.CMOS_CONFIG_DIR = path.join(tmpDir, 'config');
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-s92m01-dispatch-'));
+    savedConfigDir = process.env.RBOOK_CONFIG_DIR;
+    process.env.RBOOK_CONFIG_DIR = path.join(tmpDir, 'config');
     ProjectGraphRegistry.resetInstance();
-    CmosDetector.resetInstance();
+    RbookDetector.resetInstance();
 
     projectA = path.join(tmpDir, 'project-a');
     folderB = path.join(tmpDir, 'folder-b');
     fs.mkdirSync(projectA);
     fs.mkdirSync(folderB);
 
-    const init = await call('cmos_project', {
+    const init = await call('rbook_project', {
       action: 'init',
       projectRoot: projectA,
       projectName: 'Project A',
@@ -61,9 +61,9 @@ describe('s92-m01 resolution safety at the dispatch boundary', () => {
   afterEach(() => {
     jest.restoreAllMocks();
     ProjectGraphRegistry.resetInstance();
-    CmosDetector.resetInstance();
-    if (savedConfigDir === undefined) delete process.env.CMOS_CONFIG_DIR;
-    else process.env.CMOS_CONFIG_DIR = savedConfigDir;
+    RbookDetector.resetInstance();
+    if (savedConfigDir === undefined) delete process.env.RBOOK_CONFIG_DIR;
+    else process.env.RBOOK_CONFIG_DIR = savedConfigDir;
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
@@ -85,7 +85,7 @@ describe('s92-m01 resolution safety at the dispatch boundary', () => {
   }
 
   function rowCounts(projectRoot: string): { decisions: number; sessions: number } {
-    const db = new Database(path.join(projectRoot, 'cmos', 'db', 'cmos.sqlite'), {
+    const db = new Database(path.join(projectRoot, 'rbook', 'db', 'rbook.sqlite'), {
       readonly: true,
       fileMustExist: true,
     });
@@ -108,11 +108,11 @@ describe('s92-m01 resolution safety at the dispatch boundary', () => {
       const before = rowCounts(projectA);
       standIn(folderB);
 
-      const record = await call('cmos_decisions', {
+      const record = await call('rbook_decisions', {
         action: 'record',
         content: 'A decision made while standing in folder B',
       });
-      const session = await call('cmos_session', {
+      const session = await call('rbook_session', {
         action: 'start',
         type: 'custom',
         title: 'Session started in folder B',
@@ -121,26 +121,26 @@ describe('s92-m01 resolution safety at the dispatch boundary', () => {
       for (const result of [record, session]) {
         expect(result.isError).toBe(true);
         expect(structured(result).error).toMatchObject({
-          code: 'CMOS_NOT_DETECTED',
-          message: `No CMOS project in '${folderB}'. Nothing was written.`,
+          code: 'RBOOK_NOT_DETECTED',
+          message: `No Reasonbook project in '${folderB}'. Nothing was written.`,
         });
         expect(structured(result).error?.suggestion).toContain(
-          `cmos_project(action="init", projectRoot=${JSON.stringify(folderB)})`
+          `rbook_project(action="init", projectRoot=${JSON.stringify(folderB)})`
         );
       }
       expect(rowCounts(projectA)).toEqual(before);
       // Nothing was created in B either: the refusal happens before any store is opened.
-      expect(fs.existsSync(path.join(folderB, 'cmos'))).toBe(false);
+      expect(fs.existsSync(path.join(folderB, 'rbook'))).toBe(false);
     });
 
     it('answers a read from folder B with the labelled no-project answer', async () => {
       standIn(folderB);
-      const result = await call('cmos_decisions', { action: 'list' });
+      const result = await call('rbook_decisions', { action: 'list' });
 
       expect(result.isError).toBe(true);
       expect(structured(result).error).toMatchObject({
-        code: 'CMOS_NOT_DETECTED',
-        message: `No CMOS project in '${folderB}'. There is nothing to read here.`,
+        code: 'RBOOK_NOT_DETECTED',
+        message: `No Reasonbook project in '${folderB}'. There is nothing to read here.`,
       });
     });
   });
@@ -149,14 +149,14 @@ describe('s92-m01 resolution safety at the dispatch boundary', () => {
     const before = rowCounts(projectA);
     standIn(projectA);
 
-    const result = await call('cmos_decisions', {
+    const result = await call('rbook_decisions', {
       action: 'record',
       projectRoot: folderB,
       content: 'Meant for B; must never land in A',
     });
 
     expect(result.isError).toBe(true);
-    expect(structured(result).error?.code).toBe('CMOS_NOT_DETECTED');
+    expect(structured(result).error?.code).toBe('RBOOK_NOT_DETECTED');
     expect(rowCounts(projectA)).toEqual(before);
   });
 
@@ -165,27 +165,27 @@ describe('s92-m01 resolution safety at the dispatch boundary', () => {
     fs.mkdirSync(subfolder, { recursive: true });
     standIn(folderB);
 
-    const result = await call('cmos_decisions', { action: 'list', projectRoot: subfolder });
+    const result = await call('rbook_decisions', { action: 'list', projectRoot: subfolder });
 
     expect(structured(result).error).toMatchObject({
-      code: 'CMOS_NOT_DETECTED',
+      code: 'RBOOK_NOT_DETECTED',
       suggestion: `Pass projectRoot=${JSON.stringify(projectA)}.`,
     });
   });
 
   describe('acrossProjects never moves a write (critic finding, s92-m01 build review)', () => {
-    it('refuses a write that names a non-CMOS projectRoot alongside acrossProjects=true', async () => {
+    it('refuses a write that names a non-Reasonbook projectRoot alongside acrossProjects=true', async () => {
       const before = rowCounts(projectA);
       standIn(projectA);
 
-      const record = await call('cmos_decisions', {
+      const record = await call('rbook_decisions', {
         action: 'record',
         projectRoot: folderB,
         acrossProjects: true,
         content: 'Must not land in project A',
       });
       expect(record.isError).toBe(true);
-      expect(structured(record).error?.code).toBe('CMOS_NOT_DETECTED');
+      expect(structured(record).error?.code).toBe('RBOOK_NOT_DETECTED');
       expect(rowCounts(projectA)).toEqual(before);
     });
 
@@ -193,14 +193,14 @@ describe('s92-m01 resolution safety at the dispatch boundary', () => {
       const projectC = path.join(tmpDir, 'project-c');
       fs.mkdirSync(projectC);
       expect(
-        (await call('cmos_project', { action: 'init', projectRoot: projectC, projectName: 'C' }))
+        (await call('rbook_project', { action: 'init', projectRoot: projectC, projectName: 'C' }))
           .isError
       ).toBe(false);
       const beforeA = rowCounts(projectA);
       const beforeC = rowCounts(projectC);
       standIn(projectA);
 
-      const record = await call('cmos_decisions', {
+      const record = await call('rbook_decisions', {
         action: 'record',
         projectRoot: projectC,
         acrossProjects: true,
@@ -217,19 +217,19 @@ describe('s92-m01 resolution safety at the dispatch boundary', () => {
 
     it('still serves the portfolio read from a folder that is not a project', async () => {
       standIn(folderB);
-      const portfolio = await call('cmos_decisions', { action: 'list', acrossProjects: true });
+      const portfolio = await call('rbook_decisions', { action: 'list', acrossProjects: true });
       expect(portfolio.isError).toBe(false);
       expect(structured(portfolio).data).toMatchObject({ projectRoot: null, resolvedBy: 'none' });
     });
   });
 
-  describe('a folder named cmos inside a project is not a project (critic finding)', () => {
-    it('resolves a cwd inside a source tree with its own cmos/ folder to the enclosing project', async () => {
+  describe('a folder named rbook inside a project is not a project (critic finding)', () => {
+    it('resolves a cwd inside a source tree with its own rbook/ folder to the enclosing project', async () => {
       const sourceTree = path.join(projectA, 'src', 'tools');
-      fs.mkdirSync(path.join(sourceTree, 'cmos'), { recursive: true });
+      fs.mkdirSync(path.join(sourceTree, 'rbook'), { recursive: true });
       standIn(sourceTree);
 
-      const listed = await call('cmos_decisions', { action: 'list' });
+      const listed = await call('rbook_decisions', { action: 'list' });
       expect(structured(listed).data).toMatchObject({
         projectRoot: path.resolve(projectA),
         resolvedBy: 'cwd',
@@ -238,12 +238,12 @@ describe('s92-m01 resolution safety at the dispatch boundary', () => {
 
     it('answers an explicit source-tree folder with the enclosing project, never an init there', async () => {
       const sourceTree = path.join(projectA, 'src', 'tools');
-      fs.mkdirSync(path.join(sourceTree, 'cmos'), { recursive: true });
+      fs.mkdirSync(path.join(sourceTree, 'rbook'), { recursive: true });
       standIn(folderB);
 
-      const result = await call('cmos_decisions', { action: 'list', projectRoot: sourceTree });
+      const result = await call('rbook_decisions', { action: 'list', projectRoot: sourceTree });
       expect(structured(result).error).toMatchObject({
-        code: 'CMOS_NOT_DETECTED',
+        code: 'RBOOK_NOT_DETECTED',
         suggestion: `Pass projectRoot=${JSON.stringify(projectA)}.`,
       });
     });
@@ -251,21 +251,21 @@ describe('s92-m01 resolution safety at the dispatch boundary', () => {
 
   it('validates an explicit projectRoot on dashboard-only message actions', async () => {
     standIn(projectA);
-    const result = await call('cmos_message', { action: 'list', projectRoot: folderB });
+    const result = await call('rbook_message', { action: 'list', projectRoot: folderB });
     expect(result.isError).toBe(true);
-    expect(structured(result).error?.code).toBe('CMOS_NOT_DETECTED');
+    expect(structured(result).error?.code).toBe('RBOOK_NOT_DETECTED');
   });
 
   describe('every success names the store it touched', () => {
     it('stamps projectRoot and resolvedBy on a representative success from every store-backed tool', async () => {
       standIn(projectA);
-      const sprint = await call('cmos_sprint', {
+      const sprint = await call('rbook_sprint', {
         action: 'add',
         sprintId: 'sprint-1',
         title: 'Stamp sprint',
       });
       expect(sprint.isError).toBe(false);
-      const added = await call('cmos_mission', {
+      const added = await call('rbook_mission', {
         action: 'add',
         missionId: 'm-stamp',
         name: 'Stamp probe',
@@ -274,18 +274,18 @@ describe('s92-m01 resolution safety at the dispatch boundary', () => {
       expect(added.isError).toBe(false);
 
       const calls: Array<[string, Record<string, unknown>]> = [
-        ['cmos_db', { action: 'health' }],
-        ['cmos_mission', { action: 'list' }],
-        ['cmos_mission_transition', { action: 'start', missionId: 'm-stamp' }],
-        ['cmos_sprint', { action: 'list' }],
-        ['cmos_context', { action: 'view' }],
-        ['cmos_session', { action: 'list' }],
-        ['cmos_decisions', { action: 'list' }],
-        ['cmos_learnings', { action: 'list' }],
-        ['cmos_feedback', { action: 'list' }],
-        ['cmos_status', {}],
-        ['cmos_agent_onboard', {}],
-        ['cmos_review', {}],
+        ['rbook_db', { action: 'health' }],
+        ['rbook_mission', { action: 'list' }],
+        ['rbook_mission_transition', { action: 'start', missionId: 'm-stamp' }],
+        ['rbook_sprint', { action: 'list' }],
+        ['rbook_context', { action: 'view' }],
+        ['rbook_session', { action: 'list' }],
+        ['rbook_decisions', { action: 'list' }],
+        ['rbook_learnings', { action: 'list' }],
+        ['rbook_feedback', { action: 'list' }],
+        ['rbook_status', {}],
+        ['rbook_agent_onboard', {}],
+        ['rbook_review', {}],
       ];
       for (const [tool, args] of calls) {
         const result = await call(tool, args);
@@ -302,7 +302,7 @@ describe('s92-m01 resolution safety at the dispatch boundary', () => {
 
     it('reports an explicit root as explicit, and a walked-up cwd as cwd', async () => {
       standIn(folderB);
-      const explicit = await call('cmos_decisions', { action: 'list', projectRoot: projectA });
+      const explicit = await call('rbook_decisions', { action: 'list', projectRoot: projectA });
       expect(structured(explicit).data).toMatchObject({
         projectRoot: path.resolve(projectA),
         resolvedBy: 'explicit',
@@ -311,7 +311,7 @@ describe('s92-m01 resolution safety at the dispatch boundary', () => {
       const nested = path.join(projectA, 'docs', 'notes');
       fs.mkdirSync(nested, { recursive: true });
       standIn(nested);
-      const walked = await call('cmos_decisions', { action: 'list' });
+      const walked = await call('rbook_decisions', { action: 'list' });
       expect(structured(walked).data).toMatchObject({
         projectRoot: path.resolve(projectA),
         resolvedBy: 'cwd',
@@ -320,7 +320,7 @@ describe('s92-m01 resolution safety at the dispatch boundary', () => {
 
     it('keeps the review digest inside its budget with the stamp inside it', async () => {
       standIn(projectA);
-      const result = await call('cmos_review', {});
+      const result = await call('rbook_review', {});
       const data = structured(result).data as Record<string, unknown>;
       expect(data.digestSizeBytes).toBe(Buffer.byteLength(JSON.stringify(data), 'utf8'));
       expect(data.digestSizeBytes as number).toBeLessThanOrEqual(4096);
@@ -331,7 +331,7 @@ describe('s92-m01 resolution safety at the dispatch boundary', () => {
     it('lists, validates and prunes the registry from a folder that is not a project', async () => {
       standIn(folderB);
       for (const action of ['list', 'validate', 'prune'] as const) {
-        const result = await call('cmos_project', { action });
+        const result = await call('rbook_project', { action });
         expect({ action, isError: result.isError }).toEqual({ action, isError: false });
         expect(structured(result).data).toMatchObject({ projectRoot: null, resolvedBy: 'none' });
       }
@@ -339,15 +339,15 @@ describe('s92-m01 resolution safety at the dispatch boundary', () => {
 
     it('runs a user-level auth action project-free instead of refusing for a missing project', async () => {
       standIn(folderB);
-      const result = await call('cmos_auth', { action: 'list' });
+      const result = await call('rbook_auth', { action: 'list' });
       // No credential is configured in this isolated store, so the action itself refuses — but
-      // for that reason, not because folder B is not a CMOS project.
-      expect(structured(result).error?.code).not.toBe('CMOS_NOT_DETECTED');
+      // for that reason, not because folder B is not a Reasonbook project.
+      expect(structured(result).error?.code).not.toBe('RBOOK_NOT_DETECTED');
     });
 
     it('treats unregister as a literal path: a dead path never unregisters the cwd project', async () => {
       standIn(projectA);
-      const result = await call('cmos_project', {
+      const result = await call('rbook_project', {
         action: 'unregister',
         projectRoot: path.join(tmpDir, 'deleted-project'),
       });

@@ -53,10 +53,10 @@ function sourceModules() {
     mod._compile(outputText, file);
   };
   return {
-    ...require('../src/tools/cmos/client.ts'),
-    ...require('../src/tools/cmos/fts5-retriever.ts'),
+    ...require('../src/tools/rbook/client.ts'),
+    ...require('../src/tools/rbook/fts5-retriever.ts'),
     ...require('../src/cli/commands.ts'),
-    ...require('../src/tools/cmos/first-prompt-recall.ts'),
+    ...require('../src/tools/rbook/first-prompt-recall.ts'),
     ...require('../src/cli.ts'),
     restoreLoader() {
       if (previousLoader) require.extensions['.ts'] = previousLoader;
@@ -133,7 +133,7 @@ async function emittedHookIds(source, dbPath, query) {
   let stdout = '';
   let errors = 0;
   const code = await source.runCli(['hook', 'prompt', '--format', 'text', '--project-root', root], {
-    env: { ...process.env, CMOS_AMBIENT: 'on', CLAUDE_PROJECT_DIR: '' },
+    env: { ...process.env, RBOOK_AMBIENT: 'on', CLAUDE_PROJECT_DIR: '' },
     cwd: root,
     readStdin: async () => JSON.stringify({ session_id: `probe-${++hookSequence}`, prompt: query }),
     stdout: (text) => {
@@ -150,7 +150,7 @@ async function emittedHookIds(source, dbPath, query) {
 }
 
 async function currentSourceResults(source, dbPath, query) {
-  const opened = await source.CmosDatabaseClient.create({ dbPath, readonly: true });
+  const opened = await source.RbookDatabaseClient.create({ dbPath, readonly: true });
   if (!opened.success || !opened.data) throw new Error('readonly_open_failed');
   const client = opened.data;
   try {
@@ -248,16 +248,16 @@ async function measure(source, scratch, dbPath, fill) {
 
 async function main() {
   const options = argumentsFor(process.argv.slice(2));
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-m05-recall-'));
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-m05-recall-'));
   const originalNow = Date.now;
   let db;
   let source;
   try {
-    process.env.CMOS_CONFIG_DIR = path.join(temporary, 'config');
-    process.env.CMOS_OFFLINE_EMBEDDINGS = '1';
-    process.env.CMOS_CHECKPOINT_SYNC = 'off';
+    process.env.RBOOK_CONFIG_DIR = process.env.RBOOK_CONFIG_DIR = path.join(temporary, 'config');
+    process.env.RBOOK_OFFLINE_EMBEDDINGS = process.env.RBOOK_OFFLINE_EMBEDDINGS = '1';
+    process.env.RBOOK_CHECKPOINT_SYNC = process.env.RBOOK_CHECKPOINT_SYNC = 'off';
     source = sourceModules();
-    const dbPath = path.join(temporary, 'project', 'cmos', 'db', 'cmos.sqlite');
+    const dbPath = path.join(temporary, 'project', 'rbook', 'db', 'rbook.sqlite');
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     db = new Database(dbPath);
     const passed = await measure(source, options.scratch, dbPath, sliceWriter(db));

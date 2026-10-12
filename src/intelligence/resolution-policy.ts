@@ -6,18 +6,19 @@
  * Resolution policy (s92-m01).
  *
  * Both resolvers — `resolveSenderContext` (dispatch) and the deprecated
- * `resolveProjectRootEnhanced` (direct `CmosDatabaseClient.create` callers) — read these rules
+ * `resolveProjectRootEnhanced` (direct `RbookDatabaseClient.create` callers) — read these rules
  * from here so the two cannot drift apart. The module is a leaf: it imports nothing from the tool
  * layer, so either resolver can depend on it without an import cycle.
  *
  * The rule the module encodes: never act on a project the caller did not name. A folder that is
- * not a CMOS project is a real working folder, and a call made there is refused rather than routed
+ * not a Reasonbook project is a real working folder, and a call made there is refused rather than routed
  * somewhere else. Only a CONTEXTLESS call — one whose server has no idea where the user is — may use
  * a configured default.
  *
  * @module intelligence/resolution-policy
  */
 
+import { getSetting, resolveRecordPaths } from './legacy-compat';
 import { existsSync, realpathSync, statSync } from 'fs';
 import os from 'os';
 import path from 'path';
@@ -29,16 +30,16 @@ import path from 'path';
 export const SERVER_INSTALL_ROOT = path.resolve(__dirname, '..', '..');
 
 /** Extra ephemeral locations, separated by `path.delimiter` (`:` on POSIX). */
-export const CMOS_EPHEMERAL_PATHS_ENV = 'CMOS_EPHEMERAL_PATHS';
+export const RBOOK_EPHEMERAL_PATHS_ENV = 'RBOOK_EPHEMERAL_PATHS';
 
 /** The CLI flag that pins one server config to one project (the Claude Desktop recipe). */
 export const PROJECT_ROOT_ARG = '--project-root';
 
-/** Where a CMOS store was found. */
+/** Where a Reasonbook store was found. */
 export interface EnclosingStore {
-  /** The project root: the directory holding `cmos/db/`. */
+  /** The project root: the directory holding `rbook/db/`. */
   readonly root: string;
-  /** Whether `cmos/db/cmos.sqlite` exists under it (false = a store whose database is gone). */
+  /** Whether `rbook/db/rbook.sqlite` exists under it (false = a store whose database is gone). */
   readonly hasDatabase: boolean;
 }
 
@@ -71,20 +72,21 @@ function isWithin(child: string, parent: string): boolean {
 }
 
 /**
- * The CMOS store rooted exactly at `dir`, or null. The marker is `cmos/db/` — the directory a CMOS
- * project keeps its database in — never a bare `cmos/`. A folder named `cmos` is common in source
- * trees (this repository has `src/tools/cmos/`) and in notes (`cmos/` holding papers); treating
+ * The Reasonbook store rooted exactly at `dir`, or null. The marker is `rbook/db/` — the directory a Reasonbook
+ * project keeps its database in — never a bare `rbook/`. A folder named `rbook` is common in source
+ * trees (this repository has `src/tools/rbook/`) and in notes (`rbook/` holding papers); treating
  * one as a project would route a call to the folder above it and offer to create a nested
  * project there (critic finding, s92-m01 build review).
  */
 export function storeAt(dir: string): EnclosingStore | null {
-  const dbDir = path.join(path.resolve(dir), 'cmos', 'db');
+  const resolved = resolveRecordPaths(dir);
+  const dbDir = path.join(resolved.directory, 'db');
   if (!isDirectory(dbDir)) return null;
-  return { root: path.resolve(dir), hasDatabase: existsSync(path.join(dbDir, 'cmos.sqlite')) };
+  return { root: path.resolve(dir), hasDatabase: existsSync(resolved.dbPath) };
 }
 
 /**
- * Walk up from `startDir` to the nearest directory holding a CMOS store (`cmos/db/`, see
+ * Walk up from `startDir` to the nearest directory holding a Reasonbook store (`rbook/db/`, see
  * {@link storeAt}), the way git finds `.git`. A store whose database file is gone still ends the
  * walk: it is the project the caller is standing in, and continuing past it would route the call
  * to an outer project.
@@ -119,7 +121,7 @@ export function findEnclosingStore(
  * A CONTEXTLESS directory tells the server nothing about where the user is working: the
  * filesystem root, `$HOME`, or the server's own install root. Claude Desktop launches servers
  * from one of these. Any other directory without a store is a real working folder that simply
- * is not a CMOS project, and calls there are refused rather than defaulted.
+ * is not a Reasonbook project, and calls there are refused rather than defaulted.
  */
 export function isContextlessDirectory(
   dir: string,
@@ -133,7 +135,7 @@ export function isContextlessDirectory(
 
 /**
  * Read `--project-root <dir>` or `--project-root=<dir>` from a server's argv. The flag lives in
- * ONE server config, so unlike the pre-s53 `CMOS_PROJECT_ROOT` fallback it cannot leak into every
+ * ONE server config, so unlike the pre-s53 `RBOOK_PROJECT_ROOT` fallback it cannot leak into every
  * harness that shares a machine. Returns the resolved path, or undefined when absent or empty.
  */
 export function parseProjectRootArg(argv: readonly string[]): string | undefined {
@@ -165,13 +167,13 @@ export function getServerProjectRoot(): string | undefined {
 
 /**
  * Locations whose stores are scratch by nature: the realpath of `os.tmpdir()`, `/tmp` and
- * `/private/tmp`, plus any paths in `CMOS_EPHEMERAL_PATHS`. `os.tmpdir()` alone is not enough:
+ * `/private/tmp`, plus any paths in `RBOOK_EPHEMERAL_PATHS`. `os.tmpdir()` alone is not enough:
  * on macOS it is `/var/folders/…/T`, while agent scratchpads live under `/private/tmp/…`
  * (feedback #41's store was `/private/tmp/claude-501/…/scratchpad/…`).
  */
 export function defaultEphemeralRoots(env: NodeJS.ProcessEnv = process.env): string[] {
   const roots = [os.tmpdir(), '/tmp', '/private/tmp'];
-  const extra = env[CMOS_EPHEMERAL_PATHS_ENV];
+  const extra = getSetting(RBOOK_EPHEMERAL_PATHS_ENV, env);
   if (extra) {
     roots.push(...extra.split(path.delimiter).filter((entry) => entry.trim().length > 0));
   }

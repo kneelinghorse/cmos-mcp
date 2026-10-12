@@ -23,12 +23,12 @@ const HELPER_FILE = 'tests/helpers/public-mirror.ts';
 const fixtureRoots: string[] = [];
 
 function mirrorFixture(withPrivateMarker = false, initializeGit = true): string {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-public-mirror-contract-'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-public-mirror-contract-'));
   fixtureRoots.push(root);
   fs.mkdirSync(path.join(root, 'scripts'), { recursive: true });
   fs.writeFileSync(
     path.join(root, 'scripts', 'mirror-to-public.sh'),
-    'PRIVATE_PATHS=( private-root scratch-a scratch-b cmos artifacts tmp )\n' +
+    'PRIVATE_PATHS=( private-root scratch-a scratch-b rbook artifacts tmp )\n' +
       'DOCS_EXCLUDES=( internal/private-marker.md )\n'
   );
   fs.writeFileSync(path.join(root, '.gitignore'), 'tmp/\nartifacts/quality-metrics/\n');
@@ -43,9 +43,9 @@ function mirrorFixture(withPrivateMarker = false, initializeGit = true): string 
       'git',
       [
         '-c',
-        'user.name=CMOS Test',
+        'user.name=Reasonbook Test',
         '-c',
-        'user.email=cmos-test@example.invalid',
+        'user.email=rbook-test@example.invalid',
         '-c',
         'commit.gpgsign=false',
         'commit',
@@ -562,11 +562,11 @@ const KNOWN_STATIC_FALSE_NEGATIVES = [
     profile: 'indirect production-side CWD read',
     exemplar: 'tests/index.runtime.test.ts',
     reason:
-      'The bounded AST pass sees test-side filesystem and git sinks, but a called production resolver can derive cmos/ from process.cwd() before a mocked handler runs. The four index.runtime error-path cases use seeded explicit project roots, and the faithful public-mirror full-suite run remains the behavioral backstop.',
+      'The bounded AST pass sees test-side filesystem and git sinks, but a called production resolver can derive rbook/ from process.cwd() before a mocked handler runs. The four index.runtime error-path cases use seeded explicit project roots, and the faithful public-mirror full-suite run remains the behavioral backstop.',
   },
   {
     profile: 'repository checkout assumed outside tmpdir',
-    exemplar: 'tests/tools/cmos/real-store-guard.test.ts',
+    exemplar: 'tests/tools/rbook/real-store-guard.test.ts',
     reason:
       'The static pass cannot infer that public verification stages the repository beneath os.tmpdir(), which changes a repo-relative isolation sentinel from forbidden to allowed. The guard tests use a deterministic root-level non-tmpdir sentinel, and the faithful public-mirror full-suite run remains the behavioral backstop.',
   },
@@ -603,8 +603,8 @@ describe('public mirror exclusion parser and helper', () => {
     fs.writeFileSync(path.join(root, 'scratch-a', 'runtime.txt'), 'runtime\n');
     fs.mkdirSync(path.join(root, 'scratch-b'), { recursive: true });
     fs.writeFileSync(path.join(root, 'scratch-b', 'runtime.txt'), 'runtime\n');
-    fs.mkdirSync(path.join(root, 'cmos', 'research'), { recursive: true });
-    fs.writeFileSync(path.join(root, 'cmos', 'research', 'runtime.json'), '{}\n');
+    fs.mkdirSync(path.join(root, 'rbook', 'research'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'rbook', 'research', 'runtime.json'), '{}\n');
     fs.mkdirSync(path.join(root, 'tmp'), { recursive: true });
     fs.writeFileSync(path.join(root, 'tmp', 'ignored.txt'), 'ignored\n');
     fs.mkdirSync(path.join(root, 'artifacts', 'quality-metrics'), { recursive: true });
@@ -852,10 +852,10 @@ describe('public mirror routed-test class gate', () => {
     expect(KNOWN_STATIC_FALSE_NEGATIVES).toHaveLength(2);
     expect(indexProfile.profile).toBe('indirect production-side CWD read');
     expect(indexProfile.reason).toMatch(/process\.cwd\(\).*four index\.runtime.*full-suite run/i);
-    expect(indexSource).toContain("createSeededCmosProject({}, 'cmos-index-write-error-')");
-    expect(indexSource).toContain("createSeededCmosProject({}, 'cmos-index-disclosure-error-')");
-    expect(indexSource).toContain("createSeededCmosProject({}, 'cmos-index-parallel-a-')");
-    expect(indexSource).toContain("createSeededCmosProject({}, 'cmos-index-parallel-b-')");
+    expect(indexSource).toContain("createSeededRbookProject({}, 'rbook-index-write-error-')");
+    expect(indexSource).toContain("createSeededRbookProject({}, 'rbook-index-disclosure-error-')");
+    expect(indexSource).toContain("createSeededRbookProject({}, 'rbook-index-parallel-a-')");
+    expect(indexSource).toContain("createSeededRbookProject({}, 'rbook-index-parallel-b-')");
     expect(guardProfile.profile).toBe('repository checkout assumed outside tmpdir');
     expect(guardProfile.reason).toMatch(/beneath os\.tmpdir\(\).*root-level non-tmpdir/i);
     expect(guardSource).toContain('path.parse(os.tmpdir()).root');
@@ -867,10 +867,10 @@ describe('public mirror routed-test class gate', () => {
 describe('public mirror exact committed-tree boundary', () => {
   const gitEnv = {
     ...process.env,
-    GIT_AUTHOR_NAME: 'CMOS Test',
-    GIT_AUTHOR_EMAIL: 'cmos-test@example.invalid',
-    GIT_COMMITTER_NAME: 'CMOS Test',
-    GIT_COMMITTER_EMAIL: 'cmos-test@example.invalid',
+    GIT_AUTHOR_NAME: 'Reasonbook Test',
+    GIT_AUTHOR_EMAIL: 'rbook-test@example.invalid',
+    GIT_COMMITTER_NAME: 'Reasonbook Test',
+    GIT_COMMITTER_EMAIL: 'rbook-test@example.invalid',
   };
   function git(cwd: string, ...args: string[]): string {
     return execFileSync('git', ['-c', 'commit.gpgsign=false', ...args], {
@@ -889,7 +889,7 @@ describe('public mirror exact committed-tree boundary', () => {
     'command git ls-files --stage -z > "$MIRROR_FIXTURE_INDEX_AFTER"';
 
   function exactTreeFixture(fault = '', indexFault = '', disableComparison = false) {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-mirror-exact-'));
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-mirror-exact-'));
     fixtureRoots.push(root);
     const source = path.join(root, 'source');
     const publicSeed = path.join(root, 'public-seed');
@@ -912,9 +912,9 @@ describe('public mirror exact committed-tree boundary', () => {
       'public.txt': 'committed public bytes\n',
       'run.sh': '#!/bin/sh\nexit 0\n',
       'odd\tname\n.txt': 'paths must be NUL-delimited\n',
-      'cmos/private.txt': 'excluded by exact root\n',
+      'rbook/private.txt': 'excluded by exact root\n',
       'docs/specs/phase2-pg-mirror-schema.md': 'excluded nested file\n',
-      'docs/cmos/public.txt': 'same basename below a public directory survives\n',
+      'docs/rbook/public.txt': 'same basename below a public directory survives\n',
       '.env.fixture': 'defense-in-depth exclusion\n',
       '.env.template': 'public template\n',
     };
@@ -1013,10 +1013,10 @@ describe('public mirror exact committed-tree boundary', () => {
     expect(git(retained!, 'ls-tree', 'HEAD', 'run.sh')).toMatch(/100755 blob/);
     expect(git(retained!, 'ls-tree', 'HEAD', 'public-link')).toMatch(/120000 blob/);
     expect(fs.readFileSync(path.join(retained!, 'odd\tname\n.txt'), 'utf8')).toContain('NUL');
-    expect(fs.existsSync(path.join(retained!, 'cmos'))).toBe(false);
+    expect(fs.existsSync(path.join(retained!, 'rbook'))).toBe(false);
     expect(fs.existsSync(path.join(retained!, '.env.fixture'))).toBe(false);
     expect(fs.existsSync(path.join(retained!, '.env.template'))).toBe(true);
-    expect(fs.existsSync(path.join(retained!, 'docs/cmos/public.txt'))).toBe(true);
+    expect(fs.existsSync(path.join(retained!, 'docs/rbook/public.txt'))).toBe(true);
   });
 
   it.each([

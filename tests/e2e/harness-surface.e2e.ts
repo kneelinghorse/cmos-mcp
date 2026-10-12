@@ -8,7 +8,7 @@ import * as os from 'os';
 import * as path from 'path';
 
 import { SERVER_INSTRUCTIONS, SERVER_INSTRUCTIONS_LOOP } from '../../src/server-instructions';
-import { seedCmosDb } from '../helpers/seedCmosDb';
+import { seedRbookDb } from '../helpers/seedRbookDb';
 import { connectStdioServer, type StdioHarness } from './stdio-harness';
 
 const SERVER = path.resolve(__dirname, '../../dist/index.js');
@@ -25,15 +25,15 @@ function mkTmp(prefix: string): string {
 }
 
 async function connect(): Promise<StdioHarness> {
-  const projectRoot = mkTmp('cmos-e2e-m08-');
-  seedCmosDb(projectRoot, { projectName: 's92-m08 e2e' });
+  const projectRoot = mkTmp('rbook-e2e-m08-');
+  seedRbookDb(projectRoot, { projectName: 's92-m08 e2e' });
   const harness = await connectStdioServer({
     serverPath: SERVER,
     cwd: projectRoot,
     env: {
-      HOME: mkTmp('cmos-e2e-m08-home-'),
-      CMOS_CONFIG_DIR: mkTmp('cmos-e2e-m08-config-'),
-      CMOS_PROJECT_ROOT: projectRoot,
+      HOME: mkTmp('rbook-e2e-m08-home-'),
+      RBOOK_CONFIG_DIR: mkTmp('rbook-e2e-m08-config-'),
+      RBOOK_PROJECT_ROOT: projectRoot,
       PATH: process.env.PATH ?? path.dirname(process.execPath),
       NODE_ENV: 'test',
     },
@@ -57,7 +57,7 @@ describe('s92-m08 harness surface over stdio', () => {
     const second = await harness.client.listTools();
     expect(JSON.stringify(first.tools).length).toBeLessThanOrEqual(24_000);
     expect(second.tools.map((t) => t.name)).toEqual(first.tools.map((t) => t.name));
-    expect(first.tools[0].name).toBe('cmos_mission');
-    expect(first.tools[first.tools.length - 1].name).toBe('cmos_review');
+    expect(first.tools[0].name).toBe('rbook_mission');
+    expect(first.tools[first.tools.length - 1].name).toBe('rbook_review');
   });
 });

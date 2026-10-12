@@ -10,19 +10,19 @@ import * as path from 'path';
 import { pathToFileURL } from 'url';
 import { runCli } from '../../src/cli';
 import { buildMissionProtocolContext, registerToolHandlers } from '../../src/index';
-import { CmosDetector } from '../../src/intelligence/cmos-detector';
-import { DashboardClient } from '../../src/tools/cmos/dashboard-client';
+import { RbookDetector } from '../../src/intelligence/rbook-detector';
+import { DashboardClient } from '../../src/tools/rbook/dashboard-client';
 import { ProjectGraphRegistry } from '../../src/intelligence/project-graph-registry';
 import {
   hasHookSession,
   openDraftRuntime,
   recordSessionStart,
   sessionStartedAt,
-} from '../../src/tools/cmos/draft-runtime';
-import { harnessSessionHash } from '../../src/tools/cmos/harness-session';
-import { closeOwnImplicitSessions } from '../../src/tools/cmos/implicit-session-lifecycle';
-import { processSessionOwner, setExternalSessionOwner } from '../../src/tools/cmos/session-owner';
-import { reidentifyCmosTestStore, seedCmosDb } from '../helpers/seedCmosDb';
+} from '../../src/tools/rbook/draft-runtime';
+import { harnessSessionHash } from '../../src/tools/rbook/harness-session';
+import { closeOwnImplicitSessions } from '../../src/tools/rbook/implicit-session-lifecycle';
+import { processSessionOwner, setExternalSessionOwner } from '../../src/tools/rbook/session-owner';
+import { reidentifyRbookTestStore, seedRbookDb } from '../helpers/seedRbookDb';
 
 type Result = {
   isError?: boolean;
@@ -41,8 +41,8 @@ let project: string;
 let other: string;
 let dbPath: string;
 const saved = {
-  config: process.env.CMOS_CONFIG_DIR,
-  sync: process.env.CMOS_CHECKPOINT_SYNC,
+  config: process.env.RBOOK_CONFIG_DIR,
+  sync: process.env.RBOOK_CHECKPOINT_SYNC,
   session: process.env.CLAUDE_CODE_SESSION_ID,
 };
 const DRAFT = 'Keep the project record in SQLite because every agent needs the same decisions.';
@@ -51,21 +51,21 @@ beforeAll(async () => {
   context = await buildMissionProtocolContext();
 });
 beforeEach(() => {
-  temp = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-s95-codex-'));
-  process.env.CMOS_CONFIG_DIR = path.join(temp, 'config');
-  process.env.CMOS_CHECKPOINT_SYNC = 'off';
+  temp = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-s95-codex-'));
+  process.env.RBOOK_CONFIG_DIR = path.join(temp, 'config');
+  process.env.RBOOK_CHECKPOINT_SYNC = 'off';
   delete process.env.CLAUDE_CODE_SESSION_ID;
   project = path.join(temp, 'project');
   other = path.join(temp, 'other');
-  dbPath = seedCmosDb(project, {
+  dbPath = seedRbookDb(project, {
     projectName: 'codex-project',
     dashboardProjectId: '11111111-1111-4111-8111-111111111111',
-    cmosAddress: 'cmos://operator/codex-project',
+    rbookAddress: 'rbook://operator/codex-project',
   });
-  seedCmosDb(other, { projectName: 'other-project' });
-  reidentifyCmosTestStore(project);
-  reidentifyCmosTestStore(other);
-  CmosDetector.resetInstance();
+  seedRbookDb(other, { projectName: 'other-project' });
+  reidentifyRbookTestStore(project);
+  reidentifyRbookTestStore(other);
+  RbookDetector.resetInstance();
   ProjectGraphRegistry.resetInstance();
   jest.spyOn(process, 'cwd').mockReturnValue(other);
   registerToolHandlers(context, {
@@ -81,10 +81,10 @@ afterEach(() => {
   jest.restoreAllMocks();
   setExternalSessionOwner(null);
   ProjectGraphRegistry.resetInstance();
-  CmosDetector.resetInstance();
+  RbookDetector.resetInstance();
   for (const [key, value] of [
-    ['CMOS_CONFIG_DIR', saved.config],
-    ['CMOS_CHECKPOINT_SYNC', saved.sync],
+    ['RBOOK_CONFIG_DIR', saved.config],
+    ['RBOOK_CHECKPOINT_SYNC', saved.sync],
     ['CLAUDE_CODE_SESSION_ID', saved.session],
   ] as const) {
     if (value === undefined) delete process.env[key];
@@ -104,7 +104,7 @@ function invoke(name: string, args: Record<string, unknown> = {}, metadata?: unk
   return call({ params: { name, arguments: args, ...(metadata ? { _meta: metadata } : {}) } });
 }
 function rows<T>(sql: string, root = project): T[] {
-  const db = new Database(path.join(root, 'cmos/db/cmos.sqlite'), { readonly: true });
+  const db = new Database(path.join(root, 'rbook/db/rbook.sqlite'), { readonly: true });
   try {
     return db.prepare(sql).all() as T[];
   } finally {
@@ -129,7 +129,7 @@ async function offer(session: string) {
 it('uses the enclosing client folder instead of the server cwd and stamps it as named', async () => {
   const folder = path.join(project, 'src');
   fs.mkdirSync(folder);
-  const result = await invoke('cmos_mission', { action: 'list' }, meta(folder));
+  const result = await invoke('rbook_mission', { action: 'list' }, meta(folder));
   expect(result.structuredContent).toMatchObject({
     success: true,
     data: { projectRoot: project, resolvedBy: 'client-cwd' },
@@ -140,7 +140,7 @@ it('uses the enclosing client folder instead of the server cwd and stamps it as 
 it('keeps explicit selection final even with unusable Codex metadata', async () => {
   const metadata = meta();
   delete metadata['codex/sandbox-state-meta'];
-  const result = await invoke('cmos_mission', { action: 'list', projectRoot: other }, metadata);
+  const result = await invoke('rbook_mission', { action: 'list', projectRoot: other }, metadata);
   expect(result.structuredContent.data).toMatchObject({
     projectRoot: other,
     resolvedBy: 'explicit',
@@ -150,7 +150,7 @@ it('keeps explicit selection final even with unusable Codex metadata', async () 
 it('does not borrow the server project when the client folder has no store', async () => {
   const folder = path.join(temp, 'empty');
   fs.mkdirSync(folder);
-  const result = await invoke('cmos_mission', { action: 'list' }, meta(folder));
+  const result = await invoke('rbook_mission', { action: 'list' }, meta(folder));
   expect(result.isError).toBe(true);
   expect(JSON.stringify(result)).toContain(folder);
 });
@@ -159,7 +159,7 @@ it.each([undefined, 'https://example.test/project', 'file://remote/project', 'fi
   'refuses invalid client folder %p without server-cwd fallback or an unscoped inbox',
   async (sandboxCwd) => {
     const metadata = { ...meta(), 'codex/sandbox-state-meta': { sandboxCwd } };
-    for (const name of ['cmos_mission', 'cmos_message']) {
+    for (const name of ['rbook_mission', 'rbook_message']) {
       const result = await invoke(name, { action: 'list' }, metadata);
       expect(result.isError).toBe(true);
       expect(JSON.stringify(result)).toContain('projectRoot');
@@ -168,15 +168,15 @@ it.each([undefined, 'https://example.test/project', 'file://remote/project', 'fi
 );
 
 it.each([undefined, '', '   ', 7])('refuses unusable session identity %p', async (sessionId) => {
-  const result = await invoke('cmos_mission', { action: 'list' }, { ...meta(), sessionId });
+  const result = await invoke('rbook_mission', { action: 'list' }, { ...meta(), sessionId });
   expect(result.isError).toBe(true);
 });
 
 it('does not suppress Codex refusal when an optional resolver serves auth or portfolio reads', async () => {
   const metadata = { ...meta(), 'codex/sandbox-state-meta': {} };
   for (const [name, args] of [
-    ['cmos_auth', { action: 'list' }],
-    ['cmos_mission', { action: 'status', acrossProjects: true }],
+    ['rbook_auth', { action: 'list' }],
+    ['rbook_mission', { action: 'status', acrossProjects: true }],
   ] as const) {
     const result = await invoke(name, args, metadata);
     expect(result.structuredContent.error?.code).toBe('CODEX_CONTEXT_REQUIRED');
@@ -184,12 +184,12 @@ it('does not suppress Codex refusal when an optional resolver serves auth or por
 });
 
 it('keeps clients without Codex metadata on the existing cwd route', async () => {
-  const result = await invoke('cmos_mission', { action: 'list' });
+  const result = await invoke('rbook_mission', { action: 'list' });
   expect(result.structuredContent.data).toMatchObject({ projectRoot: other, resolvedBy: 'cwd' });
 });
 
 it('whoami resolves the client folder through both strict and relaxed paths', async () => {
-  const result = await invoke('cmos_message', { action: 'whoami' }, meta());
+  const result = await invoke('rbook_message', { action: 'whoami' }, meta());
   expect(result.structuredContent.success).toBe(true);
   expect(result.structuredContent.data).toMatchObject({
     projectRoot: project,
@@ -212,10 +212,10 @@ it('sends with the client folder identity rather than the plugin server identity
     data: { messageId: 'receipt', status: 'pending' },
   } as never);
   const result = await invoke(
-    'cmos_message',
+    'rbook_message',
     {
       action: 'send',
-      targetAddress: 'cmos://operator/target',
+      targetAddress: 'rbook://operator/target',
       type: 'intel_alert',
       summary: 'Test',
     },
@@ -226,7 +226,7 @@ it('sends with the client folder identity rather than the plugin server identity
   expect(send).toHaveBeenCalledWith(
     expect.objectContaining({
       senderProjectId: '11111111-1111-4111-8111-111111111111',
-      senderAddress: 'cmos://operator/codex-project',
+      senderAddress: 'rbook://operator/codex-project',
     })
   );
   expect(result.structuredContent.data).toMatchObject({
@@ -240,13 +240,13 @@ it('binds independent simultaneous requests to the hook state in their own store
     [project, 'one'],
     [other, 'two'],
   ] as const) {
-    const runtime = openDraftRuntime(path.join(root, 'cmos/db/cmos.sqlite'))!;
+    const runtime = openDraftRuntime(path.join(root, 'rbook/db/rbook.sqlite'))!;
     recordSessionStart(runtime, harnessSessionHash(session), Date.now());
     runtime.close();
   }
   const results = await Promise.all([
-    invoke('cmos_decisions', { action: 'record', content: DRAFT }, meta(project, 'one')),
-    invoke('cmos_decisions', { action: 'record', content: DRAFT }, meta(other, 'two')),
+    invoke('rbook_decisions', { action: 'record', content: DRAFT }, meta(project, 'one')),
+    invoke('rbook_decisions', { action: 'record', content: DRAFT }, meta(other, 'two')),
   ]);
   expect(results.map((result) => result.structuredContent.success)).toEqual([true, true]);
   for (const [root, session] of [
@@ -260,11 +260,11 @@ it('binds independent simultaneous requests to the hook state in their own store
 });
 
 it('keeps an explicitly different store on the pid owner, even when it has that session hash', async () => {
-  const runtime = openDraftRuntime(path.join(other, 'cmos/db/cmos.sqlite'))!;
+  const runtime = openDraftRuntime(path.join(other, 'rbook/db/rbook.sqlite'))!;
   recordSessionStart(runtime, harnessSessionHash('codex-one'), Date.now());
   runtime.close();
   const result = await invoke(
-    'cmos_decisions',
+    'rbook_decisions',
     { action: 'record', content: DRAFT, projectRoot: other },
     meta()
   );
@@ -277,7 +277,7 @@ it('keeps an explicitly different store on the pid owner, even when it has that 
 it('records hookless fromDraft as agent-attested and closes its pid session on server exit', async () => {
   await offer('another-hook-session');
   const result = await invoke(
-    'cmos_decisions',
+    'rbook_decisions',
     { action: 'record', content: DRAFT, fromDraft: 'P1' },
     meta()
   );
@@ -304,20 +304,20 @@ it('binds hook-stored operator approval once, without a global owner override', 
   expect(hasHookSession(runtime, harnessSessionHash('codex-one'))).toBe(true);
   runtime.close();
   const args = { action: 'record', content: DRAFT, fromDraft: 'P1' };
-  const result = await invoke('cmos_decisions', args, meta());
+  const result = await invoke('rbook_decisions', args, meta());
   expect(result.structuredContent.success).toBe(true);
   expect(
     rows<{ approval_mode: string; approval_words: string }>(
       "SELECT approval_mode, approval_words FROM strategic_decisions WHERE approval_draft = 'P1'"
     )
   ).toEqual([{ approval_mode: 'approved', approval_words: 'approved' }]);
-  expect((await invoke('cmos_decisions', args, meta())).isError).toBe(true);
+  expect((await invoke('rbook_decisions', args, meta())).isError).toBe(true);
   await hook('session-end', 'codex-one');
   const ended = openDraftRuntime(dbPath, process.env, { readonly: true })!;
   expect(hasHookSession(ended, harnessSessionHash('codex-one'))).toBe(false);
   ended.close();
   const afterEnd = await invoke(
-    'cmos_decisions',
+    'rbook_decisions',
     {
       action: 'record',
       content: 'Use a different record after the conversation ended.',

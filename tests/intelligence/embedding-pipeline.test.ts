@@ -6,8 +6,8 @@ import Database from 'better-sqlite3';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { CmosDatabaseClient } from '../../src/tools/cmos/client';
-import { ensureVectorStorage } from '../../src/tools/cmos/schema-migrations';
+import { RbookDatabaseClient } from '../../src/tools/rbook/client';
+import { ensureVectorStorage } from '../../src/tools/rbook/schema-migrations';
 import {
   recordEmbedding,
   decisionEmbeddingInput,
@@ -23,9 +23,9 @@ import {
 
 function makeTempDb(): { tempDir: string; dbPath: string } {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'embedding-pipeline-test-'));
-  const cmosDbDir = path.join(tempDir, 'cmos', 'db');
-  fs.mkdirSync(cmosDbDir, { recursive: true });
-  const dbPath = path.join(cmosDbDir, 'cmos.sqlite');
+  const rbookDbDir = path.join(tempDir, 'rbook', 'db');
+  fs.mkdirSync(rbookDbDir, { recursive: true });
+  const dbPath = path.join(rbookDbDir, 'rbook.sqlite');
 
   const db = new Database(dbPath);
   db.exec(`
@@ -131,12 +131,12 @@ describe('embedding-input composition', () => {
 describe('recordEmbedding', () => {
   let tempDir: string;
   let dbPath: string;
-  let client: CmosDatabaseClient;
+  let client: RbookDatabaseClient;
   let mock: ReturnType<typeof makeMockEmbedder>;
 
   beforeEach(async () => {
     ({ tempDir, dbPath } = makeTempDb());
-    const result = await CmosDatabaseClient.create({ dbPath });
+    const result = await RbookDatabaseClient.create({ dbPath });
     client = result.data!;
     ensureVectorStorage(client);
 
@@ -332,12 +332,12 @@ describe('recordEmbedding', () => {
 describe('backfill behavior (fixture corpus)', () => {
   let tempDir: string;
   let dbPath: string;
-  let client: CmosDatabaseClient;
+  let client: RbookDatabaseClient;
   let mock: ReturnType<typeof makeMockEmbedder>;
 
   beforeEach(async () => {
     ({ tempDir, dbPath } = makeTempDb());
-    const result = await CmosDatabaseClient.create({ dbPath });
+    const result = await RbookDatabaseClient.create({ dbPath });
     client = result.data!;
     ensureVectorStorage(client);
 

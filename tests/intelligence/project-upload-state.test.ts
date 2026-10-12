@@ -114,7 +114,7 @@ it('renews only a live matching lease and leaves missing/archived projects alone
 });
 
 it('two independent processes contend for one lease and only its holder sends to loopback', async () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-upload-race-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-upload-race-'));
   const database = path.join(directory, 'registry.sqlite');
   markUploadOwed(db, 'one', now - 300001);
   await db.backup(database);
@@ -138,7 +138,7 @@ it('two independent processes contend for one lease and only its holder sends to
       state.ensureUploadColumns(db);
       const lease = state.claimUpload(db, 'one', Date.now(), false);
       if (!lease) { db.close(); process.exit(0); }
-      require('http').get(process.env.CMOS_DASHBOARD_URL, res => {
+      require('http').get(process.env.RBOOK_DASHBOARD_URL, res => {
         res.resume(); res.on('end', () => { db.close(); process.exit(0); });
       }).on('error', () => process.exit(1));
     });
@@ -156,8 +156,8 @@ it('two independent processes contend for one lease and only its holder sends to
       silent: true,
       env: {
         ...process.env,
-        CMOS_CONFIG_DIR: directory,
-        CMOS_DASHBOARD_URL: `http://127.0.0.1:${address.port}`,
+        RBOOK_CONFIG_DIR: directory,
+        RBOOK_DASHBOARD_URL: `http://127.0.0.1:${address.port}`,
       },
     })
   );

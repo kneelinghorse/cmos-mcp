@@ -30,7 +30,7 @@ describe('the shared Codex plugin runtime', () => {
     const plugin = copiedPlugin(root);
     const env = {
       PATH: '',
-      CMOS_CONFIG_DIR: path.join(root, 'config'),
+      RBOOK_CONFIG_DIR: path.join(root, 'config'),
       CLAUDE_PLUGIN_DATA: path.join(root, '.codex/plugins/data'),
       PLUGIN_DATA: path.join(root, '.codex/plugins/data'),
     };
@@ -40,7 +40,7 @@ describe('the shared Codex plugin runtime', () => {
       const contexts=[];const launches=[];const lines=[];
       const options={env:${JSON.stringify(env)},startInstaller:ctx=>contexts.push(ctx),
         launch:async(command,args)=>{launches.push(args);return 0},writeOut:text=>lines.push(text)};
-      const args=['hook','session-start','--harness','codex','--install-root','shared','--hook-source','cmos-codex-plugin'];
+      const args=['hook','session-start','--harness','codex','--install-root','shared','--hook-source','rbook-codex-plugin'];
       await run(args,options); const ctx=contexts[0];
       if(ctx){${packageCode('ctx.installRoot')} writeMarker(ctx,ctx.installRoot); await run(args,options); await run(['serve','--install-root','shared'],options);}
       console.log(JSON.stringify({contexts,launches,lines,privateExists:fs.existsSync(${JSON.stringify(path.join(root, '.codex'))})}));`);
@@ -57,7 +57,7 @@ describe('the shared Codex plugin runtime', () => {
       '--harness',
       'codex',
       '--hook-source',
-      'cmos-codex-plugin',
+      'rbook-codex-plugin',
     ]);
     expect(value.launches[1].slice(1)).toEqual(['serve']);
     expect(value.launches[1][0]).toBe(value.launches[0][0]);
@@ -70,7 +70,7 @@ describe('the shared Codex plugin runtime', () => {
       node(`import {run} from ${JSON.stringify(pathToFileURL(path.join(plugin, 'hooks/run.mjs')).href)};
       let serving;let launched=0;
       const code=await run(['serve','--install-root','shared'],{
-        env:{PATH:'',CMOS_CONFIG_DIR:${JSON.stringify(path.join(root, 'config'))}},
+        env:{PATH:'',RBOOK_CONFIG_DIR:${JSON.stringify(path.join(root, 'config'))}},
         launch:async()=>{launched++;return 7},
         serveInstalling:async(ctx)=>{serving=ctx;},startInstaller:()=>{}});
       console.log(JSON.stringify({code,serving,launched}));`);
@@ -89,8 +89,8 @@ describe('the shared Codex plugin runtime', () => {
       import {run} from ${JSON.stringify(pathToFileURL(path.join(plugin, 'hooks/run.mjs')).href)};
       const globalRoot=${JSON.stringify(globalRoot)};${packageCode('globalRoot')}
       fs.mkdirSync(${JSON.stringify(globalBin)});
-      fs.symlinkSync(path.join(globalRoot,'node_modules/@aquex/cmos-mcp/dist/bin.js'),path.join(${JSON.stringify(globalBin)},'cmos-mcp'));
-      const env={PATH:${JSON.stringify(globalBin)},CMOS_CONFIG_DIR:${JSON.stringify(path.join(root, 'config'))},CLAUDE_PLUGIN_DATA:${JSON.stringify(path.join(root, 'claude-data'))}};
+      fs.symlinkSync(path.join(globalRoot,'node_modules/@aquex/reasonbook/dist/bin.js'),path.join(${JSON.stringify(globalBin)},'reasonbook'));
+      const env={PATH:${JSON.stringify(globalBin)},RBOOK_CONFIG_DIR:${JSON.stringify(path.join(root, 'config'))},CLAUDE_PLUGIN_DATA:${JSON.stringify(path.join(root, 'claude-data'))}};
       const workers=[];const servers=[];const launches=[];
       const options={env,startInstaller:ctx=>workers.push(ctx),serveInstalling:async ctx=>{servers.push(ctx)},launch:async(cmd,args)=>{launches.push(args);return 0},writeOut:()=>{}};
       await run(['hook','session-start','--install-root','shared'],options);
@@ -103,7 +103,7 @@ describe('the shared Codex plugin runtime', () => {
     expect(value).toMatchObject({ workers: 1, servers: 1, sharedLaunches: 0 });
     expect(value.launches).toHaveLength(1);
     expect(value.launches[0]).toEqual([
-      fs.realpathSync(path.join(globalRoot, 'node_modules/@aquex/cmos-mcp/dist/bin.js')),
+      fs.realpathSync(path.join(globalRoot, 'node_modules/@aquex/reasonbook/dist/bin.js')),
       'serve',
     ]);
   });
@@ -113,7 +113,7 @@ describe('the shared Codex plugin runtime', () => {
     const result =
       node(`import {run} from ${JSON.stringify(pathToFileURL(path.join(plugin, 'hooks/run.mjs')).href)};
       let launched=0;const errors=[];const code=await run(['serve','--install-root','foreign'],{
-        env:{PATH:'',CMOS_CONFIG_DIR:${JSON.stringify(path.join(root, 'config'))}},
+        env:{PATH:'',RBOOK_CONFIG_DIR:${JSON.stringify(path.join(root, 'config'))}},
         launch:async()=>{launched++;return 0},writeError:e=>errors.push(e)});
       console.log(JSON.stringify({code,launched,errors}));`);
     expect(result.status).toBe(0);
@@ -131,7 +131,7 @@ describe('the shared Codex plugin runtime', () => {
         node(`import os from 'node:os';import {run} from ${JSON.stringify(pathToFileURL(path.join(plugin, 'hooks/run.mjs')).href)};
         os.homedir=()=>${JSON.stringify(root)};process.chdir(${JSON.stringify(root)});
         const errors=[];let executions=0;
-        const options={env:{PATH:'',CMOS_CONFIG_DIR:${JSON.stringify(override)}},
+        const options={env:{PATH:'',RBOOK_CONFIG_DIR:${JSON.stringify(override)}},
           launch:async()=>{executions++;return 7},startInstaller:()=>{executions++},
           serveInstalling:async()=>{executions++},writeOut:()=>{},writeError:text=>errors.push(text)};
         const hook=await run(['hook','session-start','--install-root','shared'],options);
@@ -150,7 +150,9 @@ describe('the shared Codex plugin runtime', () => {
       });
       expect(value.errors).toHaveLength(2);
       for (const error of value.errors)
-        expect(error).toContain('CMOS_CONFIG_DIR must be an absolute path');
+        expect(error).toContain(
+          'RBOOK_CONFIG_DIR (or its legacy equivalent) must be an absolute path'
+        );
     }
   );
 });

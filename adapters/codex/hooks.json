@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cmos-mcp hook session-start --harness codex --hook-source cmos-codex",
+            "command": "reasonbook hook session-start --harness codex --hook-source rbook-codex",
             "timeout": 3
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cmos-mcp hook prompt --harness codex --hook-source cmos-codex",
+            "command": "reasonbook hook prompt --harness codex --hook-source rbook-codex",
             "timeout": 1
           }
         ]
@@ -27,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cmos-mcp hook stop --harness codex --hook-source cmos-codex",
+            "command": "reasonbook hook stop --harness codex --hook-source rbook-codex",
             "timeout": 1
           }
         ]
@@ -38,7 +38,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cmos-mcp hook pre-compact --harness codex --hook-source cmos-codex",
+            "command": "reasonbook hook pre-compact --harness codex --hook-source rbook-codex",
             "timeout": 1
           }
         ]
@@ -49,7 +49,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cmos-mcp hook session-end --harness codex --hook-source cmos-codex",
+            "command": "reasonbook hook session-end --harness codex --hook-source rbook-codex",
             "timeout": 1
           }
         ]

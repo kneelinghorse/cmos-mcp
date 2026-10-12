@@ -15,9 +15,9 @@ cmos/db/*.sqlite-shm
 cmos/db/*.sqlite-wal
 cmos/db/cmos.sqlite
 cmos/db/snapshots/
-cmos-seed/db/cmos.sqlite
-cmos-seed/db/*.sqlite-shm
-cmos-seed/db/*.sqlite-wal
+rbook-seed/db/rbook.sqlite
+rbook-seed/db/*.sqlite-shm
+rbook-seed/db/*.sqlite-wal
 
 # Session scratchpad (BFS/reachability tooling, analysis outputs) — never mirror to public
 /scratchpad/

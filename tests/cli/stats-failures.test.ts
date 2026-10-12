@@ -14,9 +14,9 @@ import {
   appendTelemetry,
   targetForStore,
   telemetryDir,
-} from '../../src/tools/cmos/local-telemetry';
-import { collectTelemetryStats, exportTelemetryStats } from '../../src/tools/cmos/telemetry-stats';
-import { seedCmosDb } from '../helpers/seedCmosDb';
+} from '../../src/tools/rbook/local-telemetry';
+import { collectTelemetryStats, exportTelemetryStats } from '../../src/tools/rbook/telemetry-stats';
+import { seedRbookDb } from '../helpers/seedRbookDb';
 
 let tmp: string;
 let root: string;
@@ -29,10 +29,10 @@ const window = () => {
 };
 
 beforeEach(() => {
-  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-stats-failures-'));
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-stats-failures-'));
   root = path.join(tmp, 'project');
-  dbPath = seedCmosDb(root);
-  env = { CMOS_CONFIG_DIR: path.join(tmp, 'config') };
+  dbPath = seedRbookDb(root);
+  env = { RBOOK_CONFIG_DIR: path.join(tmp, 'config') };
 });
 afterEach(() => fs.rmSync(tmp, { recursive: true, force: true }));
 

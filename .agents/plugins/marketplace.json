@@ -1,17 +1,31 @@
 {
-  "name": "cmos",
-  "interface": { "displayName": "CMOS" },
+  "name": "reasonbook",
+  "interface": {
+    "displayName": "Reasonbook"
+  },
   "plugins": [
     {
-      "name": "cmos",
-      "source": { "source": "local", "path": "./plugins/cmos" },
-      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "name": "reasonbook",
+      "source": {
+        "source": "local",
+        "path": "./plugins/reasonbook"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
       "category": "Developer Tools"
     },
     {
-      "name": "cmos-chat",
-      "source": { "source": "local", "path": "./plugins/cmos-chat" },
-      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "name": "reasonbook-chat",
+      "source": {
+        "source": "local",
+        "path": "./plugins/reasonbook-chat"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
       "category": "Productivity"
     }
   ]

@@ -6,7 +6,7 @@ import os from 'os';
 import path from 'path';
 import {
   CredentialStore,
-  CMOS_CONFIG_DIR_ENV,
+  RBOOK_CONFIG_DIR_ENV,
   type ProjectKeyRecord,
   type UserScopedKeyRecord,
 } from '../../src/intelligence/credential-store';
@@ -17,7 +17,7 @@ describe('CredentialStore — cache invalidation (Sprint 66 m06)', () => {
 
   beforeEach(async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'credential-store-cache-'));
-    delete process.env[CMOS_CONFIG_DIR_ENV];
+    delete process.env[RBOOK_CONFIG_DIR_ENV];
     CredentialStore.resetInstance();
   });
 

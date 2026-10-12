@@ -23,7 +23,7 @@ describe('plugin shim routing', () => {
   afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
   function env() {
     return {
-      CMOS_CONFIG_DIR: path.join(root, 'config'),
+      RBOOK_CONFIG_DIR: path.join(root, 'config'),
       CLAUDE_PLUGIN_DATA: path.join(root, 'data'),
       PATH: '',
     };
@@ -129,7 +129,7 @@ describe('plugin shim routing', () => {
       node(`import {run} from ${JSON.stringify(pathToFileURL(path.join(plugin, 'hooks/run.mjs')).href)};
       let workers=0, launches=0; const lines=[];
       const options={env:${JSON.stringify(env())},startInstaller:()=>{workers++},launch:async()=>{launches++;return 2},writeOut:text=>lines.push(text),writeError:()=>{}};
-      for(const verb of ['session-start','prompt','stop','pre-compact','session-end']) await run(['hook',verb,'--hook-source','cmos-plugin'],options);
+      for(const verb of ['session-start','prompt','stop','pre-compact','session-end']) await run(['hook',verb,'--hook-source','rbook-plugin'],options);
       console.log(JSON.stringify({workers,launches,lines}));`);
     expect(result.status).toBe(0);
     const value = JSON.parse(result.stdout);
@@ -138,13 +138,13 @@ describe('plugin shim routing', () => {
     expect(value.lines).toHaveLength(1);
     expect(JSON.parse(value.lines[0]).hookSpecificOutput).toEqual({
       hookEventName: 'SessionStart',
-      additionalContext: 'CMOS is installing; the record loads from the next session',
+      additionalContext: 'Reasonbook is installing; the record loads from the next session',
     });
   });
 
   test('ready hooks preserve source arguments, record the pointer and fail open on CLI errors', () => {
     install();
-    const result = runShim(['hook', 'prompt', '--hook-source', 'cmos-plugin'], '{}', {
+    const result = runShim(['hook', 'prompt', '--hook-source', 'rbook-plugin'], '{}', {
       FIXTURE_EXIT: '7',
     });
     expect(result.status).toBe(0);
@@ -152,7 +152,7 @@ describe('plugin shim routing', () => {
       'hook',
       'prompt',
       '--hook-source',
-      'cmos-plugin',
+      'rbook-plugin',
     ]);
     expect(
       JSON.parse(fs.readFileSync(path.join(root, 'config/runtime/plugin-install.json'), 'utf8'))
@@ -162,7 +162,7 @@ describe('plugin shim routing', () => {
 
   test('Stop never forwards child stdout, even if a failing CLI writes it', () => {
     install();
-    const result = runShim(['hook', 'stop', '--hook-source', 'cmos-plugin'], '{}', {
+    const result = runShim(['hook', 'stop', '--hook-source', 'rbook-plugin'], '{}', {
       FIXTURE_EXIT: '7',
     });
     expect(result.status).toBe(0);
@@ -189,7 +189,7 @@ describe('plugin shim routing', () => {
     const value = JSON.parse(result.stdout);
     expect(value.serve).toBe(9);
     expect(value.init).toBe(9);
-    expect(value.calls[0].args).toContain(`@aquex/cmos-mcp@${version}`);
+    expect(value.calls[0].args).toContain(`@aquex/reasonbook@${version}`);
     expect(value.calls[1].args.slice(-3)).toEqual(['init', '--name', 'fixture']);
     expect(value.calls[0].shell).toBe(false);
   });

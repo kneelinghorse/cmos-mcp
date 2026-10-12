@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "mission": "s94-m06",
   "fixtureRoot": "cmos/research/2026-10-s94-m06",
   "baseline": {
@@ -101,7 +101,7 @@
     "src/cli/telemetry.ts",
     "src/cli/transcript-scan.ts",
     "src/debug-log.ts",
-    "src/intelligence/cmos-detector.ts",
+    "src/intelligence/rbook-detector.ts",
     "src/intelligence/content-sanitizer.ts",
     "src/intelligence/embedding-pipeline.ts",
     "src/intelligence/project-graph-registry.ts",
@@ -110,49 +110,204 @@
     "src/intelligence/provenance-frame.ts",
     "src/intelligence/resolution-policy.ts",
     "src/intelligence/transformers-offline-env.ts",
-    "src/tools/cmos/action-taxonomy.ts",
-    "src/tools/cmos/citation-neighbors.ts",
-    "src/tools/cmos/client.ts",
-    "src/tools/cmos/decision-citations.ts",
-    "src/tools/cmos/decision-fields.ts",
-    "src/tools/cmos/decision-shape-migration.ts",
-    "src/tools/cmos/draft-grammar.ts",
-    "src/tools/cmos/draft-runtime.ts",
-    "src/tools/cmos/errors.ts",
-    "src/tools/cmos/first-prompt-recall.ts",
-    "src/tools/cmos/fts5-retriever.ts",
-    "src/tools/cmos/harness-session.ts",
-    "src/tools/cmos/keyword-extraction.ts",
-    "src/tools/cmos/local-telemetry.ts",
-    "src/tools/cmos/project-id.ts",
-    "src/tools/cmos/prompt-patterns.ts",
-    "src/tools/cmos/proposals.ts",
-    "src/tools/cmos/read-only-agent-guard.ts",
-    "src/tools/cmos/real-store-guard.ts",
-    "src/tools/cmos/record-link-extractor.ts",
-    "src/tools/cmos/record-link-materialize.ts",
-    "src/tools/cmos/record-link-migration.ts",
-    "src/tools/cmos/record-link-reader.ts",
-    "src/tools/cmos/record-link-schema.ts",
-    "src/tools/cmos/record-link-store.ts",
-    "src/tools/cmos/record-links.ts",
-    "src/tools/cmos/relevance-surfacing.ts",
-    "src/tools/cmos/restatement.ts",
-    "src/tools/cmos/rules-files.ts",
-    "src/tools/cmos/schema-migrations.ts",
-    "src/tools/cmos/schema.ts",
-    "src/tools/cmos/spin-out-read.ts",
-    "src/tools/cmos/spin-out-types.ts",
-    "src/tools/cmos/sqlite-busy.ts",
-    "src/tools/cmos/stored-time.ts",
-    "src/tools/cmos/supersession-detection.ts",
-    "src/tools/cmos/telemetry-extract.ts",
-    "src/tools/cmos/terminal-status.ts",
-    "src/tools/cmos/text-preview.ts",
-    "src/tools/cmos/tool-call-context.ts",
-    "src/tools/cmos/vec-loader.ts",
-    "src/tools/cmos/write-guard.ts",
+    "src/tools/rbook/action-taxonomy.ts",
+    "src/tools/rbook/citation-neighbors.ts",
+    "src/tools/rbook/client.ts",
+    "src/tools/rbook/decision-citations.ts",
+    "src/tools/rbook/decision-fields.ts",
+    "src/tools/rbook/decision-shape-migration.ts",
+    "src/tools/rbook/draft-grammar.ts",
+    "src/tools/rbook/draft-runtime.ts",
+    "src/tools/rbook/errors.ts",
+    "src/tools/rbook/first-prompt-recall.ts",
+    "src/tools/rbook/fts5-retriever.ts",
+    "src/tools/rbook/harness-session.ts",
+    "src/tools/rbook/keyword-extraction.ts",
+    "src/tools/rbook/local-telemetry.ts",
+    "src/tools/rbook/project-id.ts",
+    "src/tools/rbook/prompt-patterns.ts",
+    "src/tools/rbook/proposals.ts",
+    "src/tools/rbook/read-only-agent-guard.ts",
+    "src/tools/rbook/real-store-guard.ts",
+    "src/tools/rbook/record-link-extractor.ts",
+    "src/tools/rbook/record-link-materialize.ts",
+    "src/tools/rbook/record-link-migration.ts",
+    "src/tools/rbook/record-link-reader.ts",
+    "src/tools/rbook/record-link-schema.ts",
+    "src/tools/rbook/record-link-store.ts",
+    "src/tools/rbook/record-links.ts",
+    "src/tools/rbook/relevance-surfacing.ts",
+    "src/tools/rbook/restatement.ts",
+    "src/tools/rbook/rules-files.ts",
+    "src/tools/rbook/schema-migrations.ts",
+    "src/tools/rbook/schema.ts",
+    "src/tools/rbook/spin-out-read.ts",
+    "src/tools/rbook/spin-out-types.ts",
+    "src/tools/rbook/sqlite-busy.ts",
+    "src/tools/rbook/stored-time.ts",
+    "src/tools/rbook/supersession-detection.ts",
+    "src/tools/rbook/telemetry-extract.ts",
+    "src/tools/rbook/terminal-status.ts",
+    "src/tools/rbook/text-preview.ts",
+    "src/tools/rbook/tool-call-context.ts",
+    "src/tools/rbook/vec-loader.ts",
+    "src/tools/rbook/write-guard.ts",
     "src/types/event-types.ts",
     "src/utils/fs.ts"
-  ]
+  ],
+  "sourceRenames": {
+    "src/tools/cmos/record-link-extractor.ts": {
+      "path": "src/tools/rbook/record-link-extractor.ts",
+      "replacements": []
+    },
+    "src/tools/cmos/decision-citations.ts": {
+      "path": "src/tools/rbook/decision-citations.ts",
+      "replacements": []
+    },
+    "src/tools/cmos/stored-time.ts": {
+      "path": "src/tools/rbook/stored-time.ts",
+      "replacements": [
+        {
+          "from": "Cmos",
+          "to": "Rbook",
+          "count": 4
+        }
+      ]
+    },
+    "src/tools/cmos/errors.ts": {
+      "path": "src/tools/rbook/errors.ts",
+      "replacements": [
+        {
+          "from": "Cmos",
+          "to": "Rbook",
+          "count": 39
+        },
+        {
+          "from": "CMOS_",
+          "to": "RBOOK_",
+          "count": 40
+        },
+        {
+          "from": "CMOS",
+          "to": "Reasonbook",
+          "count": 20
+        },
+        {
+          "from": "tools/cmos/",
+          "to": "tools/rbook/",
+          "count": 1
+        },
+        {
+          "from": "cmos/db/cmos.sqlite",
+          "to": "rbook/db/rbook.sqlite",
+          "count": 2
+        },
+        {
+          "from": "cmos_",
+          "to": "rbook_",
+          "count": 18
+        },
+        {
+          "from": "cmosNotDetected",
+          "to": "rbookNotDetected",
+          "count": 1
+        },
+        {
+          "from": "cmos-mission-",
+          "to": "rbook-mission-",
+          "count": 3
+        },
+        {
+          "from": "cmos-sprint-",
+          "to": "rbook-sprint-",
+          "count": 1
+        },
+        {
+          "from": "cmos.aquex.ai",
+          "to": "reasonbook.ai",
+          "count": 4
+        }
+      ]
+    },
+    "src/tools/cmos/terminal-status.ts": {
+      "path": "src/tools/rbook/terminal-status.ts",
+      "replacements": [
+        {
+          "from": "tools/cmos/",
+          "to": "tools/rbook/",
+          "count": 1
+        },
+        {
+          "from": "cmos-sprint-",
+          "to": "rbook-sprint-",
+          "count": 2
+        }
+      ]
+    },
+    "scripts/measure-retrieval-quality.js": {
+      "path": "scripts/measure-retrieval-quality.js",
+      "replacements": [
+        {
+          "from": "CMOS_",
+          "to": "RBOOK_",
+          "count": 2
+        },
+        {
+          "from": "tools/cmos/",
+          "to": "tools/rbook/",
+          "count": 1
+        }
+      ]
+    },
+    "scripts/retrieval-quality-fixture.js": {
+      "path": "scripts/retrieval-quality-fixture.js",
+      "replacements": [
+        {
+          "from": "Cmos",
+          "to": "Rbook",
+          "count": 1
+        },
+        {
+          "from": "CMOS_",
+          "to": "RBOOK_",
+          "count": 1
+        },
+        {
+          "from": "tools/cmos/",
+          "to": "tools/rbook/",
+          "count": 8
+        },
+        {
+          "from": "cmos/db/cmos.sqlite",
+          "to": "rbook/db/rbook.sqlite",
+          "count": 1
+        },
+        {
+          "from": "cmos-retrieval-slice-",
+          "to": "rbook-retrieval-slice-",
+          "count": 1
+        }
+      ]
+    },
+    "scripts/retrieval-quality-diagnostics.js": {
+      "path": "scripts/retrieval-quality-diagnostics.js",
+      "replacements": [
+        {
+          "from": "tools/cmos/",
+          "to": "tools/rbook/",
+          "count": 1
+        }
+      ]
+    },
+    "scripts/build-retrieval-labels.js": {
+      "path": "scripts/build-retrieval-labels.js",
+      "replacements": [
+        {
+          "from": "tools/cmos/",
+          "to": "tools/rbook/",
+          "count": 1
+        }
+      ]
+    }
+  }
 }

@@ -1,12 +1,12 @@
 // ABOUTME: Unit tests for CredentialStore — Sprint 57 m01 local credential persistence.
-// ABOUTME: Covers atomic write + 0600 perms + CMOS_CONFIG_DIR override + multi-user-scoped-key coexistence.
+// ABOUTME: Covers atomic write + 0600 perms + RBOOK_CONFIG_DIR override + multi-user-scoped-key coexistence.
 
 import { promises as fs } from 'fs';
 import os from 'os';
 import path from 'path';
 import {
   CredentialStore,
-  CMOS_CONFIG_DIR_ENV,
+  RBOOK_CONFIG_DIR_ENV,
   type ProjectKeyRecord,
   type UserScopedKeyRecord,
 } from '../../src/intelligence/credential-store';
@@ -17,7 +17,7 @@ describe('CredentialStore', () => {
 
   beforeEach(async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'credential-store-'));
-    delete process.env[CMOS_CONFIG_DIR_ENV];
+    delete process.env[RBOOK_CONFIG_DIR_ENV];
     CredentialStore.resetInstance();
   });
 
@@ -100,8 +100,8 @@ describe('CredentialStore', () => {
     expect(await store.listUserScopedKeys()).toEqual({});
   });
 
-  it('honors CMOS_CONFIG_DIR env var when no explicit configDir is supplied', async () => {
-    process.env[CMOS_CONFIG_DIR_ENV] = tempDir;
+  it('honors RBOOK_CONFIG_DIR env var when no explicit configDir is supplied', async () => {
+    process.env[RBOOK_CONFIG_DIR_ENV] = tempDir;
     const store = await CredentialStore.create();
     expect(store.path).toBe(path.join(tempDir, 'credentials.json'));
 
@@ -271,12 +271,39 @@ describe('CredentialStore', () => {
   });
 
   it('getInstance returns the same instance across calls until resetInstance', async () => {
-    process.env[CMOS_CONFIG_DIR_ENV] = tempDir;
+    process.env[RBOOK_CONFIG_DIR_ENV] = tempDir;
     const a = CredentialStore.getInstance();
     const b = CredentialStore.getInstance();
     expect(a).toBe(b);
     CredentialStore.resetInstance();
     const c = CredentialStore.getInstance();
     expect(c).not.toBe(a);
+  });
+
+  // s95-m09 (U5): a store built from RBOOK_CONFIG_DIR kept that folder for the life of the
+  // process, so a test that did not call resetInstance() read the previous test's credentials and
+  // recreated its removed folder. The store now follows the variable unless a configDir pinned it.
+  it('follows RBOOK_CONFIG_DIR to a new folder and never recreates a removed one (s95-m09)', async () => {
+    const first = path.join(tempDir, 'first');
+    process.env[RBOOK_CONFIG_DIR_ENV] = first;
+    await (await CredentialStore.create()).upsertUserScopedKey('k', keyRecord());
+    await fs.rm(first, { recursive: true, force: true });
+
+    const second = path.join(tempDir, 'second');
+    process.env[RBOOK_CONFIG_DIR_ENV] = second;
+    const store = await CredentialStore.create();
+
+    expect(store.path).toBe(path.join(second, 'credentials.json'));
+    expect(await store.listUserScopedKeys()).toEqual({});
+    await expect(fs.stat(first)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('an explicit configDir pins the store for calls that pass none; another one replaces it', async () => {
+    process.env[RBOOK_CONFIG_DIR_ENV] = path.join(tempDir, 'env');
+    const pinned = await CredentialStore.create({ configDir: path.join(tempDir, 'pinned') });
+    expect(await CredentialStore.create()).toBe(pinned);
+
+    const other = await CredentialStore.create({ configDir: path.join(tempDir, 'other') });
+    expect(other.path).toBe(path.join(tempDir, 'other', 'credentials.json'));
   });
 });

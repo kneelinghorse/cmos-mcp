@@ -3,10 +3,10 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { genesisColumns } from '../../src/tools/cmos/genesis-columns';
+import { genesisColumns } from '../../src/tools/rbook/genesis-columns';
 
-const COVERAGE_TEST = path.resolve(__dirname, '../tools/cmos/event-type-coverage.test.ts');
-const GENESIS_HELPER = path.resolve(__dirname, '../../src/tools/cmos/genesis-columns.ts');
+const COVERAGE_TEST = path.resolve(__dirname, '../tools/rbook/event-type-coverage.test.ts');
+const GENESIS_HELPER = path.resolve(__dirname, '../../src/tools/rbook/genesis-columns.ts');
 
 describe('mission discipline guard (Sprint 70 m03)', () => {
   it('keeps the event_type coverage test present and non-trivial', () => {

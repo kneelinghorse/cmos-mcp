@@ -21,7 +21,7 @@ function git(repo: string, args: readonly string[], date?: string): void {
       '-c',
       'commit.gpgsign=false',
       '-c',
-      'user.name=CMOS Test',
+      'user.name=Reasonbook Test',
       '-c',
       'user.email=test@example.com',
       ...args,

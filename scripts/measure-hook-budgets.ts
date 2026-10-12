@@ -6,10 +6,11 @@
  * Usage: npm run build && npx ts-node scripts/measure-hook-budgets.ts [runs]
  *
  * Never touches the live store: it copies cmos/db/cmos.sqlite into a temp project first, and runs
- * every verb with a temp CMOS_CONFIG_DIR. Each run is a fresh `node` process, so module loading
+ * every verb with a temp RBOOK_CONFIG_DIR. Each run is a fresh `node` process, so module loading
  * is measured the way a hook pays for it.
  */
 
+import { resolveRecordPaths } from '../src/intelligence/legacy-compat';
 import { spawnSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -29,11 +30,11 @@ const BUDGETS_MS: Record<string, number> = {
 
 function main(): void {
   if (!fs.existsSync(BIN)) throw new Error('Build first: dist/bin.js is missing.');
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-hook-budgets-'));
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-hook-budgets-'));
   const project = path.join(tmp, 'project');
-  fs.mkdirSync(path.join(project, 'cmos', 'db'), { recursive: true });
-  const live = path.join(REPO, 'cmos', 'db', 'cmos.sqlite');
-  fs.copyFileSync(live, path.join(project, 'cmos', 'db', 'cmos.sqlite'));
+  fs.mkdirSync(path.join(project, 'rbook', 'db'), { recursive: true });
+  const live = resolveRecordPaths(REPO).dbPath;
+  fs.copyFileSync(live, path.join(project, 'rbook', 'db', 'rbook.sqlite'));
   const sizeMb = fs.statSync(live).size / 1024 / 1024;
   const config = path.join(tmp, 'config');
   const preload = path.join(tmp, 'record-modules.js');
@@ -44,10 +45,10 @@ function main(): void {
 
   const env = {
     ...process.env,
-    CMOS_CONFIG_DIR: config,
+    RBOOK_CONFIG_DIR: config,
     CLAUDE_PROJECT_DIR: project,
     CLAUDE_PID: '999999',
-    CMOS_AMBIENT: '',
+    RBOOK_AMBIENT: '',
   };
   const load = os.loadavg().map((n) => n.toFixed(2));
 

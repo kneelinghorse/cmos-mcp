@@ -7,7 +7,7 @@
  * Covers queryAcrossStores: basic 3-store merge, tie-breaking by
  * (occurred_at, origin_seq, project_id), per-store failure isolation, read-only
  * enforcement, latency instrumentation, the four named portfolio queries against a
- * 5-store fixture, the concurrency cap at N=50, and the cmos_decisions(acrossProjects)
+ * 5-store fixture, the concurrency cap at N=50, and the rbook_decisions(acrossProjects)
  * tool integration.
  *
  * @module tests/intelligence/cross-store-query
@@ -33,7 +33,7 @@ import {
   ProjectGraphRegistry,
   type ProjectGraphEntry,
 } from '../../src/intelligence/project-graph-registry';
-import { cmosDecisionsList } from '../../src/tools/cmos/cmos-decisions-list';
+import { rbookDecisionsList } from '../../src/tools/rbook/rbook-decisions-list';
 
 interface DecisionSeed {
   id: number;
@@ -69,15 +69,15 @@ describe('cross-store fan-out read API (Sprint 69 m06)', () => {
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'xstore-test-'));
     configDir = path.join(tmpDir, 'config');
-    prevConfigEnv = process.env.CMOS_CONFIG_DIR;
-    process.env.CMOS_CONFIG_DIR = configDir;
+    prevConfigEnv = process.env.RBOOK_CONFIG_DIR;
+    process.env.RBOOK_CONFIG_DIR = configDir;
     ProjectGraphRegistry.resetInstance();
   });
 
   afterEach(() => {
     ProjectGraphRegistry.resetInstance();
-    if (prevConfigEnv === undefined) delete process.env.CMOS_CONFIG_DIR;
-    else process.env.CMOS_CONFIG_DIR = prevConfigEnv;
+    if (prevConfigEnv === undefined) delete process.env.RBOOK_CONFIG_DIR;
+    else process.env.RBOOK_CONFIG_DIR = prevConfigEnv;
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
@@ -219,7 +219,7 @@ describe('cross-store fan-out read API (Sprint 69 m06)', () => {
     const clusters = await citationGraphAcrossProjects({ registry, limit: 3 });
     expect(clusters.clusters[0].members.map((row) => row.decisionId)).toEqual([2, 3]);
     expect(
-      (await cmosDecisionsList({ acrossProjects: true, pageSize: 1 })).data?.decisions.map(
+      (await rbookDecisionsList({ acrossProjects: true, pageSize: 1 })).data?.decisions.map(
         (row) => row.id
       )
     ).toEqual([2]);
@@ -345,7 +345,7 @@ describe('cross-store fan-out read API (Sprint 69 m06)', () => {
     expect(res.metadata.overallMs).toBeGreaterThanOrEqual(Math.max(...res.metadata.perStoreMs));
   });
 
-  // ── (f) the four named CMOS queries against a 5-store fixture ────────────────
+  // ── (f) the four named Reasonbook queries against a 5-store fixture ────────────────
   it('the four named portfolio queries fan out correctly across 5 stores', async () => {
     const now = 10_000_000_000_000; // fixed clock
     const day = 24 * 60 * 60 * 1000;
@@ -559,7 +559,7 @@ describe('cross-store fan-out read API (Sprint 69 m06)', () => {
     expect(moreRes.metadata.truncated).toBe(true); // 3 rows, limit 2 → capped
   });
 
-  // ── tool integration: cmos_decisions(acrossProjects) ────────────────────────
+  // ── tool integration: rbook_decisions(acrossProjects) ────────────────────────
   it('an explicit empty discovery snapshot never creates or backfills a registry', async () => {
     const options = { sql: '', stores: [] };
     const result = await queryAcrossStores(options);
@@ -656,7 +656,7 @@ describe('cross-store fan-out read API (Sprint 69 m06)', () => {
     expect(result.errors.every((error) => /deadline/.test(error.error))).toBe(true);
   });
 
-  it('cmos_decisions list acrossProjects fans out via the project-graph registry', async () => {
+  it('rbook_decisions list acrossProjects fans out via the project-graph registry', async () => {
     const a = makeStore('proj-a', {
       decisions: [
         { id: 1, text: 'A decision', occurred_at: 300, origin_seq: 1, project_domain: 'da' },
@@ -672,7 +672,7 @@ describe('cross-store fan-out read API (Sprint 69 m06)', () => {
     reg.register({ project_id: 'proj-a', store_path: a, name: 'proj-a' });
     reg.register({ project_id: 'proj-b', store_path: b, name: 'proj-b' });
 
-    const result = await cmosDecisionsList({ acrossProjects: true });
+    const result = await rbookDecisionsList({ acrossProjects: true });
     expect(result.success).toBe(true);
     const data = result.data!;
     expect(data.acrossProjects).toBe(true);

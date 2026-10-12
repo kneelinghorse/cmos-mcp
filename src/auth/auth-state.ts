@@ -1,13 +1,14 @@
 // ABOUTME: Sprint 57 m04 — computeAuthState() composes the local credential store + last deliveryAck snapshot.
-// ABOUTME: Surfaced by cmos_message(action=whoami) and cmos_agent_onboard for agent-visible auth diagnostics.
+// ABOUTME: Surfaced by rbook_message(action=whoami) and rbook_agent_onboard for agent-visible auth diagnostics.
 
 /**
- * Build the `authState` block exposed by `cmos_message(action=whoami)` and
- * `cmos_agent_onboard`. Pure observability — never mutates anything.
+ * Build the `authState` block exposed by `rbook_message(action=whoami)` and
+ * `rbook_agent_onboard`. Pure observability — never mutates anything.
  *
  * @module auth/auth-state
  */
 
+import { getSetting } from '../intelligence/legacy-compat';
 import {
   CredentialStore,
   type ProjectKeyRecord,
@@ -15,18 +16,18 @@ import {
 } from '../intelligence/credential-store';
 import { getLastDeliveryAck, type DeliveryIdentitySource } from './delivery-ack-cache';
 import {
-  CMOS_DASHBOARD_API_KEY_ENV,
-  CMOS_DASHBOARD_USER_ENV,
-  CMOS_DASHBOARD_PASSWORD_ENV,
-} from '../tools/cmos/dashboard-client';
+  RBOOK_DASHBOARD_API_KEY_ENV,
+  RBOOK_DASHBOARD_USER_ENV,
+  RBOOK_DASHBOARD_PASSWORD_ENV,
+} from '../tools/rbook/dashboard-client';
 
 /**
  * Sprint 58 m02 — surfaces which auth arm a send would take right now.
  *
  * Mirrors the fromEnvForProject priority chain:
  *   - `device-code`       — user-scoped keys present in local credential
- *                           store (minted by cmos_auth action="login").
- *   - `legacy-env`        — store empty, CMOS_DASHBOARD_API_KEY env var set.
+ *                           store (minted by rbook_auth action="login").
+ *   - `legacy-env`        — store empty, RBOOK_DASHBOARD_API_KEY env var set.
  *                           Emits a startup WARN on first fire.
  *   - `password-fallback` — store empty, no legacy env key, email+password
  *                           env vars set. Emits a startup WARN on first fire.
@@ -87,7 +88,7 @@ export interface AuthState {
    * Sprint 58 m02 — which `fromEnvForProject` arm would fire for the next
    * send. Inferred statically from local store + env vars (not from an
    * observed send). When this is anything other than `device-code`, the
-   * onboard surface emits a `cmos_auth(action="login")` suggestedAction.
+   * onboard surface emits a `rbook_auth(action="login")` suggestedAction.
    */
   authTier: AuthTier;
 }
@@ -179,7 +180,7 @@ export async function computeAuthState(options: ComputeAuthStateOptions = {}): P
   if (identitySource === 'request-body') {
     warning =
       'Last send was attributed via legacy user-scoped + body-level senderProjectId path. ' +
-      'Run cmos_auth(action=reissue) for this project to migrate to project-scoped key.';
+      'Run rbook_auth(action=reissue) for this project to migrate to project-scoped key.';
   } else if (identitySource === 'none' && !projectKey && !userScopedKey) {
     warning =
       'No dashboard credentials configured. Run the device code bootstrap to mint a user-scoped key.';
@@ -208,8 +209,8 @@ export async function computeAuthState(options: ComputeAuthStateOptions = {}): P
  */
 function deriveAuthTier(hasUserScopedKey: boolean): AuthTier {
   if (hasUserScopedKey) return 'device-code';
-  if (process.env[CMOS_DASHBOARD_API_KEY_ENV]) return 'legacy-env';
-  if (process.env[CMOS_DASHBOARD_USER_ENV] && process.env[CMOS_DASHBOARD_PASSWORD_ENV]) {
+  if (getSetting(RBOOK_DASHBOARD_API_KEY_ENV)) return 'legacy-env';
+  if (getSetting(RBOOK_DASHBOARD_USER_ENV) && getSetting(RBOOK_DASHBOARD_PASSWORD_ENV)) {
     return 'password-fallback';
   }
   return 'none';

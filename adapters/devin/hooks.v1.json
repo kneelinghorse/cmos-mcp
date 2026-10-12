@@ -5,7 +5,7 @@
       "hooks": [
         {
           "type": "command",
-          "command": "cmos-mcp hook session-start --harness devin --hook-source cmos-devin",
+          "command": "reasonbook hook session-start --harness devin --hook-source rbook-devin",
           "timeout": 3
         }
       ]
@@ -17,7 +17,7 @@
       "hooks": [
         {
           "type": "command",
-          "command": "cmos-mcp hook prompt --harness devin --hook-source cmos-devin",
+          "command": "reasonbook hook prompt --harness devin --hook-source rbook-devin",
           "timeout": 1
         }
       ]
@@ -29,7 +29,7 @@
       "hooks": [
         {
           "type": "command",
-          "command": "cmos-mcp hook session-end --harness devin --hook-source cmos-devin",
+          "command": "reasonbook hook session-end --harness devin --hook-source rbook-devin",
           "timeout": 1
         }
       ]

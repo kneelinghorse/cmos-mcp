@@ -1,13 +1,13 @@
 # Security posture
 
-This document describes what CMOS-MCP does with your data, credentials, and network — plainly and
+This document describes what Reasonbook does with your data, credentials, and network — plainly and
 truthfully. Every claim below names the source it rests on — a file in the
-[source repository](https://github.com/kneelinghorse/cmos-mcp) and, where it helps, the function or
+[source repository](https://github.com/kneelinghorse/reasonbook) and, where it helps, the function or
 constant to look for — so you can verify it. (The npm package ships compiled code, so the links point
 at the repository.) If something here does not match the code, that is a bug in this document —
 please report it.
 
-CMOS-MCP is a **local-first** MCP server. The default, fully-supported mode is: a stdio server running
+Reasonbook is a **local-first** MCP server. The default, fully-supported mode is: a stdio server running
 on your machine, reading and writing a single SQLite file in your project. Nothing listens on a
 network port. Ordinary local-only operations do not contact the dashboard. Dashboard-backed tool
 calls can, and startup may conditionally recover a missing project key when a registered project and
@@ -17,7 +17,7 @@ baked default host without an environment setting.
 ## MCP tool annotations
 
 Every published tool has a human-readable title and all four MCP effect hints. The explicit
-action inventory in [tool-effects.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/tool-effects.ts)
+action inventory in [tool-effects.ts](https://github.com/kneelinghorse/reasonbook/blob/main/src/tools/rbook/tool-effects.ts)
 is checked against the published actions and the security read/write taxonomy. Hints describe the
 union of every action's effects and the common MCP dispatch effects, following
 [OpenAI's annotation definitions](https://developers.openai.com/plugins/plugin-guidelines#correct-annotation).
@@ -31,12 +31,12 @@ destructive, with no exemption for operational logs. Opening a project can also 
 upload scheduler pay upload debt from an earlier write. A configured upload may therefore follow
 a read; its destination is the user's bounded dashboard account.
 
-Only `cmos_message` and `cmos_sprint` advertise `openWorldHint: true`, because messaging and sprint
+Only `rbook_message` and `rbook_sprint` advertise `openWorldHint: true`, because messaging and sprint
 `carry_forward` can send to other people's projects. Their hints apply to every action, including
 list and show. Access to the user's own bounded dashboard account alone does not make a tool
 open-world.
 
-These hints are different from [action-taxonomy.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/action-taxonomy.ts),
+These hints are different from [action-taxonomy.ts](https://github.com/kneelinghorse/reasonbook/blob/main/src/tools/rbook/action-taxonomy.ts),
 which governs a review agent's access to project records. A security-classified read can leave the
 record unchanged while writing telemetry outside the store. Tests check prepared store and
 registry snapshot hashes for enumerated actions with no action-owned mutation; separate tests
@@ -51,15 +51,15 @@ runtime or tool-surface changes, rather than inaccurate hints.
 ## Reporting a vulnerability
 
 Please report security issues via the GitHub issue tracker
-([github.com/kneelinghorse/cmos-mcp/issues](https://github.com/kneelinghorse/cmos-mcp/issues)). For a
+([github.com/kneelinghorse/reasonbook/issues](https://github.com/kneelinghorse/reasonbook/issues)). For a
 sensitive report you would rather not file publicly, open a minimal issue asking for a private channel
 and we will follow up. There is no bug-bounty program.
 
 ## What listens on the network
 
-**Nothing.** CMOS-MCP is a stdio MCP server (`bin: cmos-mcp` → `dist/bin.js`, `package.json`, which
+**Nothing.** Reasonbook is a stdio MCP server (the `reasonbook` bin → `dist/bin.js`, `package.json`, which
 starts the server from `dist/index.js` when given no verb). It speaks JSON-RPC over stdin/stdout to its
-MCP host and opens **no** listening socket. The same bin's CLI verbs (`cmos-mcp hook …`) run once and
+MCP host and opens **no** listening socket. The same bin's CLI verbs (`reasonbook hook …`) run once and
 exit; they open no socket either.
 
 A previous release also shipped an HTTP transport bin (`cmos-mcp-http`) that bound a port with
@@ -70,18 +70,18 @@ network surface.
 
 ## Outbound network
 
-CMOS runtime and plugin installation make outbound requests in these situations:
+Reasonbook runtime and plugin installation make outbound requests in these situations:
 
 1. **The dashboard, once you have a credential, or when you ask for it.** The URL resolves from
-   `CMOS_DASHBOARD_URL`, then the baked `https://cmos.aquex.ai` default (`DEFAULT_DASHBOARD_URL` in
-   [dashboard-client.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/dashboard-client.ts)).
-   - **Sign-in.** `cmos_auth(action="login")` or `login_init` contacts that host even when no URL
+   `RBOOK_DASHBOARD_URL`, then the baked `https://reasonbook.ai` default (`DEFAULT_DASHBOARD_URL` in
+   [dashboard-client.ts](https://github.com/kneelinghorse/reasonbook/blob/main/src/tools/rbook/dashboard-client.ts)).
+   - **Sign-in.** `rbook_auth(action="login")` or `login_init` contacts that host even when no URL
      variable or credential exists. `login_complete` polls only when given a `deviceCode`; without
      one it returns a local `MISSING_PARAMETER` and sends nothing.
    - **Registered-project writes and explicit completion calls start background uploads.**
-     `cmos_session(action="complete")` and `cmos_sprint(action="complete")` start this best-effort
-     work when a nonempty stored user-scoped key, `CMOS_DASHBOARD_API_KEY`, or the complete
-     `CMOS_DASHBOARD_USER` / `CMOS_DASHBOARD_PASSWORD` pair exists. A project key alone does not
+     `rbook_session(action="complete")` and `rbook_sprint(action="complete")` start this best-effort
+     work when a nonempty stored user-scoped key, `RBOOK_DASHBOARD_API_KEY`, or the complete
+     `RBOOK_DASHBOARD_USER` / `RBOOK_DASHBOARD_PASSWORD` pair exists. A project key alone does not
      open that gate. The primary path uploads a consistent snapshot of the **whole SQLite file**, including pending
      proposal drafts and any approval words already copied into decision records. It may first
      register the project and save its project key. Completion success does not confirm upload
@@ -91,47 +91,51 @@ CMOS runtime and plugin installation make outbound requests in these situations:
      backoff blocks it; transfer time is additional. A running server must have opened the
      project. An owed upload survives process exit in the per-user registry, and concurrent
      servers share one lease per project. Only explicit closes may register a new project.
-     Upload results and failures appear in `cmos_status` and `cmos_review`; HTTP 401, 402 or 403
+     Upload results and failures appear in `rbook_status` and `rbook_review`; HTTP 401, 402 or 403
      pauses automatic retries until an explicit close succeeds. Without a project slug an explicit
      checkpoint can fall back to event replay;
      a registered project's failed file upload has no replay fallback in that cycle, and a later
      checkpoint retries. Implicit process-exit closes do not upload; explicitly completing an
      implicit session through the tool does. Set
-     **`CMOS_CHECKPOINT_SYNC=off`** to disable these automatic upload paths
-     (`triggerCheckpointBackfill` in [checkpoint-backfill.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/checkpoint-backfill.ts)).
-   - **Calls you make.** Messaging, status and sync health, `cmos_db` sync actions (backfill, pull,
+     **`RBOOK_CHECKPOINT_SYNC=off`** to disable these automatic upload paths
+     (`triggerCheckpointBackfill` in [checkpoint-backfill.ts](https://github.com/kneelinghorse/reasonbook/blob/main/src/tools/rbook/checkpoint-backfill.ts)).
+   - **Calls you make.** Messaging, status and sync health, `rbook_db` sync actions (backfill, pull,
      clone, purge), sprint carry-forward, and the onboard and review summaries of messages.
    - **Startup key recovery**, when a registered project and a usable user-scoped credential exist
      but the project's key is missing.
    - **Shared-store propagation.** Credentialed collab stores lock, pull and push around mission
      transitions, sprint status changes/completion, and project-identity name changes
-     ([sync-locks.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/sync-locks.ts)).
-     `CMOS_CHECKPOINT_SYNC=off` does not disable this propagation or explicit sync calls.
+     ([sync-locks.ts](https://github.com/kneelinghorse/reasonbook/blob/main/src/tools/rbook/sync-locks.ts)).
+     `RBOOK_CHECKPOINT_SYNC=off` does not disable this propagation or explicit sync calls.
 
    Without a credential, ordinary local work sends nothing: the baked address alone does not make
    any tool upload project data.
 
 2. **HuggingFace (`huggingface.co`)**, only when the optional `@xenova/transformers` package is
-   installed next to cmos-mcp. The default install does not include it, and then cmos-mcp never
-   contacts HuggingFace: retrieval is keyword-only and `cmos_db(action="health")` reports semantic
+   installed next to Reasonbook. The default install does not include it, and then Reasonbook never
+   contacts HuggingFace: retrieval is keyword-only and `rbook_db(action="health")` reports semantic
    search off. With the package installed, the first write that records an embedding (a decision,
    learning or mission) or the first search downloads the embedding model
-   `Xenova/all-MiniLM-L6-v2` (~25 MB, [embedding-pipeline.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/intelligence/embedding-pipeline.ts)),
+   `Xenova/all-MiniLM-L6-v2` (~25 MB, [embedding-pipeline.ts](https://github.com/kneelinghorse/reasonbook/blob/main/src/intelligence/embedding-pipeline.ts)),
    which is then cached locally. You can force **embedding-model loading to remain offline** with
-   `CMOS_OFFLINE_EMBEDDINGS=1` (and optionally a pre-seeded `CMOS_MODEL_CACHE_DIR`): the loader sets
+   `RBOOK_OFFLINE_EMBEDDINGS=1` (and optionally a pre-seeded `RBOOK_MODEL_CACHE_DIR`): the loader sets
    `env.allowRemoteModels=false` before loading
-   ([transformers-offline-env.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/intelligence/transformers-offline-env.ts)), and if the model is
+   ([transformers-offline-env.ts](https://github.com/kneelinghorse/reasonbook/blob/main/src/intelligence/transformers-offline-env.ts)), and if the model is
    not present locally the vector arm degrades to keyword-only retrieval instead of blocking on a
-   fetch (`getEmbedder` in [embedding-pipeline.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/intelligence/embedding-pipeline.ts)). The token
+   fetch (`getEmbedder` in [embedding-pipeline.ts](https://github.com/kneelinghorse/reasonbook/blob/main/src/intelligence/embedding-pipeline.ts)). The token
    counter's tokenizer (`Xenova/claude-tokenizer`) loads only when something counts tokens, and no
    tool does. A local-forever install never _hard-requires_ a network fetch.
 
-3. **Plugin installation.** A cold plugin launch runs npm to install the plugin's exact CMOS
+3. **Plugin installation.** A cold plugin launch runs npm to install the plugin's exact Reasonbook
    version and its dependencies. This contacts the configured npm registry; dependency install
-   scripts may also download native packages from their suppliers. This installation is separate
-   from dashboard sync and does not upload the project database. The launcher validates package
-   identity, CLI version and native SQLite before publishing the install
-   ([install-worker.mjs](https://github.com/kneelinghorse/cmos-mcp/blob/main/plugins/cmos/hooks/install-worker.mjs)).
+   scripts may also download native packages from their suppliers. Until that install is ready, a
+   command run through the plugin (not a hook) runs the same exact version with
+   `npx -y --prefer-offline`, which contacts the registry too unless npx's cache already holds it;
+   in Codex, the plugin's server answers that Reasonbook is installing rather than starting through npx
+   ([run.mjs](https://github.com/kneelinghorse/reasonbook/blob/main/plugins/reasonbook/hooks/run.mjs)).
+   This installation is separate from dashboard sync and does not upload the project database. The
+   launcher validates package identity, CLI version and native SQLite before publishing the install
+   ([install-worker.mjs](https://github.com/kneelinghorse/reasonbook/blob/main/plugins/reasonbook/hooks/install-worker.mjs)).
    `pluginServer: "off"` disables the plugin's MCP server before package discovery or installation;
    enabled developer hooks can still need their runtime.
 
@@ -140,14 +144,14 @@ CMOS runtime and plugin installation make outbound requests in these situations:
 Dashboard authentication is **optional**. Device-code bootstrap uses the effective dashboard URL
 described above and does not require an existing credential. After bootstrap, credential-bearing
 project clients are constructed by `DashboardClient.fromEnvForProject()`
-([dashboard-client.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/dashboard-client.ts)); the selected credential source is
+([dashboard-client.ts](https://github.com/kneelinghorse/reasonbook/blob/main/src/tools/rbook/dashboard-client.ts)); the selected credential source is
 surfaced as an `authTier` (the `AuthTier` type and `deriveAuthTier` in
-[auth-state.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/auth/auth-state.ts)):
+[auth-state.ts](https://github.com/kneelinghorse/reasonbook/blob/main/src/auth/auth-state.ts)):
 
-- **`device-code` (preferred).** RFC 8628 device-code flow via `cmos_auth(action="login_init")` +
+- **`device-code` (preferred).** RFC 8628 device-code flow via `rbook_auth(action="login_init")` +
   `login_complete`. Mints user-scoped and project-scoped `cmk_` keys stored locally.
-- **`legacy-env`.** A `CMOS_DASHBOARD_API_KEY` environment variable (`CMOS_DASHBOARD_API_KEY_ENV`
-  in [dashboard-client.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/dashboard-client.ts)). Kept as a CI/script fallback; the
+- **`legacy-env`.** A `RBOOK_DASHBOARD_API_KEY` environment variable (`RBOOK_DASHBOARD_API_KEY_ENV`
+  in [dashboard-client.ts](https://github.com/kneelinghorse/reasonbook/blob/main/src/tools/rbook/dashboard-client.ts)). Kept as a CI/script fallback; the
   server emits a one-time `[WARN]` nudging migration to device-code (`warnLegacyAuth`, same file).
 - **`password-fallback`.** Email + password login. Also emits the migration `[WARN]`.
 - **`none`.** No stored credential — ordinary local work remains local and credential-requiring
@@ -156,66 +160,66 @@ surfaced as an `authTier` (the `AuthTier` type and `deriveAuthTier` in
 
 ## Data & credentials at rest
 
-- **Project data** lives in one SQLite file, `cmos/db/cmos.sqlite`, inside your project. It is not
+- **Project data** lives in one SQLite file, `rbook/db/rbook.sqlite`, inside your project. It is not
   encrypted at rest (it is an ordinary SQLite database on your disk, with your filesystem's
   permissions).
 - **Credentials** live at `<configDir>/credentials.json`, where `configDir` defaults to
-  `~/.config/cmos-mcp` and honors `CMOS_CONFIG_DIR` (`CMOS_CONFIG_DIR_ENV` in
-  [credential-store.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/intelligence/credential-store.ts)). The file is written atomically with
+  `~/.config/rbook` and honors `RBOOK_CONFIG_DIR` (`RBOOK_CONFIG_DIR_ENV` in
+  [credential-store.ts](https://github.com/kneelinghorse/reasonbook/blob/main/src/intelligence/credential-store.ts)). The file is written atomically with
   **`0600`** permissions (`writeFileAtomic(…, { mode: 0o600 })`, same file).
 - **The `cmk_` keys in that file are stored in plaintext** — there is **no** encryption at rest and
   we make no such claim (the key fields in
-  [credential-store.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/intelligence/credential-store.ts) are documented "Plaintext `cmk_…`
+  [credential-store.ts](https://github.com/kneelinghorse/reasonbook/blob/main/src/intelligence/credential-store.ts) are documented "Plaintext `cmk_…`
   key"). The protection is filesystem permissions (`0600`), not cryptography. Treat
   `credentials.json` like an SSH private key.
 
 ## Backups & deletion — the honest reality
 
-- **Database snapshots** are copies of the SQLite file under `cmos/db/snapshots/`.
-  `cmos_db(action="snapshot")` takes one on demand. `cmos_sprint(action="complete")` attempts
+- **Database snapshots** are copies of the SQLite file under `rbook/db/snapshots/`.
+  `rbook_db(action="snapshot")` takes one on demand. `rbook_sprint(action="complete")` attempts
   snapshots before and after closing; a snapshot failure warns without blocking the close.
-  `cmos_db(action="prune_snapshots")` requires a backup before applying a nonempty selection.
-  `cmos_db(action="restore")` requires a copy of the live database under
-  `cmos/db/snapshots/pre-restore/` before replacing it. These are the automatic backup paths.
-- **Retention deletes.** `CMOS_MAX_SNAPSHOTS` (default 50, `resolveMaxSnapshots` in
-  [cmos-db-snapshot.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/cmos-db-snapshot.ts)) caps how many snapshots are kept:
+  `rbook_db(action="prune_snapshots")` requires a backup before applying a nonempty selection.
+  `rbook_db(action="restore")` requires a copy of the live database under
+  `rbook/db/snapshots/pre-restore/` before replacing it. These are the automatic backup paths.
+- **Retention deletes.** `RBOOK_MAX_SNAPSHOTS` (default 50, `resolveMaxSnapshots` in
+  [rbook-db-snapshot.ts](https://github.com/kneelinghorse/reasonbook/blob/main/src/tools/rbook/rbook-db-snapshot.ts)) caps how many snapshots are kept:
   taking one deletes the oldest beyond the cap, automatic ones included.
-- The environment variables `CMOS_AUTO_SNAPSHOT`, `CMOS_SNAPSHOT_RETENTION_DAYS`, and `DB_PATH`
+- The environment variables `RBOOK_AUTO_SNAPSHOT`, `RBOOK_SNAPSHOT_RETENTION_DAYS`, and `DB_PATH`
   appear in older docs but are **vestigial — no code reads them.** Do not rely on them.
 - There is **no `deleted_at` soft-delete net** on the main store. Decisions and learnings carry a
-  status (`active`/`superseded`/`archived`/`stale`), but `cmos_db(action="restore")` replaces the
-  whole database, and `cmos_db(action="purge")` deletes this project's data from the dashboard
+  status (`active`/`superseded`/`archived`/`stale`), but `rbook_db(action="restore")` replaces the
+  whole database, and `rbook_db(action="purge")` deletes this project's data from the dashboard
   mirror. A restore's pre-restore copy is **not listed or accepted by restore-by-ID**: keep its
   returned path for manual filesystem recovery with all writers stopped. That subdirectory is
   also outside the top-level snapshot retention count
-  ([cmos-db-restore.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/cmos-db-restore.ts)).
-- **Snapshot content can be emptied.** `cmos_db(action="prune_snapshots")` is a dry run unless
-  `confirm=true`; applied, it empties the content of context-snapshot copies CMOS wrote on its own
+  ([rbook-db-restore.ts](https://github.com/kneelinghorse/reasonbook/blob/main/src/tools/rbook/rbook-db-restore.ts)).
+- **Snapshot content can be emptied.** `rbook_db(action="prune_snapshots")` is a dry run unless
+  `confirm=true`; applied, it empties the content of context-snapshot copies Reasonbook wrote on its own
   (rows, ids, references and events stay) after taking a database snapshot.
 
 ## Untrusted / foreign content
 
-Text that CMOS did not author locally — inbound message bodies and summaries, project directory
+Text that Reasonbook did not author locally — inbound message bodies and summaries, project directory
 descriptions, and decision/learning rows synced from _other_ projects — is treated as **data, not
 instructions**. It is rendered inside a source-labeled, self-escaping "untrusted" fence and carries an
 additive `{source, trust:"foreign"}` descriptor
-([provenance-frame.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/intelligence/provenance-frame.ts)), applied across the message list,
-onboarding, directory, and cross-store/pull-merged decision & learning renders. The `cmos_message` and
-`cmos_agent_onboard` tool descriptions state this contract to the calling agent.
+([provenance-frame.ts](https://github.com/kneelinghorse/reasonbook/blob/main/src/intelligence/provenance-frame.ts)), applied across the message list,
+onboarding, directory, and cross-store/pull-merged decision & learning renders. The `rbook_message` and
+`rbook_agent_onboard` tool descriptions state this contract to the calling agent.
 
-- **Decision & learning read surfaces framed:** after a `cmos_db pull`, the local
+- **Decision & learning read surfaces framed:** after a `rbook_db pull`, the local
   `strategic_decisions` / `learnings` tables can hold rows authored in another project. `project_id` is
   derived read-time (no migration; column-presence guarded so ancient stores degrade to `NULL` and
   render bare, never throw) and a foreign **decision or learning** row — its `project_id` ≠ the resolved
   local project — renders inside the untrusted fence, while local rows stay bare, at **every** surface
   that renders such rows:
   - the retrieval/search reads: mission-start "relevant decisions"
-    ([relevance-surfacing.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/relevance-surfacing.ts) →
-    [cmos-mission-start.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/cmos-mission-start.ts), decision text **and** evidence),
-    `cmos_context(action="search")`, `cmos_decisions(action="search")`, `cmos_learnings(action="search")`
+    ([relevance-surfacing.ts](https://github.com/kneelinghorse/reasonbook/blob/main/src/tools/rbook/relevance-surfacing.ts) →
+    [rbook-mission-start.ts](https://github.com/kneelinghorse/reasonbook/blob/main/src/tools/rbook/rbook-mission-start.ts), decision text **and** evidence),
+    `rbook_context(action="search")`, `rbook_decisions(action="search")`, `rbook_learnings(action="search")`
     (threaded through the retriever's `RankedResult` and the two direct-SELECT search paths);
-  - the aggregate/digest reads: `cmos_context(action="view")` (full + compact),
-    `cmos_agent_onboard` "Recent Decisions", and the `cmos_review` digest's recent-decisions.
+  - the aggregate/digest reads: `rbook_context(action="view")` (full + compact),
+    `rbook_agent_onboard` "Recent Decisions", and the `rbook_review` digest's recent-decisions.
 
   This closes the former mission-start "relevant decisions" limitation for decision/learning content.
 
@@ -225,18 +229,18 @@ onboarding, directory, and cross-store/pull-merged decision & learning renders. 
   column-presence PRAGMA guard, so ancient stores degrade to `NULL` and render bare, never throw) and a
   foreign row — its `project_id` ≠ the resolved local project — renders inside the untrusted fence while
   local rows stay bare, at **every** surface that renders such rows:
-  - `cmos_agent_onboard` current-sprint header, active-session, and pending & blocked missions;
-  - `cmos_mission(action="list")` name/objective, `cmos_mission(action="show")` name/title/focus
+  - `rbook_agent_onboard` current-sprint header, active-session, and pending & blocked missions;
+  - `rbook_mission(action="list")` name/objective, `rbook_mission(action="show")` name/title/focus
     (inline) + objective/context/success_criteria/deliverables (block);
-  - `cmos_mission(action="status")` local work-queue (In Progress/Current/Queued/Blocked names +
+  - `rbook_mission(action="status")` local work-queue (In Progress/Current/Queued/Blocked names +
     objectives + sprint title/focus) and `acrossProjects=true` portfolio mission names (foreign fenced,
     the local project's own rows bare — the `[proj:X]` tag is metadata, not a trust boundary);
-  - the `cmos_review` digest sprint title/focus, portfolio mission names, and the `Next:` recommendation
+  - the `rbook_review` digest sprint title/focus, portfolio mission names, and the `Next:` recommendation
     (a foreign referenced mission renders **id-only** so its name never lands unfenced in the ≤4KB digest);
-  - the `cmos_agent_onboard` **suggested actions** and the `cmos_review` promoted **next_actions** they
+  - the `rbook_agent_onboard` **suggested actions** and the `rbook_review` promoted **next_actions** they
     feed — a foreign mission/session referenced by a "continue/start/resolve/complete" action renders
     **id-only** (name/title dropped) rather than fenced, keeping the byte-capped digest clean;
-  - `cmos_session(action="list")` title/summary and `cmos_session(action="search")` title + matched
+  - `rbook_session(action="list")` title/summary and `rbook_session(action="search")` title + matched
     snippets.
 
   This closes the former foreign MISSION/SPRINT/SESSION limitation; the decision/learning sweep above
@@ -247,8 +251,8 @@ onboarding, directory, and cross-store/pull-merged decision & learning renders. 
   narrow set of surfaces, and were deliberately left out of the sweep; revisit if a real cross-owner share
   makes them an injection vector.
 
-- The separate content sanitizer ([content-sanitizer.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/intelligence/content-sanitizer.ts))
-  guards CMOS's own **write** paths against a specific tool-call-marshalling corruption; it is not the
+- The separate content sanitizer ([content-sanitizer.ts](https://github.com/kneelinghorse/reasonbook/blob/main/src/intelligence/content-sanitizer.ts))
+  guards Reasonbook's own **write** paths against a specific tool-call-marshalling corruption; it is not the
   inbound-rendering mechanism above.
 
 ## Dependency posture
@@ -263,73 +267,85 @@ optional peer dependency. If you install it for semantic search, its chain carri
 into your tree, and this package's `overrides` cannot reach a dependent's tree: pin `protobufjs` to
 `^7` in your own `overrides`. In this repository the override still pins it for the development tree
 (where the package is a dev dependency), guarded by
-[tests/release/dependency-overrides.test.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/tests/release/dependency-overrides.test.ts).
-For the 3.4.0 candidate on 2026-10-10, `npm audit --omit=dev --json` reported **zero** vulnerable
-package entries. The full development installation's `npm audit --json` reported **40 affected
-package entries: 9 moderate, 30 high and 1 critical**, counting `Object.keys(vulnerabilities)` and
-the report's severity totals, including propagated dependency entries rather than distinct
-advisories. These development-tree findings remain unresolved. The critical entry is
-`handlebars@4.7.9` through the development dependency `ts-jest@29.4.6`; affected direct development
-dependencies also include Jest, lint-staged, jest-cucumber and the optional embedding stack used
-in development. This is not a clean full-tree audit. A consumer that installs the optional
-embedding peer must audit that resulting installation separately.
+[tests/release/dependency-overrides.test.ts](https://github.com/kneelinghorse/reasonbook/blob/main/tests/release/dependency-overrides.test.ts).
+On 2026-10-11, `npm audit --omit=dev --json` reported **zero** vulnerable package entries. The full
+development installation's `npm audit --json` reported **2 affected package entries, both high**,
+counting `Object.keys(vulnerabilities)` and the report's severity totals; an entry can be flagged
+only because a package it depends on is. Both come from three `sharp` advisories
+(GHSA-f88m-g3jw-g9cj, GHSA-rgj7-g3m4-5g8c, GHSA-wq5f-xc86-pv6w) on one path,
+`@xenova/transformers@2.17.2 → sharp`: the optional embedding peer, a development dependency here.
+They remain because npm's only offered fix downgrades `@xenova/transformers` to 1.4.2, and the
+package reaches only people who install it for semantic search.
+
+The same development tree reported 40 entries (9 moderate, 30 high, 1 critical) earlier the same
+day and on 2026-10-10. Jest 30.5.2 and lint-staged 16.4.0 removed `micromatch` and `braces`, which
+has no fixed release; `handlebars` 4.7.10, through `ts-jest`, cleared the critical. Two development
+`overrides` cleared the rest: `@istanbuljs/load-nyc-config` gets js-yaml 4, dropping `argparse` 1
+and `sprintf-js`, which has no fixed release either, and `uuid` is pinned to ^11.1.1 across the
+development tree, where its only users are `jest-cucumber` (asking for ^10) and `@cucumber/messages`
+(asking for exactly 9.0.1). Overrides apply only to this repository's own install, never to a
+consumer's, and
+[tests/release/dependency-overrides.test.ts](https://github.com/kneelinghorse/reasonbook/blob/main/tests/release/dependency-overrides.test.ts)
+fails if any of these advisories comes back. Developing in this repository needs Node.js 20.17 or
+newer (lint-staged 16.4); the published package runs on Node.js 20 or newer. A consumer that
+installs the optional embedding peer must audit that resulting installation separately.
 
 ## Sanctioned deployment shape
 
-**Recommended: one project-local stdio server per project.** Launch CMOS from the project directory
+**Recommended: one project-local stdio server per project.** Launch Reasonbook from the project directory
 (or let your MCP host advertise the project via `roots/list`) so attribution resolves to the right
-project. Sender/attribution resolution never consults `CMOS_PROJECT_ROOT` at tool-dispatch time — that
+project. Sender/attribution resolution never consults `RBOOK_PROJECT_ROOT` at tool-dispatch time — that
 env var is retained only as a bootstrap hint so the server can find its own `.env` (the module note
-in [sender-context.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/intelligence/sender-context.ts)).
+in [sender-context.ts](https://github.com/kneelinghorse/reasonbook/blob/main/src/intelligence/sender-context.ts)).
 
-**The one topology to avoid:** a single _global_ MCP entry that pins `CMOS_PROJECT_ROOT` to one repo
+**The one topology to avoid:** a single _global_ MCP entry that pins `RBOOK_PROJECT_ROOT` to one repo
 while you work across several registered projects. That configuration ties `.env` bootstrap — and
 any dashboard key that `.env` holds — to one repo that every sibling session shares. The server emits
-a startup `[WARN]` when it detects exactly this — `CMOS_PROJECT_ROOT` pinned **and** more than one
-project registered (`evaluateStartupTopology` in [index.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/index.ts)). If you see that warning,
+a startup `[WARN]` when it detects exactly this — `RBOOK_PROJECT_ROOT` pinned **and** more than one
+project registered (`evaluateStartupTopology` in [index.ts](https://github.com/kneelinghorse/reasonbook/blob/main/src/index.ts)). If you see that warning,
 prefer a project-local server or pass `projectRoot` explicitly per call.
 
-**Credentials belong in `~/.config/cmos-mcp`, not a repo `.env`.** Keeping `cmk_` keys out of any
+**Credentials belong in `~/.config/rbook`, not a repo `.env`.** Keeping `cmk_` keys out of any
 repository avoids committing or mirroring them. The publish/mirror tooling additionally fails hard if
 a real `.env` (anything but `.env.template`) ever reaches the public tree (the leak guard in
-[scripts/mirror-to-public.sh](https://github.com/kneelinghorse/cmos-mcp/blob/main/scripts/mirror-to-public.sh)).
+[scripts/mirror-to-public.sh](https://github.com/kneelinghorse/reasonbook/blob/main/scripts/mirror-to-public.sh)).
 
 ### Read-only review agents (the review deployment)
 
-CMOS ships a fail-closed **read-only mode** for agents that should never mutate your store — e.g. a
-code-review agent. When `CMOS_AGENT_ROLE=review` is set, a dispatch-layer guard
-([read-only-agent-guard.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/read-only-agent-guard.ts), classifying every action via the
-fail-closed [action-taxonomy.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/action-taxonomy.ts)) hard-rejects every write-classified
+Reasonbook ships a fail-closed **read-only mode** for agents that should never mutate your store — e.g. a
+code-review agent. When `RBOOK_AGENT_ROLE=review` is set, a dispatch-layer guard
+([read-only-agent-guard.ts](https://github.com/kneelinghorse/reasonbook/blob/main/src/tools/rbook/read-only-agent-guard.ts), classifying every action via the
+fail-closed [action-taxonomy.ts](https://github.com/kneelinghorse/reasonbook/blob/main/src/tools/rbook/action-taxonomy.ts)) hard-rejects every write-classified
 tool call **before any database is opened** and is a strict no-op when the env is unset.
 
 To close the _other_ data-loss vector — a review agent running `git reset`/`stash`/`clean`/etc. — the
-repo ships a PreToolUse hook ([scripts/hooks/block-git-mutations.sh](https://github.com/kneelinghorse/cmos-mcp/blob/main/scripts/hooks/block-git-mutations.sh))
+repo ships a PreToolUse hook ([scripts/hooks/block-git-mutations.sh](https://github.com/kneelinghorse/reasonbook/blob/main/scripts/hooks/block-git-mutations.sh))
 that rejects destructive git commands. It is **role-gated**: a strict no-op unless
-`CMOS_AGENT_ROLE=review`, so it is safe to wire into any settings. To run a review deployment, use a
+`RBOOK_AGENT_ROLE=review`, so it is safe to wire into any settings. To run a review deployment, use a
 **separate** Claude Code / MCP host instance and apply
-[scripts/hooks/review-agent.settings.json](https://github.com/kneelinghorse/cmos-mcp/blob/main/scripts/hooks/review-agent.settings.json) (copy it to that
-instance's `.claude/settings.json`) — it sets `CMOS_AGENT_ROLE=review` and wires the hook, activating
+[scripts/hooks/review-agent.settings.json](https://github.com/kneelinghorse/reasonbook/blob/main/scripts/hooks/review-agent.settings.json) (copy it to that
+instance's `.claude/settings.json`) — it sets `RBOOK_AGENT_ROLE=review` and wires the hook, activating
 both guards together.
 
 **Reads never write the record, under any role.** Since 3.3.0 a read-classified call (the
-`READ_ONLY_ACTIONS` list in [src/tools/cmos/action-taxonomy.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/action-taxonomy.ts))
+`READ_ONLY_ACTIONS` list in [src/tools/rbook/action-taxonomy.ts](https://github.com/kneelinghorse/reasonbook/blob/main/src/tools/rbook/action-taxonomy.ts))
 changes no row: no record status, no owner or address, no seeded identity, no schema label, no rebuilt
 search index. Each repair that rewrites a value asks `callMayWrite()` in
-[src/tools/cmos/tool-call-context.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/tool-call-context.ts) first. Through 3.2.0 the
+[src/tools/rbook/tool-call-context.ts](https://github.com/kneelinghorse/reasonbook/blob/main/src/tools/rbook/tool-call-context.ts) first. Through 3.2.0 the
 session opener marked old decisions and learnings `stale` on every review, the review role included. A
 migration may still run on a read when it is DDL, the filling of a table or column that same call
 added, and the new completion marker it writes under its own key when it ran that DDL
 (`ensureExternalFts` and `ensureVectorStorage` in
-[src/tools/cmos/schema-migrations.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/schema-migrations.ts)). Store upkeep that
-rewrites existing values (restoring rows an older CMOS marked stale, a pending master_context
+[src/tools/rbook/schema-migrations.ts](https://github.com/kneelinghorse/reasonbook/blob/main/src/tools/rbook/schema-migrations.ts)). Store upkeep that
+rewrites existing values (restoring rows an older Reasonbook marked stale, a pending master_context
 migration, rebuilding a search index out of step with its table) runs only at a write, at a server
 process's first write to a store (`runFirstWriteMaintenance` in
-[src/tools/cmos/first-write-maintenance.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/first-write-maintenance.ts)), and the
+[src/tools/rbook/first-write-maintenance.ts](https://github.com/kneelinghorse/reasonbook/blob/main/src/tools/rbook/first-write-maintenance.ts)), and the
 write's answer says what it did. A read that meets an index out of step says so on its answer, and the
 server that read it rebuilds it at its next write. Repairs made on a write's way (an address heal, a
 seeded identity row) are not that write (`asLazyRepair`): onboard, which makes no status write, never
 starts the upkeep. Whoami and the startup lines write nothing at all; they resolve with the address the
-next write would store. [tests/tools/cmos/reads-never-write.test.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/tests/tools/cmos/reads-never-write.test.ts)
+next write would store. [tests/tools/rbook/reads-never-write.test.ts](https://github.com/kneelinghorse/reasonbook/blob/main/tests/tools/rbook/reads-never-write.test.ts)
 calls every read-classified action against stores seeded so each old write was possible, in both
 roles, and fails on any committed row change.
 
@@ -338,39 +354,39 @@ PreCompact and SessionEnd. Its hook parser consumes `session_id`, `cwd`, `prompt
 `last_assistant_message`; Codex's `turn_id` becomes the shared `prompt_id`. The shared parser also
 accepts `source` and `reason`. The prompt can be searched for recall and observed for draft approval;
 the latest assistant reply can produce the draft and its bounded excerpt described below. Codex
-`transcript_path` is discarded before the shared parser, so CMOS does not scan a Codex transcript
+`transcript_path` is discarded before the shared parser, so Reasonbook does not scan a Codex transcript
 as if it were a Claude transcript. Other stdin fields are ignored
-([hook-adapters.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/cli/hook-adapters.ts),
-[core.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/cli/core.ts)). The chat plugin has no hooks.
+([hook-adapters.ts](https://github.com/kneelinghorse/reasonbook/blob/main/src/cli/hook-adapters.ts),
+[core.ts](https://github.com/kneelinghorse/reasonbook/blob/main/src/cli/core.ts)). The chat plugin has no hooks.
 
-For MCP calls, CMOS advertises `codex/sandbox-state-meta` and reads only the presence and object
+For MCP calls, Reasonbook advertises `codex/sandbox-state-meta` and reads only the presence and object
 shape of `_meta["x-codex-turn-metadata"]`, the nonempty `_meta.sessionId`, and
 `_meta["codex/sandbox-state-meta"].sandboxCwd` as a `file://` URI. It ignores the marker's contents
-and every other sandbox-state field; those fields are not copied into the CMOS request context.
+and every other sandbox-state field; those fields are not copied into the Reasonbook request context.
 An explicit `projectRoot` remains the first choice. Without it, malformed supplied metadata
 refuses project resolution. The folder and conversation id live only for the request; background upload work
 clears this context
-([codex-request-context.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/codex-request-context.ts)).
+([codex-request-context.ts](https://github.com/kneelinghorse/reasonbook/blob/main/src/codex-request-context.ts)).
 
-The metadata is caller context, not authentication or proof of approval. CMOS uses a conversation
+The metadata is caller context, not authentication or proof of approval. Reasonbook uses a conversation
 session key only when its folder resolves to the same physical store and that session has actual
 hook state there. Otherwise it uses a process-owned session; merely supplying a session id cannot
 manufacture hook approval. SessionEnd removes that session's hook evidence
-([session-owner.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/session-owner.ts),
-[draft-runtime.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/draft-runtime.ts)).
-A chat-only direct decision can put observed approval words in `context`; CMOS cannot verify those
+([session-owner.ts](https://github.com/kneelinghorse/reasonbook/blob/main/src/tools/rbook/session-owner.ts),
+[draft-runtime.ts](https://github.com/kneelinghorse/reasonbook/blob/main/src/tools/rbook/draft-runtime.ts)).
+A chat-only direct decision can put observed approval words in `context`; Reasonbook cannot verify those
 words and does not label that direct record as hook-approved.
 
 **Hook runtime files.** The hook CLI keeps per-machine state under the config directory, never in a
-project or the store ([src/tools/cmos/harness-session.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/harness-session.ts)):
+project or the store ([src/tools/rbook/harness-session.ts](https://github.com/kneelinghorse/reasonbook/blob/main/src/tools/rbook/harness-session.ts)):
 `<configDir>/runtime/harness/<pid>.json` links a harness process to its sessions, each by a
 16-character SHA-256 prefix of the session id (`harnessSessionHash`), and holds the path of the
 folder the conversation works in; `<pid>.ended` holds the prefix of the session that ended;
 `runtime/declined.json` lists repositories whose user declined the init offer;
 and `runtime/fail-open.jsonl` records hook verbs that gave up (the verb and a cause, never content;
-`recordFailOpen` in [src/cli/core.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/cli/core.ts)). No raw harness session id is written to the store, the
+`recordFailOpen` in [src/cli/core.ts](https://github.com/kneelinghorse/reasonbook/blob/main/src/cli/core.ts)). No raw harness session id is written to the store, the
 runtime files or a log. The hook verbs read the record without writing it (the digest is
-`cmos_review`'s read), except that session end closes the sessions the conversation opened, and that
+`rbook_review`'s read), except that session end closes the sessions the conversation opened, and that
 drafts are kept in the store's `proposals` table (below). No hook verb registers a project in the
 project graph or writes its identity.
 
@@ -379,8 +395,8 @@ stores it in the store's `proposals` table: the line, its kind, the hashed sessi
 characters of the reply before it, the links it named, and whether the session had read outside
 content. The prompt hook writes only a decline or a draft's first-offer time there. Neither is a
 record: the table is outside search, embeddings and sync events, and nothing in it becomes a
-decision, constraint, learning or profile line without a `cmos_decisions(action="record",
-fromDraft=...)` call. The table is in `cmos.sqlite`, so a signed-in checkpoint upload carries it with
+decision, constraint, learning or profile line without a `rbook_decisions(action="record",
+fromDraft=...)` call. The table is in `rbook.sqlite`, so a signed-in checkpoint upload carries it with
 the rest of the store. The operator's reply to a draft is never written to the store by a hook.
 The runtime uses one SQLite file per store under `<configDir>/runtime/drafts/`, keyed by a hash of
 the project id and the store's native real path. It keeps:
@@ -394,16 +410,16 @@ the project id and the store's native real path. It keeps:
 - transcript scan offsets and outside-content flags, keyed by hashes of transcript paths.
 
 Session keys are 16-character hashes; raw session ids and transcript paths are not stored there
-([src/tools/cmos/draft-runtime.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/draft-runtime.ts)).
+([src/tools/rbook/draft-runtime.ts](https://github.com/kneelinghorse/reasonbook/blob/main/src/tools/rbook/draft-runtime.ts)).
 Replies, shown sets and windows stop being usable after two hours. That is an expiry check, not a
-background deletion timer: cross-store pruning runs only at a session start inside a CMOS project
+background deletion timer: cross-store pruning runs only at a session start inside a Reasonbook project
 with a harness session id, visits at most 50 runtime files, and skips files it cannot open. Binding
 a new reply also prunes expired replies in that store. A successful session-end cleanup deletes
 that session's runtime rows; the bounded start-time history remains. A crash followed by no such
 start or cleanup can leave expired data on disk. Only a `fromDraft` record copies a reply into the
-decision it approves, as that decision's `approval_words`. Under `CMOS_AGENT_ROLE=review` session
+decision it approves, as that decision's `approval_words`. Under `RBOOK_AGENT_ROLE=review` session
 starts do not prune or count toward draft expiry, and the hooks store, bind and decline nothing
-([src/cli/drafts-hook.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/cli/drafts-hook.ts)).
+([src/cli/drafts-hook.ts](https://github.com/kneelinghorse/reasonbook/blob/main/src/cli/drafts-hook.ts)).
 
 The plugin also keeps hashed source-election and turn receipts under `runtime/hooks/`, and
 completed first-prompt receipts plus delivered typed IDs under `runtime/recall/`. These receipts
@@ -414,27 +430,27 @@ repository observations, not agent authorship. The Claude plugin installer store
 runtime/version marker with its package in `CLAUDE_PLUGIN_DATA` and an installation pointer under
 the config directory. The Codex developer hooks and both Codex plugin servers instead share
 `<configDir>/plugins`, with an exact version, platform, architecture and Node ABI in the install
-identity. The developer entry forwards an optional absolute `CMOS_CONFIG_DIR`; empty or relative
+identity. The developer entry forwards an optional absolute `RBOOK_CONFIG_DIR`; empty or relative
 values are refused. The portable chat loader cannot forward that optional variable, so its supported
-shared root is the default `~/.config/cmos-mcp`. Both entries use the same installation validation. `pluginServer: off` is checked before package discovery or installation and exposes
+shared root is the default `~/.config/rbook`. Both entries use the same installation validation. `pluginServer: off` is checked before package discovery or installation and exposes
 no tools or instructions. None of this external runtime state is uploaded with the project store.
 
 **The operator profile.** `<configDir>/profile.md` holds the operator's working preferences, for
 every project. It lives outside every repository and every store, so it is never committed and never
-uploaded with the store. `cmos-mcp profile show` prints it. CMOS's own write path (`addProfileLine` in
-[src/tools/cmos/operator-profile.ts](https://github.com/kneelinghorse/cmos-mcp/blob/main/src/tools/cmos/operator-profile.ts))
+uploaded with the store. `reasonbook profile show` prints it. Reasonbook's own write path (`addProfileLine` in
+[src/tools/rbook/operator-profile.ts](https://github.com/kneelinghorse/reasonbook/blob/main/src/tools/rbook/operator-profile.ts))
 adds a line only on an approved draft of kind `profile`, refuses a line past the 1,100-character cap,
-and never cuts the profile to fit. That is a rule CMOS keeps, not a sandbox: it checks the approval
+and never cuts the profile to fit. That is a rule Reasonbook keeps, not a sandbox: it checks the approval
 it is handed, not where the approval came from, and the profile is an ordinary file in the user's
 config folder, which anything running as the user, an agent with file access included, can edit.
 
 **Honesty caveat (important).** The machine-enforced read-only guarantee holds under this
 **separate-read-only-server** deployment, where the review agent's MCP server is launched with
-`CMOS_AGENT_ROLE=review`. It does **not** automatically extend to in-session subagents spawned by a
+`RBOOK_AGENT_ROLE=review`. It does **not** automatically extend to in-session subagents spawned by a
 normal build agent: those subagents share the parent's environment and MCP connection, so the parent's
 (writable) server serves them. For read-only investigation _within_ a build session, use a read-only
 subagent type (e.g. the `Explore` agent) — that is a mitigation, not the machine-hard guarantee.
 
 ---
 
-_Last verified against the source for release 3.5.0._
+_Last verified against the source for release 4.0.0._

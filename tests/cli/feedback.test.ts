@@ -9,28 +9,28 @@ import * as path from 'path';
 
 import { runCli } from '../../src/cli';
 import type { CliIo } from '../../src/cli/core';
-import { CmosDetector } from '../../src/intelligence/cmos-detector';
-import { readTelemetry } from '../../src/tools/cmos/local-telemetry';
-import { seedCmosDb } from '../helpers/seedCmosDb';
+import { RbookDetector } from '../../src/intelligence/rbook-detector';
+import { readTelemetry } from '../../src/tools/rbook/local-telemetry';
+import { seedRbookDb } from '../helpers/seedRbookDb';
 
 let tmp: string;
 let projectRoot: string;
 let dbPath: string;
 let env: NodeJS.ProcessEnv;
-const savedConfig = process.env.CMOS_CONFIG_DIR;
+const savedConfig = process.env.RBOOK_CONFIG_DIR;
 
 beforeEach(() => {
-  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-cli-feedback-'));
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-cli-feedback-'));
   projectRoot = path.join(tmp, 'project');
-  dbPath = seedCmosDb(projectRoot, { projectId: 'cli-feedback' });
-  env = { ...process.env, CMOS_CONFIG_DIR: path.join(tmp, 'config'), CLAUDE_PROJECT_DIR: '' };
-  process.env.CMOS_CONFIG_DIR = env.CMOS_CONFIG_DIR;
-  CmosDetector.resetInstance();
+  dbPath = seedRbookDb(projectRoot, { projectId: 'cli-feedback' });
+  env = { ...process.env, RBOOK_CONFIG_DIR: path.join(tmp, 'config'), CLAUDE_PROJECT_DIR: '' };
+  process.env.RBOOK_CONFIG_DIR = env.RBOOK_CONFIG_DIR;
+  RbookDetector.resetInstance();
 });
 
 afterEach(() => {
-  if (savedConfig === undefined) delete process.env.CMOS_CONFIG_DIR;
-  else process.env.CMOS_CONFIG_DIR = savedConfig;
+  if (savedConfig === undefined) delete process.env.RBOOK_CONFIG_DIR;
+  else process.env.RBOOK_CONFIG_DIR = savedConfig;
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -74,7 +74,7 @@ describe('standalone feedback', () => {
     ).toEqual([
       {
         body: 'The remedy omitted the required project root.',
-        tool_name: 'cmos-mcp feedback',
+        tool_name: 'reasonbook feedback',
         status: 'open',
         project_id: 'cli-feedback',
         session_id: null,
@@ -145,10 +145,10 @@ describe('standalone feedback', () => {
   it('refuses review-role writes before opening the project client', async () => {
     const before = fs.readFileSync(dbPath);
     const result = await run(['--content', 'Forbidden write.'], {
-      env: { ...env, CMOS_AGENT_ROLE: 'review' },
+      env: { ...env, RBOOK_AGENT_ROLE: 'review' },
     });
     expect(result.code).toBe(1);
-    expect(result.stderr.join(' ')).toContain('CMOS_AGENT_ROLE');
+    expect(result.stderr.join(' ')).toContain('RBOOK_AGENT_ROLE');
     expect(result.stdout).toBe('');
     expect(fs.readFileSync(dbPath)).toEqual(before);
   });
@@ -191,7 +191,7 @@ describe('standalone feedback', () => {
         '--dry-run',
         '--format=json',
       ],
-      { env: { ...env, CMOS_AGENT_ROLE: 'review' } }
+      { env: { ...env, RBOOK_AGENT_ROLE: 'review' } }
     );
     expect(result.code).toBe(0);
     expect(JSON.parse(result.stdout)).toMatchObject({

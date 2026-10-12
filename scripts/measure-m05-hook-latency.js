@@ -12,9 +12,10 @@ const { performance } = require('perf_hooks');
 const Database = require('better-sqlite3');
 
 const repo = path.resolve(__dirname, '..');
-const { digestHeadline } = require('../dist/tools/cmos/digest-v2');
-const { readTelemetry, targetForStore } = require('../dist/tools/cmos/local-telemetry');
-const { harnessSessionHash } = require('../dist/tools/cmos/harness-session');
+const { resolveRecordPaths } = require('../dist/intelligence/legacy-compat');
+const { digestHeadline } = require('../dist/tools/rbook/digest-v2');
+const { readTelemetry, targetForStore } = require('../dist/tools/rbook/local-telemetry');
+const { harnessSessionHash } = require('../dist/tools/rbook/harness-session');
 const hash = (file) => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 
 function argumentsFor(argv) {
@@ -123,7 +124,7 @@ function summary(values) {
 
 async function main() {
   const options = argumentsFor(process.argv.slice(2));
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-m05-bin-latency-'));
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-m05-bin-latency-'));
   const buildHash = JSON.parse(
     fs.readFileSync(path.join(repo, 'dist/.build-manifest.json'), 'utf8')
   ).buildHash;
@@ -145,9 +146,9 @@ async function main() {
   try {
     for (const [projectIndex, project] of options.projects.entries()) {
       const root = path.join(temporary, `project-${projectIndex}`);
-      const dbPath = path.join(root, 'cmos/db/cmos.sqlite');
+      const dbPath = path.join(root, 'rbook/db/rbook.sqlite');
       fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-      const source = new Database(path.join(project, 'cmos/db/cmos.sqlite'), {
+      const source = new Database(resolveRecordPaths(project).dbPath, {
         readonly: true,
         fileMustExist: true,
       });
@@ -159,11 +160,11 @@ async function main() {
       const before = hash(dbPath);
       const env = {
         ...process.env,
-        CMOS_CONFIG_DIR: path.join(temporary, `config-${projectIndex}`),
+        RBOOK_CONFIG_DIR: path.join(temporary, `config-${projectIndex}`),
         CLAUDE_PROJECT_DIR: root,
-        CMOS_AMBIENT: 'on',
-        CMOS_CHECKPOINT_SYNC: 'off',
-        CMOS_OFFLINE_EMBEDDINGS: '1',
+        RBOOK_AMBIENT: 'on',
+        RBOOK_CHECKPOINT_SYNC: 'off',
+        RBOOK_OFFLINE_EMBEDDINGS: '1',
       };
       const target = targetForStore(dbPath);
       if (!target) throw new Error('copied_identity_unavailable');

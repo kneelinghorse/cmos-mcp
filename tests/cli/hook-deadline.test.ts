@@ -15,7 +15,7 @@ jest.mock('../../src/cli/pre-compact', () => {
 });
 
 it('does not run a verb whose lazy import consumed the remaining deadline', async () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-lazy-deadline-'));
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-lazy-deadline-'));
   mockNow = Date.now();
   const clock = jest.spyOn(Date, 'now').mockImplementation(() => mockNow);
   const output: string[] = [];
@@ -23,8 +23,8 @@ it('does not run a verb whose lazy import consumed the remaining deadline', asyn
     expect(
       await runCli(['hook', 'pre-compact'], {
         env: {
-          CMOS_CONFIG_DIR: path.join(tmp, 'config'),
-          CMOS_AMBIENT: 'on',
+          RBOOK_CONFIG_DIR: path.join(tmp, 'config'),
+          RBOOK_AMBIENT: 'on',
           CLAUDE_PROJECT_DIR: '',
           CLAUDE_PID: '',
         },

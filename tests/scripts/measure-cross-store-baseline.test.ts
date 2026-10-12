@@ -21,8 +21,8 @@ import {
   type StoreOpener,
   type StoreWriteCounts,
 } from '../../scripts/measure-cross-store-baseline';
-import { CmosDatabaseClient } from '../../src/tools/cmos/client';
-import { createSeededCmosProject, type SeededCmosProject } from '../helpers/seedCmosDb';
+import { RbookDatabaseClient } from '../../src/tools/rbook/client';
+import { createSeededRbookProject, type SeededRbookProject } from '../helpers/seedRbookDb';
 
 // Fixed clock so the 30-day window + ISO timestamps are deterministic.
 const NOW = Date.UTC(2026, 4, 1, 12, 0, 0);
@@ -37,13 +37,13 @@ interface StoreSeed {
   identitySnapshots: number;
 }
 
-async function seedStore(seed: StoreSeed): Promise<SeededCmosProject> {
-  const project = await createSeededCmosProject(
+async function seedStore(seed: StoreSeed): Promise<SeededRbookProject> {
+  const project = await createSeededRbookProject(
     { projectName: seed.projectName },
     'baseline-test-'
   );
   const db = new Database(project.dbPath);
-  // Real CMOS stores are always WAL (the client forces it on write-open); match
+  // Real Reasonbook stores are always WAL (the client forces it on write-open); match
   // that so the script's read-only opens (which run `journal_mode=WAL`) succeed.
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = OFF');
@@ -163,7 +163,7 @@ describe('measure-cross-store-baseline', () => {
   });
 
   describe('countStoreWrites', () => {
-    let project: SeededCmosProject;
+    let project: SeededRbookProject;
     afterEach(async () => {
       if (project) await project.cleanup();
     });
@@ -187,7 +187,7 @@ describe('measure-cross-store-baseline', () => {
         learnings: [{ content: 'l1', category: 'technical' }],
         identitySnapshots: 2,
       });
-      const res = await CmosDatabaseClient.create({ dbPath: project.dbPath, readonly: true });
+      const res = await RbookDatabaseClient.create({ dbPath: project.dbPath, readonly: true });
       expect(res.success).toBe(true);
       const client = res.data!;
       try {
@@ -208,8 +208,8 @@ describe('measure-cross-store-baseline', () => {
   });
 
   describe('buildReport (four-query fan-out simulation)', () => {
-    let stores: SeededCmosProject[] = [];
-    let emptyStore: SeededCmosProject;
+    let stores: SeededRbookProject[] = [];
+    let emptyStore: SeededRbookProject;
 
     beforeEach(async () => {
       const a = await seedStore({
@@ -241,9 +241,9 @@ describe('measure-cross-store-baseline', () => {
       });
       stores = [a, b, c];
 
-      // A 4th store that is reachable + opens but has no CMOS tables, to exercise
+      // A 4th store that is reachable + opens but has no Reasonbook tables, to exercise
       // per-query failure isolation.
-      emptyStore = await createSeededCmosProject({ projectName: 'empty' }, 'baseline-empty-');
+      emptyStore = await createSeededRbookProject({ projectName: 'empty' }, 'baseline-empty-');
       const edb = new Database(emptyStore.dbPath);
       edb.pragma('journal_mode = WAL');
       edb.exec(
@@ -296,7 +296,7 @@ describe('measure-cross-store-baseline', () => {
 
     it('isolates a store that fails to OPEN into openErrors (custom opener)', async () => {
       const realOpener: StoreOpener = async (dbPath) => {
-        const res = await CmosDatabaseClient.create({ dbPath, readonly: true });
+        const res = await RbookDatabaseClient.create({ dbPath, readonly: true });
         return res.success && res.data
           ? { client: res.data }
           : { error: res.error?.message ?? 'x' };

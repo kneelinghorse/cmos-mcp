@@ -73,19 +73,19 @@ function loadSource(root) {
     expected.add(file);
     return require(file);
   };
-  const retrieval = moduleAt('tools/cmos/fts5-retriever');
+  const retrieval = moduleAt('tools/rbook/fts5-retriever');
   const oldEmbed = retrieval.HybridRetriever.prototype.embedQuery;
   // Explicit deterministic keyword-only mode, never an optional-model availability fallback.
   retrieval.HybridRetriever.prototype.embedQuery = async () => null;
   return {
-    ...moduleAt('tools/cmos/client'),
-    ...moduleAt('tools/cmos/schema'),
-    ...moduleAt('tools/cmos/schema-migrations'),
+    ...moduleAt('tools/rbook/client'),
+    ...moduleAt('tools/rbook/schema'),
+    ...moduleAt('tools/rbook/schema-migrations'),
     ...retrieval,
     retrieval,
-    ...moduleAt('tools/cmos/relevance-surfacing'),
-    ...moduleAt('tools/cmos/first-prompt-recall'),
-    ...moduleAt('tools/cmos/tool-call-context'),
+    ...moduleAt('tools/rbook/relevance-surfacing'),
+    ...moduleAt('tools/rbook/first-prompt-recall'),
+    ...moduleAt('tools/rbook/tool-call-context'),
     ...moduleAt('cli'),
     moduleAt,
     verify() {
@@ -108,11 +108,11 @@ function loadSource(root) {
 }
 
 async function createSlice(source, corpus, includeLinks = false) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-retrieval-slice-'));
-  const dbPath = path.join(root, 'cmos/db/cmos.sqlite');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-retrieval-slice-'));
+  const dbPath = path.join(root, 'rbook/db/rbook.sqlite');
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
   const db = new Database(dbPath);
-  db.exec(source.CMOS_SCHEMA);
+  db.exec(source.RBOOK_SCHEMA);
   db.pragma('foreign_keys = OFF');
   db.prepare('INSERT OR REPLACE INTO metadata(key,value) VALUES(?,?)').run(
     'project_id',
@@ -121,13 +121,13 @@ async function createSlice(source, corpus, includeLinks = false) {
   db.exec(
     'CREATE TABLE IF NOT EXISTS agent_feedback(id INTEGER PRIMARY KEY,created_at TEXT,project_id TEXT)'
   );
-  const opened = await source.CmosDatabaseClient.create({ dbPath });
+  const opened = await source.RbookDatabaseClient.create({ dbPath });
   if (!opened.success || !opened.data) throw new Error('slice open failed');
   const client = opened.data;
   const substrate = source.ensureVectorStorage(client);
   if (substrate.warnings?.length)
     throw new Error(`slice substrate: ${substrate.warnings.join('; ')}`);
-  const links = includeLinks ? source.moduleAt('tools/cmos/record-links') : null;
+  const links = includeLinks ? source.moduleAt('tools/rbook/record-links') : null;
   if (links) {
     const ready = links.ensureRecordLinks(client);
     if (!ready.ready) throw new Error(`slice link schema: ${JSON.stringify(ready)}`);

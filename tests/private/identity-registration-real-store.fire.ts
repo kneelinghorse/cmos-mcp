@@ -4,11 +4,12 @@
 
 /**
  * This is deliberately NOT part of default Jest discovery. Run it through
- * `npm run test:identity-real-store` with CMOS_IDENTITYLESS_REAL_STORE_ROOT set to a real,
- * identity-less CMOS project. The command fails when the source is absent or unsuitable; public
+ * `npm run test:identity-real-store` with RBOOK_IDENTITYLESS_REAL_STORE_ROOT set to a real,
+ * identity-less Reasonbook project. The command fails when the source is absent or unsuitable; public
  * CI keeps the portable fixture gates without silently claiming it ran this private fleet proof.
  */
 
+import { resolveRecordPaths } from '../../src/intelligence/legacy-compat';
 import { createHash } from 'crypto';
 import { afterEach, describe, expect, it } from '@jest/globals';
 import Database from 'better-sqlite3';
@@ -17,11 +18,11 @@ import * as os from 'os';
 import * as path from 'path';
 
 import { buildMissionProtocolContext, executeMissionProtocolTool } from '../../src/index';
-import { CmosDetector } from '../../src/intelligence/cmos-detector';
+import { RbookDetector } from '../../src/intelligence/rbook-detector';
 import { ProjectGraphRegistry } from '../../src/intelligence/project-graph-registry';
-import { READ_ONLY_AGENT_ENV } from '../../src/tools/cmos/read-only-agent-guard';
+import { READ_ONLY_AGENT_ENV } from '../../src/tools/rbook/read-only-agent-guard';
 
-const REAL_STORE_ROOT_ENV = 'CMOS_IDENTITYLESS_REAL_STORE_ROOT';
+const REAL_STORE_ROOT_ENV = 'RBOOK_IDENTITYLESS_REAL_STORE_ROOT';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const DB_SUFFIXES = ['', '-wal', '-shm', '-journal'] as const;
 
@@ -88,11 +89,11 @@ function fallbackIdentity(dbPath: string): string {
 }
 
 function copyBundle(sourceDbPath: string): { projectRoot: string; dbPath: string } {
-  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-s88m08-real-store-'));
+  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-s88m08-real-store-'));
   tmpDirs.push(projectRoot);
-  const dbDir = path.join(projectRoot, 'cmos', 'db');
+  const dbDir = path.join(projectRoot, 'rbook', 'db');
   fs.mkdirSync(dbDir, { recursive: true });
-  const dbPath = path.join(dbDir, 'cmos.sqlite');
+  const dbPath = path.join(dbDir, 'rbook.sqlite');
   for (const suffix of DB_SUFFIXES) {
     const source = `${sourceDbPath}${suffix}`;
     if (fs.existsSync(source)) fs.copyFileSync(source, `${dbPath}${suffix}`);
@@ -102,7 +103,7 @@ function copyBundle(sourceDbPath: string): { projectRoot: string; dbPath: string
 
 afterEach(() => {
   ProjectGraphRegistry.resetInstance();
-  CmosDetector.resetInstance();
+  RbookDetector.resetInstance();
   for (const dir of tmpDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -111,7 +112,7 @@ describe('s88-m08 dedicated identity registration real-store FIRE', () => {
     const sourceRoot = process.env[REAL_STORE_ROOT_ENV];
     expect(sourceRoot).toBeTruthy();
     const resolvedSourceRoot = path.resolve(sourceRoot!);
-    const sourceDbPath = path.join(resolvedSourceRoot, 'cmos', 'db', 'cmos.sqlite');
+    const sourceDbPath = resolveRecordPaths(resolvedSourceRoot).dbPath;
     expect(fs.existsSync(sourceDbPath)).toBe(true);
     const sourceBefore = fingerprintBundle(sourceDbPath);
     let operationError: unknown;
@@ -127,18 +128,18 @@ describe('s88-m08 dedicated identity registration real-store FIRE', () => {
       expect(fs.realpathSync(projectRoot).startsWith(tmpRealPath)).toBe(true);
 
       const originalCwd = process.cwd;
-      const savedConfigDir = process.env.CMOS_CONFIG_DIR;
+      const savedConfigDir = process.env.RBOOK_CONFIG_DIR;
       const savedRole = process.env[READ_ONLY_AGENT_ENV];
       process.cwd = () => projectRoot;
-      process.env.CMOS_CONFIG_DIR = configDir;
+      process.env.RBOOK_CONFIG_DIR = configDir;
       process.env[READ_ONLY_AGENT_ENV] = 'review';
       ProjectGraphRegistry.resetInstance();
-      CmosDetector.resetInstance();
+      RbookDetector.resetInstance();
 
       try {
         const context = await buildMissionProtocolContext();
         const readResult = await executeMissionProtocolTool(
-          'cmos_mission',
+          'rbook_mission',
           { action: 'status', acrossProjects: true },
           context
         );
@@ -164,7 +165,7 @@ describe('s88-m08 dedicated identity registration real-store FIRE', () => {
 
         delete process.env[READ_ONLY_AGENT_ENV];
         const registration = await executeMissionProtocolTool(
-          'cmos_project',
+          'rbook_project',
           { action: 'register', projectRoot, name: 's88-m08 real-store copy' },
           context
         );
@@ -177,12 +178,12 @@ describe('s88-m08 dedicated identity registration real-store FIRE', () => {
         expect(writeGraph.getByStorePath(projectRoot)).toBe(minted);
       } finally {
         process.cwd = originalCwd;
-        if (savedConfigDir === undefined) delete process.env.CMOS_CONFIG_DIR;
-        else process.env.CMOS_CONFIG_DIR = savedConfigDir;
+        if (savedConfigDir === undefined) delete process.env.RBOOK_CONFIG_DIR;
+        else process.env.RBOOK_CONFIG_DIR = savedConfigDir;
         if (savedRole === undefined) delete process.env[READ_ONLY_AGENT_ENV];
         else process.env[READ_ONLY_AGENT_ENV] = savedRole;
         ProjectGraphRegistry.resetInstance();
-        CmosDetector.resetInstance();
+        RbookDetector.resetInstance();
       }
     } catch (error) {
       operationError = error;

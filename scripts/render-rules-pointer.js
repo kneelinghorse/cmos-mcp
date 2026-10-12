@@ -15,6 +15,6 @@ require.extensions['.ts'] = (mod, file) => {
   });
   mod._compile(outputText, file);
 };
-const rules = require(path.resolve(__dirname, '../src/tools/cmos/rules-files.ts'));
+const rules = require(path.resolve(__dirname, '../src/tools/rbook/rules-files.ts'));
 const level = rules.levelOfTier(JSON.parse(process.argv[2]));
-process.stdout.write(JSON.stringify({ level, text: rules.cmosRulesLine(level) }));
+process.stdout.write(JSON.stringify({ level, text: rules.rbookRulesLine(level) }));

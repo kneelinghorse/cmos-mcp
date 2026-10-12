@@ -9,7 +9,7 @@
  *   - `request-body` — still using user-scoped key + body-level senderProjectId (rotation pending)
  *   - `none`         — no identifiable sender project
  *
- * This module is a tiny in-process cache so `whoami` and `cmos_agent_onboard`
+ * This module is a tiny in-process cache so `whoami` and `rbook_agent_onboard`
  * can surface the most-recent value without forcing a fresh round-trip. The
  * cache is process-local (cleared on restart) and never persisted to disk.
  *

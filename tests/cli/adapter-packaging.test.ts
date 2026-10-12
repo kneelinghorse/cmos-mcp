@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // ABOUTME: Keeps portable hook configuration installable from the published package.
-// ABOUTME: Each native schema exposes only lifecycle events whose context contract CMOS supports.
+// ABOUTME: Each native schema exposes only lifecycle events whose context contract Reasonbook supports.
 
 import * as fs from 'fs';
 import * as os from 'os';
@@ -28,8 +28,8 @@ const adapters = [
   ['codex', 'adapters/codex/hooks.json'],
   ['cursor', 'adapters/cursor/hooks.json'],
   ['devin', 'adapters/devin/hooks.v1.json'],
-  ['copilot', 'adapters/copilot/cmos.json'],
-  ['vscode', 'adapters/vscode/cmos.json'],
+  ['copilot', 'adapters/copilot/rbook.json'],
+  ['vscode', 'adapters/vscode/rbook.json'],
 ] as const;
 
 function commands(harness: string, file: string): Array<[string, Command]> {
@@ -47,7 +47,7 @@ function commands(harness: string, file: string): Array<[string, Command]> {
 
 describe('portable adapter installation contract', () => {
   it('includes every install source and its coverage guide in an actual npm pack manifest', () => {
-    const cache = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-adapter-pack-'));
+    const cache = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-adapter-pack-'));
     try {
       const packed = spawnSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], {
         cwd: root,
@@ -93,7 +93,7 @@ describe('portable adapter installation contract', () => {
     );
     const devin = read('adapters/devin/hooks.v1.json');
     expect(devin).not.toHaveProperty('hooks');
-    // Devin documents no Stop reply or pre-compaction input supported by CMOS.
+    // Devin documents no Stop reply or pre-compaction input supported by Reasonbook.
     expect(Object.keys(devin).sort()).toEqual(
       ['SessionStart', 'UserPromptSubmit', 'SessionEnd'].sort()
     );
@@ -124,7 +124,7 @@ describe('portable adapter installation contract', () => {
       for (const [event, command] of commands(harness, file)) {
         const executable = harness === 'copilot' ? command.bash : command.command;
         expect(executable).toBe(
-          `cmos-mcp hook ${verbs[event]} --harness ${harness} --hook-source cmos-${harness}`
+          `reasonbook hook ${verbs[event]} --harness ${harness} --hook-source rbook-${harness}`
         );
         if (harness === 'copilot') expect(command.powershell).toBe(executable);
         if (harness !== 'cursor') expect(command.type).toBe('command');

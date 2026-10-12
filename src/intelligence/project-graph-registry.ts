@@ -10,10 +10,10 @@
  *
  * **Scope: per-user, NOT per-project.** One file holds every project the user
  * owns. It lives at `<configDir>/project-graph.sqlite`, where `configDir`
- * resolves as: explicit option → `CMOS_CONFIG_DIR` env → `~/.config/cmos-mcp`. The ADR sketch
- * said `~/.cmos/`, but deferring to the codebase's established config-dir pattern
- * (a) keeps all per-user CMOS state in one place and (b) makes test runs
- * automatically isolated (Jest globalSetup points `CMOS_CONFIG_DIR` at a tmpdir).
+ * resolves as: explicit option → `RBOOK_CONFIG_DIR` env → `~/.config/rbook`. The ADR sketch
+ * said `~/.rbook/`, but deferring to the codebase's established config-dir pattern
+ * (a) keeps all per-user Reasonbook state in one place and (b) makes test runs
+ * automatically isolated (Jest globalSetup points `RBOOK_CONFIG_DIR` at a tmpdir).
  *
  * **Keyed by `project_id`** (the per-project store's `metadata.project_id`), NOT
  * by filesystem path — the cross-store layer keys on `project_id` (it is the leading
@@ -34,15 +34,19 @@
  * @module intelligence/project-graph-registry
  */
 
+import {
+  assertConfigDirectoryAvailable,
+  resolveConfigDirectory,
+  resolveRecordPaths,
+} from './legacy-compat';
 import Database from 'better-sqlite3';
-import { processBusyTimeout } from '../tools/cmos/sqlite-busy';
+import { processBusyTimeout } from '../tools/rbook/sqlite-busy';
 import { randomUUID } from 'crypto';
 import { existsSync, readFileSync, realpathSync } from 'fs';
-import os from 'os';
 import path from 'path';
 import { ensureDir } from '../utils/fs';
-import { isReadOnlyAgentSession } from '../tools/cmos/read-only-agent-guard';
-import { currentToolCallActionMode } from '../tools/cmos/tool-call-context';
+import { isReadOnlyAgentSession } from '../tools/rbook/read-only-agent-guard';
+import { currentToolCallActionMode } from '../tools/rbook/tool-call-context';
 import { defaultEphemeralRoots, isEphemeralStorePath } from './resolution-policy';
 import * as uploads from './project-upload-state';
 
@@ -61,7 +65,7 @@ import * as uploads from './project-upload-state';
  * rather than a reproducible failure. A plan-time critic asserted this site is not
  * on the detached path; that assertion is refuted by the chain above.
  *
- * Guarded by tests/tools/cmos/detached-log-gate.test.ts Arm A.
+ * Guarded by tests/tools/rbook/detached-log-gate.test.ts Arm A.
  */
 function log(line: string): void {
   process.stderr.write(line + '\n');
@@ -82,13 +86,13 @@ function isSameStorePath(left: string, right: string): boolean {
 }
 
 /**
- * Override the default `~/.config/cmos-mcp` config directory. When set (and no
+ * Override the default `~/.config/rbook` config directory. When set (and no
  * explicit `configDir` option is passed), the registry reads/writes here instead
  * of the user's home-config path. Used by Jest globalSetup to keep test runs from
  * polluting the real registry. (s80-m02: moved here from the deleted JSON
  * `project-registry.ts` — this is now the single owner of the config-dir contract.)
  */
-export const CMOS_CONFIG_DIR_ENV = 'CMOS_CONFIG_DIR';
+export const RBOOK_CONFIG_DIR_ENV = 'RBOOK_CONFIG_DIR';
 
 /**
  * Current schema version stamped on each row + in registry_meta.
@@ -146,7 +150,7 @@ const PENDING_LEGACY_DEFAULT_PATH_META_KEY = 'pending_legacy_default_store_path'
 export interface ProjectGraphEntry {
   /** ULID/slug — matches the per-project store's metadata.project_id. */
   project_id: string;
-  /** Absolute path to the project ROOT (the dir containing cmos/db/cmos.sqlite). */
+  /** Absolute path to the project ROOT (the dir containing rbook/db/rbook.sqlite). */
   store_path: string;
   /** Human-readable project name. */
   name: string;
@@ -174,9 +178,14 @@ export interface ProjectGraphRegisterInput {
   name: string;
 }
 
+/** The folder a caller that names none asks for: `RBOOK_CONFIG_DIR`, else `~/.config/rbook`. */
+function envConfigDir(): string {
+  return resolveConfigDirectory();
+}
+
 /** Options for config-dir override + test isolation. */
 export interface ProjectGraphRegistryOptions {
-  /** Override config directory (default: CMOS_CONFIG_DIR env → ~/.config/cmos-mcp). */
+  /** Override config directory (default: RBOOK_CONFIG_DIR env → ~/.config/rbook). */
   configDir?: string;
   /** Override registry filename (default: project-graph.sqlite). */
   registryFilename?: string;
@@ -205,30 +214,41 @@ interface MetaRow {
 /**
  * Per-user project-graph registry — the single discovery source (s80-m02). A
  * singleton + async `create()` lifecycle; the config dir resolves via the
- * `CMOS_CONFIG_DIR` seam so test runs stay isolated.
+ * `RBOOK_CONFIG_DIR` seam so test runs stay isolated.
  */
 export class ProjectGraphRegistry {
   private static instance?: ProjectGraphRegistry;
 
   private readonly configDir: string;
+  /** True when an explicit `configDir` chose the folder; such a graph is kept by calls naming none. */
+  private readonly pinned: boolean;
   private readonly registryPath: string;
   private readonly now: () => number;
   private readonly ephemeralRoots: readonly string[] | undefined;
   private db: Database.Database | null = null;
 
   private constructor(options: ProjectGraphRegistryOptions = {}) {
-    this.configDir =
-      options.configDir ??
-      process.env[CMOS_CONFIG_DIR_ENV] ??
-      path.join(os.homedir(), '.config', 'cmos-mcp');
+    this.pinned = options.configDir !== undefined;
+    this.configDir = options.configDir ?? envConfigDir();
     const filename = options.registryFilename ?? 'project-graph.sqlite';
     this.registryPath = path.join(this.configDir, filename);
     this.now = options.now ?? Date.now;
     this.ephemeralRoots = options.ephemeralRoots;
   }
 
-  /** Singleton accessor. */
+  /**
+   * Singleton accessor. s95-m09: the graph serves the folder its caller asks for. An explicit
+   * `configDir` wins; a call naming none keeps a graph an explicit folder pinned, and otherwise
+   * follows `RBOOK_CONFIG_DIR`. A graph bound to another folder is closed and replaced: a stale one
+   * kept writing a deleted file and recreated its removed folder on every `create()`.
+   */
   static getInstance(options?: ProjectGraphRegistryOptions): ProjectGraphRegistry {
+    const current = ProjectGraphRegistry.instance;
+    const wanted = options?.configDir ?? (current?.pinned ? current.configDir : envConfigDir());
+    assertConfigDirectoryAvailable(wanted);
+    if (current && path.resolve(current.configDir) !== path.resolve(wanted)) {
+      ProjectGraphRegistry.resetInstance();
+    }
     if (!ProjectGraphRegistry.instance) {
       ProjectGraphRegistry.instance = new ProjectGraphRegistry(options);
     }
@@ -249,7 +269,9 @@ export class ProjectGraphRegistry {
    */
   static async create(options?: ProjectGraphRegistryOptions): Promise<ProjectGraphRegistry> {
     const registry = ProjectGraphRegistry.getInstance(options);
+    assertConfigDirectoryAvailable(registry.configDir);
     await ensureDir(registry.configDir);
+    assertConfigDirectoryAvailable(registry.configDir);
     registry.ensureSchema();
     // Legacy import is a compatibility WRITE. A read-classified/review call may open and query
     // the graph schema, but must neither consume the one-shot markers nor add legacy rows. The
@@ -268,6 +290,8 @@ export class ProjectGraphRegistry {
 
   /** Open (lazily) the registry DB with WAL + busy_timeout and ensure the schema. */
   private connection(): Database.Database {
+    // Pinned instances and retained closed objects must not reopen a migrated legacy path.
+    assertConfigDirectoryAvailable(this.configDir);
     if (this.db) return this.db;
     // Arm the busy handler via the CONSTRUCTOR option, not a later pragma: the
     // `journal_mode = WAL` flip below briefly takes an exclusive lock (and creates
@@ -360,7 +384,7 @@ export class ProjectGraphRegistry {
       const incumbentIdentity = readStoreIdentity(incumbent.store_path);
       if (incumbentIdentity?.project_id === input.project_id) {
         log(
-          `[CMOS] project-graph collision refused: project_id '${input.project_id}' is held by ` +
+          `[Reasonbook] project-graph collision refused: project_id '${input.project_id}' is held by ` +
             `live store '${incumbent.store_path}'; ignoring conflicting registration from ` +
             `'${resolvedPath}'. Re-key one of the two projects (metadata.project_id) to resolve.`
         );
@@ -560,17 +584,17 @@ export class ProjectGraphRegistry {
   }
 
   /**
-   * s79-m03 — archive every ACTIVE row whose store's `cmos/db/cmos.sqlite` no
+   * s79-m03 — archive every ACTIVE row whose store's `rbook/db/rbook.sqlite` no
    * longer exists on disk (operators delete project DBs without de-registering).
    * Archive (soft) rather than hard-delete keeps the row recoverable; a later
    * re-register/touch un-archives it. Returns the number archived. Powers the
-   * boot-time prune + `cmos_project validate(prune=true)`. (s80-m02: no JSON mirror
+   * boot-time prune + `rbook_project validate(prune=true)`. (s80-m02: no JSON mirror
    * to re-derive afterward — the graph is the single source.)
    */
   pruneMissingStores(): number {
     let pruned = 0;
     for (const row of this.list()) {
-      const dbPath = path.join(row.store_path, 'cmos', 'db', 'cmos.sqlite');
+      const dbPath = resolveRecordPaths(row.store_path).dbPath;
       if (!existsSync(dbPath) && this.archive(row.project_id)) pruned++;
     }
     return pruned;
@@ -580,7 +604,7 @@ export class ProjectGraphRegistry {
    * s92-m01 — archive every ACTIVE row whose store lies under an ephemeral location, even while
    * its file still exists (feedback #41: a scratch store stayed registered and fed the portfolio
    * views). Archive, not delete, so a row registered there on purpose can be restored. Powers
-   * `cmos_project validate(prune=true)` only — the boot-time prune stays existence-based.
+   * `rbook_project validate(prune=true)` only — the boot-time prune stays existence-based.
    */
   pruneEphemeralStores(): number {
     let pruned = 0;
@@ -628,7 +652,7 @@ export class ProjectGraphRegistry {
 
   /**
    * s79-m02 — the authoritative registration primitive for discovery-write
-   * handlers (`cmos_project` init/register and write-client registration). Give
+   * handlers (`rbook_project` init/register and write-client registration). Give
    * the store a STABLE project_id and upsert it. Id resolution, in order:
    *   1. reuse the id an already-registered row at this path holds (stable across
    *      re-registration, even when the store DB is momentarily unreadable);
@@ -651,7 +675,7 @@ export class ProjectGraphRegistry {
     const storedProjectId = mintProjectId(resolved, existingGraphId ?? undefined);
     if (opts.requireStoredIdentity && !storedProjectId) {
       throw new Error(
-        `Unable to persist a project identity in ${path.join(resolved, 'cmos', 'db', 'cmos.sqlite')}`
+        `Unable to persist a project identity in ${resolveRecordPaths(resolved).dbPath}`
       );
     }
     if (
@@ -702,7 +726,7 @@ export class ProjectGraphRegistry {
 
   /**
    * s79-m02 — hard-remove a store by its ROOT path (the authoritative counterpart
-   * to `cmos_project unregister`). Clears the default when the removed project was
+   * to `rbook_project unregister`). Clears the default when the removed project was
    * it. Returns whether a row was removed + whether it had been the default.
    * (s80-m02: the graph is the single source — no JSON mirror to re-derive.)
    */
@@ -781,7 +805,7 @@ export class ProjectGraphRegistry {
     } catch {
       // Backfill is best-effort; never block registry availability on it. The
       // marker is still set so we don't re-scan on every open. A missed store stays absent until
-      // an explicit/write registration path adds it; read-classified cmos_review never does.
+      // an explicit/write registration path adds it; read-classified rbook_review never does.
     } finally {
       db.prepare('INSERT OR REPLACE INTO registry_meta (key, value) VALUES (?, ?)').run(
         BACKFILL_MARKER_KEY,
@@ -841,7 +865,7 @@ export class ProjectGraphRegistry {
 }
 
 /**
- * s92-m01 — the one line the startup log, `whoami` and `cmos_review` show when a registry default
+ * s92-m01 — the one line the startup log, `whoami` and `rbook_review` show when a registry default
  * exists but is not applied (written before 3.2.0 and never re-confirmed). Null when there is no
  * default, or when it is applied.
  */
@@ -852,7 +876,7 @@ export function unappliedDefaultNotice(status: ProjectGraphDefaultStatus): strin
 
 /** s92-m01 — the call that re-confirms (and so applies) a registry default. */
 export function reconfirmDefaultCall(entry: ProjectGraphEntry): string {
-  return `cmos_project(action="register", projectRoot=${JSON.stringify(entry.store_path)}, setAsDefault=true)`;
+  return `rbook_project(action="register", projectRoot=${JSON.stringify(entry.store_path)}, setAsDefault=true)`;
 }
 
 /** The shape the graph backfills need from the legacy `project-registry.json`. */
@@ -903,12 +927,12 @@ function readLegacyJsonRegistry(configDir: string): LegacyJsonRegistry | null {
  * `metadata` table, opening the SQLite read-only. Returns null when the DB is
  * absent, unreadable, or carries no non-empty project_id. Never throws.
  *
- * @param storePath absolute path to the project ROOT (cmos/db/cmos.sqlite under it).
+ * @param storePath absolute path to the project ROOT (rbook/db/rbook.sqlite under it).
  */
 export function readStoreIdentity(
   storePath: string
 ): { project_id: string; name: string; storedName?: string } | null {
-  const dbPath = path.join(storePath, 'cmos', 'db', 'cmos.sqlite');
+  const dbPath = resolveRecordPaths(storePath).dbPath;
   if (!existsSync(dbPath)) return null;
   let db: Database.Database | null = null;
   try {
@@ -933,12 +957,12 @@ export function readStoreIdentity(
 
 /**
  * Ensure a per-project store has a stable `metadata.project_id`, minting a UUID
- * only where one is absent (s79-m01). Mirrors `cmos_project init` (`randomUUID`)
+ * only where one is absent (s79-m01). Mirrors `rbook_project init` (`randomUUID`)
  * — an existing id (slug OR UUID) is returned untouched (never churned; the
  * dashboard keys on slugs). Returns the resolved/minted id, or null when the
  * store DB is absent/unreadable. Opens the store read-WRITE only to insert.
  *
- * @param storePath absolute path to the project ROOT (cmos/db/cmos.sqlite under it).
+ * @param storePath absolute path to the project ROOT (rbook/db/rbook.sqlite under it).
  */
 /** Derive a stable slug id from a name/basename (degenerate unreadable-store fallback). */
 function slugifyName(value: string): string {
@@ -946,7 +970,7 @@ function slugifyName(value: string): string {
 }
 
 export function mintProjectId(storePath: string, preferredId?: string): string | null {
-  const dbPath = path.join(storePath, 'cmos', 'db', 'cmos.sqlite');
+  const dbPath = resolveRecordPaths(storePath).dbPath;
   if (!existsSync(dbPath)) return null;
   let db: Database.Database | null = null;
   try {

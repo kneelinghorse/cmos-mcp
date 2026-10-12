@@ -8,7 +8,7 @@ import { parse as parseYaml } from 'yaml';
 import { inspectNpmPack } from '../docs/npm-pack-inspection';
 
 const ROOT = path.resolve(__dirname, '../..');
-const PLUGIN = 'plugins/cmos-chat';
+const PLUGIN = 'plugins/reasonbook-chat';
 const SKILLS = ['capture-notes', 'catch-up', 'next-up', 'propose-decision', 'recall', 'setup'];
 const read = (file: string) => fs.readFileSync(path.join(ROOT, file), 'utf8');
 const json = (file: string) => JSON.parse(read(file));
@@ -25,12 +25,14 @@ function files(directory: string): string[] {
  * Scope: every UTF-8 instruction file under the chat skills directory, including frontmatter.
  * False negatives: prose describing program execution without a command token, filesystem names
  * without slashes, and MCP tool names that wrap a shell. These require semantic reviewer judgment.
- * cmos:// addresses are selectors, not paths, and are the only slash-bearing exception.
+ * rbook:// addresses are selectors, not paths, and are the only slash-bearing exception.
+ * s99-m02: Reasonbook is the product's name in prose; lowercase reasonbook is its command.
  */
 function chatViolations(source: string): string[] {
-  const text = source.replace(/cmos:\/\/[a-zA-Z0-9_-]+\/[a-zA-Z0-9_-]+/g, 'PROJECT_ADDRESS');
+  const text = source.replace(/rbook:\/\/[a-zA-Z0-9_-]+\/[a-zA-Z0-9_-]+/g, 'PROJECT_ADDRESS');
   const violations: string[] = [];
-  if (/\b(?:cmos-mcp|node|npx|npm)\b/i.test(text)) violations.push('shell token');
+  if (/\b(?:cmos-mcp|node|npx|npm)\b/i.test(text) || /\breasonbook\b/.test(text))
+    violations.push('shell token');
   if (/\bhooks?\b|\b(?:SessionStart|UserPromptSubmit|PreCompact|SessionEnd)\b/i.test(text))
     violations.push('hook reference');
   if (text.includes('--project-root')) violations.push('CLI option');
@@ -38,7 +40,7 @@ function chatViolations(source: string): string[] {
     violations.push('filesystem path');
   if (
     [...text.matchAll(/`([^`\n]+)`/g)].some(
-      (match) => /\s/.test(match[1]) && !/^cmos_[a-z_]+\(/.test(match[1])
+      (match) => /\s/.test(match[1]) && !/^rbook_[a-z_]+\(/.test(match[1])
     )
   )
     violations.push('backticked command');
@@ -47,16 +49,21 @@ function chatViolations(source: string): string[] {
 }
 
 describe('portable chat plugin', () => {
+  it('omits developer-only forwarding fields so portable hosts discover the server', () => {
+    // Codex drops this portable MCP file when the developer manifest's env_vars field is present.
+    expect(json(`${PLUGIN}/mcp.json`).mcpServers.rbook).not.toHaveProperty('env_vars');
+  });
+
   it('declares a portable entry, setup onboarding and exactly one shared stdio server', () => {
     const manifest = json(`${PLUGIN}/plugin.json`);
     expect(manifest).toMatchObject({
       $schema: 'https://agent-plugins.org/schemas/1.0.0/plugin.schema.json',
-      name: 'cmos-chat',
+      name: 'reasonbook-chat',
       version: json('package.json').version,
       extensions: {
         'com.openai': {
           onboardingSkill: './skills/setup/SKILL.md',
-          interface: { displayName: 'CMOS Chat', category: 'Productivity' },
+          interface: { displayName: 'Reasonbook Chat', category: 'Productivity' },
         },
       },
     });
@@ -65,7 +72,7 @@ describe('portable chat plugin', () => {
     expect(json(`${PLUGIN}/mcp.json`)).toEqual({
       $schema: 'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json',
       mcpServers: {
-        cmos: {
+        rbook: {
           type: 'stdio',
           command: './server/launch.sh',
           args: ['serve', '--install-root', 'shared'],
@@ -77,20 +84,20 @@ describe('portable chat plugin', () => {
 
   it('copies the complete bootstrap closure byte-for-byte so chat cannot diverge from developer installs', () => {
     const canonical = fs
-      .readdirSync(path.join(ROOT, 'plugins/cmos/hooks'))
+      .readdirSync(path.join(ROOT, 'plugins/reasonbook/hooks'))
       .filter((name) => /\.(?:mjs|sh)$/.test(name))
       .sort();
     expect(fs.readdirSync(path.join(ROOT, PLUGIN, 'server')).sort()).toEqual(canonical);
     // The portable loader executes a contained relative command directly.
     expect(fs.statSync(path.join(ROOT, PLUGIN, 'server/launch.sh')).mode & 0o111).toBe(0o111);
     for (const name of canonical) {
-      expect(read(`${PLUGIN}/server/${name}`)).toBe(read(`plugins/cmos/hooks/${name}`));
+      expect(read(`${PLUGIN}/server/${name}`)).toBe(read(`plugins/reasonbook/hooks/${name}`));
     }
   });
 
   it('ships distinct discoverable chat skills and keeps every instruction within the MCP-only boundary', () => {
     expect(fs.readdirSync(path.join(ROOT, PLUGIN, 'skills')).sort()).toEqual(SKILLS);
-    const developerNames = fs.readdirSync(path.join(ROOT, 'plugins/cmos/skills'));
+    const developerNames = fs.readdirSync(path.join(ROOT, 'plugins/reasonbook/skills'));
     for (const name of SKILLS) {
       const source = read(`${PLUGIN}/skills/${name}/SKILL.md`);
       const frontmatter = /^---\r?\n([\s\S]+?)\r?\n---\r?\n/.exec(source);
@@ -114,6 +121,8 @@ describe('portable chat plugin', () => {
 describe('chat instruction lint', () => {
   it.each([
     'npx cmos-mcp',
+    'reasonbook ambient off',
+    'npx @aquex/reasonbook@3.6.0',
     'npm install',
     'node program',
     '`git status`',
@@ -140,11 +149,11 @@ describe('chat instruction lint', () => {
   it('permits address selection and MCP calls without broad slash or code exceptions', () => {
     expect(
       chatViolations(
-        'Use cmos://owner/project with `cmos_review(projectRoot="cmos://owner/project")`.'
+        'Use rbook://owner/project with `rbook_review(projectRoot="rbook://owner/project")`.'
       )
     ).toEqual([]);
-    expect(chatViolations('Call `cmos_decisions(action="record", content="the choice")`.')).toEqual(
-      []
-    );
+    expect(
+      chatViolations('Call `rbook_decisions(action="record", content="the choice")`.')
+    ).toEqual([]);
   });
 });

@@ -2,11 +2,12 @@
 // ABOUTME: Elects one ready hook source per verified harness lifetime and journals successful turn events.
 // ABOUTME: Keys contain hashes only; lifecycle repeats stay eligible and end never deletes suppression receipts.
 
+import { resolveRecordPaths } from '../intelligence/legacy-compat';
 import Database from 'better-sqlite3';
 import { createHash } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
-import { harnessSessionHash, runtimeDir } from '../tools/cmos/harness-session';
+import { harnessSessionHash, runtimeDir } from '../tools/rbook/harness-session';
 import type { HookEvent, HookInput } from './core';
 import { prepareRuntimeFile, requireSafeRuntime } from './runtime-file';
 
@@ -46,7 +47,7 @@ function open(key: HookRuntimeIdentity, env: NodeJS.ProcessEnv): Database.Databa
   const file = hookRuntimePath(key, env);
   prepareRuntimeFile(file, {
     projectId: '',
-    dbPath: path.join(key.directory, 'cmos', 'db', 'cmos.sqlite'),
+    dbPath: resolveRecordPaths(key.directory).dbPath,
   });
   return new Database(file, { timeout: 10 });
 }
@@ -63,7 +64,7 @@ export function electHookSource(
   const file = hookRuntimePath(key, env);
   requireSafeRuntime(file, {
     projectId: '',
-    dbPath: path.join(key.directory, 'cmos', 'db', 'cmos.sqlite'),
+    dbPath: resolveRecordPaths(key.directory).dbPath,
   });
   // Established sources only read. In particular a loser cannot contend with the winner's
   // in-flight turn receipt or produce a fail-open measurement from that writer lock.

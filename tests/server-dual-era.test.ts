@@ -7,9 +7,9 @@ import * as os from 'os';
 import * as path from 'path';
 import * as ts from 'typescript';
 import Database from 'better-sqlite3';
-import { seedCmosDb } from './helpers/seedCmosDb';
+import { seedRbookDb } from './helpers/seedRbookDb';
 import { RawStdioServer } from './helpers/raw-stdio-server';
-import { readTelemetry, targetForStore } from '../src/tools/cmos/local-telemetry';
+import { readTelemetry, targetForStore } from '../src/tools/rbook/local-telemetry';
 import { ProjectGraphRegistry } from '../src/intelligence/project-graph-registry';
 import { pathToFileURL } from 'url';
 
@@ -28,7 +28,7 @@ let cwd: string;
 const children: RawStdioServer[] = [];
 
 beforeAll(() => {
-  directory = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-dual-era-'));
+  directory = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-dual-era-'));
   const output = path.join(directory, 'package');
   fs.mkdirSync(output);
   // Transpile the actual source, without instrumentation or a real-dist write. Type checking
@@ -54,7 +54,7 @@ beforeAll(() => {
     }
   };
   compile('');
-  for (const name of ['node_modules', 'cmos-seed', 'plugins']) {
+  for (const name of ['node_modules', 'rbook-seed', 'plugins']) {
     fs.symlinkSync(path.join(repo, name), path.join(output, name), 'dir');
   }
   fs.copyFileSync(path.join(repo, 'package.json'), path.join(output, 'package.json'));
@@ -72,7 +72,7 @@ beforeEach(() => {
     [project, 'first'],
     [other, 'second'],
   ]) {
-    const database = new Database(seedCmosDb(root, { projectId: id, projectName: id }));
+    const database = new Database(seedRbookDb(root, { projectId: id, projectName: id }));
     // Match the application's connection mode before taking the no-write witness: changing
     // journal mode itself changes SQLite's header even when no application row is written.
     database.pragma('journal_mode = WAL');
@@ -91,9 +91,9 @@ function start(workingDir = cwd, args: string[] = []): RawStdioServer {
     {
       PATH: process.env.PATH ?? path.dirname(process.execPath),
       HOME: directory,
-      CMOS_CONFIG_DIR: config,
-      CMOS_CHECKPOINT_SYNC: 'off',
-      CMOS_AGENT_ROLE: 'review',
+      RBOOK_CONFIG_DIR: config,
+      RBOOK_CHECKPOINT_SYNC: 'off',
+      RBOOK_AGENT_ROLE: 'review',
     },
     args
   );
@@ -132,7 +132,7 @@ it('advertises Codex metadata and carries its folder through an actual MCP proce
   expect(initialized.capabilities.experimental).toMatchObject({ 'codex/sandbox-state-meta': {} });
   child.notify('notifications/initialized');
   const result = await child.request('tools/call', {
-    name: 'cmos_review',
+    name: 'rbook_review',
     arguments: {},
     _meta: {
       'x-codex-turn-metadata': {},
@@ -150,7 +150,7 @@ it('advertises Codex metadata and carries its folder through an actual MCP proce
 it('opens with a modern tool call, preserves request identity, and caches tools without changing order', async () => {
   const child = start();
   const called = await child.request('tools/call', {
-    name: 'cmos_review',
+    name: 'rbook_review',
     arguments: { projectRoot: project },
     _meta: modern('direct-modern'),
   });
@@ -168,8 +168,8 @@ it('opens with a modern tool call, preserves request identity, and caches tools 
     oldListing.tools.map((tool: { name: string }) => tool.name)
   );
   expect(child.rootsCalls).toBe(0);
-  const records = readTelemetry(targetForStore(path.join(project, 'cmos/db/cmos.sqlite'))!, {
-    CMOS_CONFIG_DIR: config,
+  const records = readTelemetry(targetForStore(path.join(project, 'rbook/db/rbook.sqlite'))!, {
+    RBOOK_CONFIG_DIR: config,
   });
   expect(records).toEqual([expect.objectContaining({ client: 'direct-modern/1', ok: true })]);
   expect(await child.close()).toBe(0);
@@ -181,7 +181,7 @@ it('keeps legacy roots cached until list_changed and discovers before falling ba
   expect(discovery).toBeDefined();
   await legacy(child);
   child.roots = [project];
-  const review = () => child.request('tools/call', { name: 'cmos_review', arguments: {} });
+  const review = () => child.request('tools/call', { name: 'rbook_review', arguments: {} });
   expect((await review()).structuredContent.data.projectRoot).toBe(project);
   expect((await review()).structuredContent.data.projectRoot).toBe(project);
   expect(child.rootsCalls).toBe(1);
@@ -199,7 +199,7 @@ it.each([null, ''])(
     await legacy(child);
     child.roots = [project];
     const result = await child.request('tools/call', {
-      name: 'cmos_review',
+      name: 'rbook_review',
       arguments: { projectRoot: root },
     });
     expect(result.structuredContent.success).toBe(true);
@@ -229,7 +229,7 @@ it.each(['cwd', 'server-project-root', 'registry-default'] as const)(
     child.roots = [other];
     child.answerRoots = false;
     const result = await child.request('tools/call', {
-      name: 'cmos_review',
+      name: 'rbook_review',
       arguments: {},
       _meta: {
         ...modern(`fallback-${source}`),
@@ -248,12 +248,12 @@ it('serves two simultaneous application processes against one store without SQLi
   const first = start();
   const second = start();
   expect(first.child.pid).not.toBe(second.child.pid);
-  const dbPath = path.join(project, 'cmos/db/cmos.sqlite');
+  const dbPath = path.join(project, 'rbook/db/rbook.sqlite');
   const before = snapshot(dbPath);
   const results = await Promise.all(
     [first, second].map((child, index) =>
       child.request('tools/call', {
-        name: 'cmos_review',
+        name: 'rbook_review',
         arguments: { projectRoot: project },
         _meta: modern(`parallel-${index}`),
       })
@@ -264,7 +264,7 @@ it('serves two simultaneous application processes against one store without SQLi
   snapshot(path.join(config, 'project-graph.sqlite'));
   expect([first.rootsCalls, second.rootsCalls]).toEqual([0, 0]);
   expect(
-    readTelemetry(targetForStore(dbPath)!, { CMOS_CONFIG_DIR: config })
+    readTelemetry(targetForStore(dbPath)!, { RBOOK_CONFIG_DIR: config })
       .map((row) => row.client)
       .sort()
   ).toEqual(['parallel-0/1', 'parallel-1/1']);

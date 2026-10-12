@@ -1,4 +1,4 @@
-// ABOUTME: Jest globalTeardown — removes the per-run CMOS_CONFIG_DIR tmpdir provisioned by globalSetup.
+// ABOUTME: Jest globalTeardown — removes the per-run RBOOK_CONFIG_DIR tmpdir provisioned by globalSetup.
 // ABOUTME: Ignores cleanup errors, and fails the run if a test rewrote the real build manifest.
 
 import { promises as fs } from 'fs';
@@ -10,8 +10,8 @@ import {
 } from './helpers/dist-manifest-fingerprint';
 
 export default async function globalTeardown(): Promise<void> {
-  const dir = (globalThis as unknown as { __CMOS_JEST_CONFIG_DIR__?: string })
-    .__CMOS_JEST_CONFIG_DIR__;
+  const dir = (globalThis as unknown as { __RBOOK_JEST_CONFIG_DIR__?: string })
+    .__RBOOK_JEST_CONFIG_DIR__;
   if (dir) {
     try {
       await fs.rm(dir, { recursive: true, force: true });

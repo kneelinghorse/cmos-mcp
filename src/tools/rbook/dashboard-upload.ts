@@ -1,0 +1,186 @@
+// SPDX-License-Identifier: Apache-2.0
+// ABOUTME: Shared lease and consistent SQLite snapshot for explicit and automatic dashboard uploads;
+// ABOUTME: keeps pending work across failure or exit, and removes day-old copies a dead upload left.
+
+import { LEGACY, isUploadCopyName, resolveRecordPaths } from '../../intelligence/legacy-compat';
+import Database from 'better-sqlite3';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { ProjectGraphRegistry } from '../../intelligence/project-graph-registry';
+import type { UploadOutcome } from '../../intelligence/project-upload-state';
+import { isSameDirectory } from '../../intelligence/resolution-policy';
+
+export interface UploadProject {
+  readonly projectId: string;
+  readonly projectRoot: string;
+  readonly dbPath: string;
+  readonly name: string;
+  readonly registered: boolean;
+}
+
+export function uploadLog(message: string): void {
+  process.stderr.write(`[CHECKPOINT] ${message}\n`);
+}
+
+/** Missing metadata means an old/foreign store; query failures remain visible to the caller. */
+export function readUploadProject(projectRoot: string): UploadProject | null {
+  const root = path.resolve(projectRoot);
+  const dbPath = resolveRecordPaths(root).dbPath;
+  const db = new Database(dbPath, { readonly: true, fileMustExist: true, timeout: 250 });
+  try {
+    if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'").get())
+      return null;
+    const values = new Map(
+      (
+        db
+          .prepare(
+            "SELECT key,value FROM metadata WHERE key IN ('project_id','project_name','dashboard_registered')"
+          )
+          .all() as Array<{ key: string; value: string | null }>
+      ).map((r) => [r.key, r.value])
+    );
+    const projectId = values.get('project_id');
+    if (!projectId) return null;
+    return {
+      projectId,
+      projectRoot: root,
+      dbPath,
+      name: values.get('project_name') ?? projectId,
+      registered: values.get('dashboard_registered') === 'true',
+    };
+  } finally {
+    db.close();
+  }
+}
+
+const UPLOAD_COPY_PREFIX = 'rbook-dashboard-upload-';
+/** An upload runs for seconds and its lease lasts five minutes, so a day-old copy is no live upload's. */
+const STALE_UPLOAD_COPY_MS = 24 * 60 * 60 * 1000;
+
+/** s95-m08: what the stale-copy sweep reads; a test injects lstat and the user id. */
+export interface UploadSweepOptions {
+  readonly tmpdir?: string;
+  readonly now?: number;
+  readonly lstat?: (file: string) => Pick<fs.Stats, 'isDirectory' | 'uid' | 'mtimeMs'>;
+  /** This user's id; undefined where the platform has none (Windows), which keeps everything. */
+  readonly uid?: number;
+}
+
+/**
+ * s95-m08: remove the upload copies a process that died mid-upload left behind (the temp-leak next
+ * step, #1313): direct children of the temp folder named like ours, real directories (lstat, so a
+ * symlink is kept), owned by this user and older than 24 hours. Best effort: a copy that cannot be
+ * removed is reported and left. Without user ids (Windows) ownership cannot be checked, so
+ * everything is kept. Returns what was removed.
+ */
+export function sweepStaleUploadCopies(options: UploadSweepOptions = {}): string[] {
+  const uid = 'uid' in options ? options.uid : process.getuid?.();
+  if (uid === undefined) return [];
+  const tmp = options.tmpdir ?? os.tmpdir();
+  const now = options.now ?? Date.now();
+  const lstat = options.lstat ?? fs.lstatSync;
+  const removed: string[] = [];
+  let names: string[];
+  try {
+    names = fs.readdirSync(tmp);
+  } catch (error) {
+    uploadLog(`Could not list ${tmp} for old upload copies: ${errorText(error)}`);
+    return removed;
+  }
+  for (const name of names) {
+    if (!isUploadCopyName(name)) continue;
+    const directory = path.join(tmp, name);
+    try {
+      const stat = lstat(directory);
+      if (!stat.isDirectory() || stat.uid !== uid || now - stat.mtimeMs < STALE_UPLOAD_COPY_MS)
+        continue;
+      fs.rmSync(directory, { recursive: true, force: true });
+      removed.push(directory);
+    } catch (error) {
+      uploadLog(`Could not remove the old upload copy ${directory}: ${errorText(error)}`);
+    }
+  }
+  return removed;
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export async function withUploadSnapshot<T>(
+  dbPath: string,
+  send: (file: string) => Promise<T>,
+  sweep: UploadSweepOptions = {}
+): Promise<T> {
+  sweepStaleUploadCopies(sweep);
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), UPLOAD_COPY_PREFIX));
+  const file = path.join(directory, LEGACY.databaseFile);
+  let db: Database.Database | undefined;
+  try {
+    db = new Database(dbPath, { readonly: true, fileMustExist: true, timeout: 5000 });
+    await db.backup(file);
+    db.close();
+    db = undefined;
+    return await send(file);
+  } finally {
+    db?.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/** Both entry points take this lease before registration/reconciliation, snapshot or network work. */
+export async function withUploadLease(
+  projectRoot: string,
+  explicit: boolean,
+  send: () => Promise<UploadOutcome>
+): Promise<void> {
+  const project = readUploadProject(projectRoot);
+  if (!project || (!explicit && !project.registered)) return;
+  const registry = await ProjectGraphRegistry.create();
+  let entry = registry.get(project.projectId);
+  if (!entry && explicit)
+    entry = registry.register({
+      project_id: project.projectId,
+      store_path: project.projectRoot,
+      name: project.name,
+    });
+  if (!entry || !isSameDirectory(entry.store_path, project.projectRoot))
+    throw new Error('Upload project identity does not match its registered store path.');
+  if (explicit && !registry.markUploadOwed(project.projectId))
+    throw new Error('Could not mark the explicit upload owed.');
+  const lease = registry.claimUpload(project.projectId, explicit);
+  if (!lease) return;
+  let lost = false;
+  const keepAlive = setInterval(() => {
+    try {
+      if (!registry.renewUploadLease(project.projectId, lease.token)) {
+        lost = true;
+        uploadLog(
+          `Upload lease lost for ${project.projectId}; completion cannot clear pending work.`
+        );
+      }
+    } catch (error) {
+      lost = true;
+      uploadLog(
+        `Upload lease renewal failed: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }, 60_000);
+  keepAlive.unref();
+  let outcome: UploadOutcome;
+  try {
+    outcome = await send();
+  } catch (error) {
+    outcome = { success: false, error: error instanceof Error ? error.message : String(error) };
+  } finally {
+    clearInterval(keepAlive);
+  }
+  if (lost || !registry.finishUpload(project.projectId, lease, outcome)) {
+    uploadLog(
+      `Upload result could not be committed for ${project.projectId}; its pending mark remains.`
+    );
+  }
+  if (!outcome.success)
+    uploadLog(`Upload failed for ${project.projectId}: ${outcome.error ?? 'unknown'}`);
+}

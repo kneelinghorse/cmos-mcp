@@ -2,10 +2,11 @@
 // ABOUTME: Keeps transient compact markers and once-captured Git baselines outside the project.
 // ABOUTME: Exit facts describe bounded repository observations, never authorship, and cleanup is exact-path only.
 
+import { resolveRecordPaths } from '../intelligence/legacy-compat';
 import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
-import { runtimeDir } from '../tools/cmos/harness-session';
+import { runtimeDir } from '../tools/rbook/harness-session';
 import type { HookRuntimeIdentity } from './hook-runtime';
 import { prepareRuntimeFile, requireSafeRuntime } from './runtime-file';
 
@@ -16,7 +17,7 @@ interface Baseline {
 }
 const target = (key: HookRuntimeIdentity) => ({
   projectId: '',
-  dbPath: path.join(key.directory, 'cmos', 'db', 'cmos.sqlite'),
+  dbPath: resolveRecordPaths(key.directory).dbPath,
 });
 
 export function lifecyclePaths(
@@ -74,7 +75,7 @@ function readBaseline(key: HookRuntimeIdentity, env: NodeJS.ProcessEnv): Baselin
   }
 }
 
-/** Called at SessionStart before any CMOS write. A resume/compact never replaces the baseline. */
+/** Called at SessionStart before any Reasonbook write. A resume/compact never replaces the baseline. */
 export function captureBaseline(
   key: HookRuntimeIdentity | null,
   env: NodeJS.ProcessEnv,

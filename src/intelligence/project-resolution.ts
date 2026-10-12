@@ -18,9 +18,9 @@
  */
 
 import path from 'path';
-import { isReadOnlyAgentSession } from '../tools/cmos/read-only-agent-guard';
-import { currentToolCallActionMode } from '../tools/cmos/tool-call-context';
-import { CmosDetector } from './cmos-detector';
+import { isReadOnlyAgentSession } from '../tools/rbook/read-only-agent-guard';
+import { currentToolCallActionMode } from '../tools/rbook/tool-call-context';
+import { RbookDetector } from './rbook-detector';
 import { ProjectGraphRegistry } from './project-graph-registry';
 import {
   findEnclosingStore,
@@ -32,7 +32,7 @@ import {
  * Authoritative registration half of the resolve/register split.
  *
  * Kept beside the graph-backed resolver so tool clients do not import portfolio fan-out
- * machinery directly. Callers must establish that the target contains a CMOS database before
+ * machinery directly. Callers must establish that the target contains a Reasonbook database before
  * invoking this write primitive.
  */
 export async function registerResolvedProjectStore(
@@ -79,16 +79,16 @@ export class ProjectResolutionError extends Error {
  * Priority (s92-m01 — the same rules as `resolveSenderContext`, minus MCP roots, which only the
  * dispatcher can see):
  * 1. Explicit parameter
- * 2. cwd walk-up — the nearest enclosing directory holding a CMOS store (`cmos/db/`)
+ * 2. cwd walk-up — the nearest enclosing directory holding a Reasonbook store (`rbook/db/`)
  * 3. Defaults, only when the cwd is contextless (`/`, `$HOME`, the install root): the server's
  *    `--project-root`, then a registry default an operator confirmed with `setAsDefault`
  * 4. Error with actionable guidance
  *
  * @deprecated Use `resolveSenderContext` from `src/intelligence/sender-context.ts`
  *   for any dispatcher or dashboard-bound call site. This function remains
- *   available for direct `CmosDatabaseClient.create` fallbacks and for tests,
+ *   available for direct `RbookDatabaseClient.create` fallbacks and for tests,
  *   but should not be called from tool dispatchers. Sprint 53 m02 removed the
- *   former Step 2 (`CMOS_PROJECT_ROOT` env var) because it was the structural
+ *   former Step 2 (`RBOOK_PROJECT_ROOT` env var) because it was the structural
  *   source of cross-project mis-attribution (Sprint 32 / 52 / 53 P0s).
  *
  * @param explicitRoot - Explicitly provided project root
@@ -114,16 +114,16 @@ export async function resolveProjectRootEnhanced(
     };
   }
 
-  // Step 2 (removed): CMOS_PROJECT_ROOT env-var fallback. See Sprint 53 m02
+  // Step 2 (removed): RBOOK_PROJECT_ROOT env-var fallback. See Sprint 53 m02
   // rationale in the function docblock. The env var is still read at
   // `src/index.ts:17` for .env bootstrap but is never consulted here.
 
-  // Step 3: Auto-discover from cwd — s92-m01: the nearest enclosing store (`cmos/db/`), not just
+  // Step 3: Auto-discover from cwd — s92-m01: the nearest enclosing store (`rbook/db/`), not just
   // cwd itself. A store whose database file is gone still ends the walk; the caller's client
   // detection then refuses with DB_NOT_FOUND for that root rather than this resolver routing
   // elsewhere.
   const cwd = process.cwd();
-  const detector = CmosDetector.getInstance();
+  const detector = RbookDetector.getInstance();
   const enclosing = findEnclosingStore(cwd);
 
   if (enclosing) {
@@ -131,13 +131,13 @@ export async function resolveProjectRootEnhanced(
     const result: ProjectResolutionResult = {
       projectRoot: storeRoot,
       source: 'auto-discover',
-      message: `Auto-discovered CMOS project at: ${storeRoot}`,
+      message: `Auto-discovered Reasonbook project at: ${storeRoot}`,
     };
     if (!enclosing.hasDatabase) return result;
 
     // Auto-register if enabled AND this is not a read/review call. s88-m08: discovery may add/touch
     // a store that ALREADY records an identity, but it must never mint one. Identity minting
-    // belongs to the write-registration path in CmosDatabaseClient / cmos_project(register),
+    // belongs to the write-registration path in RbookDatabaseClient / rbook_project(register),
     // before a handler transaction exists. `touchOrRegisterFromStore` returns null for an
     // identity-less store, leaving the selected store/row unchanged. (s80-m02: the graph is the
     // single discovery source; no JSON mirror remains.)
@@ -150,7 +150,7 @@ export async function resolveProjectRootEnhanced(
           if (registered) {
             result.autoRegistered = true;
             if (!silent) {
-              console.error(`[CMOS] Auto-registered project: ${storeRoot}`);
+              console.error(`[Reasonbook] Auto-registered project: ${storeRoot}`);
             }
           }
         } else {
@@ -165,7 +165,7 @@ export async function resolveProjectRootEnhanced(
   }
 
   // Step 3: Defaults — s92-m01: ONLY for a contextless cwd. A store-less working folder is a real
-  // folder that is not a CMOS project; defaulting it to another project is the defect m01 removes.
+  // folder that is not a Reasonbook project; defaulting it to another project is the defect m01 removes.
   if (isContextlessDirectory(cwd)) {
     const serverProjectRoot = getServerProjectRoot();
     if (serverProjectRoot) {
@@ -180,11 +180,11 @@ export async function resolveProjectRootEnhanced(
       const { entry: defaultProject, applied } = graph.getDefaultStatus();
 
       if (defaultProject && applied) {
-        // Verify the default project still has CMOS
+        // Verify the default project still has Reasonbook
         const defaultDetection = await detector.detect(defaultProject.store_path, {
           forceRefresh: true,
         });
-        if (defaultDetection.hasCmosDirectory && defaultDetection.hasDatabase) {
+        if (defaultDetection.hasRbookDirectory && defaultDetection.hasDatabase) {
           // Read/review calls may open/ensure the graph schema to resolve the default, but never
           // touch or register a project row. A write/direct caller may refresh last_seen_at.
           if (registrationAllowed) graph.touch(defaultProject.project_id);
@@ -204,13 +204,13 @@ export async function resolveProjectRootEnhanced(
   // only that case is offered one; from a real working folder the remedies are init or a path.
   const defaultOptions = isContextlessDirectory(cwd)
     ? `
-  4. Start the server with --project-root <dir> in its MCP config, or confirm a default: cmos_project(action="register", projectRoot="<path>", setAsDefault=true)`
+  4. Start the server with --project-root <dir> in its MCP config, or confirm a default: rbook_project(action="register", projectRoot="<path>", setAsDefault=true)`
     : '';
   throw new ProjectResolutionError(
-    `No CMOS project in '${cwd}'. Could not resolve project root.`,
+    `No Reasonbook project in '${cwd}'. Could not resolve project root.`,
     `Options:
-  1. Create a project here: cmos_project(action="init", projectRoot=${JSON.stringify(cwd)})
-  2. Run from a directory containing cmos/db/cmos.sqlite
+  1. Create a project here: rbook_project(action="init", projectRoot=${JSON.stringify(cwd)})
+  2. Run from a directory containing rbook/db/rbook.sqlite
   3. Provide projectRoot parameter explicitly${defaultOptions}`
   );
 }

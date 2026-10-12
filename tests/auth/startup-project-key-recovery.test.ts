@@ -6,18 +6,18 @@ import os from 'os';
 import path from 'path';
 import { describe, expect, it, beforeEach, afterEach } from '@jest/globals';
 import { runStartupProjectKeyRecovery } from '../../src/auth/project-key-capture';
-import { CMOS_CONFIG_DIR_ENV, CredentialStore } from '../../src/intelligence/credential-store';
+import { RBOOK_CONFIG_DIR_ENV, CredentialStore } from '../../src/intelligence/credential-store';
 import type { KeySource, ProjectKeyRecord } from '../../src/intelligence/credential-store';
 import type {
   DashboardClient,
   ReissueProjectKeyResult,
-} from '../../src/tools/cmos/dashboard-client';
-import type { CmosToolResult } from '../../src/tools/cmos/types';
+} from '../../src/tools/rbook/dashboard-client';
+import type { RbookToolResult } from '../../src/tools/rbook/types';
 
 function stubClient(
   options: {
     authenticatingKeyId?: string | undefined;
-    reissue?: CmosToolResult<ReissueProjectKeyResult>;
+    reissue?: RbookToolResult<ReissueProjectKeyResult>;
   } = {}
 ): DashboardClient {
   const keyId = 'authenticatingKeyId' in options ? options.authenticatingKeyId : 'user-parent-1';
@@ -33,7 +33,7 @@ function stubClient(
           label: 'reissued-label',
           revokedKeyIds: [],
         },
-      } as CmosToolResult<ReissueProjectKeyResult>),
+      } as RbookToolResult<ReissueProjectKeyResult>),
   } as unknown as DashboardClient;
 }
 
@@ -56,7 +56,7 @@ describe('runStartupProjectKeyRecovery', () => {
 
   beforeEach(async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'startup-recovery-'));
-    delete process.env[CMOS_CONFIG_DIR_ENV];
+    delete process.env[RBOOK_CONFIG_DIR_ENV];
     CredentialStore.resetInstance();
   });
 
@@ -180,7 +180,7 @@ describe('runStartupProjectKeyRecovery', () => {
           reissue: {
             success: false,
             error: { code: 'DASHBOARD_ERROR', message: 'upstream 500' },
-          } as CmosToolResult<ReissueProjectKeyResult>,
+          } as RbookToolResult<ReissueProjectKeyResult>,
         }),
       store,
     });
@@ -225,7 +225,7 @@ describe('runStartupProjectKeyRecovery', () => {
     });
 
     expect(result.status).toBe('skipped-unattributable-credential');
-    expect(result.message).toContain('CMOS_DASHBOARD_API_KEY');
+    expect(result.message).toContain('RBOOK_DASHBOARD_API_KEY');
     expect(result.message).not.toContain('will succeed');
     expect(await store.getProjectKey(projectRoot)).toBeUndefined();
   });

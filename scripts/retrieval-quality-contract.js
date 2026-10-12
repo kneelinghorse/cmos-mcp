@@ -54,13 +54,30 @@ function hashed(file, expected) {
     throw new Error(`sealed hash mismatch or missing evidence: ${file}`);
   return JSON.parse(fs.readFileSync(file, 'utf8'));
 }
-function hashMap(root, expected) {
+function hashMap(root, expected, renames = {}) {
   if (!expected || !Object.keys(expected).length) throw new Error('empty sealed hash inventory');
+  const currentHashes = {};
   for (const [relative, hash] of Object.entries(expected)) {
-    const file = localPath(root, relative);
-    if (!HASH.test(hash) || !fs.existsSync(file) || sha(fs.readFileSync(file)) !== hash)
+    const rename = renames[relative];
+    const current = rename?.path ?? relative;
+    const file = localPath(root, current);
+    if (!HASH.test(hash) || !fs.existsSync(file))
       throw new Error(`sealed hash mismatch or missing source: ${relative}`);
+    const bytes = fs.readFileSync(file);
+    let original = bytes.toString('utf8');
+    // Only the finite recorded rename may differ. Reconstruct the historical bytes; do not
+    // replace an old seal with a hash of today's source or normalize arbitrary whitespace.
+    for (const { from, to, count } of [...(rename?.replacements ?? [])].reverse()) {
+      const pieces = original.split(to);
+      if (pieces.length - 1 !== count)
+        throw new Error(`source rename occurrence mismatch: ${relative}`);
+      original = pieces.join(from);
+    }
+    if (sha(original) !== hash)
+      throw new Error(`sealed hash mismatch or missing source: ${relative}`);
+    currentHashes[current] = sha(bytes);
   }
+  return currentHashes;
 }
 /** Strict literal-array subset of the mirror authority; unsupported shell syntax fails closed. */
 function privateExclusions(root) {
@@ -98,6 +115,7 @@ function readContract(root) {
     Object.keys(contract).sort(),
     [
       'schemaVersion',
+      'sourceRenames',
       'mission',
       'fixtureRoot',
       'baseline',
@@ -113,7 +131,7 @@ function readContract(root) {
     'contract fields'
   );
   if (
-    contract.schemaVersion !== 1 ||
+    contract.schemaVersion !== 2 ||
     contract.mission !== 's94-m06' ||
     contract.fixtureRoot !== FIXTURE
   )
@@ -137,6 +155,45 @@ function readContract(root) {
     !HASH.test(contract.parserReview.generatorSha256 ?? '')
   )
     throw new Error('unsealed parser review');
+  const sealedSources = {
+    ...contract.parserHashes,
+    ...contract.evaluatorHashes,
+    'scripts/build-retrieval-labels.js': contract.parserReview.generatorSha256,
+  };
+  const renames = contract.sourceRenames;
+  if (!renames || typeof renames !== 'object' || Array.isArray(renames))
+    throw new Error('invalid source rename inventory');
+  const currentPaths = new Set();
+  for (const name of Object.keys(renames))
+    if (!Object.hasOwn(sealedSources, name)) throw new Error(`unknown source rename: ${name}`);
+  for (const name of Object.keys(sealedSources)) {
+    localPath(root, name);
+    const rename = renames[name];
+    const current = rename?.path ?? name;
+    localPath(root, current);
+    if (currentPaths.has(current)) throw new Error(`duplicate source rename path: ${current}`);
+    currentPaths.add(current);
+    if (!rename) continue;
+    same(Object.keys(rename).sort(), ['path', 'replacements'], 'source rename fields');
+    if (!Array.isArray(rename.replacements)) throw new Error('invalid source rename replacements');
+    for (const replacement of rename.replacements) {
+      same(
+        Object.keys(replacement).sort(),
+        ['count', 'from', 'to'],
+        'source rename replacement fields'
+      );
+      if (
+        typeof replacement.from !== 'string' ||
+        !replacement.from ||
+        typeof replacement.to !== 'string' ||
+        !replacement.to ||
+        replacement.from === replacement.to ||
+        !Number.isSafeInteger(replacement.count) ||
+        replacement.count < 1
+      )
+        throw new Error('invalid source rename replacement');
+    }
+  }
   for (const name of ['primary', 'mission', 'mixed'])
     if (!Number.isSafeInteger(contract.counts[name]) || contract.counts[name] < 1)
       throw new Error(`empty frozen ${name} population`);
@@ -207,7 +264,9 @@ function verifyCandidateSource(root, report, contract, before) {
   same(
     report.evaluatorHashes,
     Object.fromEntries(
-      Object.entries(contract.evaluatorHashes).map(([name, hash]) => [path.basename(name), hash])
+      Object.entries(hashMap(root, contract.evaluatorHashes, contract.sourceRenames)).map(
+        ([name, hash]) => [path.basename(name), hash]
+      )
     ),
     'candidate evaluator hashes'
   );
@@ -215,8 +274,8 @@ function verifyCandidateSource(root, report, contract, before) {
 function verifyEvidence(root, contract) {
   const fixture = localPath(root, contract.fixtureRoot);
   hashMap(fixture, contract.evidenceHashes);
-  hashMap(root, contract.parserHashes);
-  hashMap(root, contract.evaluatorHashes);
+  hashMap(root, contract.parserHashes, contract.sourceRenames);
+  hashMap(root, contract.evaluatorHashes, contract.sourceRenames);
   const baseline = hashed(path.join(fixture, contract.baseline.file), contract.baseline.sha256);
   const labels = JSON.parse(
     fs.readFileSync(path.join(fixture, 'frozen-labels/manifest.json'), 'utf8')
@@ -225,7 +284,11 @@ function verifyEvidence(root, contract) {
     path.join(fixture, contract.parserReview.file),
     contract.parserReview.sha256
   );
-  hashMap(root, { 'scripts/build-retrieval-labels.js': contract.parserReview.generatorSha256 });
+  hashMap(
+    root,
+    { 'scripts/build-retrieval-labels.js': contract.parserReview.generatorSha256 },
+    contract.sourceRenames
+  );
   same(review.extractorSources, contract.parserHashes, 'review parser inventory');
   same(
     Object.keys(labels.extractorSources).sort(),

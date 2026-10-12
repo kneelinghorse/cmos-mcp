@@ -21,7 +21,7 @@ describe('s92-m10 — an unapproved outbound request fails its test loudly', () 
     const run = spawnSync(
       process.execPath,
       [require.resolve('jest/bin/jest'), '--config', JSON.stringify(config), '--coverage=false'],
-      { cwd: REPO_ROOT, encoding: 'utf8', env: { ...process.env, CMOS_LIVE_DASHBOARD: '' } }
+      { cwd: REPO_ROOT, encoding: 'utf8', env: { ...process.env, RBOOK_LIVE_DASHBOARD: '' } }
     );
     const output = `${run.stdout}\n${run.stderr}`;
     expect(run.status).not.toBe(0);

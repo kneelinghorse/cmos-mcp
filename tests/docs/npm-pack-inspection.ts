@@ -80,7 +80,7 @@ function regularTarFiles(tarball: string): ReadonlyMap<string, Buffer> {
 }
 
 export function inspectNpmPack(repoRoot: string): NpmPackInspection {
-  const packDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-stamp-pack-'));
+  const packDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-stamp-pack-'));
   try {
     const invocation = npmPackInvocation(packDir);
     const raw = execFileSync(invocation.command, invocation.args, {
@@ -100,7 +100,7 @@ export function inspectNpmPack(repoRoot: string): NpmPackInspection {
     const files = new Set(manifest.files.map((file) => file.path));
     const archiveFiles = regularTarFiles(tarball);
     const seedMarkdown = new Map<string, string>();
-    for (const rel of [...files].filter((file) => /^cmos-seed\/.*\.md$/.test(file)).sort()) {
+    for (const rel of [...files].filter((file) => /^rbook-seed\/.*\.md$/.test(file)).sort()) {
       const content = archiveFiles.get(`package/${rel}`);
       if (!content) throw new Error(`npm tarball has no readable package/${rel} member`);
       seedMarkdown.set(rel, content.toString('utf8'));

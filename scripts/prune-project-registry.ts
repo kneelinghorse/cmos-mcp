@@ -1,20 +1,18 @@
 // ABOUTME: One-shot CLI to archive dead entries from the project-graph registry
-// ABOUTME: (~/.config/cmos-mcp/project-graph.sqlite). Mirrors the server-startup auto-prune.
+// ABOUTME: (~/.config/rbook/project-graph.sqlite). Mirrors the server-startup auto-prune.
 
+import { resolveRecordPaths } from '../src/intelligence/legacy-compat';
 import { existsSync } from 'fs';
-import path from 'path';
 import { ProjectGraphRegistry } from '../src/intelligence/project-graph-registry';
 
 async function main(): Promise<number> {
   // s80-m02: the project-graph registry is the single discovery source (the JSON
-  // ProjectRegistry was deleted). Prune = archive rows whose store's cmos.sqlite is gone.
+  // ProjectRegistry was deleted). Prune = archive rows whose store's rbook.sqlite is gone.
   const graph = await ProjectGraphRegistry.create();
   const before = graph.list();
   console.log(`[prune] ${before.length} entries in ${graph.path}`);
 
-  const stale = before.filter(
-    (e) => !existsSync(path.join(e.store_path, 'cmos', 'db', 'cmos.sqlite'))
-  );
+  const stale = before.filter((e) => !existsSync(resolveRecordPaths(e.store_path).dbPath));
 
   if (stale.length === 0) {
     console.log('[prune] registry is clean, nothing to remove');

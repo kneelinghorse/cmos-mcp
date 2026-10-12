@@ -27,7 +27,7 @@ async function emittedHookIds(source, root, sessionId, query, cap) {
   let stdout = '';
   let errors = 0;
   const code = await source.runCli(['hook', 'prompt', '--format', 'text', '--project-root', root], {
-    env: { ...process.env, CMOS_AMBIENT: 'on', CLAUDE_PROJECT_DIR: '' },
+    env: { ...process.env, RBOOK_AMBIENT: 'on', CLAUDE_PROJECT_DIR: '' },
     cwd: root,
     readStdin: async () => JSON.stringify({ session_id: sessionId, prompt: query }),
     stdout: (text) => {
@@ -47,19 +47,19 @@ async function main() {
   const args = process.argv.slice(2);
   if (args.length !== 2 || args[0] !== '--scratch') throw Error('invalid_arguments');
   const scratch = path.resolve(args[1]);
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-later-recall-'));
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-later-recall-'));
   const originalNow = Date.now;
   let source;
   let db;
   try {
-    process.env.CMOS_CONFIG_DIR = path.join(temporary, 'config');
-    process.env.CMOS_OFFLINE_EMBEDDINGS = '1';
-    process.env.CMOS_CHECKPOINT_SYNC = 'off';
+    process.env.RBOOK_CONFIG_DIR = process.env.RBOOK_CONFIG_DIR = path.join(temporary, 'config');
+    process.env.RBOOK_OFFLINE_EMBEDDINGS = process.env.RBOOK_OFFLINE_EMBEDDINGS = '1';
+    process.env.RBOOK_CHECKPOINT_SYNC = process.env.RBOOK_CHECKPOINT_SYNC = 'off';
     source = sourceModules();
     const { recallLaterPrompt, skipLaterPrompt } = require('../src/cli/later-prompt-recall.ts');
     const { renderFirstPrompt } = require('../src/cli/prompt.ts');
     const { emittedRenderedIds } = require('../src/cli/telemetry.ts');
-    const dbPath = path.join(temporary, 'project', 'cmos', 'db', 'cmos.sqlite');
+    const dbPath = path.join(temporary, 'project', 'rbook', 'db', 'rbook.sqlite');
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     db = new Database(dbPath);
     const fill = sliceWriter(db);

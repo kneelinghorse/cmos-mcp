@@ -140,7 +140,7 @@
       "witnesses": [
         {
           "id": "current-1",
-          "file": "src/tools/cmos/blob-migrations.ts",
+          "file": "src/tools/rbook/blob-migrations.ts",
           "line": 187,
           "text": "`INSERT INTO context_snapshots (context_id, session_id, source, content_hash, content, created_at, ${[...storage.columns, ...g.columns].join(', ')})",
           "occurrence": 1,
@@ -149,7 +149,7 @@
         },
         {
           "id": "current-2",
-          "file": "src/tools/cmos/cmos-context-condense.ts",
+          "file": "src/tools/rbook/rbook-context-condense.ts",
           "line": 655,
           "text": "`INSERT INTO context_snapshots (context_id, source, content_hash, content, created_at, ${[...storage.columns, ...g.columns].join(', ')})",
           "occurrence": 1,
@@ -158,7 +158,7 @@
         },
         {
           "id": "current-3",
-          "file": "src/tools/cmos/cmos-context-snapshot.ts",
+          "file": "src/tools/rbook/rbook-context-snapshot.ts",
           "line": 210,
           "text": "`INSERT INTO context_snapshots (context_id, session_id, source, content_hash, content, created_at, ${[...storage.columns, ...g.columns].join(', ')})",
           "occurrence": 1,
@@ -167,7 +167,7 @@
         },
         {
           "id": "current-4",
-          "file": "src/tools/cmos/cmos-context-update.ts",
+          "file": "src/tools/rbook/rbook-context-update.ts",
           "line": 911,
           "text": "`INSERT INTO context_snapshots (context_id, source, content_hash, content, created_at, ${[...storage.columns, ...g.columns].join(', ')})",
           "occurrence": 1,
@@ -176,7 +176,7 @@
         },
         {
           "id": "current-5",
-          "file": "src/tools/cmos/cmos-mission-complete.ts",
+          "file": "src/tools/rbook/rbook-mission-complete.ts",
           "line": 894,
           "text": "`INSERT INTO context_snapshots (context_id, source, content_hash, content, created_at, ${[...storage.columns, ...g.columns].join(', ')})",
           "occurrence": 1,
@@ -185,7 +185,7 @@
         },
         {
           "id": "current-6",
-          "file": "src/tools/cmos/cmos-session-complete.ts",
+          "file": "src/tools/rbook/rbook-session-complete.ts",
           "line": 1492,
           "text": "`INSERT INTO context_snapshots (context_id, session_id, source, content_hash, content, created_at, ${[...storage.columns, ...g.columns].join(', ')})",
           "occurrence": 1,
@@ -194,7 +194,7 @@
         },
         {
           "id": "current-7",
-          "file": "src/tools/cmos/cmos-sprint-complete.ts",
+          "file": "src/tools/rbook/rbook-sprint-complete.ts",
           "line": 1253,
           "text": "`INSERT INTO context_snapshots (context_id, source, content_hash, content, created_at, ${[...storage.columns, ...g.columns].join(', ')})",
           "occurrence": 1,
@@ -203,7 +203,7 @@
         },
         {
           "id": "current-8",
-          "file": "src/tools/cmos/context-freshness.ts",
+          "file": "src/tools/rbook/context-freshness.ts",
           "line": 455,
           "text": "`INSERT INTO context_snapshots (context_id, source, content_hash, content, created_at, ${[...storage.columns, ...g.columns].join(', ')})",
           "occurrence": 1,
@@ -212,7 +212,7 @@
         },
         {
           "id": "current-9",
-          "file": "src/tools/cmos/context-retention.ts",
+          "file": "src/tools/rbook/context-retention.ts",
           "line": 638,
           "text": "`INSERT INTO context_snapshots (context_id, source, content_hash, content, created_at, ${[...storage.columns, ...g.columns].join(', ')})",
           "occurrence": 1,

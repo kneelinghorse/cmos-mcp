@@ -4,7 +4,7 @@
 
 import { execFileSync } from 'child_process';
 import * as fs from 'fs';
-import { harnessPid } from '../tools/cmos/harness-session';
+import { harnessPid } from '../tools/rbook/harness-session';
 
 /** Linux stat comm may contain spaces and parentheses; starttime is field 22 after the final ')'. */
 export function linuxStartTime(stat: string, pid: number): string | null {

@@ -5,11 +5,11 @@ const DEPRECATED_TOOL_NAMES = [
   'create_mission',
   'get_mission_quality_score',
   'create_mission_splits',
-  'cmos_sprint_list',
-  'cmos_sprint_show',
-  'cmos_sprint_add',
-  'cmos_sprint_update',
-  'cmos_sprint_complete',
+  'rbook_sprint_list',
+  'rbook_sprint_show',
+  'rbook_sprint_add',
+  'rbook_sprint_update',
+  'rbook_sprint_complete',
 ] as const;
 
 describe('executeMissionProtocolTool integration (mocked)', () => {

@@ -9,16 +9,17 @@
 // reflect shipped code; meta reads the live DEFAULT_RRF_K / DEFAULT_RECENCY_WEIGHT so the
 // old stale 60/0.5 can never re-drift.
 
+import { getSetting, resolveRecordPaths } from '../dist/intelligence/legacy-compat';
 import * as fs from 'fs';
 import * as path from 'path';
-import { CmosDatabaseClient } from '../dist/tools/cmos/client';
+import { RbookDatabaseClient } from '../dist/tools/rbook/client';
 import {
   HybridRetriever,
   type RankedResult,
   DEFAULT_RRF_K,
   DEFAULT_RECENCY_WEIGHT,
-} from '../dist/tools/cmos/fts5-retriever';
-import { extractKeywords } from '../dist/tools/cmos/supersession-detection';
+} from '../dist/tools/rbook/fts5-retriever';
+import { extractKeywords } from '../dist/tools/rbook/supersession-detection';
 
 const FIXTURE_PATH = path.resolve(
   __dirname,
@@ -27,9 +28,10 @@ const FIXTURE_PATH = path.resolve(
 );
 // s82-m03: allow gating a COPY of the store (backfill-against-a-copy discipline) by pointing
 // at an alternate DB. Defaults to the live git-tracked store.
-const DB_PATH = process.env.CMOS_RETRIEVAL_DB
-  ? path.resolve(process.env.CMOS_RETRIEVAL_DB)
-  : path.resolve(__dirname, '..', 'cmos/db/cmos.sqlite');
+const configuredDbPath = getSetting('RBOOK_RETRIEVAL_DB');
+const DB_PATH = configuredDbPath
+  ? path.resolve(configuredDbPath)
+  : resolveRecordPaths(path.resolve(__dirname, '..')).dbPath;
 const BASELINE_PATH = path.resolve(__dirname, '..', 'tests/fixtures/retrieval-baseline.json');
 const TOP_K = 10;
 
@@ -44,30 +46,30 @@ const WRITE_BASELINE = process.argv.includes('--write-baseline');
 // result; the graph arm doubled mission top-3 recall 0.25→0.50 with zero decision/learning
 // regression). Measured on the production recall path (expandGraph=true), which is what
 // context-search / relevance-surfacing use.
-const MISSION_TOP3_FLOOR = envFloat('CMOS_MISSION_TOP3_FLOOR', 0.5);
+const MISSION_TOP3_FLOOR = envFloat('RBOOK_MISSION_TOP3_FLOOR', 0.5);
 // Decisions/learnings may not drop more than this below the committed baseline (5 points).
-const REGRESSION_TOLERANCE = envFloat('CMOS_REGRESSION_TOLERANCE', 0.05);
+const REGRESSION_TOLERANCE = envFloat('RBOOK_REGRESSION_TOLERANCE', 0.05);
 
 // s82-m03/FORK-E5: optional per-run tuning overrides for the post-re-embed sweep. Undefined
 // => the retriever's shipped DEFAULT_RRF_K / DEFAULT_RECENCY_WEIGHT are used.
-const RECENCY_OVERRIDE = envOptFloat('CMOS_RECENCY_OVERRIDE');
-const RRFK_OVERRIDE = envOptInt('CMOS_RRFK_OVERRIDE');
+const RECENCY_OVERRIDE = envOptFloat('RBOOK_RECENCY_OVERRIDE');
+const RRFK_OVERRIDE = envOptInt('RBOOK_RRFK_OVERRIDE');
 
 function envOptFloat(name: string): number | undefined {
-  const v = process.env[name];
+  const v = getSetting(name);
   if (v === undefined || v === '') return undefined;
   const n = Number.parseFloat(v);
   return Number.isFinite(n) ? n : undefined;
 }
 function envOptInt(name: string): number | undefined {
-  const v = process.env[name];
+  const v = getSetting(name);
   if (v === undefined || v === '') return undefined;
   const n = Number.parseInt(v, 10);
   return Number.isFinite(n) ? n : undefined;
 }
 
 function envFloat(name: string, fallback: number): number {
-  const v = process.env[name];
+  const v = getSetting(name);
   if (v === undefined || v === '') return fallback;
   const n = Number.parseFloat(v);
   return Number.isFinite(n) ? n : fallback;
@@ -136,7 +138,7 @@ interface RankedHit {
 }
 
 function bm25Only(
-  client: CmosDatabaseClient,
+  client: RbookDatabaseClient,
   type: FixtureType,
   query: string,
   limit: number
@@ -219,7 +221,7 @@ interface MissingFixture {
   reason: string;
 }
 
-function verifyFixturesExist(client: CmosDatabaseClient, fixtures: Fixture[]): MissingFixture[] {
+function verifyFixturesExist(client: RbookDatabaseClient, fixtures: Fixture[]): MissingFixture[] {
   const missing: MissingFixture[] = [];
   for (const f of fixtures) {
     if (f.type === 'decision') {
@@ -350,7 +352,7 @@ async function main(): Promise<void> {
   // Open the live DB read-only. The HybridRetriever's ensureXxxFts5 / ensureVectorStorage
   // helpers short-circuit when the tables already exist (they do — the m02 migration ran),
   // so no CREATE statements fire on this path.
-  const clientResult = await CmosDatabaseClient.create({ dbPath: DB_PATH, readonly: true });
+  const clientResult = await RbookDatabaseClient.create({ dbPath: DB_PATH, readonly: true });
   if (!clientResult.success || !clientResult.data) {
     throw new Error(`Failed to open DB: ${clientResult.error?.message ?? 'unknown'}`);
   }
@@ -400,10 +402,10 @@ async function main(): Promise<void> {
         ...(RRFK_OVERRIDE !== undefined ? { rrfK: RRFK_OVERRIDE } : {}),
         // s82-m04: the gate measures the PRODUCTION recall path, where context-search /
         // relevance-surfacing pass expandGraph=true — so the arm is ON by default here.
-        // CMOS_EXPAND_GRAPH=0 turns it off for the OFF-vs-ON comparison; CMOS_GRAPH_WEIGHT sweeps.
-        ...(process.env.CMOS_EXPAND_GRAPH !== '0' ? { expandGraph: true } : {}),
-        ...(envOptFloat('CMOS_GRAPH_WEIGHT') !== undefined
-          ? { graphWeight: envOptFloat('CMOS_GRAPH_WEIGHT') }
+        // RBOOK_EXPAND_GRAPH=0 turns it off for the OFF-vs-ON comparison; RBOOK_GRAPH_WEIGHT sweeps.
+        ...(getSetting('RBOOK_EXPAND_GRAPH') !== '0' ? { expandGraph: true } : {}),
+        ...(envOptFloat('RBOOK_GRAPH_WEIGHT') !== undefined
+          ? { graphWeight: envOptFloat('RBOOK_GRAPH_WEIGHT') }
           : {}),
       });
       const hybridOutcome: RunOutcome = {

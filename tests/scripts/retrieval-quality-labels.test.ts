@@ -2,8 +2,8 @@
 // ABOUTME: Natural labels use production exclusions and cannot see future collisions or foreign text.
 // ABOUTME: Mission cutoffs and rich-field barriers remain fixed before candidate ranking is measured.
 
-import * as extractor from '../../src/tools/cmos/record-link-extractor';
-import { storedTimeMs } from '../../src/tools/cmos/stored-time';
+import * as extractor from '../../src/tools/rbook/record-link-extractor';
+import { storedTimeMs } from '../../src/tools/rbook/stored-time';
 
 const { buildLabels } = require('../../scripts/build-retrieval-labels');
 const { timeMs } = require('../../scripts/retrieval-quality-fixture');

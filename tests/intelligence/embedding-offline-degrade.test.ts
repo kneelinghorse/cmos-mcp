@@ -9,14 +9,14 @@ import {
   __resetEmbedderCacheForTesting,
   __getEmbedderLoadAttemptsForTesting,
 } from '../../src/intelligence/embedding-pipeline';
-import { HybridRetriever } from '../../src/tools/cmos/fts5-retriever';
-import { CmosDatabaseClient } from '../../src/tools/cmos/client';
+import { HybridRetriever } from '../../src/tools/rbook/fts5-retriever';
+import { RbookDatabaseClient } from '../../src/tools/rbook/client';
 import { TokenCounter } from '../../src/intelligence/token-counters';
 import * as bootstrap from '../../src/intelligence/tokenizer-bootstrap';
 
 // s78-m03: offline graceful-degrade + negative caching. Drives the REAL getEmbedder path
-// (NOT setEmbedderForTesting) with the library-level offline mechanism — CMOS_OFFLINE_EMBEDDINGS=1
-// (env.allowRemoteModels=false) + an empty CMOS_MODEL_CACHE_DIR — so the model load fails without
+// (NOT setEmbedderForTesting) with the library-level offline mechanism — RBOOK_OFFLINE_EMBEDDINGS=1
+// (env.allowRemoteModels=false) + an empty RBOOK_MODEL_CACHE_DIR — so the model load fails without
 // any external egress. Isolated file: env vars are restored in afterAll (process.env is
 // worker-scoped and would otherwise leak to sibling test files).
 
@@ -26,8 +26,8 @@ describe('offline graceful-degrade + negative caching (s78-m03)', () => {
   let savedOffline: string | undefined;
   let savedCacheDir: string | undefined;
 
-  async function openClient(): Promise<CmosDatabaseClient> {
-    const result = await CmosDatabaseClient.create({ dbPath });
+  async function openClient(): Promise<RbookDatabaseClient> {
+    const result = await RbookDatabaseClient.create({ dbPath });
     if (!result.success || !result.data) {
       throw new Error(`open failed: ${result.error?.message}`);
     }
@@ -35,30 +35,30 @@ describe('offline graceful-degrade + negative caching (s78-m03)', () => {
   }
 
   beforeAll(() => {
-    savedOffline = process.env.CMOS_OFFLINE_EMBEDDINGS;
-    savedCacheDir = process.env.CMOS_MODEL_CACHE_DIR;
-    process.env.CMOS_OFFLINE_EMBEDDINGS = '1';
+    savedOffline = process.env.RBOOK_OFFLINE_EMBEDDINGS;
+    savedCacheDir = process.env.RBOOK_MODEL_CACHE_DIR;
+    process.env.RBOOK_OFFLINE_EMBEDDINGS = '1';
   });
 
   afterAll(() => {
     __resetEmbedderCacheForTesting();
     bootstrap.__test__.reset();
-    if (savedOffline === undefined) delete process.env.CMOS_OFFLINE_EMBEDDINGS;
-    else process.env.CMOS_OFFLINE_EMBEDDINGS = savedOffline;
-    if (savedCacheDir === undefined) delete process.env.CMOS_MODEL_CACHE_DIR;
-    else process.env.CMOS_MODEL_CACHE_DIR = savedCacheDir;
+    if (savedOffline === undefined) delete process.env.RBOOK_OFFLINE_EMBEDDINGS;
+    else process.env.RBOOK_OFFLINE_EMBEDDINGS = savedOffline;
+    if (savedCacheDir === undefined) delete process.env.RBOOK_MODEL_CACHE_DIR;
+    else process.env.RBOOK_MODEL_CACHE_DIR = savedCacheDir;
   });
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-offline-degrade-'));
-    const dbDir = path.join(tempDir, 'cmos', 'db');
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-offline-degrade-'));
+    const dbDir = path.join(tempDir, 'rbook', 'db');
     fs.mkdirSync(dbDir, { recursive: true });
     // Empty model cache dir → with allowRemoteModels=false the model is unfindable.
     const emptyCache = path.join(tempDir, 'empty-model-cache');
     fs.mkdirSync(emptyCache, { recursive: true });
-    process.env.CMOS_MODEL_CACHE_DIR = emptyCache;
+    process.env.RBOOK_MODEL_CACHE_DIR = emptyCache;
 
-    dbPath = path.join(dbDir, 'cmos.sqlite');
+    dbPath = path.join(dbDir, 'rbook.sqlite');
     const db = new Database(dbPath);
     db.exec(`
       CREATE TABLE strategic_decisions (

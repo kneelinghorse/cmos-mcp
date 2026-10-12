@@ -13,10 +13,10 @@ import {
   appendTelemetry,
   targetForStore,
   type TelemetryRecord,
-} from '../../src/tools/cmos/local-telemetry';
-import { cmosRulesLine } from '../../src/tools/cmos/rules-files';
-import { collectTelemetryStats, exportTelemetryStats } from '../../src/tools/cmos/telemetry-stats';
-import { seedCmosDb } from '../helpers/seedCmosDb';
+} from '../../src/tools/rbook/local-telemetry';
+import { rbookRulesLine } from '../../src/tools/rbook/rules-files';
+import { collectTelemetryStats, exportTelemetryStats } from '../../src/tools/rbook/telemetry-stats';
+import { seedRbookDb } from '../helpers/seedRbookDb';
 
 let tmp: string;
 let root: string;
@@ -34,11 +34,11 @@ const bounds = () => ({
 
 beforeEach(() => {
   now = Date.now();
-  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-stats-'));
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-stats-'));
   root = path.join(tmp, 'private-project-name');
-  dbPath = seedCmosDb(root, { projectName: 'private-project-name' });
-  env = { ...process.env, CMOS_CONFIG_DIR: path.join(tmp, 'config'), CLAUDE_PROJECT_DIR: '' };
-  fs.writeFileSync(path.join(root, 'AGENTS.md'), `${cmosRulesLine('builder')}\n`);
+  dbPath = seedRbookDb(root, { projectName: 'private-project-name' });
+  env = { ...process.env, RBOOK_CONFIG_DIR: path.join(tmp, 'config'), CLAUDE_PROJECT_DIR: '' };
+  fs.writeFileSync(path.join(root, 'AGENTS.md'), `${rbookRulesLine('builder')}\n`);
 });
 
 afterEach(() => {
@@ -102,7 +102,7 @@ describe('local telemetry stats', () => {
     async (order) => {
       const aliasRoot = path.join(fs.realpathSync.native(tmp), 'PRIVATE-PROJECT-NAME');
       if (!fs.existsSync(aliasRoot)) fs.symlinkSync(root, aliasRoot, 'dir');
-      const aliasPath = path.join(aliasRoot, 'cmos', 'db', 'cmos.sqlite');
+      const aliasPath = path.join(aliasRoot, 'rbook', 'db', 'rbook.sqlite');
       const original = fs.realpathSync;
       // Preserve caller spelling only in the non-native API; keep physical identity real.
       const nonNative = jest
@@ -118,7 +118,7 @@ describe('local telemetry stats', () => {
       event({
         ts: iso(now - 1000),
         surface: 'mcp',
-        tool: 'cmos_decisions',
+        tool: 'rbook_decisions',
         action: 'record',
         mode: 'write',
         idsCited: ['d:1'],
@@ -186,16 +186,16 @@ describe('local telemetry stats', () => {
 
   it('counts procedure before skips, excludes plugin ceremonies, and scans nested rules without exempting edited pointers', async () => {
     event({ procedurePatternIds: ['P02', 'P03'], ceremony: null, ambient: 'off' });
-    event({ procedurePatternIds: ['P02'], ceremony: '/cmos:build' });
+    event({ procedurePatternIds: ['P02'], ceremony: '/reasonbook:build' });
     event({ procedurePatternIds: [], ceremony: 'C01' });
-    fs.mkdirSync(path.join(root, 'cmos', 'legacy'), { recursive: true });
+    fs.mkdirSync(path.join(root, 'rbook', 'legacy'), { recursive: true });
     fs.writeFileSync(
-      path.join(root, 'cmos', 'legacy', 'agents.md'),
-      'Run cmos_review() before work.\n'
+      path.join(root, 'rbook', 'legacy', 'agents.md'),
+      'Run rbook_review() before work.\n'
     );
     fs.writeFileSync(
       path.join(root, 'CLAUDE.md'),
-      `${cmosRulesLine('builder')} Also run cmos_review().\n`
+      `${rbookRulesLine('builder')} Also run rbook_review().\n`
     );
     const outsideRules = path.join(tmp, 'linked-rules');
     fs.mkdirSync(outsideRules);
@@ -220,7 +220,7 @@ describe('local telemetry stats', () => {
       ts: iso(now - 9000),
       idsCited: ['d:1'],
       surface: 'mcp',
-      tool: 'cmos_decisions',
+      tool: 'rbook_decisions',
       action: 'record',
       mode: 'write',
     });
@@ -229,7 +229,7 @@ describe('local telemetry stats', () => {
     event({
       ts: iso(now - 6000),
       surface: 'mcp',
-      tool: 'cmos_decisions',
+      tool: 'rbook_decisions',
       action: 'show',
       idsReturned: ['d:1'],
       session: 'ext:aaaaaaaaaaaaaaaa',
@@ -237,14 +237,14 @@ describe('local telemetry stats', () => {
     event({
       ts: iso(now - 5000),
       surface: 'mcp',
-      tool: 'cmos_learnings',
+      tool: 'rbook_learnings',
       action: 'list',
       idsReturned: ['l:1'],
     });
     event({
       ts: iso(now - 4000),
       surface: 'mcp',
-      tool: 'cmos_decisions',
+      tool: 'rbook_decisions',
       action: 'record',
       mode: 'write',
       ok: false,
@@ -252,11 +252,11 @@ describe('local telemetry stats', () => {
     });
     event({ ts: iso(now - 3000), session: 'bbbbbbbbbbbbbbbb', idsInjected: ['d:2'] });
     const other = path.join(tmp, 'other');
-    const otherDb = seedCmosDb(other);
+    const otherDb = seedRbookDb(other);
     event(
       {
         surface: 'mcp',
-        tool: 'cmos_decisions',
+        tool: 'rbook_decisions',
         action: 'record',
         mode: 'write',
         idsCited: ['d:2'],
@@ -282,7 +282,7 @@ describe('local telemetry stats', () => {
       iso(now - day + 301_000)
     );
     const other = path.join(tmp, 'thin');
-    seedCmosDb(other);
+    seedRbookDb(other);
     const report = await collectTelemetryStats([root, other], bounds(), env);
     expect(report.timing).toMatchObject({
       readableProjects: 1,
@@ -370,7 +370,7 @@ describe('local telemetry stats', () => {
     event({
       refused: 'WRITE_REFUSED',
       ok: false,
-      tool: 'cmos_session',
+      tool: 'rbook_session',
       surface: 'mcp',
       mode: 'write',
     });
@@ -409,8 +409,8 @@ describe('local telemetry stats', () => {
   it('supports repeated explicit include-project flags and rejects reversed or malformed windows', async () => {
     const second = path.join(tmp, 'second');
     const third = path.join(tmp, 'third');
-    seedCmosDb(second);
-    seedCmosDb(third);
+    seedRbookDb(second);
+    seedRbookDb(third);
     let stdout = '';
     const stderr: string[] = [];
     const io = {

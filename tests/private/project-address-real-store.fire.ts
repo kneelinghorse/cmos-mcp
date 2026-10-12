@@ -2,6 +2,7 @@
 // ABOUTME: Proves address selection and sibling preservation against a copy of an explicit real store.
 // ABOUTME: The private source is never changed and is not required by the public default suite.
 
+import { resolveRecordPaths } from '../../src/intelligence/legacy-compat';
 import type { Server } from '@modelcontextprotocol/server';
 import Database from 'better-sqlite3';
 import { createHash } from 'crypto';
@@ -9,9 +10,9 @@ import * as fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { buildMissionProtocolContext, registerToolHandlers } from '../../src/index';
-import { CmosDetector } from '../../src/intelligence/cmos-detector';
+import { RbookDetector } from '../../src/intelligence/rbook-detector';
 import { ProjectGraphRegistry } from '../../src/intelligence/project-graph-registry';
-import { reidentifyCmosTestStore, seedCmosDb } from '../helpers/seedCmosDb';
+import { reidentifyRbookTestStore, seedRbookDb } from '../helpers/seedRbookDb';
 
 type Result = {
   isError?: boolean;
@@ -23,8 +24,8 @@ type Result = {
   };
 };
 type Call = (request: { params: Record<string, unknown> }) => Promise<Result>;
-const ADDRESS = 'cmos://operator/address-target';
-const saved = { config: process.env.CMOS_CONFIG_DIR, sync: process.env.CMOS_CHECKPOINT_SYNC };
+const ADDRESS = 'rbook://operator/address-target';
+const saved = { config: process.env.RBOOK_CONFIG_DIR, sync: process.env.RBOOK_CHECKPOINT_SYNC };
 let temp: string;
 let target: string;
 let sibling: string;
@@ -36,21 +37,21 @@ beforeAll(async () => {
   context = await buildMissionProtocolContext();
 });
 beforeEach(async () => {
-  temp = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-address-dispatch-'));
-  process.env.CMOS_CONFIG_DIR = path.join(temp, 'config');
-  process.env.CMOS_CHECKPOINT_SYNC = 'off';
+  temp = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-address-dispatch-'));
+  process.env.RBOOK_CONFIG_DIR = path.join(temp, 'config');
+  process.env.RBOOK_CHECKPOINT_SYNC = 'off';
   target = path.join(temp, 'target');
   sibling = path.join(temp, 'sibling');
-  seedCmosDb(target, {
+  seedRbookDb(target, {
     projectName: 'target',
-    cmosAddress: ADDRESS,
+    rbookAddress: ADDRESS,
     dashboardProjectId: '11111111-1111-4111-8111-111111111111',
   });
-  seedCmosDb(sibling, { projectName: 'sibling', cmosAddress: 'cmos://unknown/sibling' });
-  reidentifyCmosTestStore(target, 'target');
-  reidentifyCmosTestStore(sibling, 'sibling');
+  seedRbookDb(sibling, { projectName: 'sibling', rbookAddress: 'rbook://unknown/sibling' });
+  reidentifyRbookTestStore(target, 'target');
+  reidentifyRbookTestStore(sibling, 'sibling');
   ProjectGraphRegistry.resetInstance();
-  CmosDetector.resetInstance();
+  RbookDetector.resetInstance();
   graph = await ProjectGraphRegistry.create();
   graph.register({ project_id: 'target', store_path: target, name: 'target' });
   graph.register({ project_id: 'sibling', store_path: sibling, name: 'sibling' });
@@ -67,15 +68,15 @@ beforeEach(async () => {
 afterEach(() => {
   jest.restoreAllMocks();
   ProjectGraphRegistry.resetInstance();
-  CmosDetector.resetInstance();
-  if (saved.config === undefined) delete process.env.CMOS_CONFIG_DIR;
-  else process.env.CMOS_CONFIG_DIR = saved.config;
-  if (saved.sync === undefined) delete process.env.CMOS_CHECKPOINT_SYNC;
-  else process.env.CMOS_CHECKPOINT_SYNC = saved.sync;
+  RbookDetector.resetInstance();
+  if (saved.config === undefined) delete process.env.RBOOK_CONFIG_DIR;
+  else process.env.RBOOK_CONFIG_DIR = saved.config;
+  if (saved.sync === undefined) delete process.env.RBOOK_CHECKPOINT_SYNC;
+  else process.env.RBOOK_CHECKPOINT_SYNC = saved.sync;
   fs.rmSync(temp, { recursive: true, force: true });
 });
 async function snapshotHash(root: string, label: string): Promise<string> {
-  const db = new Database(path.join(root, 'cmos/db/cmos.sqlite'), { readonly: true });
+  const db = new Database(path.join(root, 'rbook/db/rbook.sqlite'), { readonly: true });
   const witness = path.join(temp, `${label}.sqlite`);
   try {
     await db.backup(witness);
@@ -86,19 +87,19 @@ async function snapshotHash(root: string, label: string): Promise<string> {
 }
 
 it('positive fire on a copy of the real store records in the addressed project and preserves sibling snapshot bytes', async () => {
-  const repoRoot = process.env.CMOS_ADDRESS_REAL_STORE_ROOT;
-  if (!repoRoot) throw new Error('Set CMOS_ADDRESS_REAL_STORE_ROOT to an existing real project.');
-  const source = new Database(path.join(repoRoot, 'cmos/db/cmos.sqlite'), { readonly: true });
+  const repoRoot = process.env.RBOOK_ADDRESS_REAL_STORE_ROOT;
+  if (!repoRoot) throw new Error('Set RBOOK_ADDRESS_REAL_STORE_ROOT to an existing real project.');
+  const source = new Database(resolveRecordPaths(repoRoot).dbPath, { readonly: true });
   try {
     await source.backup(path.join(temp, 'real.sqlite'));
   } finally {
     source.close();
   }
   const root = path.join(temp, 'real');
-  fs.mkdirSync(path.join(root, 'cmos/db'), { recursive: true });
-  fs.renameSync(path.join(temp, 'real.sqlite'), path.join(root, 'cmos/db/cmos.sqlite'));
-  reidentifyCmosTestStore(root);
-  const db = new Database(path.join(root, 'cmos/db/cmos.sqlite'));
+  fs.mkdirSync(path.join(root, 'rbook/db'), { recursive: true });
+  fs.renameSync(path.join(temp, 'real.sqlite'), path.join(root, 'rbook/db/rbook.sqlite'));
+  reidentifyRbookTestStore(root);
+  const db = new Database(path.join(root, 'rbook/db/rbook.sqlite'));
   const identity = JSON.parse(
     (
       db.prepare("SELECT content FROM contexts WHERE id='project_identity'").get() as {
@@ -106,14 +107,14 @@ it('positive fire on a copy of the real store records in the addressed project a
       }
     ).content
   );
-  const address = identity.cmos_address;
+  const address = identity.rbook_address;
   const id = identity.project_id;
   db.close();
   graph.register({ project_id: id, store_path: root, name: 'real copy' });
   const before = await snapshotHash(sibling, 'before');
   const result = await call({
     params: {
-      name: 'cmos_decisions',
+      name: 'rbook_decisions',
       arguments: {
         action: 'record',
         projectRoot: address,
@@ -125,7 +126,7 @@ it('positive fire on a copy of the real store records in the addressed project a
   });
   expect(result.structuredContent.success).toBe(true);
   expect(result.structuredContent.data?.projectRoot).toBe(root);
-  const written = new Database(path.join(root, 'cmos/db/cmos.sqlite'), { readonly: true });
+  const written = new Database(path.join(root, 'rbook/db/rbook.sqlite'), { readonly: true });
   try {
     expect(
       (

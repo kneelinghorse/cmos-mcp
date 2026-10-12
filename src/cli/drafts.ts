@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
-// ABOUTME: s93-m06 — `cmos-mcp drafts list`: the drafts awaiting the operator, with their computed state.
+// ABOUTME: s93-m06 — `reasonbook drafts list`: the drafts awaiting the operator, with their computed state.
 // ABOUTME: Read-only: opens the store and the draft runtime read-only, migrates and writes nothing.
 
 import Database from 'better-sqlite3';
 
-import { openDraftRuntime, startsSince } from '../tools/cmos/draft-runtime';
+import { openDraftRuntime, startsSince } from '../tools/rbook/draft-runtime';
 import {
   draftLabel,
   draftsCreatedBetween,
@@ -12,8 +12,8 @@ import {
   pendingDrafts,
   rawRunner,
   type DraftRow,
-} from '../tools/cmos/proposals';
-import { storedTimeMs } from '../tools/cmos/stored-time';
+} from '../tools/rbook/proposals';
+import { storedTimeMs } from '../tools/rbook/stored-time';
 import { parseArgs, resolveCliProject, type CliIo } from './core';
 
 /** How far back `--all` reaches. */
@@ -97,7 +97,7 @@ function line(draft: ListedDraft): string {
 export async function runDrafts(argv: readonly string[], io: CliIo): Promise<number> {
   const { positional, flags } = parseArgs(argv);
   if ((positional[0] ?? 'list') !== 'list') {
-    io.stderr('Usage: cmos-mcp drafts list [--all] [--format json] [--project-root <dir>]');
+    io.stderr('Usage: reasonbook drafts list [--all] [--format json] [--project-root <dir>]');
     return 1;
   }
   const resolution = resolveCliProject({
@@ -106,7 +106,7 @@ export async function runDrafts(argv: readonly string[], io: CliIo): Promise<num
     cwd: io.cwd,
   });
   if (resolution.kind !== 'store') {
-    io.stderr('cmos-mcp drafts: no CMOS project here; pass --project-root <dir>.');
+    io.stderr('reasonbook drafts: no Reasonbook project here; pass --project-root <dir>.');
     return 1;
   }
   try {
@@ -124,7 +124,7 @@ export async function runDrafts(argv: readonly string[], io: CliIo): Promise<num
     return 0;
   } catch (error) {
     io.stderr(
-      `cmos-mcp drafts: the store could not be read: ${error instanceof Error ? error.message : String(error)}`
+      `reasonbook drafts: the store could not be read: ${error instanceof Error ? error.message : String(error)}`
     );
     return 1;
   }

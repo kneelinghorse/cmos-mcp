@@ -6,7 +6,7 @@ import {
   prepareSpinOutRead,
   spinOutSqliteReader,
   type SpinOutKind,
-} from '../tools/cmos/spin-out-read';
+} from '../tools/rbook/spin-out-read';
 
 export function spinOutQuery(
   kind: SpinOutKind,

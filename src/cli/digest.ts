@@ -3,8 +3,8 @@
 // ABOUTME: Fleet feedback counts are bounded; no migrations or dashboard work runs and typed spans measure delivery.
 
 import type { ResolvedBy } from '../intelligence/sender-context';
-import { readDigestV2 } from '../tools/cmos/digest-v2-store';
-import { renderDigestV2 } from '../tools/cmos/digest-v2';
+import { readDigestV2 } from '../tools/rbook/digest-v2-store';
+import { renderDigestV2 } from '../tools/rbook/digest-v2';
 import { CliStoreError, type CliIo } from './core';
 import { observeRenderedContext } from './telemetry';
 

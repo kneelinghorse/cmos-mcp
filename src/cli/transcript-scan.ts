@@ -2,6 +2,7 @@
 // ABOUTME: s93-m06 — reads a harness transcript, its subagents' included, for outside content, and for the last reply
 // ABOUTME: when Stop carries none. Line-aligned bounded reads under a deadline; raw paths are never stored.
 
+import { toolNameSuffix } from '../intelligence/legacy-compat';
 import { createHash } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -13,10 +14,10 @@ import * as path from 'path';
  *   - a tool call named WebFetch or WebSearch; an `mcp__` tool whose name says fetch, scrape,
  *     crawl, browse or search_engine; a browser tool (Claude in Chrome, the built-in browser);
  *   - a Bash command running curl, wget, or `gh api|issue|pr|release|repo`;
- *   - a CMOS call with `"acrossProjects": true`, and any `cmos_message` call;
- *   - an MCP tool result carrying a CMOS provenance fence (`[UNTRUSTED DATA` or `⟪untrusted`).
+ *   - a Reasonbook call with `"acrossProjects": true`, and any `rbook_message` call;
+ *   - an MCP tool result carrying a Reasonbook provenance fence (`[UNTRUSTED DATA` or `⟪untrusted`).
  *     Fences count only in MCP results (the transcript marks them with `mcpMeta`), so reading
- *     CMOS's own source code, which contains the fence text, does not flag a session.
+ *     Reasonbook's own source code, which contains the fence text, does not flag a session.
  * Subagents write their own transcripts (`<session>/subagents/*.jsonl`), where most web research
  * runs; each is scanned too. A session that called a subagent whose transcript is absent reads
  * unknown.
@@ -35,8 +36,6 @@ const WEB_TOOL = /^(?:WebFetch|WebSearch)$/;
 const MCP_FETCH = /^mcp__.*(?:fetch|scrape|crawl|browse|search_engine)/i;
 const BROWSER = /^mcp__(?:claude-in-chrome|Claude_Browser|remote-devices__Claude_Browser)__/;
 const BASH_FETCH = /\b(?:curl|wget)\b|\bgh\s+(?:api|issue|pr|release|repo)\b/;
-const CMOS_MESSAGE = /^mcp__.*cmos_message$/;
-const CMOS_TOOL = /^mcp__.*cmos_[a-z_]+$/;
 const FENCES = ['[UNTRUSTED DATA', '⟪untrusted'];
 const SUBAGENT_CALL = /^(?:Task|Agent)$/;
 
@@ -99,12 +98,17 @@ export function entryMarkers(entry: unknown): { outside: boolean; subagent: bool
         WEB_TOOL.test(name) ||
         MCP_FETCH.test(name) ||
         BROWSER.test(name) ||
-        CMOS_MESSAGE.test(name)
+        (name.startsWith('mcp__') && toolNameSuffix(name) === 'message')
       )
         outside = true;
       if (name === 'Bash' && typeof input.command === 'string' && BASH_FETCH.test(input.command))
         outside = true;
-      if (CMOS_TOOL.test(name) && input.acrossProjects === true) outside = true;
+      if (
+        name.startsWith('mcp__') &&
+        toolNameSuffix(name) !== null &&
+        input.acrossProjects === true
+      )
+        outside = true;
     }
     if (block.type === 'tool_result' && record.mcpMeta !== undefined) {
       const text = textOf(block.content);

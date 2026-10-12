@@ -43,9 +43,9 @@ async function emittedHookIds(source, slice, query, sequence) {
     {
       env: {
         ...process.env,
-        CMOS_AMBIENT: 'on',
+        RBOOK_AMBIENT: 'on',
         CLAUDE_PROJECT_DIR: '',
-        CMOS_PROJECT_ROOT: slice.root,
+        RBOOK_PROJECT_ROOT: slice.root,
       },
       cwd: slice.root,
       readStdin: async () => JSON.stringify({ session_id: `quality-${sequence}`, prompt: query }),
@@ -98,7 +98,7 @@ async function measure(options) {
     // Final acceptance omits overrides and tests the published defaults.
     if (options.recencyWeight !== undefined)
       source.retrieval.DEFAULT_RECENCY_WEIGHT = options.recencyWeight;
-    const promptModule = source.moduleAt('tools/cmos/first-prompt-recall');
+    const promptModule = source.moduleAt('tools/rbook/first-prompt-recall');
     if (options.promptFloor !== undefined)
       promptModule.DEFAULT_MIN_KEYWORD_MATCHES = options.promptFloor;
     slice = await createSlice(source, corpus, !baseline);

@@ -7,15 +7,15 @@
  * s86-m04 rewrote two things here.
  *
  * PER-ACTION TABLES. An action-bearing tool now renders one parameter table per action, driven by
- * CMOS_ACTION_PARAMS (src/tools/cmos/action-params.ts). The flat table it replaces was a false
- * claim by omission: it offered `evergreen` as an unconditional `cmos_learnings` parameter when
- * only two of four actions do anything with it, and as an unconditional `cmos_context` parameter
+ * RBOOK_ACTION_PARAMS (src/tools/rbook/action-params.ts). The flat table it replaces was a false
+ * claim by omission: it offered `evergreen` as an unconditional `rbook_learnings` parameter when
+ * only two of four actions do anything with it, and as an unconditional `rbook_context` parameter
  * when only `constraints` does. Nothing in the old output let a reader tell the difference between
  * a parameter that applies and one that is silently ignored.
  *
- * A DERIVED HEADER. The old header asserted that `cmos_agent_onboard`, `cmos_status` and
- * `cmos_review` "take only `projectRoot`" — three lines above the table listing
- * `cmos_agent_onboard`'s `agentFeedback`. The authoritative public reference contradicted itself on
+ * A DERIVED HEADER. The old header asserted that `rbook_agent_onboard`, `rbook_status` and
+ * `rbook_review` "take only `projectRoot`" — three lines above the table listing
+ * `rbook_agent_onboard`'s `agentFeedback`. The authoritative public reference contradicted itself on
  * the same page. The fix is not a better sentence: the header now states only what is DERIVABLE
  * from the definitions (how many tools, how many take an action, which take none) and makes no
  * claim about any tool's parameter set.
@@ -55,7 +55,7 @@ function cell(text) {
  * applying unchanged, and a dotted row is a greppable identifier).
  *
  * DERIVED, not listed: an object with `properties`, or an array whose `items` has them. A nested
- * param that publishes NO sub-shape (`cmos_mission.domainFields`) renders as a single row —
+ * param that publishes NO sub-shape (`rbook_mission.domainFields`) renders as a single row —
  * authoring the missing sub-shape is schema design, not rendering.
  */
 function subShapeOf(prop) {
@@ -120,7 +120,7 @@ function renderTool(tool, actionParams) {
   if (!map) {
     throw new Error(
       `[tool-reference] ${tool.name} publishes an action enum but has no ACTION_PARAMS entry. ` +
-        'Add one in its tool module and register it in src/tools/cmos/action-params.ts.'
+        'Add one in its tool module and register it in src/tools/rbook/action-params.ts.'
     );
   }
 
@@ -159,7 +159,7 @@ function renderHeaderSentence(toolDefinitions) {
       ? '.'
       : `; the remaining ${actionLess.length} (${listed}) take no \`action\`.`;
   return (
-    `The CMOS MCP server exposes ${toolDefinitions.length} tools. ` +
+    `Reasonbook exposes ${toolDefinitions.length} tools through its MCP server. ` +
     `${withAction} select an operation with an \`action\` parameter and publish one parameter ` +
     `table per action${tail}\n\n` +
     // WITHOUT THIS, THE PER-ACTION FORMAT ITSELF BECOMES A FALSE CLAIM. One table per action reads
@@ -179,15 +179,15 @@ function renderHeaderSentence(toolDefinitions) {
 /**
  * Render the full TOOL_REFERENCE.md from a list of MCP tool definitions
  * (`{ name, description, inputSchema }`) and the per-action parameter map keyed by tool name
- * (`CMOS_ACTION_PARAMS`). Deterministic — same input, same bytes.
+ * (`RBOOK_ACTION_PARAMS`). Deterministic — same input, same bytes.
  */
 function renderToolReference(toolDefinitions, actionParams) {
   const header = [
     '<!-- GENERATED FILE — do not edit by hand. -->',
-    '<!-- Regenerated from CMOS_TOOL_DEFINITIONS by scripts/generate-tool-reference.js on every `npm run build`. -->',
+    '<!-- Regenerated from RBOOK_TOOL_DEFINITIONS by scripts/generate-tool-reference.js on every `npm run build`. -->',
     '<!-- tests/tools/tool-reference-freshness.test.ts fails the build if this drifts from the tool definitions. -->',
     '',
-    '# CMOS MCP Tool Reference',
+    '# Reasonbook Tool Reference',
     '',
     renderHeaderSentence(toolDefinitions),
     '',

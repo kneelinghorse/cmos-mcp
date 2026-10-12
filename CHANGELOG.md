@@ -1,6 +1,51 @@
 # Changelog
 
-All notable changes to cmos-mcp are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+All notable changes to Reasonbook (published as `@aquex/cmos-mcp` before 4.0.0) are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## Unreleased
+
+## 4.0.0 — 2026-10-12
+
+- **Breaking: CMOS is now Reasonbook.** The npm package is `@aquex/reasonbook`, the CLI is
+  `reasonbook`, and MCP tools use `rbook_*`. New records use `rbook/db/rbook.sqlite`, settings use
+  `RBOOK_*`, addresses use `rbook://`, and shared configuration defaults to `~/.config/rbook`.
+  The MCP entry name is `rbook`; response fields and error codes use the same short name.
+  The plugins are `reasonbook` and `reasonbook-chat`, skills are `/reasonbook:*`, and the repository
+  is `kneelinghorse/reasonbook`. Old CLI and MCP tool names are no longer registered aliases.
+- **Answer names follow the rename.** Public identity fields use `rbook_address`, and public
+  directory fields use `rbookDirectory`; stored identity keys and dashboard wire keys retain their
+  existing spelling. `RbookDecisionsShowResult.alternatives` and
+  `RbookDecisionsShowResult.deciders` retain their existing array-or-historical-string behavior.
+- **Existing records stay readable.** Legacy record and config folders, settings, addresses,
+  and stored keys remain supported inputs. Current settings and folders take precedence.
+  Reading a record does not move files or rewrite history, including its recorded tool names.
+- **Preview migration before moving files.** `reasonbook migrate` reports proposed changes;
+  `--docs-only --apply` updates supported instructions, while `--apply` moves the project record
+  during an offline window with backups and crash recovery. Shared configuration moves separately
+  with `--config --apply`. See [the migration guide](docs/migrating-from-cmos.md) for installation
+  order, plugin recovery and exact commands.
+- **Upgrade plugins explicitly.** Uninstall the old plugin in its original scope before refreshing
+  its marketplace, then install `reasonbook@reasonbook` or `reasonbook-chat@reasonbook`. The guide
+  includes recovery for a marketplace already refreshed. Replace any global old package too.
+- **The dashboard default is `https://reasonbook.ai`.** Authentication, directory access and the
+  existing dashboard wire format remain compatible; user-facing addresses use `rbook://`.
+- **Remedies name the package.** A remedy a reader may run without a global install prints
+  `npx @aquex/reasonbook@<version> …`, never the unscoped `reasonbook`, which is an unrelated npm
+  package. CLI messages begin `reasonbook <verb>:`.
+- **Each level gets its own files and words.** `rbook_project(action="init")` and
+  `rbook_project(action="update")` write only the seed files a Ledger, Planner or Builder needs, and
+  replace `rbook/README.md` only when Reasonbook wrote it unedited. `ProjectUpdateResult` adds optional
+  `filesWritten`; `RbookSessionStartResult` and `RbookDecisionsRecordResult` add optional
+  `projectLevel`.
+- **The plugin's skills stop when the tools are absent,** telling an install in progress (start a
+  new session) from a missing local server (an install pointer).
+- Dashboard uploads remove their own stale temporary copies (older than a day and owned by the
+  current user). A purge whose answer names no tables succeeds with a warning that the number of
+  deleted rows is unknown.
+- The package carries `mcpName` for the MCP Registry, and `server.json` describes it.
+- Documentation: a documentation home, the trust and privacy pages, the method page, a starter template for each
+  level, and a recorded demo. The public pages name Claude Code and Codex as verified and other MCP
+  clients as untested, and no longer describe a paid tier.
 
 ## 3.5.0 — 2026-10-11
 

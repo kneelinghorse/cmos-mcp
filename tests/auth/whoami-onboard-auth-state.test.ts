@@ -5,28 +5,28 @@ import { promises as fs } from 'fs';
 import os from 'os';
 import path from 'path';
 import { describe, expect, it, beforeEach, afterEach } from '@jest/globals';
-import { getWhoamiDiagnostics } from '../../src/tools/cmos/cmos-message';
+import { getWhoamiDiagnostics } from '../../src/tools/rbook/rbook-message';
 import { recordDeliveryAck, resetDeliveryAckCache } from '../../src/auth/delivery-ack-cache';
-import { CMOS_CONFIG_DIR_ENV, CredentialStore } from '../../src/intelligence/credential-store';
-import { createSeededCmosProject, type SeededCmosProject } from '../helpers/seedCmosDb';
+import { RBOOK_CONFIG_DIR_ENV, CredentialStore } from '../../src/intelligence/credential-store';
+import { createSeededRbookProject, type SeededRbookProject } from '../helpers/seedRbookDb';
 
 describe('whoami authState integration', () => {
   const originalEnv = { ...process.env };
   let tempDir: string;
-  let project: SeededCmosProject;
+  let project: SeededRbookProject;
 
   beforeEach(async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'whoami-auth-'));
-    process.env[CMOS_CONFIG_DIR_ENV] = tempDir;
+    process.env[RBOOK_CONFIG_DIR_ENV] = tempDir;
     CredentialStore.resetInstance();
     resetDeliveryAckCache();
-    project = await createSeededCmosProject(
+    project = await createSeededRbookProject(
       {
         projectName: 'AuthDemo',
         projectId: 'auth-demo',
         slug: 'auth-demo',
         dashboardProjectId: 'b2b2b2b2-2b2b-4b2b-9b2b-2b2b2b2b2b2b',
-        cmosAddress: 'cmos://derek/auth-demo',
+        rbookAddress: 'rbook://derek/auth-demo',
       },
       'whoami-auth-'
     );
@@ -50,7 +50,7 @@ describe('whoami authState integration', () => {
 
     const result = await getWhoamiDiagnostics({
       explicitProjectRoot: project.projectRoot,
-      cwdOverride: '/tmp/no-cmos',
+      cwdOverride: '/tmp/no-rbook',
       serverInstallRootOverride: '/mock/server-install',
     });
 
@@ -71,7 +71,7 @@ describe('whoami authState integration', () => {
 
     const result = await getWhoamiDiagnostics({
       explicitProjectRoot: project.projectRoot,
-      cwdOverride: '/tmp/no-cmos',
+      cwdOverride: '/tmp/no-rbook',
       serverInstallRootOverride: '/mock/server-install',
     });
 

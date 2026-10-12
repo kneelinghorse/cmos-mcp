@@ -7,12 +7,12 @@ import os from 'os';
 import path from 'path';
 import crypto from 'crypto';
 import { execFileSync } from 'child_process';
-import { CmosDatabaseClient } from '../../src/tools/cmos/client';
-import { CMOS_SCHEMA } from '../../src/tools/cmos/schema';
-import { ensureVectorStorage } from '../../src/tools/cmos/schema-migrations';
-import * as recordLinks from '../../src/tools/cmos/record-links';
-import * as extractor from '../../src/tools/cmos/record-link-extractor';
-import { loadLinkInventory } from '../../src/tools/cmos/record-link-store';
+import { RbookDatabaseClient } from '../../src/tools/rbook/client';
+import { RBOOK_SCHEMA } from '../../src/tools/rbook/schema';
+import { ensureVectorStorage } from '../../src/tools/rbook/schema-migrations';
+import * as recordLinks from '../../src/tools/rbook/record-links';
+import * as extractor from '../../src/tools/rbook/record-link-extractor';
+import { loadLinkInventory } from '../../src/tools/rbook/record-link-store';
 
 const {
   checkedJson,
@@ -87,8 +87,8 @@ describe('temporal benchmark evidence', () => {
         },
       };
       const source = {
-        CMOS_SCHEMA,
-        CmosDatabaseClient,
+        RBOOK_SCHEMA,
+        RbookDatabaseClient,
         ensureVectorStorage,
         moduleAt: () => recordLinks,
       };
@@ -191,7 +191,7 @@ describe('temporal benchmark evidence', () => {
   });
 
   it('refuses corrupt fixture bytes rather than silently regenerating labels', () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-retrieval-hash-'));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-retrieval-hash-'));
     const file = path.join(dir, 'fixture.json');
     try {
       const raw = '{"fixed":true}\n';
@@ -206,17 +206,17 @@ describe('temporal benchmark evidence', () => {
   });
 
   it('hashes loaded source through symlinked roots and detects a later source change', () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-retrieval-source-'));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-retrieval-source-'));
     const sourceRoot = path.join(dir, 'source');
     const linkedRoot = path.join(dir, 'linked');
     const modules = [
-      'tools/cmos/fts5-retriever',
-      'tools/cmos/client',
-      'tools/cmos/schema',
-      'tools/cmos/schema-migrations',
-      'tools/cmos/relevance-surfacing',
-      'tools/cmos/first-prompt-recall',
-      'tools/cmos/tool-call-context',
+      'tools/rbook/fts5-retriever',
+      'tools/rbook/client',
+      'tools/rbook/schema',
+      'tools/rbook/schema-migrations',
+      'tools/rbook/relevance-surfacing',
+      'tools/rbook/first-prompt-recall',
+      'tools/rbook/tool-call-context',
       'cli',
     ];
     try {
@@ -244,7 +244,7 @@ describe('temporal benchmark evidence', () => {
           code,
           path.resolve('scripts/retrieval-quality-fixture.js'),
           linkedRoot,
-          path.join(sourceRoot, 'src/tools/cmos/fts5-retriever.ts'),
+          path.join(sourceRoot, 'src/tools/rbook/fts5-retriever.ts'),
         ],
         { encoding: 'utf8' }
       );

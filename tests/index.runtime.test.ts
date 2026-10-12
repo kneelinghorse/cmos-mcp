@@ -1,8 +1,9 @@
+import { LEGACY } from '../src/intelligence/legacy-compat';
 import { afterEach, beforeAll, beforeEach, describe, expect, test, jest } from '@jest/globals';
 import { promises as fs } from 'fs';
 import os from 'os';
 import path from 'path';
-import { createSeededCmosProject } from './helpers/seedCmosDb';
+import { createSeededRbookProject } from './helpers/seedRbookDb';
 
 type LoadedModule = Awaited<ReturnType<typeof loadIndexModule>>;
 
@@ -59,7 +60,7 @@ async function loadIndexModule() {
   const { MissionProtocolError } = await import('../src/errors/mission-error');
 
   // Sprint 70 m01: stub the real startup runners by default so initializeServer()
-  // does ZERO real I/O. Left real, they open the shared-CMOS_CONFIG_DIR registry
+  // does ZERO real I/O. Left real, they open the shared-RBOOK_CONFIG_DIR registry
   // SQLite (WAL-contended across the many parallel jest workers) and read the
   // credential store — under heavy concurrent load that blew the 5000ms test
   // timeout and its late-settling promises bled console output into sibling tests
@@ -162,36 +163,80 @@ const createMockContext = () =>
     tokenCounter: {} as any,
   }) as any;
 
-/** Set CMOS_DEBUG for one test (undefined unsets it) and return the restore step. */
+/** Set RBOOK_DEBUG for one test (undefined unsets it) and return the restore step. */
 function withDebugEnv(value: string | undefined): () => void {
-  const saved = process.env.CMOS_DEBUG;
-  if (value === undefined) delete process.env.CMOS_DEBUG;
-  else process.env.CMOS_DEBUG = value;
+  const saved = process.env.RBOOK_DEBUG;
+  if (value === undefined) delete process.env.RBOOK_DEBUG;
+  else process.env.RBOOK_DEBUG = value;
   return () => {
-    if (saved === undefined) delete process.env.CMOS_DEBUG;
-    else process.env.CMOS_DEBUG = saved;
+    if (saved === undefined) delete process.env.RBOOK_DEBUG;
+    else process.env.RBOOK_DEBUG = saved;
   };
 }
+
+test('dotenv preserves an explicitly cleared new setting while retaining other empty-value behavior', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rbook-dotenv-'));
+  const legacyKey = `${LEGACY.envPrefix}DASHBOARD_API_KEY`;
+  const keys = [
+    'RBOOK_PROJECT_ROOT',
+    'RBOOK_DASHBOARD_API_KEY',
+    'RBOOK_MODEL_CACHE_DIR',
+    legacyKey,
+  ] as const;
+  const saved = keys.map((key) => [key, process.env[key]] as const);
+  const unrelated = process.env.DOTENV_UNRELATED_FIXTURE;
+  let loaded: LoadedModule | undefined;
+  try {
+    await fs.writeFile(
+      path.join(root, '.env'),
+      [
+        'RBOOK_DASHBOARD_API_KEY=new-file-value',
+        `${legacyKey}=legacy-file-value`,
+        'RBOOK_MODEL_CACHE_DIR=/fixture/cache',
+        'DOTENV_UNRELATED_FIXTURE=file-value',
+      ].join('\n')
+    );
+    process.env.RBOOK_PROJECT_ROOT = root;
+    process.env.RBOOK_DASHBOARD_API_KEY = '';
+    process.env[legacyKey] = '';
+    delete process.env.RBOOK_MODEL_CACHE_DIR;
+    process.env.DOTENV_UNRELATED_FIXTURE = '';
+    loaded = await loadIndexModule();
+    expect(process.env.RBOOK_DASHBOARD_API_KEY).toBe('');
+    expect(process.env[legacyKey]).toBe('legacy-file-value');
+    expect(process.env.RBOOK_MODEL_CACHE_DIR).toBe('/fixture/cache');
+    expect(process.env.DOTENV_UNRELATED_FIXTURE).toBe('file-value');
+  } finally {
+    loaded?.cleanup();
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    if (unrelated === undefined) delete process.env.DOTENV_UNRELATED_FIXTURE;
+    else process.env.DOTENV_UNRELATED_FIXTURE = unrelated;
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
 
 // s94-m07: these four callers must not ask an explicit or modern caller for roots.
 // A blocked client must not hold an otherwise valid local tool response hostage.
 const ROOTS_PATHS = [
-  ['resolver', 'cmos_decisions', { action: 'list' }],
-  ['onboard', 'cmos_agent_onboard', {}],
-  ['review', 'cmos_review', {}],
-  ['message whoami', 'cmos_message', { action: 'whoami' }],
+  ['resolver', 'rbook_decisions', { action: 'list' }],
+  ['onboard', 'rbook_agent_onboard', {}],
+  ['review', 'rbook_review', {}],
+  ['message whoami', 'rbook_message', { action: 'whoami' }],
   [
     'message send',
-    'cmos_message',
+    'rbook_message',
     {
       action: 'send',
-      targetAddress: 'cmos://test/peer',
+      targetAddress: 'rbook://test/peer',
       type: 'status_update',
       summary: 'Fixture only',
       body: 'Test fixture',
     },
   ],
-  ['message list', 'cmos_message', { action: 'list' }],
+  ['message list', 'rbook_message', { action: 'list' }],
 ] as const;
 
 for (const [mode, explicit] of [
@@ -204,36 +249,36 @@ for (const [mode, explicit] of [
     async (_label, name, args) => {
       const moduleData = await loadIndexModule();
       const { indexModule, mockServer } = moduleData;
-      const root = path.join(os.tmpdir(), `cmos-roots-boundary-${process.pid}`);
+      const root = path.join(os.tmpdir(), `rbook-roots-boundary-${process.pid}`);
       const resolvedBy = explicit ? 'explicit' : 'cwd';
       const sender = await import('../src/intelligence/sender-context');
-      const cmos = await import('../src/tools/cmos');
-      const review = await import('../src/tools/cmos/review-presentation');
-      const uploads = await import('../src/tools/cmos/dashboard-upload-scheduler');
-      const previousRole = process.env.CMOS_AGENT_ROLE;
-      delete process.env.CMOS_AGENT_ROLE;
+      const rbook = await import('../src/tools/rbook');
+      const review = await import('../src/tools/rbook/review-presentation');
+      const uploads = await import('../src/tools/rbook/dashboard-upload-scheduler');
+      const previousRole = process.env.RBOOK_AGENT_ROLE;
+      delete process.env.RBOOK_AGENT_ROLE;
       jest.spyOn(sender, 'resolveSenderContext').mockResolvedValue({
         projectRoot: root,
         source: resolvedBy,
         candidates: [],
         dashboardProjectId: '5ea6fbd5-35a6-43f0-a23d-68ab20c4d6f2',
-        cmosAddress: 'cmos://test/roots',
+        rbookAddress: 'rbook://test/roots',
       });
       jest.spyOn(uploads, 'observeDashboardUploadProject').mockResolvedValue(undefined);
       const result = { success: true, data: {} };
-      jest.spyOn(cmos, 'cmosDecisions').mockResolvedValue(result as never);
-      jest.spyOn(cmos, 'formatDecisionsForLLM').mockReturnValue('Fixture ready');
-      jest.spyOn(cmos, 'cmosAgentOnboard').mockResolvedValue(result as never);
-      jest.spyOn(cmos, 'formatAgentOnboardForLLM').mockReturnValue('Fixture ready');
+      jest.spyOn(rbook, 'rbookDecisions').mockResolvedValue(result as never);
+      jest.spyOn(rbook, 'formatDecisionsForLLM').mockReturnValue('Fixture ready');
+      jest.spyOn(rbook, 'rbookAgentOnboard').mockResolvedValue(result as never);
+      jest.spyOn(rbook, 'formatAgentOnboardForLLM').mockReturnValue('Fixture ready');
       jest
-        .spyOn(review, 'cmosReviewPresentation')
+        .spyOn(review, 'rbookReviewPresentation')
         .mockResolvedValue({ result, text: 'Fixture ready' } as never);
-      jest.spyOn(cmos, 'cmosMessage').mockResolvedValue(result as never);
-      jest.spyOn(cmos, 'getWhoamiDiagnostics').mockResolvedValue({
+      jest.spyOn(rbook, 'rbookMessage').mockResolvedValue(result as never);
+      jest.spyOn(rbook, 'getWhoamiDiagnostics').mockResolvedValue({
         success: true,
         data: { resolved: { projectRoot: root, source: resolvedBy } },
       } as never);
-      jest.spyOn(cmos, 'formatMessageForLLM').mockReturnValue('Fixture ready');
+      jest.spyOn(rbook, 'formatMessageForLLM').mockReturnValue('Fixture ready');
       mockServer.getClientCapabilities.mockReturnValue({ roots: { listChanged: true } } as never);
       Object.assign(mockServer, { getNegotiatedProtocolVersion: () => mode });
       let releaseRoots!: (value: { roots: never[] }) => void;
@@ -269,8 +314,8 @@ for (const [mode, explicit] of [
         // Release only during cleanup; a failing old implementation never leaves a pending timer.
         releaseRoots({ roots: [] });
         await pending.catch(() => undefined);
-        if (previousRole === undefined) delete process.env.CMOS_AGENT_ROLE;
-        else process.env.CMOS_AGENT_ROLE = previousRole;
+        if (previousRole === undefined) delete process.env.RBOOK_AGENT_ROLE;
+        else process.env.RBOOK_AGENT_ROLE = previousRole;
         moduleData.cleanup();
       }
     }
@@ -281,7 +326,7 @@ describe('Mission Protocol entry lifecycle', () => {
   test('initializeServer logs initialization details and returns context', async () => {
     const moduleData = await loadIndexModule();
     const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
-    // s92-m07: these diagnostics are behind CMOS_DEBUG=1 (a normal start writes two lines).
+    // s92-m07: these diagnostics are behind RBOOK_DEBUG=1 (a normal start writes two lines).
     const restoreDebug = withDebugEnv('1');
 
     const context = createMockContext();
@@ -299,7 +344,7 @@ describe('Mission Protocol entry lifecycle', () => {
       expect(result).toBe(context);
       expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Initializing MCP server'));
       expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining('CMOS bundled seed schema version: 2.1')
+        expect.stringContaining('Reasonbook bundled seed schema version: 2.1')
       );
       expect(consoleSpy).toHaveBeenCalledWith(
         expect.stringContaining('Roots support: probed on first call')
@@ -319,7 +364,7 @@ describe('Mission Protocol entry lifecycle', () => {
   test('initializeServer logs "pruned N stale entries" when startup prune finds drift', async () => {
     const moduleData = await loadIndexModule();
     const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
-    // s92-m07: these diagnostics are behind CMOS_DEBUG=1 (a normal start writes two lines).
+    // s92-m07: these diagnostics are behind RBOOK_DEBUG=1 (a normal start writes two lines).
     const restoreDebug = withDebugEnv('1');
 
     const context = createMockContext();
@@ -357,7 +402,7 @@ describe('Mission Protocol entry lifecycle', () => {
   test('initializeServer logs healthy state when startup prune finds nothing to remove', async () => {
     const moduleData = await loadIndexModule();
     const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
-    // s92-m07: these diagnostics are behind CMOS_DEBUG=1 (a normal start writes two lines).
+    // s92-m07: these diagnostics are behind RBOOK_DEBUG=1 (a normal start writes two lines).
     const restoreDebug = withDebugEnv('1');
 
     const context = createMockContext();
@@ -494,7 +539,7 @@ describe('Mission Protocol entry lifecycle', () => {
     try {
       await moduleData.indexModule.__test__.initializeServer();
 
-      // s92-m07: a warning stays visible without CMOS_DEBUG; the [INFO] self-test line does not.
+      // s92-m07: a warning stays visible without RBOOK_DEBUG; the [INFO] self-test line does not.
       expect(consoleSpy).toHaveBeenCalledWith(
         expect.stringContaining('[P0] Sender attribution self-test warning')
       );
@@ -546,7 +591,7 @@ describe('Mission Protocol entry lifecycle', () => {
   test('registerToolHandlers registers list handler and sanitizes execution errors', async () => {
     const moduleData = await loadIndexModule();
     const { indexModule, mockServer, ErrorHandler } = moduleData;
-    const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'cmos-index-sanitize-error-'));
+    const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'rbook-index-sanitize-error-'));
 
     const definitions = [{ name: 'demo_tool' }];
     const definitionsSpy = jest
@@ -555,8 +600,8 @@ describe('Mission Protocol entry lifecycle', () => {
 
     const context = createMockContext();
     const executionError = new Error('boom');
-    const cmosBarrel = await import('../src/tools/cmos');
-    const handlerSpy = jest.spyOn(cmosBarrel, 'cmosProject').mockRejectedValue(executionError);
+    const rbookBarrel = await import('../src/tools/rbook');
+    const handlerSpy = jest.spyOn(rbookBarrel, 'rbookProject').mockRejectedValue(executionError);
 
     const missionError = new moduleData.MissionProtocolError({
       code: 'INTERNAL_UNEXPECTED',
@@ -580,9 +625,9 @@ describe('Mission Protocol entry lifecycle', () => {
         request: any
       ) => Promise<any>;
       // s91-m02: undeclared keys are now refused at the preflight, so the >10-key sanitizer
-      // input is built from keys the published cmos_project schema actually declares.
-      const projectSchema = (await import('../src/tools/cmos')).CMOS_TOOL_DEFINITIONS.find(
-        (definition) => definition.name === 'cmos_project'
+      // input is built from keys the published rbook_project schema actually declares.
+      const projectSchema = (await import('../src/tools/rbook')).RBOOK_TOOL_DEFINITIONS.find(
+        (definition) => definition.name === 'rbook_project'
       )!.inputSchema as { properties: Record<string, unknown> };
       const declaredKeys = Object.keys(projectSchema.properties).filter(
         (key) => key !== 'action' && key !== 'projectRoot'
@@ -590,7 +635,7 @@ describe('Mission Protocol entry lifecycle', () => {
       expect(declaredKeys.length).toBeGreaterThanOrEqual(10);
       const result = await callHandler({
         params: {
-          name: 'cmos_project',
+          name: 'rbook_project',
           arguments: {
             action: 'init',
             projectRoot,
@@ -615,7 +660,7 @@ describe('Mission Protocol entry lifecycle', () => {
       expect(contextArg).toMatchObject({
         module: 'server',
         data: expect.objectContaining({
-          tool: 'cmos_project',
+          tool: 'rbook_project',
           args: expect.objectContaining({ [declaredKeys[0]]: 0 }),
         }),
       });
@@ -630,39 +675,39 @@ describe('Mission Protocol entry lifecycle', () => {
   });
 
   test('the actual MCP boundary records reads, refusals and protocol failures once each', async () => {
-    const project = await createSeededCmosProject(
+    const project = await createSeededRbookProject(
       {
         dashboardProjectId: '9d485daa-e9fc-4e8b-ae67-9a928daec94d',
-        cmosAddress: 'cmos://test/observation',
+        rbookAddress: 'rbook://test/observation',
         owner: 'test',
       },
-      'cmos-mcp-observation-'
+      'rbook-observation-'
     );
-    const config = await fs.mkdtemp(path.join(os.tmpdir(), 'cmos-observation-config-'));
-    const previous = process.env.CMOS_CONFIG_DIR;
-    process.env.CMOS_CONFIG_DIR = config;
+    const config = await fs.mkdtemp(path.join(os.tmpdir(), 'rbook-observation-config-'));
+    const previous = process.env.RBOOK_CONFIG_DIR;
+    process.env.RBOOK_CONFIG_DIR = config;
     const moduleData = await loadIndexModule();
     try {
       const { indexModule, mockServer } = moduleData;
-      const telemetry = await import('../src/tools/cmos/local-telemetry');
+      const telemetry = await import('../src/tools/rbook/local-telemetry');
       indexModule.__test__.registerToolHandlers(createMockContext());
       const handler = mockServer.setRequestHandler.mock.calls[1][1] as (
         request: any
       ) => Promise<any>;
       const args = { projectRoot: project.projectRoot };
       const read = await handler({
-        params: { name: 'cmos_context', arguments: { ...args, action: 'next_steps' } },
+        params: { name: 'rbook_context', arguments: { ...args, action: 'next_steps' } },
       });
       expect(read.isError).toBe(false);
       const refusal = await handler({
-        params: { name: 'cmos_decisions', arguments: { ...args, action: 'show', decisionId: -1 } },
+        params: { name: 'rbook_decisions', arguments: { ...args, action: 'show', decisionId: -1 } },
       });
       expect(refusal.isError).toBe(true);
       await expect(
         handler({ params: { name: 'nonexistent_tool', arguments: args } })
       ).rejects.toThrow();
       const target = telemetry.targetForStore(
-        path.join(project.projectRoot, 'cmos/db/cmos.sqlite')
+        path.join(project.projectRoot, 'rbook/db/rbook.sqlite')
       );
       const records = telemetry.readTelemetry(target!);
       expect(records).toHaveLength(3);
@@ -673,7 +718,7 @@ describe('Mission Protocol entry lifecycle', () => {
       const cwd = jest.spyOn(process, 'cwd').mockReturnValue(project.projectRoot);
       try {
         const whoami = await handler({
-          params: { name: 'cmos_message', arguments: { action: 'whoami' } },
+          params: { name: 'rbook_message', arguments: { action: 'whoami' } },
         });
         expect(whoami.structuredContent?.error).toBeUndefined();
         expect(telemetry.readTelemetry(target!)).toHaveLength(4);
@@ -682,8 +727,8 @@ describe('Mission Protocol entry lifecycle', () => {
       }
     } finally {
       moduleData.cleanup();
-      if (previous === undefined) delete process.env.CMOS_CONFIG_DIR;
-      else process.env.CMOS_CONFIG_DIR = previous;
+      if (previous === undefined) delete process.env.RBOOK_CONFIG_DIR;
+      else process.env.RBOOK_CONFIG_DIR = previous;
       await project.cleanup();
       await fs.rm(config, { recursive: true, force: true });
     }
@@ -727,7 +772,7 @@ describe('Mission Protocol entry lifecycle', () => {
   });
 
   test('registerToolHandlers omits sanitized args when input is not an object', async () => {
-    const project = await createSeededCmosProject({}, 'cmos-index-non-object-error-');
+    const project = await createSeededRbookProject({}, 'rbook-index-non-object-error-');
     const moduleData = await loadIndexModule();
     const { indexModule, mockServer, ErrorHandler } = moduleData;
     const context = createMockContext();
@@ -735,8 +780,8 @@ describe('Mission Protocol entry lifecycle', () => {
     process.cwd = () => project.projectRoot;
 
     const executionError = new Error('explode');
-    const cmosBarrel = await import('../src/tools/cmos');
-    const handlerSpy = jest.spyOn(cmosBarrel, 'cmosStatus').mockRejectedValue(executionError);
+    const rbookBarrel = await import('../src/tools/rbook');
+    const handlerSpy = jest.spyOn(rbookBarrel, 'rbookStatus').mockRejectedValue(executionError);
     const missionError = new moduleData.MissionProtocolError({
       code: 'INTERNAL_UNEXPECTED',
       category: 'internal',
@@ -754,7 +799,7 @@ describe('Mission Protocol entry lifecycle', () => {
 
       const result = await callHandler({
         params: {
-          name: 'cmos_status',
+          name: 'rbook_status',
           arguments: 'non-object arguments',
         },
       });
@@ -765,7 +810,7 @@ describe('Mission Protocol entry lifecycle', () => {
 
       const [, , contextArg] = handleSpy.mock.calls[0];
       expect(contextArg).toBeDefined();
-      expect(contextArg?.data).toEqual({ tool: 'cmos_status' });
+      expect(contextArg?.data).toEqual({ tool: 'rbook_status' });
     } finally {
       process.cwd = originalCwd;
       moduleData.cleanup();
@@ -776,7 +821,7 @@ describe('Mission Protocol entry lifecycle', () => {
   });
 
   // Sprint 74 m03: a write-path handler that throws an unhandled (non-ProtocolError)
-  // exception must surface a structured CmosToolResult error (code+message+
+  // exception must surface a structured RbookToolResult error (code+message+
   // suggestion) as an isError result — never a bare JSON-RPC -32603 that swallows
   // the real cause. Reported by aquex.ai (msg aa124685): forceComplete + capture
   // crashed with a bare -32603 'Tool execution failed' and no actionable detail.
@@ -787,7 +832,7 @@ describe('Mission Protocol entry lifecycle', () => {
 
     try {
       const result = indexModule.buildToolExecutionErrorResult(
-        'cmos_sprint',
+        'rbook_sprint',
         { action: 'complete', forceComplete: true },
         new Error('SQLITE_CONSTRAINT: stable_event_id is not unique')
       );
@@ -807,7 +852,7 @@ describe('Mission Protocol entry lifecycle', () => {
       };
       expect(structured.success).toBe(false);
       expect(structured.error.code).toBe('TOOL_EXECUTION_ERROR');
-      expect(structured.error.message).toContain('cmos_sprint');
+      expect(structured.error.message).toContain('rbook_sprint');
       expect(structured.error.message).toContain('SQLITE_CONSTRAINT');
       expect(structured.error.suggestion.length).toBeGreaterThan(0);
     } finally {
@@ -816,20 +861,20 @@ describe('Mission Protocol entry lifecycle', () => {
     }
   });
 
-  test.each(['cmos_sprint', 'cmos_session'])(
+  test.each(['rbook_sprint', 'rbook_session'])(
     'CallTool handler returns a structured isError result (no bare -32603) when the %s write handler throws',
     async (toolName) => {
-      const project = await createSeededCmosProject({}, 'cmos-index-write-error-');
+      const project = await createSeededRbookProject({}, 'rbook-index-write-error-');
       const moduleData = await loadIndexModule();
       const { indexModule, mockServer } = moduleData;
       const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
 
       // Force the cross-module handler to throw a plain (non-ProtocolError) exception,
       // simulating the aquex.ai store-specific write crash.
-      const cmosBarrel = await import('../src/tools/cmos');
-      const handlerName = toolName === 'cmos_sprint' ? 'cmosSprint' : 'cmosSession';
+      const rbookBarrel = await import('../src/tools/rbook');
+      const handlerName = toolName === 'rbook_sprint' ? 'rbookSprint' : 'rbookSession';
       const handlerSpy = jest
-        .spyOn(cmosBarrel, handlerName as 'cmosSprint' | 'cmosSession')
+        .spyOn(rbookBarrel, handlerName as 'rbookSprint' | 'rbookSession')
         .mockRejectedValue(new Error('simulated store-specific write crash') as never);
 
       const context = createMockContext();
@@ -840,10 +885,10 @@ describe('Mission Protocol entry lifecycle', () => {
         ) => Promise<any>;
 
         const request =
-          toolName === 'cmos_sprint'
+          toolName === 'rbook_sprint'
             ? {
                 params: {
-                  name: 'cmos_sprint',
+                  name: 'rbook_sprint',
                   arguments: {
                     action: 'complete',
                     sprintId: 'sprint-1',
@@ -854,7 +899,7 @@ describe('Mission Protocol entry lifecycle', () => {
               }
             : {
                 params: {
-                  name: 'cmos_session',
+                  name: 'rbook_session',
                   arguments: {
                     action: 'capture',
                     category: 'decision',
@@ -882,19 +927,20 @@ describe('Mission Protocol entry lifecycle', () => {
   );
 
   test('CallTool handler preserves request-local identity disclosure when the selected handler throws', async () => {
-    const project = await createSeededCmosProject({}, 'cmos-index-disclosure-error-');
+    const project = await createSeededRbookProject({}, 'rbook-index-disclosure-error-');
     const moduleData = await loadIndexModule();
     const { indexModule, mockServer } = moduleData;
     const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
-    const cmosBarrel = await import('../src/tools/cmos');
-    const { recordProjectIdentityDisclosure } = await import('../src/tools/cmos/tool-call-context');
+    const rbookBarrel = await import('../src/tools/rbook');
+    const { recordProjectIdentityDisclosure } =
+      await import('../src/tools/rbook/tool-call-context');
     const disclosure =
       'store="/tmp/identityless.sqlite" has NO RECORDED project identity; fallback only';
     const primitiveDisclosure =
       'store="/tmp/primitive.sqlite" has NO RECORDED project identity; fallback only';
     const sharedError = new Error('simulated throw after getProjectId');
     let invocation = 0;
-    const handlerSpy = jest.spyOn(cmosBarrel, 'cmosContext').mockImplementation(async () => {
+    const handlerSpy = jest.spyOn(rbookBarrel, 'rbookContext').mockImplementation(async () => {
       invocation += 1;
       if (invocation === 1) recordProjectIdentityDisclosure(disclosure);
       if (invocation === 3) {
@@ -911,7 +957,7 @@ describe('Mission Protocol entry lifecycle', () => {
       ) => Promise<any>;
       const result = await callHandler({
         params: {
-          name: 'cmos_context',
+          name: 'rbook_context',
           arguments: {
             action: 'view',
             contextType: 'project_context',
@@ -926,7 +972,7 @@ describe('Mission Protocol entry lifecycle', () => {
 
       const secondResult = await callHandler({
         params: {
-          name: 'cmos_context',
+          name: 'rbook_context',
           arguments: {
             action: 'view',
             contextType: 'project_context',
@@ -941,7 +987,7 @@ describe('Mission Protocol entry lifecycle', () => {
 
       const primitiveResult = await callHandler({
         params: {
-          name: 'cmos_context',
+          name: 'rbook_context',
           arguments: {
             action: 'view',
             contextType: 'project_context',
@@ -967,14 +1013,15 @@ describe('Mission Protocol entry lifecycle', () => {
 
   test('parallel CallTool failures keep disclosures isolated when handlers throw the same Error object', async () => {
     const [projectA, projectB] = await Promise.all([
-      createSeededCmosProject({}, 'cmos-index-parallel-a-'),
-      createSeededCmosProject({}, 'cmos-index-parallel-b-'),
+      createSeededRbookProject({}, 'rbook-index-parallel-a-'),
+      createSeededRbookProject({}, 'rbook-index-parallel-b-'),
     ]);
     const moduleData = await loadIndexModule();
     const { indexModule, mockServer } = moduleData;
     const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
-    const cmosBarrel = await import('../src/tools/cmos');
-    const { recordProjectIdentityDisclosure } = await import('../src/tools/cmos/tool-call-context');
+    const rbookBarrel = await import('../src/tools/rbook');
+    const { recordProjectIdentityDisclosure } =
+      await import('../src/tools/rbook/tool-call-context');
     const sharedError = new Error('simulated parallel shared error');
     const disclosures = {
       project_context: 'store="/tmp/a.sqlite" has NO RECORDED project identity',
@@ -985,14 +1032,16 @@ describe('Mission Protocol entry lifecycle', () => {
     const bothEntered = new Promise<void>((resolve) => {
       releaseBoth = resolve;
     });
-    const handlerSpy = jest.spyOn(cmosBarrel, 'cmosContext').mockImplementation(async (params) => {
-      const contextType = params.contextType as keyof typeof disclosures;
-      recordProjectIdentityDisclosure(disclosures[contextType]);
-      entered += 1;
-      if (entered === 2) releaseBoth();
-      await bothEntered;
-      throw sharedError;
-    });
+    const handlerSpy = jest
+      .spyOn(rbookBarrel, 'rbookContext')
+      .mockImplementation(async (params) => {
+        const contextType = params.contextType as keyof typeof disclosures;
+        recordProjectIdentityDisclosure(disclosures[contextType]);
+        entered += 1;
+        if (entered === 2) releaseBoth();
+        await bothEntered;
+        throw sharedError;
+      });
 
     try {
       indexModule.__test__.registerToolHandlers(createMockContext());
@@ -1002,7 +1051,7 @@ describe('Mission Protocol entry lifecycle', () => {
       const call = (contextType: keyof typeof disclosures, projectRoot: string) =>
         callHandler({
           params: {
-            name: 'cmos_context',
+            name: 'rbook_context',
             arguments: { action: 'view', contextType, projectRoot },
           },
         });
@@ -1044,7 +1093,7 @@ describe('Mission Protocol entry lifecycle', () => {
       ) => Promise<unknown>;
 
       await expect(
-        callHandler({ params: { name: 'cmos_project_list', arguments: {} } })
+        callHandler({ params: { name: 'rbook_project_list', arguments: {} } })
       ).rejects.toMatchObject({
         code: 'internal_error',
         message: 'Server context not initialized',
@@ -1058,8 +1107,8 @@ describe('Mission Protocol entry lifecycle', () => {
   });
 
   test.each([
-    ['without CMOS_DEBUG: exactly the two startup lines', undefined],
-    ['with CMOS_DEBUG=1: the diagnostics come back', '1'],
+    ['without RBOOK_DEBUG: exactly the two startup lines', undefined],
+    ['with RBOOK_DEBUG=1: the diagnostics come back', '1'],
   ])('main connects the server and logs its startup (%s)', async (_label, debug) => {
     const moduleData = await loadIndexModule();
     const { indexModule, mockServer, serveStdioMock } = moduleData;
@@ -1112,14 +1161,12 @@ describe('Mission Protocol entry lifecycle', () => {
         await fs.readFile(path.resolve(__dirname, '../package.json'), 'utf8')
       ) as { version: string };
       const startup = [
-        `[cmos-mcp] v${version} ready on stdio (${indexModule.getToolDefinitions().length} tools)`,
-        '[cmos-mcp] project: /tmp/current-project (from the working directory)',
+        `[reasonbook] v${version} ready on stdio (${indexModule.getToolDefinitions().length} tools)`,
+        '[reasonbook] project: /tmp/current-project (from the working directory)',
       ];
       if (debug) {
         expect(lines).toEqual(expect.arrayContaining(startup));
-        expect(lines).toContainEqual(
-          expect.stringContaining('cmos-mcp MCP server running on stdio')
-        );
+        expect(lines).toContainEqual(expect.stringContaining('rbook MCP server running on stdio'));
         expect(lines.length).toBeGreaterThan(10);
       } else {
         expect(lines).toEqual(startup);
@@ -1240,7 +1287,7 @@ describe('Mission Protocol entry lifecycle', () => {
       expect(handler).toBeDefined();
       await expect(handler?.({} as any)).rejects.toThrow('exit:0');
       expect(mockServer.close).toHaveBeenCalled();
-      // s93-m11 (#606 i): a quiet shutdown, like the quiet startup — the line is CMOS_DEBUG only.
+      // s93-m11 (#606 i): a quiet shutdown, like the quiet startup — the line is RBOOK_DEBUG only.
       expect(consoleSpy).not.toHaveBeenCalledWith(
         expect.stringContaining('Received SIGINT, shutting down gracefully')
       );
@@ -1265,7 +1312,7 @@ describe('Mission Protocol entry lifecycle', () => {
       expect(handler).toBeDefined();
       await expect(handler?.({} as any)).rejects.toThrow('exit:0');
       expect(mockServer.close).toHaveBeenCalled();
-      // s93-m11 (#606 i): a quiet shutdown, like the quiet startup — the line is CMOS_DEBUG only.
+      // s93-m11 (#606 i): a quiet shutdown, like the quiet startup — the line is RBOOK_DEBUG only.
       expect(consoleSpy).not.toHaveBeenCalledWith(
         expect.stringContaining('Received SIGTERM, shutting down gracefully')
       );
@@ -1278,7 +1325,7 @@ describe('Mission Protocol entry lifecycle', () => {
 });
 
 describe('runStartupRegistryPrune (real implementation)', () => {
-  const ENV_KEY = 'CMOS_CONFIG_DIR';
+  const ENV_KEY = 'RBOOK_CONFIG_DIR';
   let savedEnv: string | undefined;
   let configDir: string;
 
@@ -1297,22 +1344,22 @@ describe('runStartupRegistryPrune (real implementation)', () => {
     await fs.rm(configDir, { recursive: true, force: true });
   });
 
-  test('drops entries whose cmos database is missing and reports counts', async () => {
+  test('drops entries whose rbook database is missing and reports counts', async () => {
     jest.resetModules();
     const { ProjectGraphRegistry } = await import('../src/intelligence/project-graph-registry');
     const indexModule = await import('../src/index');
 
     ProjectGraphRegistry.resetInstance();
     const liveProject = await fs.mkdtemp(path.join(os.tmpdir(), 'live-'));
-    await fs.mkdir(path.join(liveProject, 'cmos', 'db'), { recursive: true });
-    await fs.writeFile(path.join(liveProject, 'cmos', 'db', 'cmos.sqlite'), '');
+    await fs.mkdir(path.join(liveProject, 'rbook', 'db'), { recursive: true });
+    await fs.writeFile(path.join(liveProject, 'rbook', 'db', 'rbook.sqlite'), '');
 
     const registry = await ProjectGraphRegistry.create();
     registry.registerStore(liveProject);
 
     const deadProject = await fs.mkdtemp(path.join(os.tmpdir(), 'dead-'));
-    await fs.mkdir(path.join(deadProject, 'cmos', 'db'), { recursive: true });
-    await fs.writeFile(path.join(deadProject, 'cmos', 'db', 'cmos.sqlite'), '');
+    await fs.mkdir(path.join(deadProject, 'rbook', 'db'), { recursive: true });
+    await fs.writeFile(path.join(deadProject, 'rbook', 'db', 'rbook.sqlite'), '');
     registry.registerStore(deadProject);
     await fs.rm(deadProject, { recursive: true, force: true });
 
@@ -1335,8 +1382,8 @@ describe('runStartupRegistryPrune (real implementation)', () => {
 
     ProjectGraphRegistry.resetInstance();
     const liveProject = await fs.mkdtemp(path.join(os.tmpdir(), 'live-'));
-    await fs.mkdir(path.join(liveProject, 'cmos', 'db'), { recursive: true });
-    await fs.writeFile(path.join(liveProject, 'cmos', 'db', 'cmos.sqlite'), '');
+    await fs.mkdir(path.join(liveProject, 'rbook', 'db'), { recursive: true });
+    await fs.writeFile(path.join(liveProject, 'rbook', 'db', 'rbook.sqlite'), '');
 
     const registry = await ProjectGraphRegistry.create();
     registry.registerStore(liveProject);
@@ -1375,11 +1422,11 @@ describe('runStartupBundledEnvCheck (Sprint 62 m02)', () => {
 
   test('reports envFileBundled=true when running from node_modules with a .env present', async () => {
     const indexModule = await import('../src/index');
-    const fakeInstallRoot = path.join(tmpRoot, 'node_modules', '@aquex', 'cmos-mcp');
+    const fakeInstallRoot = path.join(tmpRoot, 'node_modules', '@aquex', 'reasonbook');
     await fs.mkdir(fakeInstallRoot, { recursive: true });
     await fs.writeFile(
       path.join(fakeInstallRoot, '.env'),
-      'CMOS_DASHBOARD_API_KEY=cmk_should_never_have_shipped\n'
+      'RBOOK_DASHBOARD_API_KEY=cmk_should_never_have_shipped\n'
     );
 
     const result = indexModule.__test__.runStartupBundledEnvCheck(fakeInstallRoot);
@@ -1390,7 +1437,7 @@ describe('runStartupBundledEnvCheck (Sprint 62 m02)', () => {
 
   test('reports envFileBundled=false when running from node_modules without a .env', async () => {
     const indexModule = await import('../src/index');
-    const fakeInstallRoot = path.join(tmpRoot, 'node_modules', '@aquex', 'cmos-mcp');
+    const fakeInstallRoot = path.join(tmpRoot, 'node_modules', '@aquex', 'reasonbook');
     await fs.mkdir(fakeInstallRoot, { recursive: true });
     // No .env created.
 

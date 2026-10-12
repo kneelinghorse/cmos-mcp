@@ -3,7 +3,7 @@
 # ABOUTME: Claude Code PreToolUse hook (Sprint 78 m04, FORK-5) for the sanctioned read-only
 # ABOUTME: review-agent deployment: reject destructive git commands so a reviewer can't wipe work.
 #
-# The CMOS_AGENT_ROLE=review server guard (read-only-agent-guard.ts) stops CMOS
+# The CMOS_AGENT_ROLE=review server guard (read-only-agent-guard.ts) stops Reasonbook
 # store WRITES; this hook closes the *other* data-loss vector — a review agent
 # running `git stash`/`reset`/`checkout`/`clean`/`restore`/`rm`/force-push and
 # destroying uncommitted work (the s70-m01 / s74-m01 incident class). Read-only git
@@ -14,7 +14,7 @@
 # call and feeds stderr back to the agent; exit 0 allows it. Any parse failure or
 # non-Bash tool falls through to allow (fail-open here is correct: this hook's job
 # is to catch git mutations, not to gate every tool — the server guard is the
-# authoritative CMOS-write gate).
+# authoritative Reasonbook-write gate).
 
 set -euo pipefail
 
@@ -22,7 +22,9 @@ set -euo pipefail
 # strict no-op unless the session is the sanctioned read-only review deployment
 # (CMOS_AGENT_ROLE=review), the same signal the server-side read-only guard keys on.
 # A normal build session (CMOS_AGENT_ROLE unset) passes every git command through.
-if [[ "${CMOS_AGENT_ROLE:-}" != "review" ]]; then
+# Shell-only compatibility boundary: the empty new setting is an explicit override.
+# This hook must work before an installed package exists, so it cannot import getSetting.
+if [[ "${RBOOK_AGENT_ROLE-${CMOS_AGENT_ROLE:-}}" != "review" ]]; then
   exit 0
 fi
 

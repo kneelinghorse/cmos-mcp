@@ -6,14 +6,14 @@ import os from 'os';
 import path from 'path';
 import { describe, expect, it, beforeEach, afterEach } from '@jest/globals';
 import { captureRegisterResponse, recoverProjectKey } from '../../src/auth/project-key-capture';
-import { CMOS_CONFIG_DIR_ENV, CredentialStore } from '../../src/intelligence/credential-store';
+import { RBOOK_CONFIG_DIR_ENV, CredentialStore } from '../../src/intelligence/credential-store';
 import type { ProjectKeyRecord } from '../../src/intelligence/credential-store';
 import {
   DashboardClient,
   type RegisterProjectResult,
   type ReissueProjectKeyResult,
-} from '../../src/tools/cmos/dashboard-client';
-import type { CmosToolResult } from '../../src/tools/cmos/types';
+} from '../../src/tools/rbook/dashboard-client';
+import type { RbookToolResult } from '../../src/tools/rbook/types';
 import { runDeviceCodeFlow } from '../../src/auth/device-code';
 import {
   describeLive,
@@ -41,7 +41,7 @@ describe('captureRegisterResponse', () => {
 
   beforeEach(async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'capture-'));
-    delete process.env[CMOS_CONFIG_DIR_ENV];
+    delete process.env[RBOOK_CONFIG_DIR_ENV];
     CredentialStore.resetInstance();
   });
 
@@ -148,7 +148,7 @@ describe('recoverProjectKey', () => {
 
   beforeEach(async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'recover-'));
-    delete process.env[CMOS_CONFIG_DIR_ENV];
+    delete process.env[RBOOK_CONFIG_DIR_ENV];
     CredentialStore.resetInstance();
   });
 
@@ -160,7 +160,7 @@ describe('recoverProjectKey', () => {
 
   function mockClient(
     options: {
-      reissue?: CmosToolResult<ReissueProjectKeyResult>;
+      reissue?: RbookToolResult<ReissueProjectKeyResult>;
       authenticatingKeyId?: string;
     } = {}
   ): DashboardClient {
@@ -176,7 +176,7 @@ describe('recoverProjectKey', () => {
               label: 'reissued',
               revokedKeyIds: ['orphan-key-id'],
             },
-          } as CmosToolResult<ReissueProjectKeyResult>;
+          } as RbookToolResult<ReissueProjectKeyResult>;
         }
         return options.reissue;
       },
@@ -264,7 +264,7 @@ describe('recoverProjectKey', () => {
           label: 'fresh',
           revokedKeyIds: ['orphan-a', 'orphan-b'],
         },
-      } as CmosToolResult<ReissueProjectKeyResult>,
+      } as RbookToolResult<ReissueProjectKeyResult>,
     });
 
     const result = await recoverProjectKey({ projectRoot, projectId: 'p', client, store });
@@ -284,7 +284,7 @@ describe('recoverProjectKey', () => {
       reissue: {
         success: false,
         error: { code: 'DASHBOARD_ERROR', message: 'upstream 500' },
-      } as CmosToolResult<ReissueProjectKeyResult>,
+      } as RbookToolResult<ReissueProjectKeyResult>,
     });
 
     const result = await recoverProjectKey({
@@ -305,9 +305,9 @@ describe('recoverProjectKey', () => {
 // ─── Live dashboard (Sprint 58 m03) ───────────────────────────────────────
 //
 // Requires:
-//   CMOS_LIVE_DASHBOARD=1
-//   CMOS_DASHBOARD_URL=https://cmos.aquex.ai
-//   CMOS_LIVE_PROJECT_ID=<existing registered project UUID on the dashboard>
+//   RBOOK_LIVE_DASHBOARD=1
+//   RBOOK_DASHBOARD_URL=https://reasonbook.ai
+//   RBOOK_LIVE_PROJECT_ID=<existing registered project UUID on the dashboard>
 //
 // Exercises `/api/projects/:id/keys/reissue` end-to-end via `recoverProjectKey`.
 // Must run after a successful device-code login in the same tmpdir so the
@@ -337,10 +337,10 @@ describeLive('project key capture — live dashboard', () => {
   it(
     'reissues a real project-scoped key and persists it locally',
     async () => {
-      const projectId = process.env.CMOS_LIVE_PROJECT_ID;
+      const projectId = process.env.RBOOK_LIVE_PROJECT_ID;
       if (!projectId) {
         throw new Error(
-          'CMOS_LIVE_PROJECT_ID is required for the project-key-capture live block ' +
+          'RBOOK_LIVE_PROJECT_ID is required for the project-key-capture live block ' +
             '(set it to the UUID of an existing registered dashboard project).'
         );
       }

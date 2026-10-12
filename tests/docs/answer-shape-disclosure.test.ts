@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // ABOUTME: Sprint 89 m04 answer-shape snapshot, mixed-kind disclosure, and currentState emit gate.
-// ABOUTME: Pins exported CMOS Error/Result closures by symbol, declared syntax, and runtime JSON kind.
+// ABOUTME: Pins exported Reasonbook Error/Result closures by symbol, declared syntax, and runtime JSON kind.
 
 /**
  * Sprint 89 m04 — ANSWER-SHAPE DISCLOSURE GATE.
  *
- * Scope: every interface/type exported from a `src/tools/cmos` module under a name ending `Error`
+ * Scope: every interface/type exported from a `src/tools/rbook` module under a name ending `Error`
  * or `Result`, plus every named interface/type transitively reached anywhere in the corresponding
  * `src/` program through references, import types, or heritage, is recorded here. Roots come from
  * TypeScript module export tables, so `export { XResult }` and an external declaration re-exported
@@ -14,25 +14,25 @@
  * member kind. Direct properties also record declared syntax and checker-resolved runtime kind.
  *
  * ARM 1 snapshots that surface. Regenerating the snapshot with `-u` carries a release-note
- * obligation: this gate exists because 2.8.0 changed `CmosToolError.currentState` on the wire and
+ * obligation: this gate exists because 2.8.0 changed `RbookToolError.currentState` on the wire and
  * nothing in the repository stopped that change from shipping without disclosure.
  *
- * ARM 2 ledgers mixed JSON kinds. `CmosToolError.currentState` requires a literal CHANGELOG token;
+ * ARM 2 ledgers mixed JSON kinds. `RbookToolError.currentState` requires a literal CHANGELOG token;
  * `RankedResult.id` is an in-process ranking row, not a tool answer, and predates 2.7.0.
- * `CMOS_ANSWER_SHAPE_CHANGELOG` may point at a scratch CHANGELOG for the pre-disclosure RED, and
- * `CMOS_ANSWER_SHAPE_SOURCE_ROOT` may point at a scratch cmos tree for a composition fire.
+ * `RBOOK_ANSWER_SHAPE_CHANGELOG` may point at a scratch CHANGELOG for the pre-disclosure RED, and
+ * `RBOOK_ANSWER_SHAPE_SOURCE_ROOT` may point at a scratch rbook tree for a composition fire.
  *
  * ARM 3 counts direct `currentState:` assignments, direct object initializers, and the eight
- * unguarded `${error.currentState}` formatter interpolations. `CMOS_ANSWER_SHAPE_EMIT_ROOT` may
- * point at a scratch cmos source copy. Anti-vacuity tests mutate strings in memory, never files.
+ * unguarded `${error.currentState}` formatter interpolations. `RBOOK_ANSWER_SHAPE_EMIT_ROOT` may
+ * point at a scratch rbook source copy. Anti-vacuity tests mutate strings in memory, never files.
  *
  * FALSE-NEGATIVE PROFILE — the declared complement of the scope above:
  *
  * - Declared/runtime kind: explicit `any` / `unknown` carries no inspectable JSON kind. Exactly
- *   three reachable sites are opaque: `CmosToolError.providedValue`,
+ *   three reachable sites are opaque: `RbookToolError.providedValue`,
  *   `DashboardMessage.evidence` (`array<ANY>`), and `PulledSyncEvent.payload`.
  * - Generic kind is separate from explicit opacity. Exactly three rows are open type-parameter
- *   holes: `CmosToolResult.data`, `SingleCurrentSprintResult.data`, and
+ *   holes: `RbookToolResult.data`, `SingleCurrentSprintResult.data`, and
  *   `CrossStoreQueryResult.results` (`array<GENERIC>`). Call-site substitution can change their
  *   JSON kind without changing the declaration snapshot.
  * - Answer types: input shapes are outside this gate. The tool-definition snapshot owns the input
@@ -60,7 +60,7 @@ import * as os from 'os';
 import * as path from 'path';
 import {
   analyzeAnswerShapes,
-  CMOS_SOURCE_ROOT,
+  RBOOK_SOURCE_ROOT,
   compositionFingerprintsForSource,
   containsNestedKind,
   exportedShapeNamesForSource,
@@ -76,43 +76,43 @@ import {
 } from '../helpers/current-state-census';
 
 const REPO_ROOT = path.resolve(__dirname, '../..');
-const EMIT_SOURCE_ROOT = process.env.CMOS_ANSWER_SHAPE_EMIT_ROOT
-  ? path.resolve(process.env.CMOS_ANSWER_SHAPE_EMIT_ROOT)
-  : CMOS_SOURCE_ROOT;
-const CHANGELOG_PATH = process.env.CMOS_ANSWER_SHAPE_CHANGELOG
-  ? path.resolve(process.env.CMOS_ANSWER_SHAPE_CHANGELOG)
+const EMIT_SOURCE_ROOT = process.env.RBOOK_ANSWER_SHAPE_EMIT_ROOT
+  ? path.resolve(process.env.RBOOK_ANSWER_SHAPE_EMIT_ROOT)
+  : RBOOK_SOURCE_ROOT;
+const CHANGELOG_PATH = process.env.RBOOK_ANSWER_SHAPE_CHANGELOG
+  ? path.resolve(process.env.RBOOK_ANSWER_SHAPE_CHANGELOG)
   : path.join(REPO_ROOT, 'CHANGELOG.md');
-const SHAPE_SOURCE_ROOT = process.env.CMOS_ANSWER_SHAPE_SOURCE_ROOT
-  ? path.resolve(process.env.CMOS_ANSWER_SHAPE_SOURCE_ROOT)
-  : CMOS_SOURCE_ROOT;
+const SHAPE_SOURCE_ROOT = process.env.RBOOK_ANSWER_SHAPE_SOURCE_ROOT
+  ? path.resolve(process.env.RBOOK_ANSWER_SHAPE_SOURCE_ROOT)
+  : RBOOK_SOURCE_ROOT;
 
 const EXPECTED_TOTALS = {
   // s90-m05: the published sprint-close receipt replaces three scalar/list fields with the named
   // `SprintPendingNextStep`, `SprintPendingNextStepGroups`, and `SprintPendingNextStepsSurvey`
   // closure. That adds three declarations/compositions and nine property rows; the CHANGELOG's
   // Changed section discloses the corresponding answer-shape break.
-  // s91-m02: src/tools/cmos/unknown-param-guard.ts joins the analyzed tool root. It declares no
+  // s91-m02: src/tools/rbook/unknown-param-guard.ts joins the analyzed tool root. It declares no
   // answer type, so only the file count moves; roots, declarations and rows are unchanged.
-  // s91-m04: cmos-decisions-record.ts adds the root `CmosDecisionsRecordResult` and
-  // `SupersededEcho` (additive; the CmosDecisionsResult union widens), and decision-write.ts joins
-  // the analyzed root. CmosSessionCaptureResult is unchanged by the extraction.
-  // s91-m05: SupersessionCandidate (inside CmosSessionCaptureResult and the record receipt) gains
+  // s91-m04: rbook-decisions-record.ts adds the root `RbookDecisionsRecordResult` and
+  // `SupersededEcho` (additive; the RbookDecisionsResult union widens), and decision-write.ts joins
+  // the analyzed root. RbookSessionCaptureResult is unchanged by the extraction.
+  // s91-m05: SupersessionCandidate (inside RbookSessionCaptureResult and the record receipt) gains
   // `preview` and `score`; `decisionText` is kept and now holds the preview. Two rows, additive.
   // s91-m06: next-step-lease.ts joins the root; NextStepRecord gains optional closesSurvived and
   // lease; SprintPendingNextStep gains status and closesSurvived; the survey gains totalOpen and
   // the new SprintNextStepLease; the close receipt gains lapsedDroppedIds. All additive.
-  // s91-m07: sprint-tracking.ts joins the root; CmosReviewResult.sprint gains `resolvedBy`
+  // s91-m07: sprint-tracking.ts joins the root; RbookReviewResult.sprint gains `resolvedBy`
   // (additive, same row count — the sprint row's declared shape widens).
   // s92-m01: sender-refusal.ts joins the analyzed tool root (it declares no answer type), and the
   // new `ResolvedBy` type adds one declaration/composition. Nine rows, all additive optional or new
-  // fields: CmosReviewResult projectRoot/resolvedBy/registryDefault, MessageWhoamiResult
+  // fields: RbookReviewResult projectRoot/resolvedBy/registryDefault, MessageWhoamiResult
   // registryDefault/serverProjectRoot, ProjectListItem.defaultApplied, ProjectRegisterResult
   // defaultApplied/ephemeral, ValidationSummary.ephemeral. ProjectValidationItem.status widens with
   // 'ephemeral' and SenderResolutionSource replaces 'registry-singleton' with 'server-project-root'
   // and 'registry-default' — both disclosed in the CHANGELOG.
   // s92-m02: sprint-end-date-repair.ts joins the analyzed root with three declarations
   // (SprintEndDateRepair, RepairedSprintEndDate, UnanchoredSprint). Eighteen rows, all additive:
-  // CmosSprintCompleteResult plannedEndDate/endDateRepair, SprintNextStepLease minAgeDays/
+  // RbookSprintCompleteResult plannedEndDate/endDateRepair, SprintNextStepLease minAgeDays/
   // heldByMinAge/idleWarnDays/idle, SprintPendingNextStep.ageDays, SprintUpdateResult
   // endDateStamped/plannedEndDate, and the repair types' own rows. LeaseState widens with 'idle'.
   // s92-m05: one additive row, SprintLifecycleTriggers.archived (the close archives only when
@@ -120,20 +120,20 @@ const EXPECTED_TOTALS = {
   // s92-m03: session-owner.ts and implicit-session-lifecycle.ts join the closure with two
   // declarations (CloseReason, ClosedSessionReceipt). Thirteen rows, all additive: the receipt's
   // eight, plus implicitSession/closedSessions on capture and record, and closedSessions on start.
-  // s92-m08: two show actions (cmos-decisions-show.ts, cmos-learnings-show.ts) join as roots, and
+  // s92-m08: two show actions (rbook-decisions-show.ts, rbook-learnings-show.ts) join as roots, and
   // previews add ContextSearchHit plus truncated/fullLength on search hits, learnings hits and
   // relevant decisions, and status on RankedResult. All additive.
   // s92-m04: six rows, all additive: RecentDecisionSummary id/truncated/fullLength,
   // SuggestedAction.scope, MissionCompleteResult.missionDecisionCount and
-  // CmosReviewResult.recentLearnings (its recentDecisions element gains `id` inside the same row).
+  // RbookReviewResult.recentLearnings (its recentDecisions element gains `id` inside the same row).
   // The supersession and implicit-reaffirm fields stay declared, deprecated and never populated.
   // s92-m07: ContextSearchResult.options widens with `excludedStatuses` (the statuses a search left
-  // out when the caller named none: ['superseded']), in the same row. CmosDbHealthResult gains
+  // out when the caller named none: ['superseded']), in the same row. RbookDbHealthResult gains
   // `semanticSearch`, typed by the new SemanticSearchStatus (enabled/state/detail): one declaration
   // and composition, four rows, all additive.
-  // s92-m09: cmos_db gains prune_snapshots. cmos-db-prune-snapshots.ts (a root) and
-  // context-snapshot-prune.ts join the closure; CmosDbPruneSnapshotsResult,
-  // PruneSnapshotsContextReport and PreserveReasons add three declarations; CmosDbResult's union
+  // s92-m09: rbook_db gains prune_snapshots. rbook-db-prune-snapshots.ts (a root) and
+  // context-snapshot-prune.ts join the closure; RbookDbPruneSnapshotsResult,
+  // PruneSnapshotsContextReport and PreserveReasons add three declarations; RbookDbResult's union
   // widens with the new result. Thirty-two rows, all new: the result also reports bytesReclaimed
   // (counted row by row) and sprintCloses, and PreserveReasons counts sprintCloseState.
   // s93-m11: StalenessResult leaves with the flagger (one declaration and composition, one root,
@@ -165,8 +165,8 @@ const EXPECTED_TOTALS = {
   // FeedbackStoreCount add two declarations and six fields, with three additive entry/list fields.
   // s93-m06: five draft modules join the folder (draft-grammar, proposals, draft-runtime,
   // draft-approval, decision-shape). The record answer gains optional `approval`,
-  // `answeredDrafts` and `stillPendingDrafts`; CmosDraftRecordResult (a new root, the answer for
-  // constraint, rule and profile drafts) joins the CmosDecisionsResult union; ApprovalEcho,
+  // `answeredDrafts` and `stillPendingDrafts`; RbookDraftRecordResult (a new root, the answer for
+  // constraint, rule and profile drafts) joins the RbookDecisionsResult union; ApprovalEcho,
   // DraftKind and ApprovalMode add three more declarations. Ten rows, all additive; the
   // CHANGELOG names the fields.
   // s94-m10: checkpoint-registration, dashboard-upload and dashboard-upload-scheduler add three
@@ -184,19 +184,22 @@ const EXPECTED_TOTALS = {
   // gains id/address/identityError (three rows); whoami's resolved object gains requestedAddress,
   // and SenderResolutionSource/ResolvedBy gain client-cwd inside existing rows. All additive,
   // with the public fields and source label disclosed in the 3.5.0 CHANGELOG.
-  files: 194,
+  // s95-m06: level-files.ts and project-level.ts join the root without a named answer type.
+  // ProjectUpdateResult gains filesWritten, and RbookSessionStartResult and RbookDecisionsRecordResult
+  // gain projectLevel (three rows, all additive and optional), to be disclosed in the 3.6.0 CHANGELOG.
+  files: 196,
   roots: 143,
   declarations: 312,
   compositions: 312,
-  rows: 1759,
+  rows: 1762,
 } as const;
 const EXPLICIT_OPAQUE_LEDGER = [
-  'CmosToolError.providedValue = ANY',
+  'RbookToolError.providedValue = ANY',
   'DashboardMessage.evidence = array<ANY>',
   'PulledSyncEvent.payload = ANY',
 ] as const;
 const GENERIC_HOLE_LEDGER = [
-  'CmosToolResult.data = GENERIC',
+  'RbookToolResult.data = GENERIC',
   'CrossStoreQueryResult.results = array<GENERIC>',
   'SingleCurrentSprintResult.data = GENERIC',
 ] as const;
@@ -223,21 +226,21 @@ const MIXED_KIND_LEDGER = [
       'The CLI copy plan preserves historical scalar project identity values in provenance; null is also retained.',
   },
   {
-    row: 'CmosDecisionsShowResult.alternatives',
+    row: 'RbookDecisionsShowResult.alternatives',
     runtimeKinds: ['array', 'string'],
-    requiredChangelogToken: 'CmosDecisionsShowResult.alternatives',
+    requiredChangelogToken: 'RbookDecisionsShowResult.alternatives',
     reason:
       'Valid JSON string arrays return arrays; malformed historical text remains visible as a string with a warning.',
   },
   {
-    row: 'CmosDecisionsShowResult.deciders',
+    row: 'RbookDecisionsShowResult.deciders',
     runtimeKinds: ['array', 'string'],
-    requiredChangelogToken: 'CmosDecisionsShowResult.deciders',
+    requiredChangelogToken: 'RbookDecisionsShowResult.deciders',
     reason:
       'Valid JSON string arrays return arrays; malformed historical text remains visible as a string with a warning.',
   },
   {
-    row: 'CmosToolError.currentState',
+    row: 'RbookToolError.currentState',
     runtimeKinds: ['object', 'string'],
     requiredChangelogToken: 'currentState',
     reason:
@@ -255,20 +258,20 @@ const MIXED_KIND_LEDGER = [
     runtimeKinds: ['number', 'string'],
     requiredChangelogToken: null,
     reason:
-      "Not a tool answer: cmos-review.ts reads it in process to classify drift; 'no-history' (s93-m11) marks a store with no rows yet.",
+      "Not a tool answer: rbook-review.ts reads it in process to classify drift; 'no-history' (s93-m11) marks a store with no rows yet.",
   },
 ] as const;
 
 const ANSWER_SHAPES = analyzeAnswerShapes(SHAPE_SOURCE_ROOT);
-const CANONICAL_EMIT_SOURCES = loadSourceTexts(CMOS_SOURCE_ROOT);
+const CANONICAL_EMIT_SOURCES = loadSourceTexts(RBOOK_SOURCE_ROOT);
 const CHECKED_EMIT_SOURCES =
-  EMIT_SOURCE_ROOT === CMOS_SOURCE_ROOT
+  EMIT_SOURCE_ROOT === RBOOK_SOURCE_ROOT
     ? CANONICAL_EMIT_SOURCES
     : loadSourceTexts(EMIT_SOURCE_ROOT);
 
 function analyzeExternalFixture(toolSource: string, authSource: string) {
-  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-answer-shape-'));
-  const toolRoot = path.join(fixture, 'src', 'tools', 'cmos');
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-answer-shape-'));
+  const toolRoot = path.join(fixture, 'src', 'tools', 'rbook');
   const authRoot = path.join(fixture, 'src', 'auth');
   fs.mkdirSync(toolRoot, { recursive: true });
   fs.mkdirSync(authRoot, { recursive: true });
@@ -303,7 +306,7 @@ describe('answer-shape disclosure gate (Sprint 89 m04)', () => {
       expect(ANSWER_SHAPES.rows.some((row) => row.key.startsWith(`${name}@`))).toBe(true);
     }
     const projectTypeFields = ANSWER_SHAPES.compositionRows.filter((row) =>
-      row.startsWith('src/tools/cmos/project-identity.ts#ProjectTypeFields:')
+      row.startsWith('src/tools/rbook/project-identity.ts#ProjectTypeFields:')
     );
     expect(projectTypeFields).toHaveLength(1);
     expect(projectTypeFields[0]).toContain('[ key : string ] : unknown ;');
@@ -347,11 +350,11 @@ describe('answer-shape disclosure gate (Sprint 89 m04)', () => {
       export interface LogoutActionResult { action: 'logout' }
     `;
     const before = compositionFingerprintsForSource(
-      `${prefix}\nexport type CmosAuthResult = LoginActionResult | LogoutActionResult;`
-    ).find((row) => row.includes('#CmosAuthResult:'));
+      `${prefix}\nexport type RbookAuthResult = LoginActionResult | LogoutActionResult;`
+    ).find((row) => row.includes('#RbookAuthResult:'));
     const after = compositionFingerprintsForSource(
-      `${prefix}\nexport type CmosAuthResult = LoginActionResult;`
-    ).find((row) => row.includes('#CmosAuthResult:'));
+      `${prefix}\nexport type RbookAuthResult = LoginActionResult;`
+    ).find((row) => row.includes('#RbookAuthResult:'));
     expect(before).toContain('LogoutActionResult');
     expect(after).not.toContain('LogoutActionResult');
     expect(after).not.toBe(before);
@@ -410,7 +413,7 @@ describe('answer-shape disclosure gate (Sprint 89 m04)', () => {
     expect(row(enumChanged, authIdentity)).not.toBe(row(enumBaseline, authIdentity));
   });
 
-  it('treats an external declaration re-exported as *Result as a cmos answer root', () => {
+  it('treats an external declaration re-exported as *Result as a rbook answer root', () => {
     const analysis = analyzeExternalFixture(
       `export { AuthState as ExternalAuthResult } from '../../auth/auth-state';`,
       `export interface AuthState { identitySource: string; }`
@@ -489,7 +492,7 @@ describe('answer-shape disclosure gate (Sprint 89 m04)', () => {
 
   it('fails independently for a second parenthesized currentState object literal', () => {
     const mutated = CANONICAL_EMIT_SOURCES.map((source) =>
-      source.relativePath === 'cmos-mission-block.ts'
+      source.relativePath === 'rbook-mission-block.ts'
         ? replaceExactlyOnce(
             source,
             'currentState: currentStatus,',

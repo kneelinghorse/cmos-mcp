@@ -22,7 +22,11 @@ type PackageJsonExports = {
 };
 
 type PackageJson = {
+  name?: string;
   version?: string;
+  description?: string;
+  mcpName?: string;
+  repository?: { url?: string };
   main?: string;
   types?: string;
   exports?: PackageJsonExports;
@@ -34,6 +38,21 @@ type PackageJson = {
 type PackageLock = {
   version?: string;
   packages?: Record<string, { version?: string }>;
+};
+
+/** s99-m04: the MCP Registry entry. Its name must equal package.json's mcpName on the published package. */
+type ServerJson = {
+  name?: string;
+  description?: string;
+  version?: string;
+  repository?: { url?: string; source?: string };
+  packages?: Array<{
+    registryType?: string;
+    identifier?: string;
+    version?: string;
+    transport?: { type?: string };
+    environmentVariables?: Array<{ name?: string; isRequired?: boolean }>;
+  }>;
 };
 
 interface MarkdownVersionStamp {
@@ -57,6 +76,10 @@ interface ReleaseVersionState {
   readonly pluginVersion: string;
   readonly lockVersion: string;
   readonly lockSelfVersion: string;
+  readonly serverVersion: string;
+  readonly serverPackageVersion: string;
+  readonly serverName: string;
+  readonly mcpName: string;
   readonly changelog: string;
   readonly stamps: readonly MarkdownVersionStamp[];
   readonly newestTag?: string;
@@ -80,9 +103,12 @@ const DATED_CHANGELOG_HEADING =
   /^##\s*\[?(\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)\]?\s*[—-]\s*(\d{4}-\d{2}-\d{2})/m;
 const RECORD_TREE_PREFIXES = [
   'cmos/db/',
+  'rbook/db/',
   'cmos/planning/',
   'cmos/docs/archive/',
+  'rbook/docs/archive/',
   'cmos/research/',
+  'rbook/research/',
 ] as const;
 const RELEASE_GATE_COMMAND =
   'npx jest tests/release/publish-pipeline.test.ts --coverage=false --runInBand';
@@ -158,6 +184,7 @@ function scanMarkdownVersionStamps(files: readonly string[]): MarkdownVersionSta
 function loadReleaseVersionState(): ReleaseVersionState {
   const pkg = JSON.parse(readTextFile('package.json')) as PackageJson;
   const lock = JSON.parse(readTextFile('package-lock.json')) as PackageLock;
+  const server = JSON.parse(readTextFile('server.json')) as ServerJson;
   const files = trackedFiles();
   const newestTag = execFileSync('git', ['tag', '--list', 'v*', '--sort=-v:refname'], {
     cwd: projectRoot,
@@ -169,15 +196,21 @@ function loadReleaseVersionState(): ReleaseVersionState {
 
   return {
     packageVersion: pkg.version ?? '',
-    pluginVersion: fs.existsSync(path.join(projectRoot, 'plugins/cmos/.claude-plugin/plugin.json'))
+    pluginVersion: fs.existsSync(
+      path.join(projectRoot, 'plugins/reasonbook/.claude-plugin/plugin.json')
+    )
       ? ((
-          JSON.parse(readTextFile('plugins/cmos/.claude-plugin/plugin.json')) as {
+          JSON.parse(readTextFile('plugins/reasonbook/.claude-plugin/plugin.json')) as {
             version?: string;
           }
         ).version ?? '')
       : '<missing>',
     lockVersion: lock.version ?? '',
     lockSelfVersion: lock.packages?.['']?.version ?? '',
+    serverVersion: server.version ?? '',
+    serverPackageVersion: server.packages?.[0]?.version ?? '',
+    serverName: server.name ?? '',
+    mcpName: pkg.mcpName ?? '',
     changelog: readTextFile('CHANGELOG.md'),
     stamps: scanMarkdownVersionStamps(files),
     newestTag,
@@ -209,7 +242,7 @@ function evaluateReleaseVersionClass(state: ReleaseVersionState): {
     )
   );
   add(
-    'plugins/cmos/.claude-plugin/plugin.json $.version',
+    'plugins/reasonbook/.claude-plugin/plugin.json $.version',
     state.pluginVersion,
     'ASSERTED',
     'exactly equals package.json $.version; the plugin shim derives its package pin here',
@@ -228,6 +261,27 @@ function evaluateReleaseVersionClass(state: ReleaseVersionState): {
     'ASSERTED',
     'exactly equals package.json $.version',
     state.lockSelfVersion === state.packageVersion
+  );
+  add(
+    'server.json $.version',
+    state.serverVersion,
+    'ASSERTED',
+    'exactly equals package.json $.version; the MCP Registry entry names the release it describes',
+    state.serverVersion === state.packageVersion
+  );
+  add(
+    'server.json $.packages[0].version',
+    state.serverPackageVersion,
+    'ASSERTED',
+    'exactly equals package.json $.version; the registry installs this npm version',
+    state.serverPackageVersion === state.packageVersion
+  );
+  add(
+    'server.json $.name',
+    state.serverName,
+    'ASSERTED',
+    'exactly equals package.json $.mcpName, which the registry verifies on the published package',
+    state.serverName !== '' && state.serverName === state.mcpName
   );
 
   const datedHeading = state.changelog.match(DATED_CHANGELOG_HEADING);
@@ -261,7 +315,7 @@ function evaluateReleaseVersionClass(state: ReleaseVersionState): {
       );
       continue;
     }
-    if (stamp.label === 'CMOS Version') {
+    if (stamp.label === 'Reasonbook Version') {
       add(
         source,
         stamp.value,
@@ -319,7 +373,7 @@ function runbookUsesCanonicalReleaseGate(runbook: string): boolean {
  *
  * SCOPE. The authority is package.json. Continuous checkout state includes both package-lock
  * roots, plugin.json's version (the install pin), the newest DATED CHANGELOG heading, and bold
- * Markdown Version/CMOS Version stamps.
+ * Markdown Version/Reasonbook Version stamps.
  * Schema Version and Template Version are neighbouring axes, not release versions; an unfilled
  * scaffold is excluded only while its own Last Updated value is bracketed. The broad locator
  * still prints all of them so an exclusion cannot make a matching site disappear. Git tags are
@@ -350,7 +404,7 @@ describe('release-version class', () => {
     expect(files.length).toBeGreaterThan(0);
     expect(sweptFiles.length).toBeGreaterThan(0);
     expect(state.stamps.length).toBeGreaterThan(0);
-    expect(evaluation.rows).toHaveLength(state.stamps.length + 6);
+    expect(evaluation.rows).toHaveLength(state.stamps.length + 9);
     expect(evaluation.failures).toEqual([]);
 
     console.log(
@@ -374,16 +428,26 @@ describe('release-version class', () => {
       expect.arrayContaining([
         expect.stringContaining('package-lock.json $.version'),
         expect.stringContaining('package-lock.json $.packages[""].version'),
-        expect.stringContaining('plugins/cmos/.claude-plugin/plugin.json $.version'),
+        expect.stringContaining('plugins/reasonbook/.claude-plugin/plugin.json $.version'),
         expect.stringContaining('CHANGELOG.md newest dated heading'),
+        expect.stringContaining('server.json $.version'),
+        expect.stringContaining('server.json $.packages[0].version'),
       ])
     );
+  });
+
+  test('turns red when the MCP Registry name and the package mcpName disagree (s99-m04)', () => {
+    const state = loadReleaseVersionState();
+    expect(
+      evaluateReleaseVersionClass({ ...state, mcpName: 'io.github.someone-else/reasonbook' })
+        .failures
+    ).toEqual([expect.stringContaining('server.json $.name')]);
   });
 
   test('turns red when the plugin install pin drifts independently from the package', () => {
     const state = loadReleaseVersionState();
     expect(evaluateReleaseVersionClass({ ...state, pluginVersion: '99.99.99' }).failures).toEqual([
-      expect.stringContaining('plugins/cmos/.claude-plugin/plugin.json $.version'),
+      expect.stringContaining('plugins/reasonbook/.claude-plugin/plugin.json $.version'),
     ]);
   });
 
@@ -421,7 +485,7 @@ describe('release-version class', () => {
       if (stamp.label === 'Version') {
         return { ...stamp, value: prerelease };
       }
-      if (stamp.label === 'CMOS Version') {
+      if (stamp.label === 'Reasonbook Version') {
         return { ...stamp, value: `${major}.${minor}` };
       }
       return stamp;
@@ -434,6 +498,8 @@ describe('release-version class', () => {
         pluginVersion: prerelease,
         lockVersion: prerelease,
         lockSelfVersion: prerelease,
+        serverVersion: prerelease,
+        serverPackageVersion: prerelease,
         changelog,
         stamps,
       }).failures
@@ -456,7 +522,7 @@ describe('release-version class', () => {
   PRIVATE.describe('private release-version members and release entrypoint', () => {
     const declaredPrivateStamps = [
       { relativePath: PRIVATE.relativePaths.agents, label: 'Version' },
-      { relativePath: PRIVATE.relativePaths.buildSessionPrompt, label: 'CMOS Version' },
+      { relativePath: PRIVATE.relativePaths.buildSessionPrompt, label: 'Reasonbook Version' },
     ] as const;
 
     test('locates every declared private stamp before applying its rule', () => {
@@ -471,7 +537,7 @@ describe('release-version class', () => {
       ]);
     });
 
-    // s93-m12 retired the unfilled private scaffold (cmos/templates/agents.md) and its exemption, so
+    // s93-m12 retired the unfilled private scaffold (rbook/templates/agents.md) and its exemption, so
     // a placeholder Last Updated exempts no Version stamp: the release authority still fails.
     test('a placeholder Last Updated exempts no Version stamp', () => {
       const state = loadReleaseVersionState();
@@ -518,7 +584,7 @@ describe('release-version class', () => {
 
 describe('npm publish pipeline configuration', () => {
   test('packed E2E consumers install the prebuilt tarball and fail before packing when dist is absent', () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-pack-contract-'));
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-pack-contract-'));
     const mkTmp = (prefix: string): string => fs.mkdtempSync(path.join(root, prefix));
     const calls: string[][] = [];
     const runNpm = (args: string[], cwd: string) => {
@@ -530,8 +596,8 @@ describe('npm publish pipeline configuration', () => {
         );
       } else if (args[0] === 'install') {
         for (const file of [
-          'node_modules/@cmos/fixture/dist/index.js',
-          'node_modules/.bin/cmos-mcp',
+          'node_modules/@rbook/fixture/dist/index.js',
+          'node_modules/.bin/reasonbook',
         ]) {
           fs.mkdirSync(path.dirname(path.join(cwd, file)), { recursive: true });
           fs.writeFileSync(path.join(cwd, file), 'installed');
@@ -540,7 +606,7 @@ describe('npm publish pipeline configuration', () => {
       return { status: 0, stdout: '', stderr: '' };
     };
     try {
-      fs.writeFileSync(path.join(root, 'package.json'), '{"name":"@cmos/fixture"}');
+      fs.writeFileSync(path.join(root, 'package.json'), '{"name":"@rbook/fixture"}');
       expect(() => installPackedArtifact(root, mkTmp, runNpm)).toThrow(/build.*first/i);
       expect(calls).toEqual([]);
       fs.mkdirSync(path.join(root, 'dist'));
@@ -550,7 +616,7 @@ describe('npm publish pipeline configuration', () => {
       expect(calls[1][1]).toBe(installed.tarball);
       expect(fs.readFileSync(installed.serverPath, 'utf8')).toBe('installed');
       expect(installed.serverPath).toBe(
-        path.join(installed.hostDir, 'node_modules/@cmos/fixture/dist/index.js')
+        path.join(installed.hostDir, 'node_modules/@rbook/fixture/dist/index.js')
       );
       expect(fs.readFileSync(path.join(root, 'dist/index.js'), 'utf8')).toBe('prebuilt');
       expect(() =>
@@ -616,23 +682,74 @@ describe('npm publish pipeline configuration', () => {
     expect(builds).toBeGreaterThan(0);
   });
 
+  test('every CI job running the suite provisions the real PCRE2 tarball scanner first', () => {
+    const files = trackedFiles().filter((file) => /^\.github\/workflows\/.*\.ya?ml$/.test(file));
+    const missing: string[] = [];
+    let suites = 0;
+    for (const file of files) {
+      const workflow = parse(readTextFile(file)) as {
+        jobs?: Record<string, { steps?: Array<{ run?: string; if?: string }> }>;
+      };
+      for (const [job, definition] of Object.entries(workflow.jobs ?? {})) {
+        const steps = definition.steps ?? [];
+        for (const [index, step] of steps.entries()) {
+          if (!/\bnpm (?:test|run test)(?=\s|$)|\bnpx jest(?=\s|$)/.test(step.run ?? '')) continue;
+          suites++;
+          const provisioned = steps
+            .slice(0, index)
+            .some(
+              (before) =>
+                !before.if &&
+                /\bapt-get install\b[^\n]*\bripgrep\b/.test(before.run ?? '') &&
+                /\brg --pcre2-version\b/.test(before.run ?? '')
+            );
+          if (!provisioned) missing.push(`${file}:${job}`);
+        }
+      }
+    }
+    expect(suites).toBeGreaterThan(0);
+    expect(missing).toEqual([]);
+  });
+
   PRIVATE.describe('the release tarball scan fails closed without shell errexit', () => {
+    test('the actual scanner rejects text under either private record folder and accepts the seed', () => {
+      const runbook = fs.readFileSync(PRIVATE.paths.releaseRunbook, 'utf8');
+      const pattern = runbook.match(/'([^'\n]*\^package\/[^'\n]*)'/)?.[1];
+      expect(pattern).toBeDefined();
+      // Text fixtures prevent the separate SQLite-extension arm from hiding a missing root.
+      for (const [entry, status] of [
+        ['package/cmos/research/receipt.md', 0],
+        ['package/rbook/research/receipt.md', 0],
+        ['package/rbook-seed/docs/README.md', 1],
+      ] as const) {
+        const result = spawnSync('rg', ['--pcre2', pattern!], {
+          input: entry + '\n',
+          encoding: 'utf8',
+        });
+        if (result.error || result.signal || ![0, 1].includes(result.status ?? -1)) {
+          throw new Error(
+            `The real release scanner could not run: ${result.error?.message ?? `exit=${result.status}, signal=${result.signal}, stderr=${result.stderr.trim()}`}. Install ripgrep with PCRE2 support; verify with rg --pcre2-version.`
+          );
+        }
+        expect(result.status).toBe(status);
+      }
+    });
     test.each([
       ['a nonempty clean tarball', 0, 'package/dist/index.js\n', 1, 0],
       ['an empty listing', 0, '', 1, 1],
       ['a tar failure', 2, '', 1, 1],
       ['a partial listing followed by tar failure', 2, 'package/dist/index.js\n', 1, 1],
-      ['a private path match', 0, 'package/cmos/db/cmos.sqlite\n', 0, 1],
+      ['a private path match', 0, 'package/rbook/db/rbook.sqlite\n', 0, 1],
       ['a broken scanner', 0, 'package/dist/index.js\n', 2, 1],
       ['a missing scanner', 0, 'package/dist/index.js\n', 127, 1],
       ['a failed counter despite positive output', 0, 'package/dist/index.js\n', 1, 1, 1],
     ])('%s', (_name, tarStatus, listing, scanStatus, expected, countStatus = 0) => {
-      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-release-scan-'));
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-release-scan-'));
       try {
         for (const [name, body] of Object.entries({
-          tar: 'printf "%s" "$CMOS_TEST_LISTING"; exit "$CMOS_TEST_TAR_STATUS"',
-          rg: 'exit "$CMOS_TEST_SCAN_STATUS"',
-          wc: 'if [ "$CMOS_TEST_COUNT_STATUS" -ne 0 ]; then printf "1\\n"; exit "$CMOS_TEST_COUNT_STATUS"; fi; exec /usr/bin/wc "$@"',
+          tar: 'printf "%s" "$RBOOK_TEST_LISTING"; exit "$RBOOK_TEST_TAR_STATUS"',
+          rg: 'exit "$RBOOK_TEST_SCAN_STATUS"',
+          wc: 'if [ "$RBOOK_TEST_COUNT_STATUS" -ne 0 ]; then printf "1\\n"; exit "$RBOOK_TEST_COUNT_STATUS"; fi; exec /usr/bin/wc "$@"',
         }))
           fs.writeFileSync(path.join(root, name), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
         const runbook = fs.readFileSync(PRIVATE.paths.releaseRunbook, 'utf8');
@@ -647,12 +764,12 @@ describe('npm publish pipeline configuration', () => {
             encoding: 'utf8',
             env: {
               PATH: `${root}:${process.env.PATH}`,
-              CMOS_TARBALL_DIR: root,
-              CMOS_TARBALL: path.join(root, 'candidate.tgz'),
-              CMOS_TEST_TAR_STATUS: String(tarStatus),
-              CMOS_TEST_LISTING: String(listing),
-              CMOS_TEST_SCAN_STATUS: String(scanStatus),
-              CMOS_TEST_COUNT_STATUS: String(countStatus),
+              RBOOK_TARBALL_DIR: root,
+              RBOOK_TARBALL: path.join(root, 'candidate.tgz'),
+              RBOOK_TEST_TAR_STATUS: String(tarStatus),
+              RBOOK_TEST_LISTING: String(listing),
+              RBOOK_TEST_SCAN_STATUS: String(scanStatus),
+              RBOOK_TEST_COUNT_STATUS: String(countStatus),
             },
           }
         );
@@ -666,6 +783,33 @@ describe('npm publish pipeline configuration', () => {
     });
   });
 
+  test('server.json describes the published npm package for the MCP Registry (s99-m04)', () => {
+    const pkg = JSON.parse(readTextFile('package.json')) as PackageJson;
+    const server = JSON.parse(readTextFile('server.json')) as ServerJson;
+    const owner = /github\.com\/([^/]+)\/([^/.]+)/.exec(pkg.repository?.url ?? '');
+    expect(owner).not.toBeNull();
+    // The verified aquex.ai namespace keeps registry identity stable across repository moves.
+    expect(server.name).toBe('ai.aquex/reasonbook');
+    expect(pkg.mcpName).toBe('ai.aquex/reasonbook');
+    expect(server.repository).toEqual({
+      url: `https://github.com/${owner![1]}/${owner![2]}`,
+      source: 'github',
+    });
+    // The registry caps the description at 100 characters; it says what the package says.
+    expect(server.description).toBe(pkg.description);
+    expect((server.description ?? '').length).toBeLessThanOrEqual(100);
+    expect(server.packages).toHaveLength(1);
+    expect(server.packages![0]).toMatchObject({
+      registryType: 'npm',
+      identifier: pkg.name,
+      transport: { type: 'stdio' },
+    });
+    // The server starts with no secret; a required variable would make every listing ask for one.
+    expect((server.packages![0].environmentVariables ?? []).filter((v) => v.isRequired)).toEqual(
+      []
+    );
+  });
+
   test('package.json exposes dist entry points and declaration files', () => {
     const packageJson = JSON.parse(readTextFile('package.json')) as PackageJson;
 
@@ -675,8 +819,9 @@ describe('npm publish pipeline configuration', () => {
     // s93-m01: the bin is dist/bin.js, which sends a CLI verb to dist/cli.js before any server
     // module loads and starts the server through dist/index.js for no verb, `serve` or a server
     // flag. main and the exports stay dist/index.js, which still starts the server when run directly.
-    expect(packageJson.bin).toMatchObject({
-      'cmos-mcp': './dist/bin.js',
+    // Version 4 installs only the public command; legacy installations upgrade explicitly.
+    expect(packageJson.bin).toEqual({
+      reasonbook: './dist/bin.js',
     });
 
     expect(packageJson.exports).toMatchObject({
@@ -713,7 +858,7 @@ describe('npm publish pipeline configuration', () => {
     expect(referencesHttpServer).toBe(false);
 
     // The stdio bin — the product — is dist/bin.js since s93-m01 (it starts the same server).
-    expect(packageJson.bin).toMatchObject({ 'cmos-mcp': './dist/bin.js' });
+    expect(packageJson.bin).toMatchObject({ reasonbook: './dist/bin.js' });
   });
 
   test('the http-server source and transport docs are deleted from the repo', () => {
@@ -735,7 +880,7 @@ describe('npm publish pipeline configuration', () => {
 
     expect(npmIgnoreLines).toEqual(
       expect.arrayContaining([
-        'cmos/',
+        'rbook/',
         'tests/',
         'tmp/',
         'coverage/',
@@ -744,7 +889,7 @@ describe('npm publish pipeline configuration', () => {
         'scripts/',
       ])
     );
-    expect(npmIgnoreLines).not.toContain('cmos-seed/');
+    expect(npmIgnoreLines).not.toContain('rbook-seed/');
   });
 
   PRIVATE.describe('private-source npm publish workflow', () => {

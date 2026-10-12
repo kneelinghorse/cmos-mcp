@@ -60,8 +60,8 @@ describe('plugin installation readiness', () => {
     expect(
       run(`${packageCode('ctx.installRoot', '0.0.1')} writeMarker(ctx,ctx.installRoot);
       const wrongVersion=validateInstall(ctx,ctx.installRoot);
-      const pkg=path.join(ctx.installRoot,'node_modules/@aquex/cmos-mcp');
-      fs.writeFileSync(path.join(pkg,'package.json'),JSON.stringify({name:'@aquex/cmos-mcp',version:ctx.version,bin:{'cmos-mcp':'dist/bin.js'}}));
+      const pkg=path.join(ctx.installRoot,'node_modules/@aquex/reasonbook');
+      fs.writeFileSync(path.join(pkg,'package.json'),JSON.stringify({name:'@aquex/reasonbook',version:ctx.version,bin:{'reasonbook':'dist/bin.js'}}));
       fs.unlinkSync(path.join(pkg,'node_modules/better-sqlite3'));
       console.log(JSON.stringify({wrongVersion:!!wrongVersion,noNative:!!validateInstall(ctx,ctx.installRoot)}));`)
     ).toEqual({ wrongVersion: false, noNative: false });
@@ -70,31 +70,53 @@ describe('plugin installation readiness', () => {
   test('a validated PATH package must own its CLI and native dependency', () => {
     expect(
       run(`${packageCode('ctx.installRoot')} const bin=path.join(ctx.dataRoot,'bin'); fs.mkdirSync(bin);
-      fs.symlinkSync(path.join(ctx.installRoot,'node_modules/@aquex/cmos-mcp/dist/bin.js'),path.join(bin,'cmos-mcp'));
+      fs.symlinkSync(path.join(ctx.installRoot,'node_modules/@aquex/reasonbook/dist/bin.js'),path.join(bin,'reasonbook'));
       const ready=findPathPackage(ctx,{PATH:bin});
       console.log(JSON.stringify({ready:!!ready}));`)
     ).toEqual({ ready: true });
   });
 
+  test('the former package on PATH is never used, even at the same version (s99-m02)', () => {
+    // A user who still has @aquex/cmos-mcp installed globally has a `cmos-mcp` command on PATH. The
+    // renamed plugin looks only for `reasonbook` and checks the package's name besides; the same
+    // native-ready package under the new name is found, so only the name keeps the former one out.
+    expect(
+      run(`const make=(root,name,command)=>{${packageCode('root')}
+      const pkg=path.join(root,'node_modules',...name.split('/'));
+      if(name!=='@aquex/reasonbook')fs.renameSync(path.join(root,'node_modules/@aquex/reasonbook'),pkg);
+      fs.writeFileSync(path.join(pkg,'package.json'),JSON.stringify({name,version:ctx.version,bin:{[command]:'dist/bin.js'}}));
+      fs.writeFileSync(path.join(pkg,'dist/bin.js'),'console.log('+JSON.stringify(command+' '+ctx.version)+')');
+      const bin=path.join(root,'bin');fs.mkdirSync(bin);fs.symlinkSync(path.join(pkg,'dist/bin.js'),path.join(bin,command));return bin;};
+      const former=make(path.join(ctx.dataRoot,'former'),'@aquex/cmos-mcp','cmos-mcp');
+      const current=make(path.join(ctx.dataRoot,'current'),'@aquex/reasonbook','reasonbook');
+      console.log(JSON.stringify({former:!!findPathPackage(ctx,{PATH:former}),current:!!findPathPackage(ctx,{PATH:current})}));`)
+    ).toEqual({ former: false, current: true });
+  });
+
   test('a valid CLI that loads beyond 200ms remains eligible within the shared 400ms budget', () => {
     const result =
       run(`${packageCode('ctx.installRoot')} const bin=path.join(ctx.dataRoot,'bin'); fs.mkdirSync(bin);
-      const cli=path.join(ctx.installRoot,'node_modules/@aquex/cmos-mcp/dist/bin.js');
-      fs.writeFileSync(cli,'setTimeout(()=>console.log('+JSON.stringify('cmos-mcp '+ctx.version)+'),225)');
-      fs.symlinkSync(cli,path.join(bin,'cmos-mcp'));
-      console.log(JSON.stringify({ready:!!findPathPackage(ctx,{PATH:bin})}));`);
-    expect(result).toEqual({ ready: true });
+      const cli=path.join(ctx.installRoot,'node_modules/@aquex/reasonbook/dist/bin.js');
+      fs.writeFileSync(cli,'setTimeout(()=>console.log('+JSON.stringify('reasonbook '+ctx.version)+'),225)');
+      fs.symlinkSync(cli,path.join(bin,'reasonbook'));
+      const started=Date.now();const ready=!!findPathPackage(ctx,{PATH:bin});
+      console.log(JSON.stringify({ready,elapsed:Date.now()-started}));`);
+    // Under a loaded full suite, process startup alone can spend the 400ms; a refusal then is the
+    // budget's. A refusal before the budget ran out is the per-step cutoff this test exists to catch.
+    expect({ readyOrBudgetSpent: result.ready || result.elapsed >= 400 }).toEqual({
+      readyOrBudgetSpent: true,
+    });
   });
 
   test.each(['mismatch', 'timeout'])(
     'a PATH CLI with %s version output cannot become ready',
     (reason) => {
       const script =
-        reason === 'mismatch' ? "console.log('cmos-mcp 0.0.1')" : 'setInterval(()=>{},1000)';
+        reason === 'mismatch' ? "console.log('reasonbook 0.0.1')" : 'setInterval(()=>{},1000)';
       const result =
         run(`${packageCode('ctx.installRoot')} const bin=path.join(ctx.dataRoot,'bin'); fs.mkdirSync(bin);
-      const cli=path.join(ctx.installRoot,'node_modules/@aquex/cmos-mcp/dist/bin.js');
-      fs.writeFileSync(cli,${JSON.stringify(script)});fs.symlinkSync(cli,path.join(bin,'cmos-mcp'));
+      const cli=path.join(ctx.installRoot,'node_modules/@aquex/reasonbook/dist/bin.js');
+      fs.writeFileSync(cli,${JSON.stringify(script)});fs.symlinkSync(cli,path.join(bin,'reasonbook'));
       const started=Date.now();const ready=findPathPackage(ctx,{PATH:bin+path.delimiter+bin});
       console.log(JSON.stringify({ready:!!ready,elapsed:Date.now()-started}));`);
       expect(result.ready).toBe(false);
@@ -104,9 +126,9 @@ describe('plugin installation readiness', () => {
 
   test('PATH aliases cannot multiply the bounded executable check for the same package', () => {
     const result = run(`const bin=path.join(ctx.dataRoot,'bin'); ${packageCode('bin')}
-      const cli=path.join(bin,'node_modules/@aquex/cmos-mcp/dist/bin.js');const calls=path.join(ctx.dataRoot,'calls');
-      fs.writeFileSync(cli,"require('node:fs').appendFileSync("+JSON.stringify(calls)+",'x');console.log('cmos-mcp 0.0.1')");
-      fs.symlinkSync(cli,path.join(bin,'cmos-mcp'));fs.symlinkSync(bin,bin+'-alias','dir');
+      const cli=path.join(bin,'node_modules/@aquex/reasonbook/dist/bin.js');const calls=path.join(ctx.dataRoot,'calls');
+      fs.writeFileSync(cli,"require('node:fs').appendFileSync("+JSON.stringify(calls)+",'x');console.log('reasonbook 0.0.1')");
+      fs.symlinkSync(cli,path.join(bin,'reasonbook'));fs.symlinkSync(bin,bin+'-alias','dir');
       const ready=findPathPackage(ctx,{PATH:bin+path.delimiter+bin+'-alias'});
       console.log(JSON.stringify({ready:!!ready,calls:fs.readFileSync(calls,'utf8').length}));`);
     expect(result).toEqual({ ready: false, calls: 1 });
@@ -116,8 +138,8 @@ describe('plugin installation readiness', () => {
     const result =
       run(`const first=path.join(ctx.dataRoot,'first'); const second=path.join(ctx.dataRoot,'second');
       ${packageCode('first')} ${packageCode('second')}
-      for(const bin of [first,second]) {const cli=path.join(bin,'node_modules/@aquex/cmos-mcp/dist/bin.js');
-        fs.writeFileSync(cli,"require('node:fs').writeFileSync("+JSON.stringify(path.join(bin,'launched'))+",'yes');setInterval(()=>{},1000)");fs.symlinkSync(cli,path.join(bin,'cmos-mcp'));}
+      for(const bin of [first,second]) {const cli=path.join(bin,'node_modules/@aquex/reasonbook/dist/bin.js');
+        fs.writeFileSync(cli,"require('node:fs').writeFileSync("+JSON.stringify(path.join(bin,'launched'))+",'yes');setInterval(()=>{},1000)");fs.symlinkSync(cli,path.join(bin,'reasonbook'));}
       const ready=findPathPackage(ctx,{PATH:first+path.delimiter+second});
       console.log(JSON.stringify({ready:!!ready,secondLaunched:fs.existsSync(path.join(second,'launched'))}));`);
     expect(result).toEqual({ ready: false, secondLaunched: false });

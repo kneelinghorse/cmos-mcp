@@ -6,20 +6,23 @@ import Database from 'better-sqlite3';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { seedCmosDb } from '../helpers/seedCmosDb';
-import { readDigestV2 } from '../../src/tools/cmos/digest-v2-store';
-import { digestHeadline, renderDigestV2 } from '../../src/tools/cmos/digest-v2';
+import { seedRbookDb } from '../helpers/seedRbookDb';
+import { seedLegacyMigrationStore } from '../helpers/legacyMigrationStore';
+import { readDigestV2 } from '../../src/tools/rbook/digest-v2-store';
+import { digestHeadline, renderDigestV2 } from '../../src/tools/rbook/digest-v2';
 
 let root: string;
 let dbPath: string;
 let env: NodeJS.ProcessEnv;
 const day = 86_400_000;
 const date = (days = 0): string => new Date(Date.now() - days * day).toISOString();
+/** s99-m02: a remedy the reader may run without a global install names the exact scoped package. */
+const NPX = `npx @aquex/reasonbook@${JSON.parse(fs.readFileSync(path.join(__dirname, '../../package.json'), 'utf8')).version}`;
 
 beforeEach(() => {
-  root = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-digest-v2-'));
-  dbPath = seedCmosDb(root, { projectId: 'digest-local', projectName: 'Digest project' });
-  env = { ...process.env, CMOS_CONFIG_DIR: path.join(root, 'config') };
+  root = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-digest-v2-'));
+  dbPath = seedRbookDb(root, { projectId: 'digest-local', projectName: 'Digest project' });
+  env = { ...process.env, RBOOK_CONFIG_DIR: path.join(root, 'config') };
   const db = new Database(dbPath);
   db.exec(`ALTER TABLE strategic_decisions ADD COLUMN last_reviewed_at TEXT;
     ALTER TABLE learnings ADD COLUMN last_reviewed_at TEXT;
@@ -97,9 +100,9 @@ describe('the published headline rule', () => {
 
 describe('the local stable digest', () => {
   it('includes the whole approved profile and no empty headers or changing measurements', async () => {
-    fs.mkdirSync(env.CMOS_CONFIG_DIR!, { recursive: true });
+    fs.mkdirSync(env.RBOOK_CONFIG_DIR!, { recursive: true });
     const profile = 'Ask questions in prose.\n' + 'p'.repeat(1075);
-    fs.writeFileSync(path.join(env.CMOS_CONFIG_DIR!, 'profile.md'), profile);
+    fs.writeFileSync(path.join(env.RBOOK_CONFIG_DIR!, 'profile.md'), profile);
     const first = await render();
     expect(first.text).toContain(profile);
     expect(first.text).toContain('Builder');
@@ -112,11 +115,11 @@ describe('the local stable digest', () => {
   });
 
   it('discloses an oversized profile rather than silently injecting a partial instruction', async () => {
-    fs.mkdirSync(env.CMOS_CONFIG_DIR!, { recursive: true });
-    fs.writeFileSync(path.join(env.CMOS_CONFIG_DIR!, 'profile.md'), 'p'.repeat(1101));
+    fs.mkdirSync(env.RBOOK_CONFIG_DIR!, { recursive: true });
+    fs.writeFileSync(path.join(env.RBOOK_CONFIG_DIR!, 'profile.md'), 'p'.repeat(1101));
     const result = await render();
     expect(result.text).toMatch(/profile.*1100/i);
-    expect(result.text).toContain('cmos-mcp profile show');
+    expect(result.text).toContain(`${NPX} profile show`);
     expect(result.text).not.toContain('p'.repeat(100));
   });
 
@@ -175,8 +178,8 @@ describe('the local stable digest', () => {
   });
 
   it('marks exact complete local spans and obeys all section caps on a full digest', async () => {
-    fs.mkdirSync(env.CMOS_CONFIG_DIR!, { recursive: true });
-    fs.writeFileSync(path.join(env.CMOS_CONFIG_DIR!, 'profile.md'), 'p'.repeat(1100));
+    fs.mkdirSync(env.RBOOK_CONFIG_DIR!, { recursive: true });
+    fs.writeFileSync(path.join(env.RBOOK_CONFIG_DIR!, 'profile.md'), 'p'.repeat(1100));
     for (let id = 1; id <= 20; id++) {
       decision(id, `Decision ${id} ${'wide '.repeat(100)}`);
       learning(id, `Learning ${id} ${'wide '.repeat(100)}`, 1);
@@ -253,7 +256,7 @@ describe('the local stable digest', () => {
   });
 
   it('reports an unreadable profile instead of silently treating it as absent', async () => {
-    fs.mkdirSync(path.join(env.CMOS_CONFIG_DIR!, 'profile.md'), { recursive: true });
+    fs.mkdirSync(path.join(env.RBOOK_CONFIG_DIR!, 'profile.md'), { recursive: true });
     await expect(readDigestV2(root, env)).rejects.toThrow(/profile.*could not be read/i);
   });
 
@@ -349,8 +352,8 @@ describe('s94-m11 — a compact draft remedy carries its selected project', () =
       ).text;
       expect(text).toContain(
         resolvedBy === 'cwd'
-          ? '`cmos-mcp drafts list`'
-          : `cmos-mcp drafts list --project-root '${root}'`
+          ? `\`${NPX} drafts list\``
+          : `${NPX} drafts list --project-root '${root}'`
       );
       expect(text.length).toBeLessThanOrEqual(4000);
     }
@@ -369,4 +372,30 @@ it('ranks rules from decision reasoning citations without counting foreign decis
   write('UPDATE strategic_decisions SET consequences=? WHERE id=2', 'Use learning #1.');
   const model = await readDigestV2(root, env);
   expect(model.rules.map((row) => row.id)).toEqual(['l:2', 'l:1']);
+});
+
+describe('the upgrade hint', () => {
+  it('offers one version-pinned migration preview for a legacy record without moving it', async () => {
+    const legacyRoot = path.join(root, 'legacy-project');
+    const legacyDatabase = seedLegacyMigrationStore(legacyRoot);
+    const model = await readDigestV2(legacyRoot, env);
+    const text = renderDigestV2(model).text;
+    expect(text.split(`${NPX} migrate`)).toHaveLength(2);
+    expect(text).not.toContain('migrate --apply');
+    expect(fs.existsSync(legacyDatabase)).toBe(true);
+    expect(text.length).toBeLessThanOrEqual(4000);
+  });
+
+  it('does not offer migration when the selected record already uses the current folder', async () => {
+    const currentRoot = path.join(root, 'current-project');
+    const created = seedRbookDb(currentRoot);
+    const currentDirectory = path.join(currentRoot, 'rbook');
+    const directory = path.dirname(path.dirname(created));
+    if (directory !== currentDirectory) fs.renameSync(directory, currentDirectory);
+    const file = path.join(currentDirectory, 'db', path.basename(created));
+    const currentDatabase = path.join(currentDirectory, 'db', 'rbook.sqlite');
+    if (file !== currentDatabase) fs.renameSync(file, currentDatabase);
+    const text = renderDigestV2(await readDigestV2(currentRoot, env)).text;
+    expect(text).not.toContain(`${NPX} migrate`);
+  });
 });

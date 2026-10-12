@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: Apache-2.0
-// ABOUTME: The cmos-mcp bin routes a command word to dist/cli.js before any server module loads.
+// ABOUTME: The reasonbook bin routes a command word to dist/cli.js before any server module loads.
 // ABOUTME: Server --version reads package metadata directly; other server routes load the MCP entry.
 
 /**
@@ -24,6 +24,7 @@ export const CLI_VERBS: ReadonlySet<string> = new Set([
   'stats',
   'feedback',
   'drafts',
+  'migrate',
 ]);
 
 export type BinRoute =
@@ -31,7 +32,7 @@ export type BinRoute =
   | { readonly kind: 'server'; readonly argv: readonly string[] };
 
 /** The server flag that takes a value; every other server flag stands alone. */
-const VALUE_FLAGS: ReadonlySet<string> = new Set(['--project-root']);
+const VALUE_FLAGS: ReadonlySet<string> = new Set(['--project-root', '--project']);
 
 /**
  * Where a command line goes. The server takes flags only, so the first word that is not a flag
@@ -66,7 +67,7 @@ if (require.main === module) {
   } else if (target.argv.includes('--version')) {
     // Match runServer's version precedence without loading its SDK, env loader, or database tools.
     void import('./server-version').then(({ getServerVersion }) => {
-      process.stdout.write(`cmos-mcp ${getServerVersion()}\n`);
+      process.stdout.write(`reasonbook ${getServerVersion()}\n`);
       process.exit(0);
     });
   } else {

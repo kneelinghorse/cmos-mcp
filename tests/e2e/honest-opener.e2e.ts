@@ -6,7 +6,7 @@
  * The in-process tests cover the handler rule; this proves the dispatcher feeds it, from the built
  * dist/index.js with a real client advertising real roots.
  *
- * ISOLATION: HOME and CMOS_CONFIG_DIR are throwaway directories. An empty CMOS_PROJECT_ROOT
+ * ISOLATION: HOME and RBOOK_CONFIG_DIR are throwaway directories. An empty RBOOK_PROJECT_ROOT
  * makes index's nullish .env-root fallback resolve against scratch cwd instead of the checkout;
  * the attribution check trims that empty value, so it does not itself become a whoami reason.
  * Dashboard opt-in is explicit and loopback-only, with no credentials. All attribution cases
@@ -18,11 +18,11 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-import { seedCmosDb } from '../helpers/seedCmosDb';
+import { seedRbookDb } from '../helpers/seedRbookDb';
 import { connectStdioServer, type StdioHarness } from './stdio-harness';
 
 const SERVER = path.resolve(__dirname, '../../dist/index.js');
-const WHOAMI = 'cmos_message(action="whoami")';
+const WHOAMI = 'rbook_message(action="whoami")';
 
 const cleanup: Array<() => Promise<void> | void> = [];
 afterAll(async () => {
@@ -47,12 +47,12 @@ async function connect(opts: {
     cwd: opts.cwd,
     env: {
       HOME: opts.home,
-      CMOS_CONFIG_DIR: mkTmp('cmos-e2e-m04-config-'),
-      CMOS_PROJECT_ROOT: '',
-      CMOS_CHECKPOINT_SYNC: 'off',
+      RBOOK_CONFIG_DIR: mkTmp('rbook-e2e-m04-config-'),
+      RBOOK_PROJECT_ROOT: '',
+      RBOOK_CHECKPOINT_SYNC: 'off',
       PATH: process.env.PATH ?? path.dirname(process.execPath),
       NODE_ENV: 'test',
-      ...(opts.dashboardOptedIn ? { CMOS_DASHBOARD_URL: 'http://127.0.0.1:9' } : {}),
+      ...(opts.dashboardOptedIn ? { RBOOK_DASHBOARD_URL: 'http://127.0.0.1:9' } : {}),
     },
     clientName: 's92-m04-honest-opener',
     ...(opts.roots ? { roots: opts.roots } : {}),
@@ -69,7 +69,7 @@ interface ReviewAnswer {
 }
 
 async function review(harness: StdioHarness): Promise<ReviewAnswer> {
-  const res = await harness.callOk('cmos_review', {});
+  const res = await harness.callOk('rbook_review', {});
   const structured = res.structuredContent as {
     data: { next_actions: Array<{ command: string }>; resolvedBy: string };
   };
@@ -81,8 +81,8 @@ async function review(harness: StdioHarness): Promise<ReviewAnswer> {
 }
 
 function freshProject(): string {
-  const projectRoot = mkTmp('cmos-e2e-m04-project-');
-  seedCmosDb(projectRoot, { projectName: 's92-m04 e2e' });
+  const projectRoot = mkTmp('rbook-e2e-m04-project-');
+  seedRbookDb(projectRoot, { projectName: 's92-m04 e2e' });
   return projectRoot;
 }
 
@@ -92,7 +92,7 @@ describe('s92-m04 honest opener over stdio', () => {
     const answer = await review(
       await connect({
         cwd: projectRoot,
-        home: mkTmp('cmos-e2e-m04-home-'),
+        home: mkTmp('rbook-e2e-m04-home-'),
         dashboardOptedIn: true,
       })
     );
@@ -103,30 +103,30 @@ describe('s92-m04 honest opener over stdio', () => {
 
   it('a local-only project inferred from cwd gets no whoami or login nudge', async () => {
     const answer = await review(
-      await connect({ cwd: freshProject(), home: mkTmp('cmos-e2e-m04-local-home-') })
+      await connect({ cwd: freshProject(), home: mkTmp('rbook-e2e-m04-local-home-') })
     );
     expect(answer.resolvedBy).toBe('cwd');
     expect(answer.commands).not.toContain(WHOAMI);
-    expect(answer.commands).not.toContain('cmos_auth(action="login")');
+    expect(answer.commands).not.toContain('rbook_auth(action="login")');
     expect(answer.text).not.toContain(WHOAMI);
-    expect(answer.text).not.toContain('cmos_auth(action="login")');
+    expect(answer.text).not.toContain('rbook_auth(action="login")');
   });
 
   it("a project named by the client's roots is not, and the onboard-only action stays home", async () => {
     const projectRoot = freshProject();
-    const home = mkTmp('cmos-e2e-m04-home-');
+    const home = mkTmp('rbook-e2e-m04-home-');
     const answer = await review(
       await connect({ cwd: home, home, roots: [projectRoot], dashboardOptedIn: true })
     );
     expect(answer.resolvedBy).toBe('mcp-roots');
     expect(answer.commands).not.toContain(WHOAMI);
-    expect(answer.commands[0]).toBe('cmos_agent_onboard()');
+    expect(answer.commands[0]).toBe('rbook_agent_onboard()');
     expect(answer.text).not.toContain('tierSelectionPrompt');
   });
 
   it("a project named by the operator's --project-root is not either", async () => {
     const projectRoot = freshProject();
-    const home = mkTmp('cmos-e2e-m04-home-');
+    const home = mkTmp('rbook-e2e-m04-home-');
     const answer = await review(
       await connect({
         cwd: home,
@@ -137,6 +137,6 @@ describe('s92-m04 honest opener over stdio', () => {
     );
     expect(answer.resolvedBy).toBe('server-project-root');
     expect(answer.commands).not.toContain(WHOAMI);
-    expect(answer.commands[0]).toBe('cmos_agent_onboard()');
+    expect(answer.commands[0]).toBe('rbook_agent_onboard()');
   });
 });

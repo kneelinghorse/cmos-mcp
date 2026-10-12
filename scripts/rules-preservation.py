@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # ABOUTME: Stage independently classified rules refreshes with original-byte and git-clean gates.
-# ABOUTME: Validate exact candidate bytes, protected line order and real-source CMOS level pointers.
+# ABOUTME: Validate exact candidate bytes, protected line order and real-source Reasonbook level pointers.
 import argparse
 import base64
 import difflib
@@ -15,7 +15,8 @@ import subprocess
 import sys
 
 REPO = Path(__file__).resolve().parents[1]
-RENDERER = REPO / 'src/tools/cmos/rules-files.ts'
+RENDERER = REPO / 'src/tools/rbook/rules-files.ts'
+LEGACY_RECORD_PATH = 'cmos/db/cmos.sqlite'
 
 
 def sha(data):
@@ -85,7 +86,12 @@ def git_state(root, names):
 
 
 def live_tier(root):
-    database = relative_file(root, 'cmos/db/cmos.sqlite')
+    for marker in ('.rbook-migration.json', '.rbook-migration.lock'):
+        if relative_file(root, marker).exists():
+            raise ValueError('Record migration is in progress or needs recovery; run reasonbook migrate --apply first.')
+    database = relative_file(root, 'rbook/db/rbook.sqlite')
+    if not relative_file(root, 'rbook').exists():
+        database = relative_file(root, LEGACY_RECORD_PATH)
     with sqlite3.connect(database.as_uri() + '?mode=ro', uri=True) as db:
         row = db.execute("SELECT value FROM metadata WHERE key='project_type'").fetchone()
     return row[0] if row else None

@@ -2,17 +2,18 @@
 // ABOUTME: production-corpus fixtures as the regression gate. Caches query embeddings across
 // ABOUTME: combinations (one embed per fixture, not per combo) for a 25× speedup.
 
+import { resolveRecordPaths } from '../dist/intelligence/legacy-compat';
 import * as fs from 'fs';
 import * as path from 'path';
 // s82-m02: import from BUILT dist/ so the sweep reflects shipped retriever code.
-import { CmosDatabaseClient } from '../dist/tools/cmos/client';
+import { RbookDatabaseClient } from '../dist/tools/rbook/client';
 import {
   HybridRetriever,
   type RankedResult,
   DEFAULT_RRF_K,
   DEFAULT_RECENCY_WEIGHT,
-} from '../dist/tools/cmos/fts5-retriever';
-import { extractKeywords } from '../dist/tools/cmos/supersession-detection';
+} from '../dist/tools/rbook/fts5-retriever';
+import { extractKeywords } from '../dist/tools/rbook/supersession-detection';
 import { getEmbedder, type Embedder } from '../dist/intelligence/embedding-pipeline';
 
 const FIXTURE_PATH = path.resolve(
@@ -20,7 +21,7 @@ const FIXTURE_PATH = path.resolve(
   '..',
   'tests/fixtures/paraphrase-fixtures-production.json'
 );
-const DB_PATH = path.resolve(__dirname, '..', 'cmos/db/cmos.sqlite');
+const DB_PATH = resolveRecordPaths(path.resolve(__dirname, '..')).dbPath;
 const RESULTS_PATH = path.resolve(__dirname, '..', 'scripts/tune-retrieval-params.results.json');
 const TOP_K = 10;
 
@@ -106,7 +107,7 @@ const FTS_TABLE: Record<FixtureType, string> = {
 };
 
 function bm25Rank(
-  client: CmosDatabaseClient,
+  client: RbookDatabaseClient,
   type: FixtureType,
   query: string,
   expectedId: number | string
@@ -180,7 +181,7 @@ interface SweepProgress {
 }
 
 async function runSweep(
-  client: CmosDatabaseClient,
+  client: RbookDatabaseClient,
   fixtures: Fixture[],
   embedder: Embedder
 ): Promise<CombinationResult[]> {
@@ -222,7 +223,7 @@ function logProgress(p: SweepProgress): void {
 
 // ─── BM25 reference snapshot ─────────────────────────────────────────────────
 
-function bm25Snapshot(client: CmosDatabaseClient, fixtures: Fixture[]): AggregateMetrics {
+function bm25Snapshot(client: RbookDatabaseClient, fixtures: Fixture[]): AggregateMetrics {
   const outcomes: RunOutcome[] = fixtures.map((f) => {
     const r = bm25Rank(client, f.type, f.query, f.expected_id);
     return { expectedId: f.expected_id, hits: r.hits, expectedRank: r.expectedRank };
@@ -324,7 +325,7 @@ async function main(): Promise<void> {
     throw new Error(`Need >=15 fixtures; got ${fixtures.length}`);
   }
 
-  const clientResult = await CmosDatabaseClient.create({ dbPath: DB_PATH, readonly: true });
+  const clientResult = await RbookDatabaseClient.create({ dbPath: DB_PATH, readonly: true });
   if (!clientResult.success || !clientResult.data) {
     throw new Error(`Failed to open DB: ${clientResult.error?.message ?? 'unknown'}`);
   }

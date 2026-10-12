@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-// ABOUTME: s86-m06 — cmos_auth(reissue) through the REAL resolver chain, with revocation
+// ABOUTME: s86-m06 — rbook_auth(reissue) through the REAL resolver chain, with revocation
 // ABOUTME: modelled where production can actually see it: a 401 on the wire, not a synthetic flag.
 
 /**
  * Sprint 86 m06 — the test that would have caught the defect.
  *
- * WHY NO EXISTING TEST CAUGHT IT. Every `cmos_auth` test injects `clientResolver`
+ * WHY NO EXISTING TEST CAUGHT IT. Every `rbook_auth` test injects `clientResolver`
  * via a shared `deps()` helper, so the passing reissue test had NEVER executed
  * `defaultDashboardClientResolver` or `fromEnvForProject`; the DEVICE_CODE_REQUIRED
  * test injected `authenticatingKeyId: undefined` directly. No test anywhere asserted
@@ -23,11 +23,11 @@
  * questions, and only the header answers the second.
  *
  * SHAPE-FAITHFUL FIXTURE (gate #926.3, adapted). This mission is gated on no DB
- * column and no SQL query — its entire state is `~/.config/cmos-mcp/credentials.json`
+ * column and no SQL query — its entire state is `~/.config/rbook/credentials.json`
  * — so the "real-store positive fire" obligation cannot take the tmpdir-DB-copy form.
  * Copying the real credentials file is forbidden: it holds live `cmk_` secrets at mode
  * 0600, and the jest global setup exists precisely so no test reads or writes
- * `~/.config/cmos-mcp`. Instead the real store was measured read-only at plan time (21
+ * `~/.config/rbook`. Instead the real store was measured read-only at plan time (21
  * project rows, TWO user-scoped keys, every project row parent-linked) and the fixtures
  * below are faithful to that shape — which is why the matrix includes a
  * multiple-user-key path: a single-key fixture never exercises the newest-key pick.
@@ -38,14 +38,14 @@ import * as fs from 'fs/promises';
 import * as os from 'os';
 import * as path from 'path';
 
-import { cmosAuth, formatAuthForLLM } from '../../src/tools/cmos/cmos-auth';
+import { rbookAuth, formatAuthForLLM } from '../../src/tools/rbook/rbook-auth';
 import {
   CredentialStore,
-  CMOS_CONFIG_DIR_ENV,
+  RBOOK_CONFIG_DIR_ENV,
   type ProjectKeyRecord,
   type UserScopedKeyRecord,
 } from '../../src/intelligence/credential-store';
-import { DashboardClient } from '../../src/tools/cmos/dashboard-client';
+import { DashboardClient } from '../../src/tools/rbook/dashboard-client';
 import { classifyAttribution } from '../../src/auth/project-key-capture';
 
 const DASHBOARD_URL = 'https://dashboard.test';
@@ -156,22 +156,22 @@ function installFetchMock(
   jest.spyOn(global, 'fetch' as any).mockImplementation(impl as any);
 }
 
-describe('cmos_auth(reissue) credential resolution (s86-m06)', () => {
+describe('rbook_auth(reissue) credential resolution (s86-m06)', () => {
   const originalEnv = { ...process.env };
   let tempDir: string;
   let store: CredentialStore;
   let captured: CapturedRequest[];
 
   beforeEach(async () => {
-    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cmos-reissue-'));
-    // House pattern (see cmos-auth.test.ts): unset the shared config dir, reset the
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rbook-reissue-'));
+    // House pattern (see rbook-auth.test.ts): unset the shared config dir, reset the
     // singleton, and point the store at this test's own tmpdir. `resetInstance` runs in
     // BOTH hooks or the tmpdir store leaks into unrelated suites via `getInstance`.
-    delete process.env[CMOS_CONFIG_DIR_ENV];
-    delete process.env.CMOS_DASHBOARD_API_KEY;
-    delete process.env.CMOS_DASHBOARD_USER;
-    delete process.env.CMOS_DASHBOARD_PASSWORD;
-    process.env.CMOS_DASHBOARD_URL = DASHBOARD_URL;
+    delete process.env[RBOOK_CONFIG_DIR_ENV];
+    delete process.env.RBOOK_DASHBOARD_API_KEY;
+    delete process.env.RBOOK_DASHBOARD_USER;
+    delete process.env.RBOOK_DASHBOARD_PASSWORD;
+    process.env.RBOOK_DASHBOARD_URL = DASHBOARD_URL;
     CredentialStore.resetInstance();
     store = await CredentialStore.create({ configDir: tempDir });
     captured = [];
@@ -200,7 +200,7 @@ describe('cmos_auth(reissue) credential resolution (s86-m06)', () => {
     await store.upsertProjectKey(projectRoot, projectKey());
     installFetchMock(captured);
 
-    const result = await cmosAuth({ action: 'reissue', projectRoot }, realResolverDeps());
+    const result = await rbookAuth({ action: 'reissue', projectRoot }, realResolverDeps());
 
     // (1) It succeeds, and the fresh row is attributed to the user key that minted it.
     //
@@ -256,7 +256,7 @@ describe('cmos_auth(reissue) credential resolution (s86-m06)', () => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
       })) as any);
 
-    const result = await cmosAuth({ action: 'reissue', projectRoot }, realResolverDeps());
+    const result = await rbookAuth({ action: 'reissue', projectRoot }, realResolverDeps());
 
     expect(result.success).toBe(true);
     if (!result.success || result.data?.action !== 'reissue') {
@@ -279,7 +279,7 @@ describe('cmos_auth(reissue) credential resolution (s86-m06)', () => {
     await store.upsertProjectKey(projectRoot, original);
     installFetchMock(captured);
 
-    const result = await cmosAuth({ action: 'reissue', projectRoot }, realResolverDeps());
+    const result = await rbookAuth({ action: 'reissue', projectRoot }, realResolverDeps());
 
     expect(result.success).toBe(false);
     expect(result.error?.code).toBe('DEVICE_CODE_REQUIRED');
@@ -303,7 +303,7 @@ describe('cmos_auth(reissue) credential resolution (s86-m06)', () => {
       await store.upsertProjectKey(projectRoot, projectKey());
       installFetchMock(captured);
 
-      const result = await cmosAuth({ action: 'reissue', projectRoot }, realResolverDeps());
+      const result = await rbookAuth({ action: 'reissue', projectRoot }, realResolverDeps());
 
       expect(result.error?.code).toBe('DEVICE_CODE_REQUIRED');
       expect(result.error?.message).toContain(store.path);
@@ -322,7 +322,7 @@ describe('cmos_auth(reissue) credential resolution (s86-m06)', () => {
       );
       installFetchMock(captured, ['cmk_user_live', 'cmk_project_live']);
 
-      const result = await cmosAuth({ action: 'reissue', projectRoot }, realResolverDeps());
+      const result = await rbookAuth({ action: 'reissue', projectRoot }, realResolverDeps());
 
       expect(result.success).toBe(true);
       // Even with a LIVE project key available, the repair authenticates user-scoped.
@@ -349,7 +349,7 @@ describe('cmos_auth(reissue) credential resolution (s86-m06)', () => {
       // but the header assertion is what names WHICH key was chosen.
       installFetchMock(captured, ['cmk_user_newest']);
 
-      const result = await cmosAuth({ action: 'reissue', projectRoot }, realResolverDeps());
+      const result = await rbookAuth({ action: 'reissue', projectRoot }, realResolverDeps());
 
       expect(result.success).toBe(true);
       const reissuePosts = captured.filter((r) => r.url.includes('/keys/reissue'));
@@ -363,7 +363,7 @@ describe('cmos_auth(reissue) credential resolution (s86-m06)', () => {
       await store.upsertUserScopedKey('user-live-1', userKey());
       installFetchMock(captured);
 
-      const result = await cmosAuth({ action: 'reissue', projectRoot }, realResolverDeps());
+      const result = await rbookAuth({ action: 'reissue', projectRoot }, realResolverDeps());
 
       expect(result.success).toBe(true);
       expect((await store.getProjectKey(projectRoot))?.key).toBe('cmk_project_fresh');
@@ -375,7 +375,7 @@ describe('cmos_auth(reissue) credential resolution (s86-m06)', () => {
       await store.upsertProjectKey(projectRoot, projectKey());
       installFetchMock(captured);
 
-      const result = await cmosAuth({ action: 'reissue', projectRoot }, realResolverDeps());
+      const result = await rbookAuth({ action: 'reissue', projectRoot }, realResolverDeps());
 
       expect(result.success).toBe(true);
       expect(captured.every((r) => r.authorization === 'Bearer cmk_user_live')).toBe(true);
@@ -388,7 +388,7 @@ describe('cmos_auth(reissue) credential resolution (s86-m06)', () => {
       await store.upsertProjectKey(projectRoot, projectKey());
       installFetchMock(captured);
 
-      const result = await cmosAuth(
+      const result = await rbookAuth(
         { action: 'reissue', projectRoot },
         {
           ...realResolverDeps(),
@@ -534,7 +534,7 @@ describe('cmos_auth(reissue) credential resolution (s86-m06)', () => {
       await store.upsertProjectKey(projectRoot, projectKey());
       installFetchMock(captured, ['no-key-authenticates']);
 
-      const result = await cmosAuth({ action: 'reissue', projectRoot }, realResolverDeps());
+      const result = await rbookAuth({ action: 'reissue', projectRoot }, realResolverDeps());
 
       // A live user key, so the reissue POST 401s — an honest dashboard failure.
       expect(result.success).toBe(false);
@@ -547,10 +547,10 @@ describe('cmos_auth(reissue) credential resolution (s86-m06)', () => {
       const projectRoot = projectRootFor('two-messages');
       installFetchMock(captured);
 
-      const noUserKey = await cmosAuth({ action: 'reissue', projectRoot }, realResolverDeps());
+      const noUserKey = await rbookAuth({ action: 'reissue', projectRoot }, realResolverDeps());
 
       await store.upsertUserScopedKey('user-live-1', userKey());
-      const override = await cmosAuth(
+      const override = await rbookAuth(
         { action: 'reissue', projectRoot },
         {
           ...realResolverDeps(),
@@ -579,14 +579,14 @@ describe('cmos_auth(reissue) credential resolution (s86-m06)', () => {
       await store.upsertProjectKey(projectRoot, projectKey());
       installFetchMock(captured);
 
-      const result = await cmosAuth({ action: 'reissue', projectRoot }, realResolverDeps());
+      const result = await rbookAuth({ action: 'reissue', projectRoot }, realResolverDeps());
       const rendered = formatAuthForLLM('reissue', result);
 
       // Asserting on `result.error.suggestion` alone does NOT satisfy this: the
       // suggestion existed before this mission and reached no rendered answer.
       expect(rendered).toContain(result.error?.message ?? 'MISSING');
       expect(rendered).toContain(result.error?.suggestion ?? 'MISSING');
-      expect(rendered).toContain('cmos_auth(action="login_init")');
+      expect(rendered).toContain('rbook_auth(action="login_init")');
     });
 
     it('leaves a success answer unchanged (no stray suggestion line)', async () => {
@@ -594,7 +594,7 @@ describe('cmos_auth(reissue) credential resolution (s86-m06)', () => {
       await store.upsertUserScopedKey('user-live-1', userKey());
       installFetchMock(captured);
 
-      const result = await cmosAuth({ action: 'reissue', projectRoot }, realResolverDeps());
+      const result = await rbookAuth({ action: 'reissue', projectRoot }, realResolverDeps());
       const rendered = formatAuthForLLM('reissue', result);
 
       expect(rendered).toContain('Reissued project key');
@@ -623,7 +623,7 @@ describe('cmos_auth(reissue) credential resolution (s86-m06)', () => {
       await store.upsertProjectKey(projectRoot, original);
       installFetchMock(captured, undefined, 500);
 
-      const result = await cmosAuth({ action: 'reissue', projectRoot }, realResolverDeps());
+      const result = await rbookAuth({ action: 'reissue', projectRoot }, realResolverDeps());
 
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe('DASHBOARD_ERROR');
@@ -641,7 +641,7 @@ describe('cmos_auth(reissue) credential resolution (s86-m06)', () => {
       await store.upsertProjectKey(projectRoot, original);
       installFetchMock(captured, undefined, 401);
 
-      const result = await cmosAuth({ action: 'reissue', projectRoot }, realResolverDeps());
+      const result = await rbookAuth({ action: 'reissue', projectRoot }, realResolverDeps());
       expect(result.success).toBe(false);
       const persisted = await store.getProjectKey(projectRoot);
       expect(persisted?.key).toBe(original.key);
@@ -655,7 +655,7 @@ describe('cmos_auth(reissue) credential resolution (s86-m06)', () => {
       await store.upsertProjectKey(projectRoot, projectKey());
       installFetchMock(captured, undefined, 500);
 
-      const result = await cmosAuth({ action: 'reissue', projectRoot }, realResolverDeps());
+      const result = await rbookAuth({ action: 'reissue', projectRoot }, realResolverDeps());
       const message = result.error?.message ?? '';
       expect(message).toContain('Dashboard error:');
       expect(message.match(/Dashboard error:/g) ?? []).toHaveLength(1);
@@ -669,7 +669,7 @@ describe('cmos_auth(reissue) credential resolution (s86-m06)', () => {
       await store.upsertUserScopedKey('user-live-1', userKey());
       installFetchMock(captured, undefined, 500);
 
-      const result = await cmosAuth({ action: 'reissue', projectRoot }, realResolverDeps());
+      const result = await rbookAuth({ action: 'reissue', projectRoot }, realResolverDeps());
       expect(result.success).toBe(false);
       expect(await store.getProjectKey(projectRoot)).toBeUndefined();
     });

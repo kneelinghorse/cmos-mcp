@@ -17,29 +17,29 @@ import {
   observeCliResult,
   observeRenderedContext,
 } from '../../src/cli/telemetry';
-import { harnessSessionHash } from '../../src/tools/cmos/harness-session';
+import { harnessSessionHash } from '../../src/tools/rbook/harness-session';
 import {
   readTelemetry,
   targetForStore,
   type TelemetryRecord,
-} from '../../src/tools/cmos/local-telemetry';
-import { setExternalSessionOwner } from '../../src/tools/cmos/session-owner';
-import { seedCmosDb } from '../helpers/seedCmosDb';
+} from '../../src/tools/rbook/local-telemetry';
+import { setExternalSessionOwner } from '../../src/tools/rbook/session-owner';
+import { seedRbookDb } from '../helpers/seedRbookDb';
 
 let tmp: string;
 let projectRoot: string;
 let dbPath: string;
 let env: NodeJS.ProcessEnv;
-const savedConfig = process.env.CMOS_CONFIG_DIR;
+const savedConfig = process.env.RBOOK_CONFIG_DIR;
 const rule =
   'Preserve immutable event records during database migrations and verify foreign schema columns';
 
 beforeEach(() => {
-  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-cli-telemetry-'));
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-cli-telemetry-'));
   projectRoot = path.join(tmp, 'project');
-  dbPath = seedCmosDb(projectRoot, { projectId: 'cli-telemetry' });
-  env = { ...process.env, CMOS_CONFIG_DIR: path.join(tmp, 'config'), CLAUDE_PROJECT_DIR: '' };
-  process.env.CMOS_CONFIG_DIR = env.CMOS_CONFIG_DIR;
+  dbPath = seedRbookDb(projectRoot, { projectId: 'cli-telemetry' });
+  env = { ...process.env, RBOOK_CONFIG_DIR: path.join(tmp, 'config'), CLAUDE_PROJECT_DIR: '' };
+  process.env.RBOOK_CONFIG_DIR = env.RBOOK_CONFIG_DIR;
   const db = new Database(dbPath);
   db.exec('ALTER TABLE learnings ADD COLUMN evergreen INTEGER DEFAULT 0');
   db.close();
@@ -48,8 +48,8 @@ beforeEach(() => {
 afterEach(() => {
   jest.restoreAllMocks();
   setExternalSessionOwner(null);
-  if (savedConfig === undefined) delete process.env.CMOS_CONFIG_DIR;
-  else process.env.CMOS_CONFIG_DIR = savedConfig;
+  if (savedConfig === undefined) delete process.env.RBOOK_CONFIG_DIR;
+  else process.env.RBOOK_CONFIG_DIR = savedConfig;
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -129,12 +129,12 @@ describe('s93-m04 CLI telemetry', () => {
   it('matches prompts before ambient-off skips and reads only active rules in force', async () => {
     seedRules();
     const before = fs.readFileSync(dbPath);
-    const text = `Run cmos_review. ${rule}`;
+    const text = `Run rbook_review. ${rule}`;
     const result = await run(
       ['hook', 'prompt'],
       { session_id: 'raw-session', prompt: text },
       {
-        env: { ...env, CMOS_AMBIENT: 'off' },
+        env: { ...env, RBOOK_AMBIENT: 'off' },
       }
     );
     expect(result).toEqual({ code: 0, stdout: '', stderr: [] });
@@ -155,9 +155,12 @@ describe('s93-m04 CLI telemetry', () => {
   });
 
   it('logs procedure patterns for ceremony commands before downstream skip rules', async () => {
-    await run(['hook', 'prompt'], { prompt: '/cmos:close run cmos_review' });
+    await run(['hook', 'prompt'], { prompt: '/reasonbook:close run rbook_review' });
     expect(records()).toHaveLength(1);
-    expect(records()[0]).toMatchObject({ ceremony: '/cmos:close', procedurePatternIds: ['P02'] });
+    expect(records()[0]).toMatchObject({
+      ceremony: '/reasonbook:close',
+      procedurePatternIds: ['P02'],
+    });
   });
 
   it("does not treat foreign copied active rules as this project's rules in force", async () => {
@@ -175,7 +178,7 @@ describe('s93-m04 CLI telemetry', () => {
     const db = new Database(dbPath);
     db.exec('DROP TABLE constraints');
     db.close();
-    const result = await run(['hook', 'prompt'], { prompt: 'Run cmos_review' });
+    const result = await run(['hook', 'prompt'], { prompt: 'Run rbook_review' });
     expect(result.code).toBe(0);
     expect(result.stderr).toHaveLength(1);
     expect(records()[0]).toMatchObject({ ruleReadFailed: true, procedurePatternIds: ['P02'] });
@@ -198,7 +201,10 @@ describe('s93-m04 CLI telemetry', () => {
     const result = await run(['hook', 'prompt'], { prompt: rule });
     expect(result.stderr).toEqual([expect.stringContaining('rules in force could not be read')]);
     const unattributed = readTelemetry(
-      { projectId: 'unattributed', dbPath: path.join(env.CMOS_CONFIG_DIR!, 'unattributed.sqlite') },
+      {
+        projectId: 'unattributed',
+        dbPath: path.join(env.RBOOK_CONFIG_DIR!, 'unattributed.sqlite'),
+      },
       env
     );
     expect(unattributed).toHaveLength(1);
@@ -222,7 +228,7 @@ describe('s93-m04 CLI telemetry', () => {
     );
     // Give setup a full deadline: a nearly-expired wall clock could reject before the mocked
     // work starts on a loaded Node20/22 runner, leaving no pending work to resolve below.
-    const result = await run(['hook', 'prompt'], { prompt: 'Run cmos_review' });
+    const result = await run(['hook', 'prompt'], { prompt: 'Run rbook_review' });
     expect(result.stdout).toBe('');
     expect(records()).toHaveLength(1);
     expect(records()[0]).toMatchObject({ ok: false, failOpen: 'deadline', charsInjected: 0 });
@@ -248,7 +254,7 @@ describe('s93-m04 CLI telemetry', () => {
     jest.spyOn(digest, 'buildDigest').mockImplementation(async (_root, io) => {
       observeCliResult(
         io,
-        'cmos_review',
+        'rbook_review',
         {},
         {
           success: true,
@@ -366,7 +372,10 @@ describe('s93-m04 CLI telemetry', () => {
     await run(['unknown-verb'], {}, { cwd: tmp });
     expect(records()).toEqual([]);
     const unattributed = readTelemetry(
-      { projectId: 'unattributed', dbPath: path.join(env.CMOS_CONFIG_DIR!, 'unattributed.sqlite') },
+      {
+        projectId: 'unattributed',
+        dbPath: path.join(env.RBOOK_CONFIG_DIR!, 'unattributed.sqlite'),
+      },
       env
     );
     expect(unattributed).toHaveLength(1);
@@ -378,7 +387,7 @@ describe('s93-m04 CLI telemetry', () => {
     fs.mkdirSync(fresh);
     const result = await run(['init', '--project-root', fresh, '--no-hooks']);
     expect(result.code).toBe(0);
-    const target = targetForStore(path.join(fresh, 'cmos', 'db', 'cmos.sqlite'));
+    const target = targetForStore(path.join(fresh, 'rbook', 'db', 'rbook.sqlite'));
     expect(target).not.toBeNull();
     expect(readTelemetry(target!, env)).toEqual([
       expect.objectContaining({ tool: 'init', ok: true }),

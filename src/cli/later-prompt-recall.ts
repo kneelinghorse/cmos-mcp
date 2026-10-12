@@ -2,19 +2,19 @@
 // ABOUTME: Later prompts recall at most three unseen local decisions using bounded keyword search.
 // ABOUTME: Retrieval opens SQLite readonly, applies an explicit match floor and never expands citations.
 
-import { prepareSpinOutRead, spinOutSqliteReader } from '../tools/cmos/spin-out-read';
+import { prepareSpinOutRead, spinOutSqliteReader } from '../tools/rbook/spin-out-read';
 import Database from 'better-sqlite3';
 import {
   composeDecisionText,
   decisionTextProjection,
   type DecisionTextRow,
-} from '../tools/cmos/decision-fields';
-import { extractKeywords } from '../tools/cmos/keyword-extraction';
-import { getProjectId } from '../tools/cmos/project-id';
-import type { CmosDatabaseClient, QueryParams } from '../tools/cmos/client';
-import type { CmosToolResult } from '../tools/cmos/types';
-import type { RecallItem, RecallResult } from '../tools/cmos/first-prompt-recall';
-import { previewText } from '../tools/cmos/text-preview';
+} from '../tools/rbook/decision-fields';
+import { extractKeywords } from '../tools/rbook/keyword-extraction';
+import { getProjectId } from '../tools/rbook/project-id';
+import type { RbookDatabaseClient, QueryParams } from '../tools/rbook/client';
+import type { RbookToolResult } from '../tools/rbook/types';
+import type { RecallItem, RecallResult } from '../tools/rbook/first-prompt-recall';
+import { previewText } from '../tools/rbook/text-preview';
 
 export const LATER_MIN_KEYWORD_MATCHES = 3;
 export interface LaterRecallOptions {
@@ -59,9 +59,9 @@ export function recallLaterPrompt(
     )
       throw new Error('recall_index_missing');
     const identityDb = db;
-    const reader: Pick<CmosDatabaseClient, 'getOne' | 'path'> = {
+    const reader: Pick<RbookDatabaseClient, 'getOne' | 'path'> = {
       path: dbPath,
-      getOne: <T>(sql: string, params?: QueryParams): CmosToolResult<T | undefined> => ({
+      getOne: <T>(sql: string, params?: QueryParams): RbookToolResult<T | undefined> => ({
         success: true,
         data: (params ? identityDb.prepare(sql).get(params) : identityDb.prepare(sql).get()) as
           | T

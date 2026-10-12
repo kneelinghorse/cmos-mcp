@@ -1,4 +1,4 @@
-// ABOUTME: Detects and strips XML sibling-absorption artifacts from free-text fields written through CMOS tools.
+// ABOUTME: Detects and strips XML sibling-absorption artifacts from free-text fields written through Reasonbook tools.
 // ABOUTME: Strip-and-surface semantics: cleaned content is written, field names bubble up via sanitizedFields.
 
 /**

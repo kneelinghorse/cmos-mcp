@@ -7,7 +7,7 @@ import { inspectNpmPack } from '../docs/npm-pack-inspection';
 
 const root = path.resolve(__dirname, '../..');
 const json = (file: string) => JSON.parse(fs.readFileSync(path.join(root, file), 'utf8'));
-const plugin = 'plugins/cmos';
+const plugin = 'plugins/reasonbook';
 const verbs = {
   SessionStart: 'session-start',
   UserPromptSubmit: 'prompt',
@@ -19,7 +19,7 @@ const verbs = {
 test('Codex chooses a dedicated manifest and a relative server command without shell expansion', () => {
   const manifest = json(`${plugin}/.codex-plugin/plugin.json`);
   expect(manifest).toMatchObject({
-    name: 'cmos',
+    name: 'reasonbook',
     version: json('package.json').version,
     skills: './skills/',
     hooks: './hooks/codex.json',
@@ -27,11 +27,16 @@ test('Codex chooses a dedicated manifest and a relative server command without s
   });
   expect(json(`${plugin}/codex.mcp.json`)).toEqual({
     mcpServers: {
-      cmos: {
+      rbook: {
         command: '/bin/sh',
         args: ['./hooks/launch.sh', 'serve', '--install-root', 'shared'],
         cwd: '.',
-        env_vars: ['CMOS_CONFIG_DIR'],
+        env_vars: expect.arrayContaining([
+          'RBOOK_CONFIG_DIR',
+          'RBOOK_CONFIG_DIR',
+          'RBOOK_PROJECT_ROOT',
+          'RBOOK_PROJECT_ROOT',
+        ]),
       },
     },
   });
@@ -46,7 +51,7 @@ test('trusted hook definitions remain exact and contain no release version', () 
         hooks: [
           {
             type: 'command',
-            command: `node "\${PLUGIN_ROOT}/hooks/run.mjs" hook ${verb} --harness codex --install-root shared --hook-source cmos-codex-plugin`,
+            command: `node "\${PLUGIN_ROOT}/hooks/run.mjs" hook ${verb} --harness codex --install-root shared --hook-source rbook-codex-plugin`,
             timeout: event === 'SessionStart' ? 3 : 1,
           },
         ],
@@ -57,10 +62,10 @@ test('trusted hook definitions remain exact and contain no release version', () 
 
 test('the OpenAI marketplace names both plugin subtrees and ships in npm', () => {
   const marketplace = json('.agents/plugins/marketplace.json');
-  expect(marketplace.name).toBe('cmos');
+  expect(marketplace.name).toBe('reasonbook');
   expect(marketplace.plugins.map((entry: any) => [entry.name, entry.source])).toEqual([
-    ['cmos', { source: 'local', path: './plugins/cmos' }],
-    ['cmos-chat', { source: 'local', path: './plugins/cmos-chat' }],
+    ['reasonbook', { source: 'local', path: './plugins/reasonbook' }],
+    ['reasonbook-chat', { source: 'local', path: './plugins/reasonbook-chat' }],
   ]);
   for (const entry of marketplace.plugins)
     expect(entry.policy).toEqual({ installation: 'AVAILABLE', authentication: 'ON_INSTALL' });

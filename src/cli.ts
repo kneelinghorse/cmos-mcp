@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
-// ABOUTME: s93-m01 — the cmos-mcp CLI: hook verbs for harness hooks, and the read and write verbs adapters
+// ABOUTME: s93-m01 — the reasonbook CLI: hook verbs for harness hooks, and the read and write verbs adapters
 // ABOUTME: and people call. Each verb loads only its own module; hooks exit 0 and print nothing past deadline.
 
+import { getSetting } from './intelligence/legacy-compat';
 import {
   CliStoreError,
   capText,
@@ -23,7 +24,7 @@ import {
   type HookEvent,
   type HookInput,
 } from './cli/core';
-import { processBusyTimeout, setProcessBusyTimeout } from './tools/cmos/sqlite-busy';
+import { processBusyTimeout, setProcessBusyTimeout } from './tools/rbook/sqlite-busy';
 import { CliTelemetry, observeRenderedContext } from './cli/telemetry';
 import { harnessProcessEpoch } from './cli/harness-epoch';
 import {
@@ -32,9 +33,9 @@ import {
   hookRuntimeIdentity,
   type HookReceipt,
 } from './cli/hook-runtime';
-import type { RenderedContext } from './tools/cmos/rendered-context';
+import type { RenderedContext } from './tools/rbook/rendered-context';
 import { hookFormat, hookHarness, type HookHarness } from './cli/hook-adapters';
-import { captureToolCall, unwrapCapturedToolCallError } from './tools/cmos/tool-call-context';
+import { captureToolCall, unwrapCapturedToolCallError } from './tools/rbook/tool-call-context';
 
 /**
  * THE CONTRACT (design doc s93-m01, forks 5 and 6):
@@ -47,7 +48,7 @@ import { captureToolCall, unwrapCapturedToolCallError } from './tools/cmos/tool-
  * - Stop, PreCompact and SessionEnd never print: Claude Code charges a turn for Stop output and
  *   discards SessionEnd's.
  * - Hook verbs never run reconcile or the first-write upkeep; those belong to the MCP server.
- * - With the project's ambient switch off (or CMOS_AMBIENT=off), every hook verb exits silently.
+ * - With the project's ambient switch off (or RBOOK_AMBIENT=off), every hook verb exits silently.
  */
 
 /** What a hook verb is handed. */
@@ -136,7 +137,7 @@ export async function runHook(argv: readonly string[], io: CliIo): Promise<numbe
   if (!event || !(HOOK_EVENTS as readonly string[]).includes(event)) {
     // A mistyped event is a configuration error, not a hook run: exit 1 says so (never 2, which
     // would block a prompt), where 0 would hide it.
-    io.stderr(`cmos-mcp hook: name an event: ${HOOK_EVENTS.join(', ')}.`);
+    io.stderr(`reasonbook hook: name an event: ${HOOK_EVENTS.join(', ')}.`);
     new CliTelemetry(io, event ?? 'unknown', argv, true).finish(1);
     return 1;
   }
@@ -184,13 +185,13 @@ export async function runHook(argv: readonly string[], io: CliIo): Promise<numbe
     });
     telemetry.resolve(resolution);
     if (telemetry.prompt(input))
-      ownLine = 'cmos-mcp hook prompt: rules in force could not be read for telemetry.';
+      ownLine = 'reasonbook hook prompt: rules in force could not be read for telemetry.';
     let ambient: AmbientMode | null = null;
     if (resolution.kind === 'store') {
       ambient = readAmbient(resolution.dbPath, io.env);
       telemetry.patch({ ambient });
       if (ambient === 'off') return null;
-    } else if ((io.env.CMOS_AMBIENT ?? '').trim().toLowerCase() === 'off') {
+    } else if ((getSetting('RBOOK_AMBIENT', io.env) ?? '').trim().toLowerCase() === 'off') {
       telemetry.patch({ ambient: 'off' });
       return null;
     }
@@ -264,7 +265,7 @@ export async function runHook(argv: readonly string[], io: CliIo): Promise<numbe
     recordFailOpen(io.env, `hook ${event}`, failOpen);
     telemetry ??= new CliTelemetry(io, event, argv, true);
     telemetry.patch({ failOpen });
-    ownLine = oneLine(`cmos-mcp hook ${event}: ${reason}`);
+    ownLine = oneLine(`reasonbook hook ${event}: ${reason}`);
   } finally {
     finished = true;
     clearTimeout(timer);
@@ -272,14 +273,14 @@ export async function runHook(argv: readonly string[], io: CliIo): Promise<numbe
     telemetry?.finish(0);
     const stray = stderr.release();
     const line =
-      ownLine ?? (stray.length > 0 ? oneLine(`cmos-mcp hook ${event}: ${stray[0]}`) : null);
+      ownLine ?? (stray.length > 0 ? oneLine(`reasonbook hook ${event}: ${stray[0]}`) : null);
     if (line && !suppressed) io.stderr(line);
   }
   return 0;
 }
 
 const USAGE =
-  'Usage: cmos-mcp <verb> …\n' +
+  'Usage: reasonbook <verb> …\n' +
   '  hook <session-start|prompt|stop|pre-compact|session-end> [--format claude|text] [--hook-source <source>]\n' +
   '       [--harness claude|codex|cursor|devin|copilot|vscode]\n' +
   '  review --format=context        the record digest, for an agent\n' +
@@ -289,26 +290,30 @@ const USAGE =
   '  feedback --content <text> [--dry-run] [--format json]\n' +
   '                                 file friction now, without a session or mission\n' +
   '  session ensure|close --session-id <id>\n' +
-  '  ambient [on|off|digest-off]    how present CMOS is in this project\n' +
+  '  ambient [on|off|digest-off]    how present Reasonbook is in this project\n' +
   '  init [--level ledger|planner|builder] [--no-hooks] [--name <n>]\n' +
-  '                                 start a CMOS record here: AGENTS.md, CLAUDE.md and the store\n' +
+  '                                 start a Reasonbook record here: AGENTS.md, CLAUDE.md and the store\n' +
   '  spin-out --from <root> --to <folder> (--sprint <id>|--missions <ids>) [--apply]\n' +
   '                                 preview or copy selected work into its own project\n' +
+  '  migrate [--apply] [--docs-only] [--project <root>] [--config]\n' +
+  '                                 preview or apply the Reasonbook rename\n' +
   '  profile show                   the operator profile every project reads\n' +
   '  stats [--export]               local usage measurements, as counts\n' +
   '  drafts list [--all] [--format json]\n' +
   '                                 drafted records awaiting the operator\n' +
   '  serve                          run the MCP server (the default with no verb)\n' +
-  'Other verbs take --project-root <dir>; spin-out requires --from and --to explicitly.\n';
+  'Other verbs take --project-root <dir>; spin-out requires --from and --to explicitly.\n' +
+  'Use the migration guide when upgrading an existing installation.\n';
 
 /**
- * Run a CLI command line (everything after `cmos-mcp`). Returns the exit code. An unknown verb is a
+ * Run a CLI command line (everything after `reasonbook`). Returns the exit code. An unknown verb is a
  * usage error with exit 1, never 2: a mistyped hook command lands here, and Claude Code treats exit
  * 2 from a UserPromptSubmit hook as blocking the prompt.
  */
 export async function runCli(argv: readonly string[], io: CliIo = processIo()): Promise<number> {
   const [verb, ...rest] = argv;
   if (verb === 'hook') return runHook(rest, io);
+  if (verb === 'migrate') return (await import('./cli/migrate')).runMigrate(rest, io);
   if (verb === 'spin-out') return (await import('./cli/spin-out')).runSpinOut(rest, io);
   const telemetry = new CliTelemetry(io, verb ?? 'unknown', rest);
   let code = 1;
@@ -354,7 +359,7 @@ async function dispatchCli(
     case 'profile':
       return (await import('./cli/commands')).runCommand(verb, rest, io);
     default:
-      if (verb !== undefined) io.stderr(`cmos-mcp: unknown verb "${verb}".`);
+      if (verb !== undefined) io.stderr(`reasonbook: unknown verb "${verb}".`);
       io.stderr(USAGE.trimEnd());
       return 1;
   }
@@ -368,7 +373,7 @@ export function main(argv: readonly string[]): void {
   void runCli(argv)
     .catch((error: unknown) => {
       process.stderr.write(
-        `${oneLine(`cmos-mcp: ${error instanceof Error ? error.message : String(error)}`)}\n`
+        `${oneLine(`reasonbook: ${error instanceof Error ? error.message : String(error)}`)}\n`
       );
       return argv[0] === 'hook' ? 0 : 1;
     })

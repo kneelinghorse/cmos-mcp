@@ -35,7 +35,7 @@ const baselineThresholds = {
 module.exports = {
   preset: 'ts-jest',
   testEnvironment: 'node',
-  // DB-heavy integration suites (bdd/cmos-session-start.steps, sprint-status-sync,
+  // DB-heavy integration suites (bdd/rbook-session-start.steps, sprint-status-sync,
   // tier-config, sync-locks, …) occasionally exceed the 5s default under 220+-suite
   // parallel CPU contention, producing rotating timeout flakes. 30s gives headroom
   // without masking real hangs; a file-level jest.setTimeout still overrides per suite.

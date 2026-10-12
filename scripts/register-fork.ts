@@ -1,9 +1,9 @@
-// ABOUTME: One-shot registration of the local CMOS DB as a fresh dashboard project.
+// ABOUTME: One-shot registration of the local Reasonbook DB as a fresh dashboard project.
 // ABOUTME: Bypasses the triggerCheckpointBackfill env-var gate so device-code-only users can re-register.
 
 import { resolve } from 'path';
-import { DashboardClient } from '../src/tools/cmos/dashboard-client';
-import { withClientAsync } from '../src/tools/cmos/client';
+import { DashboardClient } from '../src/tools/rbook/dashboard-client';
+import { withClientAsync } from '../src/tools/rbook/client';
 import { captureRegisterResponse } from '../src/auth/project-key-capture';
 
 function deriveProjectSlug(projectName: string): string {
@@ -64,7 +64,7 @@ async function main(): Promise<void> {
       );
 
       // s87-m03 (#524) — these three writes used to be issued and DISCARDED. Each returns a
-      // CmosToolResult whose `.success` nobody read, so a failed metadata write left the script
+      // RbookToolResult whose `.success` nobody read, so a failed metadata write left the script
       // printing "Registered: …" over a store that had recorded none of it — the registration
       // would appear to have happened and would not have. Say which one failed, and exit non-zero.
       const metadataWrites: Array<[string, string, unknown[]]> = [

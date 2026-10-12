@@ -9,25 +9,25 @@ import * as path from 'path';
 import { cliCommand, formatCliRemedy, type CliRemedyTarget } from '../utils/cli-remedy';
 import type { HookDelivery, HookVerbContext } from '../cli';
 import { isSameDirectory } from '../intelligence/resolution-policy';
-import { isDeclined, linkHarness } from '../tools/cmos/harness-session';
+import { isDeclined, linkHarness } from '../tools/rbook/harness-session';
 import { hookRuntimeIdentity } from './hook-runtime';
 import { captureBaseline, consumeCompactMarker } from './lifecycle-runtime';
 import { deliverRecallContext } from './recall-runtime';
 import { preparedRenderedContext } from './telemetry';
-import { processBusyTimeout } from '../tools/cmos/sqlite-busy';
+import { processBusyTimeout } from '../tools/rbook/sqlite-busy';
 import { assertStoreReadable, hookStore, resolutionDir } from './core';
 
 export { cliCommand } from '../utils/cli-remedy';
 
-/** The one line offered in a git repository that has no CMOS record. */
+/** The one line offered in a git repository that has no Reasonbook record. */
 export function initOffer(
   command: string = cliCommand(),
   portable = false,
   target: CliRemedyTarget = { projectRoot: process.cwd(), resolvedBy: 'cwd' }
 ): string {
   return (
-    'No CMOS record in this repository. If the user wants decisions, learnings and next steps ' +
-    `kept across sessions, ${portable ? `run ${formatCliRemedy('init', target, command)} with their agreement to start one` : '/cmos:init starts one'}; if they decline, run ${formatCliRemedy('ambient off', target, command)} ` +
+    'No Reasonbook record in this repository. If the user wants decisions, learnings and next steps ' +
+    `kept across sessions, ${portable ? `run ${formatCliRemedy('init', target, command)} with their agreement to start one` : '/reasonbook:init starts one'}; if they decline, run ${formatCliRemedy('ambient off', target, command)} ` +
     'here and this offer stops.'
   );
 }
@@ -52,8 +52,8 @@ export function gitWorkTreeRoot(start: string, homeDir: string = os.homedir()): 
 /**
  * The link comes first and needs no store: it tells the harness's MCP server which conversation it
  * serves, and where (a git repository can gain a store mid-conversation). No session row is written
- * here. The harness session's CMOS session opens at its first write, so
- * a conversation that never uses CMOS leaves nothing in the record (the m01 build critic).
+ * here. The harness session's Reasonbook session opens at its first write, so
+ * a conversation that never uses Reasonbook leaves nothing in the record (the m01 build critic).
  */
 export async function run(ctx: HookVerbContext): Promise<string | HookDelivery | null> {
   const { input, io, resolution } = ctx;

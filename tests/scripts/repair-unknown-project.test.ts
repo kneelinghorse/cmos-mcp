@@ -31,10 +31,10 @@ let root: string;
 
 /** A store carrying `n` sentinel rows across two tables plus one correctly-stamped row. */
 function seedStore(opts: { identity: string | null; sentinel?: string }): void {
-  root = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-oc1-'));
-  const dbDir = path.join(root, 'cmos', 'db');
+  root = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-oc1-'));
+  const dbDir = path.join(root, 'rbook', 'db');
   fs.mkdirSync(dbDir, { recursive: true });
-  const db = new Database(path.join(dbDir, 'cmos.sqlite'));
+  const db = new Database(path.join(dbDir, 'rbook.sqlite'));
   const sentinel = opts.sentinel ?? 'unknown-project';
   db.exec(`
     CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);

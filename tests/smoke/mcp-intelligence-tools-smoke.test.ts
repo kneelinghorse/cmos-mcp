@@ -19,11 +19,11 @@ const DEPRECATED_TOOL_NAMES = [
   'create_mission',
   'get_mission_quality_score',
   'create_mission_splits',
-  'cmos_sprint_list',
-  'cmos_sprint_show',
-  'cmos_sprint_add',
-  'cmos_sprint_update',
-  'cmos_sprint_complete',
+  'rbook_sprint_list',
+  'rbook_sprint_show',
+  'rbook_sprint_add',
+  'rbook_sprint_update',
+  'rbook_sprint_complete',
 ] as const;
 
 describe('Legacy tool deprecation smoke coverage', () => {
@@ -37,7 +37,7 @@ describe('Legacy tool deprecation smoke coverage', () => {
     const toolNames = getToolDefinitions().map((tool) => tool.name);
 
     expect(toolNames).toEqual(
-      expect.arrayContaining(['cmos_db', 'cmos_agent_onboard', 'cmos_sprint'])
+      expect.arrayContaining(['rbook_db', 'rbook_agent_onboard', 'rbook_sprint'])
     );
     for (const toolName of DEPRECATED_TOOL_NAMES) {
       expect(toolNames).not.toContain(toolName);

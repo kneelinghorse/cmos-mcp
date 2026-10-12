@@ -28,40 +28,40 @@ const DEPRECATED_TOOL_NAMES = [
   'create_mission',
   'get_mission_quality_score',
   'create_mission_splits',
-  'cmos_sprint_list',
-  'cmos_sprint_show',
-  'cmos_sprint_add',
-  'cmos_sprint_update',
-  'cmos_sprint_complete',
-  'cmos_mission_list',
-  'cmos_mission_show',
-  'cmos_mission_status',
-  'cmos_mission_start',
-  'cmos_mission_complete',
-  'cmos_mission_block',
-  'cmos_mission_unblock',
-  'cmos_mission_update',
-  'cmos_mission_add',
-  'cmos_mission_depends',
-  'cmos_context_view',
-  'cmos_context_update',
-  'cmos_context_condense',
-  'cmos_context_snapshot',
-  'cmos_context_history',
-  'cmos_session_start',
-  'cmos_session_capture',
-  'cmos_session_complete',
-  'cmos_session_list',
-  'cmos_decisions_list',
-  'cmos_decisions_search',
-  'cmos_db_health',
-  'cmos_db_snapshot',
-  'cmos_db_restore',
-  'cmos_project_register',
-  'cmos_project_list',
-  'cmos_project_unregister',
-  'cmos_project_validate',
-  'cmos_project_init',
+  'rbook_sprint_list',
+  'rbook_sprint_show',
+  'rbook_sprint_add',
+  'rbook_sprint_update',
+  'rbook_sprint_complete',
+  'rbook_mission_list',
+  'rbook_mission_show',
+  'rbook_mission_status',
+  'rbook_mission_start',
+  'rbook_mission_complete',
+  'rbook_mission_block',
+  'rbook_mission_unblock',
+  'rbook_mission_update',
+  'rbook_mission_add',
+  'rbook_mission_depends',
+  'rbook_context_view',
+  'rbook_context_update',
+  'rbook_context_condense',
+  'rbook_context_snapshot',
+  'rbook_context_history',
+  'rbook_session_start',
+  'rbook_session_capture',
+  'rbook_session_complete',
+  'rbook_session_list',
+  'rbook_decisions_list',
+  'rbook_decisions_search',
+  'rbook_db_health',
+  'rbook_db_snapshot',
+  'rbook_db_restore',
+  'rbook_project_register',
+  'rbook_project_list',
+  'rbook_project_unregister',
+  'rbook_project_validate',
+  'rbook_project_init',
 ] as const;
 
 describe('Tool definitions contract', () => {
@@ -81,9 +81,9 @@ describe('Tool definitions contract', () => {
     expect(uniqueNames.size).toBe(names.length);
   });
 
-  test('tool count includes only CMOS tools', () => {
+  test('tool count includes only Reasonbook tools', () => {
     const tools = getToolDefinitions();
-    // Sprint 64 m03: added cmos_review (bundled session-opener digest), bringing the total to 15.
+    // Sprint 64 m03: added rbook_review (bundled session-opener digest), bringing the total to 15.
     expect(tools.length).toBe(15);
 
     const names = tools.map((t) => t.name).sort();
@@ -91,21 +91,21 @@ describe('Tool definitions contract', () => {
       expect(names).not.toContain(toolName);
     }
 
-    // Verify consolidated CMOS tools are present
-    expect(names).toContain('cmos_mission');
-    expect(names).toContain('cmos_mission_transition');
-    expect(names).toContain('cmos_sprint');
-    expect(names).toContain('cmos_context');
-    expect(names).toContain('cmos_session');
-    expect(names).toContain('cmos_decisions');
-    expect(names).toContain('cmos_learnings');
-    expect(names).toContain('cmos_db');
-    expect(names).toContain('cmos_project');
-    expect(names).toContain('cmos_message');
-    expect(names).toContain('cmos_agent_onboard');
-    expect(names).toContain('cmos_feedback');
-    expect(names).toContain('cmos_auth');
-    expect(names).toContain('cmos_status');
-    expect(names).toContain('cmos_review');
+    // Verify consolidated Reasonbook tools are present
+    expect(names).toContain('rbook_mission');
+    expect(names).toContain('rbook_mission_transition');
+    expect(names).toContain('rbook_sprint');
+    expect(names).toContain('rbook_context');
+    expect(names).toContain('rbook_session');
+    expect(names).toContain('rbook_decisions');
+    expect(names).toContain('rbook_learnings');
+    expect(names).toContain('rbook_db');
+    expect(names).toContain('rbook_project');
+    expect(names).toContain('rbook_message');
+    expect(names).toContain('rbook_agent_onboard');
+    expect(names).toContain('rbook_feedback');
+    expect(names).toContain('rbook_auth');
+    expect(names).toContain('rbook_status');
+    expect(names).toContain('rbook_review');
   });
 });

@@ -22,6 +22,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import Database from 'better-sqlite3';
+import { LEGACY, resolveRecordPaths } from '../dist/intelligence/legacy-compat';
 import { connectStdioServer, textOf } from '../tests/e2e/stdio-harness';
 
 const REPO_ROOT = path.resolve(__dirname, '..');
@@ -38,7 +39,7 @@ const PKG = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'ut
  * Kept here as a FIXTURE, not as a spec: it exists so the real-store migration proof below can
  * downgrade its tmpdir copy to a known pre-migration state on every run instead of depending on
  * some store somewhere still being old. Nothing reads it as the current contract — the live
- * definition is `SPRINT_SUMMARY_VIEW_SQL` in src/tools/cmos/schema.ts, and the whole point of the
+ * definition is `SPRINT_SUMMARY_VIEW_SQL` in src/tools/rbook/schema.ts, and the whole point of the
  * check is that the shipped dist replaces THIS with THAT.
  *
  * Its distinguishing property, and the one the assertion turns on: `total_missions` is a bare
@@ -89,10 +90,15 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const projectDir = mkTmp('cmos-verify-project-');
-  const configDir = mkTmp('cmos-verify-config-');
-  const env = { ...process.env, CMOS_CONFIG_DIR: configDir } as Record<string, string>;
-  delete env.CMOS_PROJECT_ROOT;
+  const projectDir = mkTmp('rbook-verify-project-');
+  const configDir = mkTmp('rbook-verify-config-');
+  const env = {
+    ...process.env,
+    RBOOK_CONFIG_DIR: configDir,
+    [`${LEGACY.envPrefix}CONFIG_DIR`]: configDir,
+  } as Record<string, string>;
+  delete env.RBOOK_PROJECT_ROOT;
+  delete env[`${LEGACY.envPrefix}PROJECT_ROOT`];
 
   const h = await connectStdioServer({
     serverPath: DIST_SERVER,
@@ -104,7 +110,7 @@ async function main(): Promise<void> {
   try {
     // --- Standing invariants (every sprint) ---
     const info = h.client.getServerVersion();
-    check('server announces cmos-mcp', info?.name === 'cmos-mcp', `got ${info?.name}`);
+    check('server announces rbook', info?.name === 'rbook', `got ${info?.name}`);
     check(
       `server version === ${PKG.version}`,
       info?.version === PKG.version,
@@ -114,29 +120,29 @@ async function main(): Promise<void> {
     const tools = await h.client.listTools();
     check('exposes exactly 15 tools', tools.tools.length === 15, `got ${tools.tools.length}`);
 
-    // s80-m05: cmos_message(get) shipped as an ACTION (not a tool — 15-tool line holds).
+    // s80-m05: rbook_message(get) shipped as an ACTION (not a tool — 15-tool line holds).
     // The byte-cap + body-on-get BEHAVIOR is covered by unit tests (the isolated verify:dist
     // env has no dashboard auth); here we assert the action reached the built dist schema.
-    const messageTool = tools.tools.find((t) => t.name === 'cmos_message');
+    const messageTool = tools.tools.find((t) => t.name === 'rbook_message');
     const messageActions =
       (messageTool?.inputSchema?.properties as { action?: { enum?: string[] } })?.action?.enum ??
       [];
     check(
-      'cmos_message advertises the get action (body-on-get)',
+      'rbook_message advertises the get action (body-on-get)',
       messageActions.includes('get'),
       `actions=${messageActions.join(',')}`
     );
 
     // --- s80-m01: the dist is drivable end-to-end against a fresh graph-only store ---
-    await h.callOk('cmos_project', {
+    await h.callOk('rbook_project', {
       action: 'init',
       projectRoot: projectDir,
       projectName: 'verify-dist',
       projectType: 'build', // The store-root tier probe below specifically edits build.md.
     });
     check(
-      'cmos_project(init) writes the seed store',
-      fs.existsSync(path.join(projectDir, 'cmos', 'db', 'cmos.sqlite'))
+      'rbook_project(init) writes the seed store',
+      fs.existsSync(path.join(projectDir, 'rbook', 'db', 'rbook.sqlite'))
     );
     // s92-m06: init writes an uppercase AGENTS.md at the project root from the shipped template.
     // A directory listing, not existsSync: a case-insensitive filesystem would accept agents.md.
@@ -160,22 +166,22 @@ async function main(): Promise<void> {
       !fs.existsSync(path.join(configDir, 'project-registry.json'))
     );
 
-    const review = await h.callOk('cmos_review', { projectRoot: projectDir });
-    check('cmos_review returns a non-empty digest', textOf(review).length > 0);
+    const review = await h.callOk('rbook_review', { projectRoot: projectDir });
+    check('rbook_review returns a non-empty digest', textOf(review).length > 0);
 
     // --- s80-m04: a pin-only read pins to the sender; a neutral multi-project dir
     //     fails CLOSED (never fans out). Register a 2nd project so the registry is
     //     multi-project (sender-context auto-picks ONLY a size-1 registry).
-    const projectDir2 = mkTmp('cmos-verify-project2-');
-    await h.callOk('cmos_project', {
+    const projectDir2 = mkTmp('rbook-verify-project2-');
+    await h.callOk('rbook_project', {
       action: 'init',
       projectRoot: projectDir2,
       projectName: 'verify-dist-2',
     });
 
-    // s80-m06: with a multi-project registry, cmos_review carries a strict-partition
+    // s80-m06: with a multi-project registry, rbook_review carries a strict-partition
     // portfolio (reachable + silent + unmigrated + unreadable === projects) within budget.
-    const review2 = h.dataOf(await h.callOk('cmos_review', { projectRoot: projectDir })) as {
+    const review2 = h.dataOf(await h.callOk('rbook_review', { projectRoot: projectDir })) as {
       portfolio?: {
         projects: number;
         reachable: number;
@@ -187,7 +193,7 @@ async function main(): Promise<void> {
     };
     const pf = review2?.portfolio;
     check(
-      'cmos_review portfolio is a strict partition (reachable+silent+unmigrated+unreadable === projects)',
+      'rbook_review portfolio is a strict partition (reachable+silent+unmigrated+unreadable === projects)',
       !!pf && pf.reachable + pf.silent + pf.unmigrated + pf.unreadable === pf.projects,
       `portfolio=${JSON.stringify(pf)}`
     );
@@ -195,7 +201,7 @@ async function main(): Promise<void> {
     // s80-m07: the self-capture guard is wired into onboard but must NOT false-fire on a
     // fresh store (no decisions/learnings/missions yet → Signal B null → no advisory).
     const onboardData = h.dataOf(
-      await h.callOk('cmos_agent_onboard', { projectRoot: projectDir })
+      await h.callOk('rbook_agent_onboard', { projectRoot: projectDir })
     ) as { selfCapture?: { fires?: boolean } };
     check(
       'self-capture guard is present and does not false-fire on a fresh store',
@@ -203,7 +209,7 @@ async function main(): Promise<void> {
       `selfCapture=${JSON.stringify(onboardData?.selfCapture)}`
     );
     check(
-      'cmos_review digest stays within the 4KB budget',
+      'rbook_review digest stays within the 4KB budget',
       typeof review2?.digestSizeBytes === 'number' && review2.digestSizeBytes <= 4096,
       `digestSizeBytes=${review2?.digestSizeBytes}`
     );
@@ -224,16 +230,16 @@ async function main(): Promise<void> {
       `drift=${JSON.stringify(driftStale)}`
     );
 
-    // --- s90-m05: cmos_sprint(complete) carries the whole-ledger next_steps survey receipt.
+    // --- s90-m05: rbook_sprint(complete) carries the whole-ledger next_steps survey receipt.
     //     Drive a minimal empty-sprint close on a fresh project and assert both the new shape and
     //     removal of the old provenance-as-delivery reconciliation fields in the shipped dist.
-    const projectDir3 = mkTmp('cmos-verify-m06-');
-    await h.callOk('cmos_project', {
+    const projectDir3 = mkTmp('rbook-verify-m06-');
+    await h.callOk('rbook_project', {
       action: 'init',
       projectRoot: projectDir3,
       projectName: 'verify-m06',
     });
-    await h.callOk('cmos_sprint', {
+    await h.callOk('rbook_sprint', {
       action: 'add',
       projectRoot: projectDir3,
       sprintId: 'sv-1',
@@ -241,7 +247,7 @@ async function main(): Promise<void> {
       focus: 'verify',
     });
     const closeData = h.dataOf(
-      await h.callOk('cmos_sprint', {
+      await h.callOk('rbook_sprint', {
         action: 'complete',
         projectRoot: projectDir3,
         sprintId: 'sv-1',
@@ -257,7 +263,7 @@ async function main(): Promise<void> {
       | undefined;
     const surveyGroups = nextStepsSurvey?.groups;
     check(
-      's90-m05: cmos_sprint(complete) returns the whole-ledger next_steps survey shape',
+      's90-m05: rbook_sprint(complete) returns the whole-ledger next_steps survey shape',
       nextStepsSurvey?.available === true &&
         nextStepsSurvey.totalPending === 0 &&
         surveyGroups !== null &&
@@ -282,19 +288,19 @@ async function main(): Promise<void> {
     // --- s83-m05: tiers that work for strangers ---
     // (a) Auto-discovery (NO projectRoot): onboard must resolve tiers from the RESOLVED
     //     store root (dirname^3 of the connected DB path), not the server install dir.
-    //     The server runs with cwd=projectDir and CMOS_PROJECT_ROOT deleted, so this is
+    //     The server runs with cwd=projectDir and RBOOK_PROJECT_ROOT deleted, so this is
     //     the real npm-consumer path. Asserting tierConfig != null alone is NOT enough —
-    //     the always-present bundled cmos-seed/tiers fallback would satisfy that even if
+    //     the always-present bundled rbook-seed/tiers fallback would satisfy that even if
     //     the onboard fix were reverted. So stamp a unique label into projectDir's OWN
     //     build.md and assert onboard echoes it: a regression to raw params.projectRoot
     //     (undefined on auto-discovery) would fall back to the seed and miss the marker.
-    const storeBuildTier = path.join(projectDir, 'cmos', 'tiers', 'build.md');
+    const storeBuildTier = path.join(projectDir, 'rbook', 'tiers', 'build.md');
     const originalTier = fs.readFileSync(storeBuildTier, 'utf8');
     const storeMarker = 'StoreRootMarker-s83m05';
     fs.writeFileSync(storeBuildTier, originalTier.replace(/^label:.*$/m, `label: ${storeMarker}`));
     let onboardNoRoot: { tierConfig?: { tier?: string; label?: string } | null };
     try {
-      onboardNoRoot = h.dataOf(await h.callOk('cmos_agent_onboard', {})) as typeof onboardNoRoot;
+      onboardNoRoot = h.dataOf(await h.callOk('rbook_agent_onboard', {})) as typeof onboardNoRoot;
     } finally {
       fs.writeFileSync(storeBuildTier, originalTier);
     }
@@ -304,17 +310,17 @@ async function main(): Promise<void> {
       `tierConfig=${JSON.stringify(onboardNoRoot?.tierConfig)}`
     );
 
-    // (b) cmos_project(init, projectType=managed) writes the tier and onboard surfaces
+    // (b) rbook_project(init, projectType=managed) writes the tier and onboard surfaces
     //     the managed first-session flow (sprintZeroReady + a Managed prompt).
-    const managedDir = mkTmp('cmos-verify-managed-');
-    await h.callOk('cmos_project', {
+    const managedDir = mkTmp('rbook-verify-managed-');
+    await h.callOk('rbook_project', {
       action: 'init',
       projectRoot: managedDir,
       projectName: 'verify-managed',
       projectType: 'managed',
     });
     const managedOnboard = h.dataOf(
-      await h.callOk('cmos_agent_onboard', { projectRoot: managedDir })
+      await h.callOk('rbook_agent_onboard', { projectRoot: managedDir })
     ) as {
       project?: { projectType?: string };
       sprintZeroReady?: boolean;
@@ -325,10 +331,11 @@ async function main(): Promise<void> {
       managedOnboard?.project?.projectType === 'managed',
       `projectType=${managedOnboard?.project?.projectType}`
     );
+    // s95-m06: the prompt names the level the operator chose (Planner is the managed tier).
     check(
-      's83-m05: managed fresh project surfaces sprintZeroReady + a Managed tier prompt',
+      's83-m05: managed fresh project surfaces sprintZeroReady + a Planner prompt',
       managedOnboard?.sprintZeroReady === true &&
-        /Managed workspace/.test(managedOnboard?.tierSelectionPrompt ?? ''),
+        /fresh Reasonbook Planner project/.test(managedOnboard?.tierSelectionPrompt ?? ''),
       `sprintZeroReady=${managedOnboard?.sprintZeroReady}; prompt=${(
         managedOnboard?.tierSelectionPrompt ?? ''
       ).slice(0, 60)}`
@@ -339,25 +346,25 @@ async function main(): Promise<void> {
     //     is NOT false-framed. The foreign-row positive-fire lives in the jest
     //     provenance-surfaces suite — a foreign row can only enter a store via
     //     sync-merge/pull, which isn't reachable over plain MCP stdio.
-    const m06Dir = mkTmp('cmos-verify-m06frame-');
-    await h.callOk('cmos_project', {
+    const m06Dir = mkTmp('rbook-verify-m06frame-');
+    await h.callOk('rbook_project', {
       action: 'init',
       projectRoot: m06Dir,
       projectName: 'verify-m06frame',
     });
-    await h.callOk('cmos_session', {
+    await h.callOk('rbook_session', {
       action: 'start',
       type: 'planning',
       title: 'plan',
       projectRoot: m06Dir,
     });
-    await h.callOk('cmos_session', {
+    await h.callOk('rbook_session', {
       action: 'capture',
       category: 'decision',
       content: 'Adopt widget-sqlite-retrieval as the local decision',
       projectRoot: m06Dir,
     });
-    const dsearchRes = await h.callOk('cmos_decisions', {
+    const dsearchRes = await h.callOk('rbook_decisions', {
       action: 'search',
       query: 'widget sqlite retrieval',
       projectRoot: m06Dir,
@@ -376,20 +383,20 @@ async function main(): Promise<void> {
     );
     // The review-closure surfaces (onboard recentDecisions, context-view) also ship the
     // plumbing and must NOT false-frame the local decision.
-    const m06Onboard = h.dataOf(await h.callOk('cmos_agent_onboard', { projectRoot: m06Dir })) as {
+    const m06Onboard = h.dataOf(await h.callOk('rbook_agent_onboard', { projectRoot: m06Dir })) as {
       localProjectId?: string | null;
     };
     check(
-      's83-m06: cmos_agent_onboard result carries localProjectId (recentDecisions framing plumbing)',
+      's83-m06: rbook_agent_onboard result carries localProjectId (recentDecisions framing plumbing)',
       typeof m06Onboard?.localProjectId === 'string' &&
         (m06Onboard.localProjectId ?? '').length > 0,
       `localProjectId=${m06Onboard?.localProjectId}`
     );
     const m06ViewText = h.textOf(
-      await h.callOk('cmos_context', { action: 'view', projectRoot: m06Dir })
+      await h.callOk('rbook_context', { action: 'view', projectRoot: m06Dir })
     );
     check(
-      's83-m06: cmos_context(view) renders the LOCAL decision BARE (no false-framing)',
+      's83-m06: rbook_context(view) renders the LOCAL decision BARE (no false-framing)',
       m06ViewText.includes('widget-sqlite-retrieval') && !m06ViewText.includes('[UNTRUSTED DATA'),
       `text=${m06ViewText.slice(0, 140)}`
     );
@@ -397,8 +404,8 @@ async function main(): Promise<void> {
     // --- s84 answer shapes (this release's deltas). Only what is provable over PLAIN stdio:
     //     the verify:dist env has no dashboard auth, so anything requiring a live dashboard
     //     round-trip stays owned by the jest suites and is asserted here at the SCHEMA level.
-    const s84Dir = mkTmp('cmos-verify-s84-');
-    await h.callOk('cmos_project', {
+    const s84Dir = mkTmp('rbook-verify-s84-');
+    await h.callOk('rbook_project', {
       action: 'init',
       projectRoot: s84Dir,
       projectName: 'verify-s84',
@@ -408,7 +415,7 @@ async function main(): Promise<void> {
     //     returnedCount) needs a dashboard; the INPUT contract is provable here.
     const messageProps = (messageTool?.inputSchema?.properties ?? {}) as Record<string, unknown>;
     check(
-      's84-m02: cmos_message advertises the offset pagination param',
+      's84-m02: rbook_message advertises the offset pagination param',
       Object.prototype.hasOwnProperty.call(messageProps, 'offset'),
       `props=${Object.keys(messageProps).join(',')}`
     );
@@ -416,26 +423,26 @@ async function main(): Promise<void> {
     // (b) s84-m05: an EVERGREEN constraint is excluded from staleness review end-to-end.
     //     Drivable on a fresh store: capture two constraints, flag one evergreen, and assert
     //     review returns the other and not it. This is the positive fire for the flag.
-    await h.callOk('cmos_session', {
+    await h.callOk('rbook_session', {
       action: 'start',
       type: 'planning',
       title: 's84 constraints',
       projectRoot: s84Dir,
     });
-    await h.callOk('cmos_session', {
+    await h.callOk('rbook_session', {
       action: 'capture',
       category: 'constraint',
       content: 'Institutional rule: the review digest stays under 4KB',
       projectRoot: s84Dir,
     });
-    await h.callOk('cmos_session', {
+    await h.callOk('rbook_session', {
       action: 'capture',
       category: 'constraint',
       content: 'Temporary rule: deploy freeze until the release lands',
       projectRoot: s84Dir,
     });
     const listedConstraints = h.dataOf(
-      await h.callOk('cmos_context', {
+      await h.callOk('rbook_context', {
         action: 'constraints',
         constraintAction: 'list',
         projectRoot: s84Dir,
@@ -453,7 +460,7 @@ async function main(): Promise<void> {
     );
 
     if (institutional && temporary) {
-      await h.callOk('cmos_context', {
+      await h.callOk('rbook_context', {
         action: 'constraints',
         constraintAction: 'reaffirm',
         constraintId: institutional.id,
@@ -461,7 +468,7 @@ async function main(): Promise<void> {
         projectRoot: s84Dir,
       });
       const relisted = h.dataOf(
-        await h.callOk('cmos_context', {
+        await h.callOk('rbook_context', {
           action: 'constraints',
           constraintAction: 'list',
           projectRoot: s84Dir,
@@ -482,13 +489,13 @@ async function main(): Promise<void> {
       // `.int().positive()` in zod, and the smallest legal value (1 day) still scores a
       // seconds-old row at 20. Backdating `created_at` is the only way, which needs direct
       // DB access — so the exclusion leg is owned by
-      // tests/tools/cmos/constraint-staleness.test.ts ("evergreen=true durably drops the
+      // tests/tools/rbook/constraint-staleness.test.ts ("evergreen=true durably drops the
       // constraint off review + banner"), which seeds a 90-day-old constraint and asserts
       // flagged-before / absent-after plus a PRAGMA positive-fire on the column.
       // What stdio CAN prove — and does, above — is that the flag reaches the built dist,
       // persists, and targets exactly one row.
       const reviewed = h.dataOf(
-        await h.callOk('cmos_context', {
+        await h.callOk('rbook_context', {
           action: 'constraints',
           constraintAction: 'review',
           projectRoot: s84Dir,
@@ -501,20 +508,20 @@ async function main(): Promise<void> {
       );
     }
 
-    // (c) s84-m04: cmos_context(history) surfaces contentPruned per row. On a fresh store
+    // (c) s84-m04: rbook_context(history) surfaces contentPruned per row. On a fresh store
     //     nothing is tombstoned, so the assertion is that the FIELD ships and reads false —
     //     a regression that dropped the column mapping would surface as undefined.
-    await h.callOk('cmos_context', {
+    await h.callOk('rbook_context', {
       action: 'snapshot',
       projectRoot: s84Dir,
       source: 'verify-dist',
     });
     const history = h.dataOf(
-      await h.callOk('cmos_context', { action: 'history', projectRoot: s84Dir })
+      await h.callOk('rbook_context', { action: 'history', projectRoot: s84Dir })
     ) as { snapshots?: Array<{ contentPruned?: boolean }> };
     const snaps = history?.snapshots ?? [];
     check(
-      's84-m04: cmos_context(history) surfaces contentPruned per row (false on a fresh store)',
+      's84-m04: rbook_context(history) surfaces contentPruned per row (false on a fresh store)',
       snaps.length > 0 && snaps.every((s) => s.contentPruned === false),
       `snapshots=${JSON.stringify(snaps.map((s) => s.contentPruned))}`
     );
@@ -522,28 +529,28 @@ async function main(): Promise<void> {
     // --- s85-m03: write-side sprint tagging. On a store whose only sprint is Completed, a
     //     session start must persist sprint_id NULL, report advisorySprintId, and warn —
     //     while DISPLAY still names the Completed sprint. Fully drivable over stdio.
-    const m03Dir = mkTmp('cmos-verify-m03-');
-    await h.callOk('cmos_project', {
+    const m03Dir = mkTmp('rbook-verify-m03-');
+    await h.callOk('rbook_project', {
       action: 'init',
       projectRoot: m03Dir,
       projectName: 'verify-m03',
       projectType: 'build', // This fixture verifies Builder's sprint display, not the init default.
     });
-    await h.callOk('cmos_sprint', {
+    await h.callOk('rbook_sprint', {
       action: 'add',
       projectRoot: m03Dir,
       sprintId: 'sp-closed',
       title: 'Closed sprint',
       focus: 'verify',
     });
-    await h.callOk('cmos_sprint', {
+    await h.callOk('rbook_sprint', {
       action: 'complete',
       projectRoot: m03Dir,
       sprintId: 'sp-closed',
       summary: 'closed so nothing is open',
     });
 
-    const m03Start = await h.callOk('cmos_session', {
+    const m03Start = await h.callOk('rbook_session', {
       action: 'start',
       type: 'planning',
       title: 'verify m03',
@@ -564,7 +571,7 @@ async function main(): Promise<void> {
       m03Data?.advisorySprintId === 'sp-closed',
       `advisorySprintId=${JSON.stringify(m03Data?.advisorySprintId)}`
     );
-    // warnings ride the CmosToolResult envelope in structuredContent (dataOf returns only
+    // warnings ride the RbookToolResult envelope in structuredContent (dataOf returns only
     // `.data`), while the text part is the LLM-formatted view.
     const m03Warnings = ((m03Start as { structuredContent?: { warnings?: string[] } })
       .structuredContent?.warnings ?? []) as string[];
@@ -580,7 +587,7 @@ async function main(): Promise<void> {
     );
 
     // Display is deliberately unchanged — onboard still NAMES the Completed sprint.
-    const m03Onboard = h.dataOf(await h.callOk('cmos_agent_onboard', { projectRoot: m03Dir })) as {
+    const m03Onboard = h.dataOf(await h.callOk('rbook_agent_onboard', { projectRoot: m03Dir })) as {
       currentSprint?: { id?: string } | null;
     };
     check(
@@ -590,35 +597,35 @@ async function main(): Promise<void> {
     );
 
     // --- s85-m04 (#487): the WHOLE mission_id path over stdio, not the handler. The router
-    //     at cmos-session.ts forwards `missionId` to complete; if that one line regresses,
+    //     at rbook-session.ts forwards `missionId` to complete; if that one line regresses,
     //     every handler test still passes and this check is the one that fails.
-    const m04Dir = mkTmp('cmos-verify-m04-');
-    await h.callOk('cmos_project', {
+    const m04Dir = mkTmp('rbook-verify-m04-');
+    await h.callOk('rbook_project', {
       action: 'init',
       projectRoot: m04Dir,
       projectName: 'verify-m04',
     });
-    await h.callOk('cmos_sprint', {
+    await h.callOk('rbook_sprint', {
       action: 'add',
       projectRoot: m04Dir,
       sprintId: 'sp-m04',
       title: 'm04',
       focus: 'verify',
     });
-    await h.callOk('cmos_mission', {
+    await h.callOk('rbook_mission', {
       action: 'add',
       projectRoot: m04Dir,
       missionId: 'mv-1',
       name: 'Verify mission',
       sprintId: 'sp-m04',
     });
-    await h.callOk('cmos_session', {
+    await h.callOk('rbook_session', {
       action: 'start',
       type: 'planning',
       title: 'verify m04',
       projectRoot: m04Dir,
     });
-    await h.callOk('cmos_session', {
+    await h.callOk('rbook_session', {
       action: 'complete',
       summary: 'verify m04 close',
       missionId: 'mv-1',
@@ -628,7 +635,7 @@ async function main(): Promise<void> {
     });
 
     const m04Decisions = h.dataOf(
-      await h.callOk('cmos_decisions', {
+      await h.callOk('rbook_decisions', {
         action: 'list',
         missionId: 'mv-1',
         projectRoot: m04Dir,
@@ -642,7 +649,7 @@ async function main(): Promise<void> {
     );
 
     const m04Steps = h.dataOf(
-      await h.callOk('cmos_context', {
+      await h.callOk('rbook_context', {
         action: 'next_steps',
         nextStepAction: 'list',
         missionId: 'mv-1',
@@ -658,7 +665,7 @@ async function main(): Promise<void> {
     // A mission with nothing stamped returns none rather than everything — proves the
     // predicate is applied rather than ignored.
     const m04Empty = h.dataOf(
-      await h.callOk('cmos_decisions', {
+      await h.callOk('rbook_decisions', {
         action: 'list',
         missionId: 'mv-absent',
         projectRoot: m04Dir,
@@ -670,26 +677,29 @@ async function main(): Promise<void> {
       `decisions=${JSON.stringify(m04Empty?.decisions)}`
     );
 
-    // --- s86-m02: the ENVELOPE warnings channel (CmosToolResult.warnings) has to be readable
+    // --- s86-m02: the ENVELOPE warnings channel (RbookToolResult.warnings) has to be readable
     //     in content[0].text, not just present in structuredContent. Before this mission 57 of
     //     76 leaf formatters never rendered it, so a warning could ship fully populated and
     //     stay invisible to every agent — which is exactly how s85-m04's own missionId advisory
     //     shipped invisible in 2.5.0. Checking structuredContent.warnings ALONE is what let that
     //     happen, so each check below asserts BOTH sides and the text side is the load-bearing one.
-    const m02Dir = mkTmp('cmos-verify-s86m02-');
-    await h.callOk('cmos_project', {
+    const m02Dir = mkTmp('rbook-verify-s86m02-');
+    // s95-m06: a Builder, because the advisory names open missions and a Ledger keeps none. These
+    // checks are about how warnings render, not about levels.
+    await h.callOk('rbook_project', {
       action: 'init',
       projectRoot: m02Dir,
       name: 's86-m02 verify',
+      projectType: 'build',
     });
-    await h.callOk('cmos_sprint', {
+    await h.callOk('rbook_sprint', {
       action: 'add',
       sprintId: 'sp-open',
       title: 'Open sprint',
       focus: 'verify the warnings channel',
       projectRoot: m02Dir,
     });
-    await h.callOk('cmos_mission', {
+    await h.callOk('rbook_mission', {
       action: 'add',
       missionId: 'wm-1',
       name: 'An open mission',
@@ -697,12 +707,12 @@ async function main(): Promise<void> {
       sprintId: 'sp-open',
       projectRoot: m02Dir,
     });
-    await h.callOk('cmos_mission_transition', {
+    await h.callOk('rbook_mission_transition', {
       action: 'start',
       missionId: 'wm-1',
       projectRoot: m02Dir,
     });
-    await h.callOk('cmos_session', {
+    await h.callOk('rbook_session', {
       action: 'start',
       type: 'planning',
       title: 'verify m02',
@@ -710,9 +720,9 @@ async function main(): Promise<void> {
     });
 
     // DISPATCHER-rendered: index.ts calls formatSessionForLLM, which delegates to the
-    // formatSessionCaptureForLLM leaf. The advisory is built in cmos-session-capture.ts and
+    // formatSessionCaptureForLLM leaf. The advisory is built in rbook-session-capture.ts and
     // handed to createSuccess; until s86-m02 the leaf never read result.warnings.
-    const m02Capture = await h.callOk('cmos_session', {
+    const m02Capture = await h.callOk('rbook_session', {
       action: 'capture',
       category: 'decision',
       content: 'A decision captured with no missionId while a mission is open.',
@@ -740,21 +750,21 @@ async function main(): Promise<void> {
     // LEAF-rendered with NO dispatcher in the path: index.ts calls formatAgentOnboardForLLM
     // directly (index.ts:727). The two paths can drop the render independently, so both are
     // checked. Trigger is an orphaned sprint — deterministic and offline; the auth/sync warnings
-    // that would exercise cmos_review's envelope need a reachable dashboard, so they are not
+    // that would exercise rbook_review's envelope need a reachable dashboard, so they are not
     // provable in this gate and are deliberately not asserted here rather than asserted vacuously.
-    await h.callOk('cmos_sprint', {
+    await h.callOk('rbook_sprint', {
       action: 'add',
       sprintId: 'sp-orphan',
       title: 'Sprint with no missions',
       focus: 'trigger an orphan warning',
       projectRoot: m02Dir,
     });
-    const m02Onboard = await h.callOk('cmos_agent_onboard', { projectRoot: m02Dir });
+    const m02Onboard = await h.callOk('rbook_agent_onboard', { projectRoot: m02Dir });
     const m02OnboardWarnings = ((m02Onboard as { structuredContent?: { warnings?: string[] } })
       .structuredContent?.warnings ?? []) as string[];
     const m02OnboardText = h.textOf(m02Onboard);
     check(
-      's86-m02: cmos_agent_onboard carries an envelope warning (orphaned sprint)',
+      's86-m02: rbook_agent_onboard carries an envelope warning (orphaned sprint)',
       m02OnboardWarnings.some((w) => /orphaned sprint/.test(w)),
       `warnings=${JSON.stringify(m02OnboardWarnings)}`
     );
@@ -779,20 +789,20 @@ async function main(): Promise<void> {
     //     statusFilter, expiresAt and agentFeedback all ship dead. The failures are forced at the
     //     DATABASE (a dangling FK, a RAISE trigger) rather than by stubbing anything, so this
     //     also proves the SQL matches the store — a mock cannot do that.
-    const m02bDir = mkTmp('cmos-verify-s86m02b-');
-    await h.callOk('cmos_project', {
+    const m02bDir = mkTmp('rbook-verify-s86m02b-');
+    await h.callOk('rbook_project', {
       action: 'init',
       projectRoot: m02bDir,
       name: 's86-m02b verify',
     });
-    await h.callOk('cmos_session', {
+    await h.callOk('rbook_session', {
       action: 'start',
       type: 'planning',
       title: 'verify m02b',
       projectRoot: m02bDir,
     });
 
-    const m02bDb = path.join(m02bDir, 'cmos', 'db', 'cmos.sqlite');
+    const m02bDb = path.join(m02bDir, 'rbook', 'db', 'rbook.sqlite');
     let m02bMasterContext: Record<string, unknown>;
     const m02bAtomicState = () => {
       const db = new Database(m02bDb, { readonly: true });
@@ -841,7 +851,7 @@ async function main(): Promise<void> {
       content: 's86-m02b — this decision INSERT is expected to fail its FK',
       projectRoot: m02bDir,
     };
-    const m02bCapture = await h.callTool('cmos_session', m02bCaptureParams);
+    const m02bCapture = await h.callTool('rbook_session', m02bCaptureParams);
     const m02bCaptureText = h.textOf(m02bCapture);
     const m02bEnvelope = m02bCapture.structuredContent as
       | {
@@ -909,7 +919,7 @@ async function main(): Promise<void> {
         db.close();
       }
     }
-    const m02bRetry = await h.callOk('cmos_session', m02bCaptureParams);
+    const m02bRetry = await h.callOk('rbook_session', m02bCaptureParams);
     const m02bAfterRetry = m02bAtomicState();
     const m02bRetryData = h.dataOf(m02bRetry) as {
       decisionExtractionCount?: number;
@@ -931,7 +941,7 @@ async function main(): Promise<void> {
 
     // Mode (i): from a REAL project cwd, a pin-only read (mission list, no projectRoot)
     // resolves to the sender and succeeds — scoped, not fanned out.
-    const pinnedRead = await h.callTool('cmos_mission', { action: 'list' });
+    const pinnedRead = await h.callTool('rbook_mission', { action: 'list' });
     check(
       'pin-only read from a real cwd resolves to the sender (not isError)',
       pinnedRead.isError !== true
@@ -939,7 +949,7 @@ async function main(): Promise<void> {
 
     // Mode (ii): from a NEUTRAL dir with a multi-project registry, the same read fails
     // CLOSED (SenderResolutionError) rather than walking every project.
-    const neutralDir = mkTmp('cmos-verify-neutral-');
+    const neutralDir = mkTmp('rbook-verify-neutral-');
     const h2 = await connectStdioServer({
       serverPath: DIST_SERVER,
       cwd: neutralDir,
@@ -947,7 +957,7 @@ async function main(): Promise<void> {
       clientName: 'verify-dist-neutral',
     });
     try {
-      const neutralRead = await h2.callTool('cmos_mission', { action: 'list' });
+      const neutralRead = await h2.callTool('rbook_mission', { action: 'list' });
       check(
         'pin-only read from a neutral multi-project dir fails CLOSED (isError, no fan-out)',
         neutralRead.isError === true,
@@ -971,11 +981,11 @@ async function main(): Promise<void> {
         { enum?: unknown[]; items?: { enum?: unknown[] } }
       >;
 
-    const ctxProps = propsOf('cmos_context');
-    const sessProps = propsOf('cmos_session');
-    check('dist advertises cmos_context.statusFilter', ctxProps.statusFilter !== undefined);
-    check('dist advertises cmos_session.expiresAt', sessProps.expiresAt !== undefined);
-    check('dist advertises cmos_session.agentFeedback', sessProps.agentFeedback !== undefined);
+    const ctxProps = propsOf('rbook_context');
+    const sessProps = propsOf('rbook_session');
+    check('dist advertises rbook_context.statusFilter', ctxProps.statusFilter !== undefined);
+    check('dist advertises rbook_session.expiresAt', sessProps.expiresAt !== undefined);
+    check('dist advertises rbook_session.agentFeedback', sessProps.agentFeedback !== undefined);
     // NO ENUM on either surface — the filter spans two tables whose live status vocabularies
     // differ, and stores hold an out-of-enum 'stale' (set explicitly, or by servers before 3.3.0,
     // which wrote it on their own). A closed enum would manufacture, in
@@ -985,7 +995,7 @@ async function main(): Promise<void> {
       ctxProps.statusFilter?.enum === undefined && ctxProps.statusFilter?.items?.enum === undefined
     );
 
-    const distDb = path.join(projectDir, 'cmos', 'db', 'cmos.sqlite');
+    const distDb = path.join(projectDir, 'rbook', 'db', 'rbook.sqlite');
     const readDb = <T>(fn: (db: Database.Database) => T): T => {
       const db = new Database(distDb, { readonly: true });
       try {
@@ -1003,7 +1013,7 @@ async function main(): Promise<void> {
       }
     };
 
-    await h.callOk('cmos_session', {
+    await h.callOk('rbook_session', {
       action: 'start',
       title: 's86-m03 dist verification',
       projectRoot: projectDir,
@@ -1011,7 +1021,7 @@ async function main(): Promise<void> {
 
     // (1) evergreen on reaffirm — the motivating defect. Read the COLUMN back, never the response:
     // asserting on the response passes against this bug forever.
-    await h.callOk('cmos_session', {
+    await h.callOk('rbook_session', {
       action: 'capture',
       category: 'learning',
       content: 's86-m03 dist verification learning',
@@ -1027,7 +1037,7 @@ async function main(): Promise<void> {
     );
     check('dist: a learning was captured to reaffirm', learningId !== undefined);
     if (learningId !== undefined) {
-      await h.callOk('cmos_learnings', {
+      await h.callOk('rbook_learnings', {
         action: 'reaffirm',
         learningId,
         evergreen: true,
@@ -1041,12 +1051,12 @@ async function main(): Promise<void> {
             }
           ).evergreen
       );
-      check('dist: cmos_learnings(reaffirm, evergreen=true) writes evergreen=1', ever === 1);
+      check('dist: rbook_learnings(reaffirm, evergreen=true) writes evergreen=1', ever === 1);
     }
 
     // (2) expiresAt — read constraints.expires_at back.
     const EXPIRY = '2027-03-20T00:00:00.000Z';
-    await h.callOk('cmos_session', {
+    await h.callOk('rbook_session', {
       action: 'capture',
       category: 'constraint',
       content: 's86-m03 dist verification constraint',
@@ -1064,12 +1074,12 @@ async function main(): Promise<void> {
         )?.expires_at
     );
     check(
-      `dist: cmos_session(capture).expiresAt persists to constraints.expires_at`,
+      `dist: rbook_session(capture).expiresAt persists to constraints.expires_at`,
       expiresAt === EXPIRY
     );
 
     // (3) statusFilter — a decision the ['active'] default cannot reach becomes reachable.
-    await h.callOk('cmos_session', {
+    await h.callOk('rbook_session', {
       action: 'capture',
       category: 'decision',
       content: 's86-m03 zzdistprobe decision for the status filter',
@@ -1084,13 +1094,13 @@ async function main(): Promise<void> {
     );
     const countHits = (res: { structuredContent?: { data?: unknown } }): number =>
       ((res.structuredContent?.data as { results?: unknown[] })?.results ?? []).length;
-    const defaultSearch = await h.callOk('cmos_context', {
+    const defaultSearch = await h.callOk('rbook_context', {
       action: 'search',
       query: 'zzdistprobe',
       searchTypes: ['decision'],
       projectRoot: projectDir,
     });
-    const filteredSearch = await h.callOk('cmos_context', {
+    const filteredSearch = await h.callOk('rbook_context', {
       action: 'search',
       query: 'zzdistprobe',
       searchTypes: ['decision'],
@@ -1103,13 +1113,13 @@ async function main(): Promise<void> {
       `got ${countHits(defaultSearch)} hits`
     );
     check(
-      'dist: cmos_context(search).statusFilter=["superseded"] reaches it',
+      'dist: rbook_context(search).statusFilter=["superseded"] reaches it',
       countHits(filteredSearch) > 0,
       `got ${countHits(filteredSearch)} hits`
     );
 
     // (4) agentFeedback — the row must carry the REGISTERED tool name, not the retired one.
-    await h.callOk('cmos_session', {
+    await h.callOk('rbook_session', {
       action: 'complete',
       summary: 's86-m03 dist verification close',
       agentFeedback: 's86-m03 dist verification feedback',
@@ -1123,10 +1133,10 @@ async function main(): Promise<void> {
           )
           .all() as Array<{ tool_name: string }>
     );
-    check('dist: cmos_session(complete).agentFeedback files exactly one row', fbRows.length === 1);
+    check('dist: rbook_session(complete).agentFeedback files exactly one row', fbRows.length === 1);
     check(
-      "dist: that row's tool_name is the REGISTERED 'cmos_session' (not the retired cmos_session_complete)",
-      fbRows[0]?.tool_name === 'cmos_session',
+      "dist: that row's tool_name is the REGISTERED 'rbook_session' (not the retired rbook_session_complete)",
+      fbRows[0]?.tool_name === 'rbook_session',
       `got ${fbRows[0]?.tool_name}`
     );
 
@@ -1144,42 +1154,42 @@ async function main(): Promise<void> {
       >;
 
     check(
-      'dist: cmos_decisions.decisionId publishes integer (was number)',
-      m04Props('cmos_decisions').decisionId?.type === 'integer',
-      `got ${m04Props('cmos_decisions').decisionId?.type}`
+      'dist: rbook_decisions.decisionId publishes integer (was number)',
+      m04Props('rbook_decisions').decisionId?.type === 'integer',
+      `got ${m04Props('rbook_decisions').decisionId?.type}`
     );
     check(
-      'dist: cmos_decisions.decisionIds items publish integer (array elements too)',
-      m04Props('cmos_decisions').decisionIds?.items?.type === 'integer',
-      `got ${m04Props('cmos_decisions').decisionIds?.items?.type}`
+      'dist: rbook_decisions.decisionIds items publish integer (array elements too)',
+      m04Props('rbook_decisions').decisionIds?.items?.type === 'integer',
+      `got ${m04Props('rbook_decisions').decisionIds?.items?.type}`
     );
     check(
-      'dist: cmos_context.recencyWeight STILL publishes number (a blanket replace would break it)',
-      m04Props('cmos_context').recencyWeight?.type === 'number',
-      `got ${m04Props('cmos_context').recencyWeight?.type}`
+      'dist: rbook_context.recencyWeight STILL publishes number (a blanket replace would break it)',
+      m04Props('rbook_context').recencyWeight?.type === 'number',
+      `got ${m04Props('rbook_context').recencyWeight?.type}`
     );
     check(
-      "dist: cmos_learnings.status publishes 'stale' — a value stores hold (explicit, or written by servers before 3.3.0)",
-      (m04Props('cmos_learnings').status?.enum ?? []).includes('stale'),
-      `got [${m04Props('cmos_learnings').status?.enum}]`
+      "dist: rbook_learnings.status publishes 'stale' — a value stores hold (explicit, or written by servers before 3.3.0)",
+      (m04Props('rbook_learnings').status?.enum ?? []).includes('stale'),
+      `got [${m04Props('rbook_learnings').status?.enum}]`
     );
     check(
-      'dist: cmos_learnings.category publishes NO enum (the column has no CHECK)',
-      m04Props('cmos_learnings').category?.enum === undefined,
-      `got [${m04Props('cmos_learnings').category?.enum}]`
+      'dist: rbook_learnings.category publishes NO enum (the column has no CHECK)',
+      m04Props('rbook_learnings').category?.enum === undefined,
+      `got [${m04Props('rbook_learnings').category?.enum}]`
     );
 
     // PROBE BEFORE ENCODING (Process Hardening #5). Next-step #501 asserts "an MCP host validating
     // against the published schema accepts pageSize=2.5 and the server then rejects it." Nothing in
     // the server rejects it — the consolidated schemas are never parsed. Drive it and RECORD what
     // actually happens, so the release notes describe an observation rather than an assumption.
-    const floatPage = await h.callTool('cmos_learnings', {
+    const floatPage = await h.callTool('rbook_learnings', {
       action: 'list',
       pageSize: 2.5,
       projectRoot: projectDir,
     });
     console.log(
-      `  … OBSERVED (s86-m04 CORRECTION 4 probe) cmos_learnings(list, pageSize=2.5): ` +
+      `  … OBSERVED (s86-m04 CORRECTION 4 probe) rbook_learnings(list, pageSize=2.5): ` +
         `isError=${floatPage.isError === true}; text="${textOf(floatPage).slice(0, 160).replace(/\n/g, ' ')}"`
     );
     check(
@@ -1191,18 +1201,18 @@ async function main(): Promise<void> {
     // REAL-STORE POSITIVE FIRE on a tmpdir COPY. The widened enum has to work against the live
     // table's actual constraint set — NOT NULL project_id/stable_event_id/occurred_at/origin_seq
     // plus an event_type CHECK — which the seeded fixture does not reproduce.
-    const liveDb = path.join(REPO_ROOT, 'cmos', 'db', 'cmos.sqlite');
+    const liveDb = resolveRecordPaths(REPO_ROOT).dbPath;
     if (fs.existsSync(liveDb)) {
       const liveBefore = fs.statSync(liveDb);
-      const copyRoot = mkTmp('cmos-verify-m04-realstore-');
-      const copyDbDir = path.join(copyRoot, 'cmos', 'db');
+      const copyRoot = mkTmp('rbook-verify-m04-realstore-');
+      const copyDbDir = path.join(copyRoot, 'rbook', 'db');
       fs.mkdirSync(copyDbDir, { recursive: true });
       for (const suffix of ['', '-wal', '-shm']) {
         if (fs.existsSync(`${liveDb}${suffix}`)) {
-          fs.copyFileSync(`${liveDb}${suffix}`, path.join(copyDbDir, `cmos.sqlite${suffix}`));
+          fs.copyFileSync(`${liveDb}${suffix}`, path.join(copyDbDir, `rbook.sqlite${suffix}`));
         }
       }
-      const copyDb = path.join(copyDbDir, 'cmos.sqlite');
+      const copyDb = path.join(copyDbDir, 'rbook.sqlite');
       const db = new Database(copyDb);
       try {
         const projectId = (
@@ -1246,18 +1256,18 @@ async function main(): Promise<void> {
         db.close();
       }
 
-      const staleLearnings = await h.callOk('cmos_learnings', {
+      const staleLearnings = await h.callOk('rbook_learnings', {
         action: 'list',
         status: 'stale',
         projectRoot: copyRoot,
       });
       check(
-        "dist: cmos_learnings(list, status='stale') returns the real-store row the enum used to forbid",
+        "dist: rbook_learnings(list, status='stale') returns the real-store row the enum used to forbid",
         textOf(staleLearnings).includes('zzstaleprobe'),
         `text=${textOf(staleLearnings).slice(0, 160)}`
       );
 
-      const staleDecisions = await h.callOk('cmos_decisions', {
+      const staleDecisions = await h.callOk('rbook_decisions', {
         action: 'list',
         status: 'stale',
         projectRoot: copyRoot,
@@ -1266,7 +1276,7 @@ async function main(): Promise<void> {
         | { decisions?: unknown[] }
         | undefined;
       check(
-        "dist: cmos_decisions(list, status='stale') returns the stale decision the copy was seeded with",
+        "dist: rbook_decisions(list, status='stale') returns the stale decision the copy was seeded with",
         textOf(staleDecisions).includes('zzstaleprobe'),
         `got ${(staleDecisionData?.decisions ?? []).length}: ${textOf(staleDecisions).slice(0, 160)}`
       );
@@ -1297,9 +1307,9 @@ async function main(): Promise<void> {
 
       // (1) THE ACTION IS ON THE WIRE. A move implemented but unadvertised is a capability no
       //     MCP host can reach — the exact shape of the three params that shipped dead.
-      const missionActions = m08Props('cmos_mission').action?.enum ?? [];
+      const missionActions = m08Props('rbook_mission').action?.enum ?? [];
       check(
-        "s86-m08: dist advertises cmos_mission(action='move') on the wire",
+        "s86-m08: dist advertises rbook_mission(action='move') on the wire",
         missionActions.includes('move'),
         `got [${missionActions.join(',')}]`
       );
@@ -1309,8 +1319,8 @@ async function main(): Promise<void> {
         `got ${tools.tools.length}`
       );
 
-      const m08Dir = mkTmp('cmos-verify-s86m08-');
-      await h.callOk('cmos_project', {
+      const m08Dir = mkTmp('rbook-verify-s86m08-');
+      await h.callOk('rbook_project', {
         action: 'init',
         projectRoot: m08Dir,
         name: 's86-m08 verify',
@@ -1319,7 +1329,7 @@ async function main(): Promise<void> {
         ['sp-from', 'Origin sprint'],
         ['sp-to', 'Destination sprint'],
       ]) {
-        await h.callOk('cmos_sprint', {
+        await h.callOk('rbook_sprint', {
           action: 'add',
           sprintId,
           title,
@@ -1332,7 +1342,7 @@ async function main(): Promise<void> {
         ['mv-parked', 'A mission that gets parked'],
         ['mv-moved', 'A mission that gets moved'],
       ]) {
-        await h.callOk('cmos_mission', {
+        await h.callOk('rbook_mission', {
           action: 'add',
           missionId,
           name,
@@ -1344,14 +1354,14 @@ async function main(): Promise<void> {
 
       // (2) THE MOVE ACTUALLY MOVES — asserted on the COLUMN, not the answer. An answer-only
       //     assertion passes against a handler that reports a move it never wrote.
-      await h.callOk('cmos_mission', {
+      await h.callOk('rbook_mission', {
         action: 'move',
         missionId: 'mv-moved',
         toSprintId: 'sp-to',
         reason: 'verify:dist — the supported re-bind',
         projectRoot: m08Dir,
       });
-      const m08Db = path.join(m08Dir, 'cmos', 'db', 'cmos.sqlite');
+      const m08Db = path.join(m08Dir, 'rbook', 'db', 'rbook.sqlite');
       const readM08 = <T>(fn: (db: Database.Database) => T): T => {
         const db = new Database(m08Db, { readonly: true });
         try {
@@ -1361,7 +1371,7 @@ async function main(): Promise<void> {
         }
       };
       check(
-        's86-m08: cmos_mission(move) rewrote missions.sprint_id to the destination',
+        's86-m08: rbook_mission(move) rewrote missions.sprint_id to the destination',
         readM08(
           (db) =>
             (
@@ -1375,34 +1385,34 @@ async function main(): Promise<void> {
       // (3) THE PARKED DENOMINATOR, on BOTH read actions. Deferring a mission must REMOVE it
       //     from totalMissions and surface it as parkedMissions — the whole point is that a
       //     sprint stops being punished in its own denominator for parking work honestly.
-      await h.callOk('cmos_mission_transition', {
+      await h.callOk('rbook_mission_transition', {
         action: 'defer',
         missionId: 'mv-parked',
         reason: 'verify:dist — park it so the denominator has something to exclude',
         projectRoot: m08Dir,
       });
 
-      const m08List = await h.callOk('cmos_sprint', { action: 'list', projectRoot: m08Dir });
+      const m08List = await h.callOk('rbook_sprint', { action: 'list', projectRoot: m08Dir });
       const listRow = (
         ((m08List.structuredContent?.data as { sprints?: Array<Record<string, unknown>> })
           ?.sprints ?? []) as Array<Record<string, unknown>>
       ).find((s) => s.id === 'sp-from');
       check(
-        's86-m08: cmos_sprint(list) carries parkedMissions and EXCLUDES the parked row from totalMissions',
+        's86-m08: rbook_sprint(list) carries parkedMissions and EXCLUDES the parked row from totalMissions',
         listRow?.totalMissions === 1 && listRow?.parkedMissions === 1,
         `total=${String(listRow?.totalMissions)} parked=${String(listRow?.parkedMissions)} (expected 1/1)`
       );
 
-      const m08Show = await h.callOk('cmos_sprint', {
+      const m08Show = await h.callOk('rbook_sprint', {
         action: 'show',
         sprintId: 'sp-from',
         projectRoot: m08Dir,
       });
-      // The show payload is FLAT (cmos-sprint-show.ts:236-257) — the counts sit on `data`
+      // The show payload is FLAT (rbook-sprint-show.ts:236-257) — the counts sit on `data`
       // itself, not under a nested `sprint` key as the list rows do.
       const showSprint = m08Show.structuredContent?.data as Record<string, unknown> | undefined;
       check(
-        's86-m08: cmos_sprint(show) reports the SAME corrected pair — the two actions cannot drift',
+        's86-m08: rbook_sprint(show) reports the SAME corrected pair — the two actions cannot drift',
         showSprint?.totalMissions === 1 && showSprint?.parkedMissions === 1,
         `total=${String(showSprint?.totalMissions)} parked=${String(showSprint?.parkedMissions)} (expected 1/1)`
       );
@@ -1410,13 +1420,13 @@ async function main(): Promise<void> {
       // (4) The FOURTH newly-reachable param's ANSWER shape. The column write is asserted at
       //     (1) in the m03 block above; this is the published response contract beside it —
       //     a caller must be able to see whether the flag actually moved.
-      await h.callOk('cmos_session', {
+      await h.callOk('rbook_session', {
         action: 'start',
         type: 'planning',
         title: 'verify m08/m09',
         projectRoot: m08Dir,
       });
-      await h.callOk('cmos_session', {
+      await h.callOk('rbook_session', {
         action: 'capture',
         category: 'learning',
         content: 's86-m09 reaffirm answer-shape learning',
@@ -1431,7 +1441,7 @@ async function main(): Promise<void> {
           )?.id
       );
       if (m08LearningId !== undefined) {
-        const reaffirmed = await h.callOk('cmos_learnings', {
+        const reaffirmed = await h.callOk('rbook_learnings', {
           action: 'reaffirm',
           learningId: m08LearningId,
           evergreen: true,
@@ -1441,7 +1451,7 @@ async function main(): Promise<void> {
           | { previousEvergreen?: boolean; newEvergreen?: boolean }
           | undefined;
         check(
-          's86-m03: cmos_learnings(reaffirm) reports previousEvergreen/newEvergreen so a caller sees the transition',
+          's86-m03: rbook_learnings(reaffirm) reports previousEvergreen/newEvergreen so a caller sees the transition',
           rd?.previousEvergreen === false && rd?.newEvergreen === true,
           `previous=${String(rd?.previousEvergreen)} new=${String(rd?.newEvergreen)}`
         );
@@ -1451,23 +1461,23 @@ async function main(): Promise<void> {
       //     and m09 criterion 10). A tmpdir COPY of the live store still carries the OLD
       //     sprint_summary definition; driving the SHIPPED dist over stdio must upgrade it.
       //     A seeded fixture cannot prove this — it is created with the new view already.
-      const liveForView = path.join(REPO_ROOT, 'cmos', 'db', 'cmos.sqlite');
+      const liveForView = resolveRecordPaths(REPO_ROOT).dbPath;
       if (fs.existsSync(liveForView)) {
         // Read BEFORE the fire — comparing an after-reading to another after-reading is a check
         // that cannot fail, which is what the m04 block above shipped until this mission.
         const liveViewBefore = fs.statSync(liveForView);
-        const viewRoot = mkTmp('cmos-verify-m09-viewmigration-');
-        const viewDbDir = path.join(viewRoot, 'cmos', 'db');
+        const viewRoot = mkTmp('rbook-verify-m09-viewmigration-');
+        const viewDbDir = path.join(viewRoot, 'rbook', 'db');
         fs.mkdirSync(viewDbDir, { recursive: true });
         for (const suffix of ['', '-wal', '-shm']) {
           if (fs.existsSync(`${liveForView}${suffix}`)) {
             fs.copyFileSync(
               `${liveForView}${suffix}`,
-              path.join(viewDbDir, `cmos.sqlite${suffix}`)
+              path.join(viewDbDir, `rbook.sqlite${suffix}`)
             );
           }
         }
-        const viewDb = path.join(viewDbDir, 'cmos.sqlite');
+        const viewDb = path.join(viewDbDir, 'rbook.sqlite');
         const viewSql = (): string | undefined => {
           const db = new Database(viewDb, { readonly: true });
           try {
@@ -1488,7 +1498,7 @@ async function main(): Promise<void> {
         // version derived the "was old" precondition from whatever DDL the live store happened to
         // carry. That was true only until the live store got migrated — and s86-m09's OWN close
         // migrates it, because `ensureSprintSummaryView` upgrades the view on the first
-        // cmos_sprint(list|show|analytics) against any writable store and criterion 21 requires
+        // rbook_sprint(list|show|analytics) against any writable store and criterion 21 requires
         // exactly that read. So the gate would have gone green once and then RED FOREVER, on the
         // repo's load-bearing release check, for a reason no future reader could have guessed.
         //
@@ -1514,8 +1524,8 @@ async function main(): Promise<void> {
           `sql=${(beforeSql ?? 'MISSING').slice(0, 120)}`
         );
 
-        await h.callOk('cmos_sprint', { action: 'analytics', projectRoot: viewRoot });
-        await h.callOk('cmos_sprint', { action: 'list', projectRoot: viewRoot });
+        await h.callOk('rbook_sprint', { action: 'analytics', projectRoot: viewRoot });
+        await h.callOk('rbook_sprint', { action: 'list', projectRoot: viewRoot });
 
         let parkedReadable = false;
         let parkedDetail = '';
@@ -1542,17 +1552,17 @@ async function main(): Promise<void> {
         let readonlyOk = false;
         let readonlyDetail = '';
         try {
-          const { CmosDatabaseClient } = require(
-            path.join(REPO_ROOT, 'dist', 'tools', 'cmos', 'client.js')
+          const { RbookDatabaseClient } = require(
+            path.join(REPO_ROOT, 'dist', 'tools', 'rbook', 'client.js')
           ) as {
-            CmosDatabaseClient: {
+            RbookDatabaseClient: {
               create: (o: {
                 dbPath: string;
                 readonly: boolean;
               }) => Promise<{ success: boolean; data?: { close: () => void } }>;
             };
           };
-          const res = await CmosDatabaseClient.create({ dbPath: viewDb, readonly: true });
+          const res = await RbookDatabaseClient.create({ dbPath: viewDb, readonly: true });
           readonlyOk = res.success === true;
           res.data?.close();
         } catch (err) {
@@ -1577,22 +1587,22 @@ async function main(): Promise<void> {
 
     // --- s86-m04 Part B: ACTION_PARAMS, checked against the COMPILED barrel ---------------
     //
-    // The renderer reads CMOS_ACTION_PARAMS from dist (scripts/generate-tool-reference.js), so a
+    // The renderer reads RBOOK_ACTION_PARAMS from dist (scripts/generate-tool-reference.js), so a
     // map that exists in src and not in the build would produce a TOOL_REFERENCE.md that silently
     // reverted — except it cannot, because the renderer throws. This asserts the compiled side
     // directly, and asserts the thing that must NOT have changed: the wire payload.
     // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const distBarrel = require(path.join(REPO_ROOT, 'dist', 'tools', 'cmos', 'index.js')) as {
-      CMOS_ACTION_PARAMS?: Record<string, Record<string, readonly string[]>>;
+    const distBarrel = require(path.join(REPO_ROOT, 'dist', 'tools', 'rbook', 'index.js')) as {
+      RBOOK_ACTION_PARAMS?: Record<string, Record<string, readonly string[]>>;
     };
-    const distMaps = distBarrel.CMOS_ACTION_PARAMS ?? {};
+    const distMaps = distBarrel.RBOOK_ACTION_PARAMS ?? {};
     const wireActionBearing = m04Tools.tools.filter((t) =>
       Array.isArray(
         (t.inputSchema?.properties as { action?: { enum?: unknown[] } } | undefined)?.action?.enum
       )
     );
     check(
-      'dist barrel exports CMOS_ACTION_PARAMS for exactly the action-bearing tools on the wire',
+      'dist barrel exports RBOOK_ACTION_PARAMS for exactly the action-bearing tools on the wire',
       Object.keys(distMaps).sort().join(',') ===
         wireActionBearing
           .map((t) => t.name)
@@ -1618,10 +1628,10 @@ async function main(): Promise<void> {
     // even if every definition carried the key. The compiled definition objects are where such a
     // key would exist, so that is where the negative is asserted.
     const distDefs = (
-      require(path.join(REPO_ROOT, 'dist', 'tools', 'cmos', 'index.js')) as {
-        CMOS_TOOL_DEFINITIONS: Array<Record<string, unknown>>;
+      require(path.join(REPO_ROOT, 'dist', 'tools', 'rbook', 'index.js')) as {
+        RBOOK_TOOL_DEFINITIONS: Array<Record<string, unknown>>;
       }
-    ).CMOS_TOOL_DEFINITIONS;
+    ).RBOOK_TOOL_DEFINITIONS;
     const MCP_TOOL_KEYS = new Set(['name', 'description', 'inputSchema', 'annotations', 'title']);
     const strayKeys = distDefs.flatMap((d) =>
       Object.keys(d)
@@ -1644,16 +1654,16 @@ async function main(): Promise<void> {
     // ─── s87-m01: the mission-transition crash must not ship ────────────────────────────────
     //
     // THIS IS THE ONLY CHECK THAT SEES THE PUBLISHED ARTIFACT. 2.6.0 shipped a `TypeError` in
-    // `dist/tools/cmos/errors.js`: `VALID_STATE_TRANSITIONS[currentStatus]` followed by an
+    // `dist/tools/rbook/errors.js`: `VALID_STATE_TRANSITIONS[currentStatus]` followed by an
     // unguarded `.length`, reached by six handlers, thrown for any stored status outside the
     // published enum — and this repo's own store holds mission B1.1 at status 'Archived'. The
-    // in-process matrix in `tests/tools/cmos/remedy-reachability.test.ts` drives `src/`; only
+    // in-process matrix in `tests/tools/rbook/remedy-reachability.test.ts` drives `src/`; only
     // this drives what npm receives.
-    const CMOS_DIST = path.join(REPO_ROOT, 'dist', 'tools', 'cmos');
+    const RBOOK_DIST = path.join(REPO_ROOT, 'dist', 'tools', 'rbook');
     const distJs = fs
-      .readdirSync(CMOS_DIST)
+      .readdirSync(RBOOK_DIST)
       .filter((f) => f.endsWith('.js'))
-      .map((f) => ({ file: f, text: fs.readFileSync(path.join(CMOS_DIST, f), 'utf8') }));
+      .map((f) => ({ file: f, text: fs.readFileSync(path.join(RBOOK_DIST, f), 'utf8') }));
 
     // (a) EVERY dynamic lookup resolves through the shared guarded helper. A literal index
     //     (`VALID_STATE_TRANSITIONS['Blocked']`) is safe by construction and stays allowed; a
@@ -1676,13 +1686,13 @@ async function main(): Promise<void> {
     // (b) The helper is actually WIRED, at every site that used to carry the bare index. Named
     //     files, not a count — a count alone passes if six calls land in one file.
     const HELPER_CALLERS = [
-      'cmos-mission-start.js',
-      'cmos-mission-complete.js',
-      'cmos-mission-block.js',
-      'cmos-mission-drop.js',
-      'cmos-mission-defer.js',
-      'cmos-mission-update.js',
-      'cmos-mission-move.js',
+      'rbook-mission-start.js',
+      'rbook-mission-complete.js',
+      'rbook-mission-block.js',
+      'rbook-mission-drop.js',
+      'rbook-mission-defer.js',
+      'rbook-mission-update.js',
+      'rbook-mission-move.js',
     ];
     // Matched against the COMPILED form: tsc emits a cross-module call as
     // `(0, errors_1.transitionsFrom)(currentStatus)`, so a bare `transitionsFrom(` substring
@@ -1714,26 +1724,26 @@ async function main(): Promise<void> {
     //     real store the way import and peer-merge paths do, then drive every transition. Each
     //     must return a structured refusal that NAMES the status — not a TOOL_EXECUTION_ERROR
     //     telling the operator to retry a call that can never succeed.
-    const projectDirM01 = mkTmp('cmos-verify-s87m01-');
-    await h.callOk('cmos_project', {
+    const projectDirM01 = mkTmp('rbook-verify-s87m01-');
+    await h.callOk('rbook_project', {
       action: 'init',
       projectRoot: projectDirM01,
       projectName: 'verify-s87m01',
     });
-    await h.callOk('cmos_sprint', {
+    await h.callOk('rbook_sprint', {
       action: 'add',
       sprintId: 'sprint-m01',
       title: 'verify s87-m01',
       projectRoot: projectDirM01,
     });
-    await h.callOk('cmos_mission', {
+    await h.callOk('rbook_mission', {
       action: 'add',
       missionId: 'vm-01',
       name: 'verify s87-m01 mission',
       sprintId: 'sprint-m01',
       projectRoot: projectDirM01,
     });
-    const m01Db = new Database(path.join(projectDirM01, 'cmos', 'db', 'cmos.sqlite'));
+    const m01Db = new Database(path.join(projectDirM01, 'rbook', 'db', 'rbook.sqlite'));
     const forced = m01Db
       .prepare(`UPDATE missions SET status = 'Archived' WHERE id = 'vm-01'`)
       .run().changes;
@@ -1745,7 +1755,7 @@ async function main(): Promise<void> {
     );
 
     for (const action of ['start', 'complete', 'block', 'drop', 'defer'] as const) {
-      const res = await h.callTool('cmos_mission_transition', {
+      const res = await h.callTool('rbook_mission_transition', {
         action,
         missionId: 'vm-01',
         reason: 'verify:dist s87-m01 probe',
@@ -1755,12 +1765,12 @@ async function main(): Promise<void> {
       });
       const text = textOf(res);
       check(
-        `s87-m01: cmos_mission_transition(${action}) on an out-of-enum status refuses, never crashes`,
+        `s87-m01: rbook_mission_transition(${action}) on an out-of-enum status refuses, never crashes`,
         !/TOOL_EXECUTION_ERROR|internal error/i.test(text) && /unrecognized status/i.test(text),
         text.slice(0, 240)
       );
     }
-    const updRes = await h.callTool('cmos_mission', {
+    const updRes = await h.callTool('rbook_mission', {
       action: 'update',
       missionId: 'vm-01',
       fields: { status: 'Queued' },
@@ -1777,7 +1787,7 @@ async function main(): Promise<void> {
       updText.slice(0, 400)
     );
     {
-      const db = new Database(path.join(projectDirM01, 'cmos', 'db', 'cmos.sqlite'), {
+      const db = new Database(path.join(projectDirM01, 'rbook', 'db', 'rbook.sqlite'), {
         readonly: true,
       });
       try {
@@ -1813,13 +1823,13 @@ async function main(): Promise<void> {
     // gate that reads what npm actually receives.
 
     // s87-m02 — the close ENUMERATES what it archived and hands back an undo handle.
-    const projectDirM02 = mkTmp('cmos-verify-s87m02-');
-    await h.callOk('cmos_project', {
+    const projectDirM02 = mkTmp('rbook-verify-s87m02-');
+    await h.callOk('rbook_project', {
       action: 'init',
       projectRoot: projectDirM02,
       projectName: 'verify-s87m02',
     });
-    await h.callOk('cmos_sprint', {
+    await h.callOk('rbook_sprint', {
       action: 'add',
       sprintId: 'sprint-m02',
       title: 'verify s87-m02',
@@ -1829,19 +1839,19 @@ async function main(): Promise<void> {
     // must not pass by there being nothing to name. Minted through the SHIPPED writer
     // (mission complete → decisions[]) rather than by raw INSERT, so every NOT NULL column is
     // filled the way production fills it and the row is one the close can really see.
-    await h.callOk('cmos_mission', {
+    await h.callOk('rbook_mission', {
       action: 'add',
       missionId: 'm02-probe',
       name: 'verify-dist archival probe',
       sprintId: 'sprint-m02',
       projectRoot: projectDirM02,
     });
-    await h.callOk('cmos_mission_transition', {
+    await h.callOk('rbook_mission_transition', {
       action: 'start',
       missionId: 'm02-probe',
       projectRoot: projectDirM02,
     });
-    await h.callOk('cmos_mission_transition', {
+    await h.callOk('rbook_mission_transition', {
       action: 'complete',
       missionId: 'm02-probe',
       notes: 'verify:dist archival probe',
@@ -1849,7 +1859,7 @@ async function main(): Promise<void> {
       projectRoot: projectDirM02,
     });
 
-    const m02Db = new Database(path.join(projectDirM02, 'cmos', 'db', 'cmos.sqlite'));
+    const m02Db = new Database(path.join(projectDirM02, 'rbook', 'db', 'rbook.sqlite'));
     const seededRow = m02Db
       .prepare(
         `SELECT id FROM strategic_decisions
@@ -1867,7 +1877,7 @@ async function main(): Promise<void> {
     const seededDecisionId = Number(seededRow?.id);
 
     // s92-m05: archival is opt-in since 3.2.0 (decision #1160), so this probe opts in.
-    const closeRes = await h.callOk('cmos_sprint', {
+    const closeRes = await h.callOk('rbook_sprint', {
       action: 'complete',
       sprintId: 'sprint-m02',
       summary: 'verify:dist s87-m02 probe',
@@ -1910,31 +1920,31 @@ async function main(): Promise<void> {
 
     // s92-m05 — a DEFAULT close keeps the sprint's decisions active (operator Q1, decision #1160).
     // Seeded through the same shipped writer as the s87-m02 probe, in a store of its own.
-    const projectDirM05 = mkTmp('cmos-verify-s92m05-');
-    await h.callOk('cmos_project', {
+    const projectDirM05 = mkTmp('rbook-verify-s92m05-');
+    await h.callOk('rbook_project', {
       action: 'init',
       projectRoot: projectDirM05,
       projectName: 'verify-s92m05',
     });
-    await h.callOk('cmos_sprint', {
+    await h.callOk('rbook_sprint', {
       action: 'add',
       sprintId: 'sprint-m05',
       title: 'verify s92-m05',
       projectRoot: projectDirM05,
     });
-    await h.callOk('cmos_mission', {
+    await h.callOk('rbook_mission', {
       action: 'add',
       missionId: 'm05-probe',
       name: 'verify-dist keeps-record probe',
       sprintId: 'sprint-m05',
       projectRoot: projectDirM05,
     });
-    await h.callOk('cmos_mission_transition', {
+    await h.callOk('rbook_mission_transition', {
       action: 'start',
       missionId: 'm05-probe',
       projectRoot: projectDirM05,
     });
-    await h.callOk('cmos_mission_transition', {
+    await h.callOk('rbook_mission_transition', {
       action: 'complete',
       missionId: 'm05-probe',
       notes: 'verify:dist keeps-record probe',
@@ -1942,7 +1952,7 @@ async function main(): Promise<void> {
       projectRoot: projectDirM05,
     });
     const activeM05Decisions = (): number[] => {
-      const db = new Database(path.join(projectDirM05, 'cmos', 'db', 'cmos.sqlite'));
+      const db = new Database(path.join(projectDirM05, 'rbook', 'db', 'rbook.sqlite'));
       try {
         return (
           db
@@ -1964,7 +1974,7 @@ async function main(): Promise<void> {
       keptBefore.length > 0,
       'no active decision bound to sprint-m05 — the keeps-record assertions below would be vacuous'
     );
-    const defaultCloseRes = await h.callOk('cmos_sprint', {
+    const defaultCloseRes = await h.callOk('rbook_sprint', {
       action: 'complete',
       sprintId: 'sprint-m05',
       summary: 'verify:dist s92-m05 probe',
@@ -1991,19 +2001,19 @@ async function main(): Promise<void> {
 
     // s92-m04 — the recommended order (record, then start, then complete) is not told "No decisions
     // captured", and the receipt reports the mission's true count. 3.1.0 counted only decisions[].
-    const projectDirM04 = mkTmp('cmos-verify-s92m04-');
-    await h.callOk('cmos_project', {
+    const projectDirM04 = mkTmp('rbook-verify-s92m04-');
+    await h.callOk('rbook_project', {
       action: 'init',
       projectRoot: projectDirM04,
       projectName: 'verify-s92m04',
     });
-    await h.callOk('cmos_sprint', {
+    await h.callOk('rbook_sprint', {
       action: 'add',
       sprintId: 'sprint-m04',
       title: 'verify s92-m04',
       projectRoot: projectDirM04,
     });
-    await h.callOk('cmos_mission', {
+    await h.callOk('rbook_mission', {
       action: 'add',
       missionId: 'm04-probe',
       name: 'verify-dist recorded-decisions probe',
@@ -2014,19 +2024,19 @@ async function main(): Promise<void> {
       'verify-dist s92-m04: recorded before the mission started',
       'verify-dist s92-m04: a second recorded decision',
     ]) {
-      await h.callOk('cmos_decisions', {
+      await h.callOk('rbook_decisions', {
         action: 'record',
         content,
         missionId: 'm04-probe',
         projectRoot: projectDirM04,
       });
     }
-    await h.callOk('cmos_mission_transition', {
+    await h.callOk('rbook_mission_transition', {
       action: 'start',
       missionId: 'm04-probe',
       projectRoot: projectDirM04,
     });
-    const m04Complete = await h.callOk('cmos_mission_transition', {
+    const m04Complete = await h.callOk('rbook_mission_transition', {
       action: 'complete',
       missionId: 'm04-probe',
       notes: 'verify:dist recorded-decisions probe',
@@ -2053,10 +2063,10 @@ async function main(): Promise<void> {
       'verify-dist s92-m07: quarantine the retired ledger shard, archived later',
       'verify-dist s92-m07: quarantine the ledger shard in memory, superseded later',
     ]) {
-      await h.callOk('cmos_decisions', { action: 'record', content, projectRoot: projectDirM04 });
+      await h.callOk('rbook_decisions', { action: 'record', content, projectRoot: projectDirM04 });
     }
     {
-      const db = new Database(path.join(projectDirM04, 'cmos', 'db', 'cmos.sqlite'));
+      const db = new Database(path.join(projectDirM04, 'rbook', 'db', 'rbook.sqlite'));
       try {
         db.prepare(
           `UPDATE strategic_decisions SET status = 'archived' WHERE decision_text LIKE '%archived later'`
@@ -2068,7 +2078,7 @@ async function main(): Promise<void> {
         db.close();
       }
     }
-    const m07Search = await h.callOk('cmos_context', {
+    const m07Search = await h.callOk('rbook_context', {
       action: 'search',
       query: 'quarantine ledger shard',
       projectRoot: projectDirM04,
@@ -2085,24 +2095,24 @@ async function main(): Promise<void> {
     );
     // s92-m09 — a session close's persist copies store no content, and the shipped prune dry-runs
     // with bytes per context, then applies without deleting a row.
-    await h.callOk('cmos_session', {
+    await h.callOk('rbook_session', {
       action: 'start',
       type: 'custom',
       title: 'verify s92-m09',
       projectRoot: projectDirM04,
     });
-    await h.callOk('cmos_session', {
+    await h.callOk('rbook_session', {
       action: 'capture',
       category: 'context',
       content: 'verify-dist s92-m09 persist-copy probe',
       projectRoot: projectDirM04,
     });
-    await h.callOk('cmos_session', {
+    await h.callOk('rbook_session', {
       action: 'complete',
       summary: 'verify:dist s92-m09',
       projectRoot: projectDirM04,
     });
-    const m09Db = path.join(projectDirM04, 'cmos', 'db', 'cmos.sqlite');
+    const m09Db = path.join(projectDirM04, 'rbook', 'db', 'rbook.sqlite');
     const m09Copies = (() => {
       const db = new Database(m09Db, { readonly: true });
       try {
@@ -2121,7 +2131,7 @@ async function main(): Promise<void> {
         m09Copies.every((row) => row.content === '' && row.content_pruned_at !== null),
       JSON.stringify(m09Copies.map((row) => [row.content.length, row.content_pruned_at !== null]))
     );
-    const m09Dry = await h.callOk('cmos_db', {
+    const m09Dry = await h.callOk('rbook_db', {
       action: 'prune_snapshots',
       keepLast: 0,
       projectRoot: projectDirM04,
@@ -2148,7 +2158,7 @@ async function main(): Promise<void> {
       }
     };
     const rowsBefore = rowCount();
-    const m09Apply = await h.callOk('cmos_db', {
+    const m09Apply = await h.callOk('rbook_db', {
       action: 'prune_snapshots',
       keepLast: 0,
       confirm: true,
@@ -2169,7 +2179,7 @@ async function main(): Promise<void> {
     );
     // s92-m09 (the blocking critic's B2) — a named snapshot of content an update copy already
     // holds gets its own row in the shipped build, so a prune that reclaims the copy keeps the name.
-    const m09Update = await h.callOk('cmos_context', {
+    const m09Update = await h.callOk('rbook_context', {
       action: 'update',
       mode: 'manual',
       contextType: 'master_context',
@@ -2177,7 +2187,7 @@ async function main(): Promise<void> {
       projectRoot: projectDirM04,
     });
     const m09UpdateId = (h.dataOf(m09Update) as { snapshotId?: number | null } | null)?.snapshotId;
-    const m09Named = await h.callOk('cmos_context', {
+    const m09Named = await h.callOk('rbook_context', {
       action: 'snapshot',
       contextType: 'master_context',
       source: 'verify-dist named save point',
@@ -2192,7 +2202,7 @@ async function main(): Promise<void> {
       JSON.stringify({ m09UpdateId, m09NamedData })
     );
 
-    const m07Health = await h.callOk('cmos_db', { action: 'health', projectRoot: projectDirM04 });
+    const m07Health = await h.callOk('rbook_db', { action: 'health', projectRoot: projectDirM04 });
     const m07Semantic = (
       h.dataOf(m07Health) as { semanticSearch?: { enabled?: boolean; state?: string } } | null
     )?.semanticSearch;
@@ -2221,7 +2231,7 @@ async function main(): Promise<void> {
      */
     const codeOf = (rel: string): string =>
       fs
-        .readFileSync(path.join(REPO_ROOT, 'dist', 'tools', 'cmos', rel), 'utf8')
+        .readFileSync(path.join(REPO_ROOT, 'dist', 'tools', 'rbook', rel), 'utf8')
         .split('\n')
         .filter((l) => {
           const t = l.trimStart();
@@ -2229,11 +2239,12 @@ async function main(): Promise<void> {
         })
         .join('\n');
 
-    const reviewSrc = codeOf('cmos-review.js');
+    const reviewSrc = codeOf('rbook-review.js');
     check(
-      's87-m03: the shipped drift reason says "no new CMOS rows", never "no CMOS write"',
-      reviewSrc.includes('no new CMOS rows in') && !reviewSrc.includes('no CMOS write in'),
-      `rows=${reviewSrc.includes('no new CMOS rows in')} writes=${reviewSrc.includes('no CMOS write in')}`
+      's87-m03: the shipped drift reason says "no new Reasonbook rows", never "no Reasonbook write"',
+      reviewSrc.includes('no new Reasonbook rows in') &&
+        !reviewSrc.includes('no Reasonbook write in'),
+      `rows=${reviewSrc.includes('no new Reasonbook rows in')} writes=${reviewSrc.includes('no Reasonbook write in')}`
     );
     check(
       's87-m03: the shipped drift classifier reports freshness-unknown rather than guessing',
@@ -2245,7 +2256,7 @@ async function main(): Promise<void> {
     // s87-m05 — a send with no messageId renders no `ID: undefined`. Asserted on the compiled
     // renderer: the verify:dist environment has no dashboard auth, so a live send is not available
     // and a behavioural probe here would assert nothing.
-    const messageSrc = codeOf('cmos-message.js');
+    const messageSrc = codeOf('rbook-message.js');
     // Every line that renders the id must carry its own guard. Stated this way rather than as
     // "the guarded form is present" because the guarded and unguarded forms differ only by a
     // prefix — an assertion that merely finds `${d.messageId}` passes on the broken code too.
@@ -2266,18 +2277,18 @@ async function main(): Promise<void> {
     // ── s89-m08: ARC F ITEM 1 — the wrong-typed published string parameter, ASSERTED ON THE
     //     ARTIFACT, not just on the in-process routers (s87-m01 hole 8).
     //
-    //     RED against the SHIPPED 2.8.0 artifact, measured over stdio: `cmos_mission(action="show",
+    //     RED against the SHIPPED 2.8.0 artifact, measured over stdio: `rbook_mission(action="show",
     //     missionId: 12345)` returned isError with code TOOL_EXECUTION_ERROR, the message
     //     "params.missionId.trim is not a function", and the suggestion "This is an internal error,
     //     not an input-validation problem — retry the call". Both halves were false: the cause WAS
     //     input validation, and "retry the call" is a loop with no exit. 42 (tool, action,
     //     declared-string-parameter) triples crashed this way (decision #1117).
     //
-    //     The in-process gate is tests/tools/cmos/suggestion-oracle.test.ts; this is the dist leg.
+    //     The in-process gate is tests/tools/rbook/suggestion-oracle.test.ts; this is the dist leg.
     for (const [tool, args, field] of [
-      ['cmos_mission', { action: 'show', missionId: 12345 }, 'missionId'],
-      ['cmos_mission_transition', { action: 'start', missionId: 12345 }, 'missionId'],
-      ['cmos_sprint', { action: 'show', sprintId: 12345 }, 'sprintId'],
+      ['rbook_mission', { action: 'show', missionId: 12345 }, 'missionId'],
+      ['rbook_mission_transition', { action: 'start', missionId: 12345 }, 'missionId'],
+      ['rbook_sprint', { action: 'show', sprintId: 12345 }, 'sprintId'],
     ] as Array<[string, Record<string, unknown>, string]>) {
       const wrongTyped = await h.callTool(tool, { ...args, projectRoot: projectDir });
       const envelope = (

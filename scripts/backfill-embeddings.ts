@@ -3,9 +3,10 @@
 // existing row in strategic_decisions / learnings / missions and upserts into the
 // matching vec0 virtual table. Resumable (skip-on-no-change via last_embedded_hash).
 
-import { decisionTextProjection, type DecisionTextRow } from '../src/tools/cmos/decision-fields';
-import { CmosDatabaseClient } from '../src/tools/cmos/client';
-import { ensureVectorStorage } from '../src/tools/cmos/schema-migrations';
+import { getSetting } from '../src/intelligence/legacy-compat';
+import { decisionTextProjection, type DecisionTextRow } from '../src/tools/rbook/decision-fields';
+import { RbookDatabaseClient } from '../src/tools/rbook/client';
+import { ensureVectorStorage } from '../src/tools/rbook/schema-migrations';
 import {
   recordEmbedding,
   decisionEmbeddingInput,
@@ -14,7 +15,7 @@ import {
   type RecordEmbeddingAction,
 } from '../src/intelligence/embedding-pipeline';
 
-const BATCH_SIZE = Number(process.env.CMOS_BACKFILL_BATCH_SIZE ?? 50);
+const BATCH_SIZE = Number(getSetting('RBOOK_BACKFILL_BATCH_SIZE') ?? 50);
 
 interface Counts {
   embedded: number;
@@ -35,7 +36,7 @@ function logProgress(type: string, processed: number, total: number, counts: Cou
   );
 }
 
-async function backfillDecisions(client: CmosDatabaseClient): Promise<Counts> {
+async function backfillDecisions(client: RbookDatabaseClient): Promise<Counts> {
   const counts: Counts = { embedded: 0, skippedNoChange: 0, failed: 0 };
   const totalRow = client.getOne<{ count: number }>(
     `SELECT COUNT(*) AS count FROM strategic_decisions`,
@@ -78,7 +79,7 @@ async function backfillDecisions(client: CmosDatabaseClient): Promise<Counts> {
   return counts;
 }
 
-async function backfillLearnings(client: CmosDatabaseClient): Promise<Counts> {
+async function backfillLearnings(client: RbookDatabaseClient): Promise<Counts> {
   const counts: Counts = { embedded: 0, skippedNoChange: 0, failed: 0 };
   const totalRow = client.getOne<{ count: number }>(`SELECT COUNT(*) AS count FROM learnings`, []);
   const total = totalRow.success && totalRow.data ? totalRow.data.count : 0;
@@ -113,7 +114,7 @@ async function backfillLearnings(client: CmosDatabaseClient): Promise<Counts> {
   return counts;
 }
 
-async function backfillMissions(client: CmosDatabaseClient): Promise<Counts> {
+async function backfillMissions(client: RbookDatabaseClient): Promise<Counts> {
   const counts: Counts = { embedded: 0, skippedNoChange: 0, failed: 0 };
   const totalRow = client.getOne<{ count: number }>(`SELECT COUNT(*) AS count FROM missions`, []);
   const total = totalRow.success && totalRow.data ? totalRow.data.count : 0;
@@ -173,10 +174,10 @@ async function backfillMissions(client: CmosDatabaseClient): Promise<Counts> {
 }
 
 async function main(): Promise<void> {
-  const projectRoot = process.env.CMOS_PROJECT_ROOT ?? process.cwd();
+  const projectRoot = getSetting('RBOOK_PROJECT_ROOT') ?? process.cwd();
   process.stderr.write(`[backfill] project root: ${projectRoot}\n`);
 
-  const clientResult = await CmosDatabaseClient.create({ projectRoot });
+  const clientResult = await RbookDatabaseClient.create({ projectRoot });
   if (!clientResult.success || !clientResult.data) {
     process.stderr.write(`[backfill] failed to open client: ${clientResult.error?.message}\n`);
     process.exit(1);

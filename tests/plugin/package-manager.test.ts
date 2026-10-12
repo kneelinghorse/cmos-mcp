@@ -30,8 +30,8 @@ describe('plugin package-manager commands', () => {
     expect(result.status).toBe(0);
     const { npm, npx } = JSON.parse(result.stdout);
     expect(npm.shell).toBe(true);
-    expect(npm.env.CMOS_NPM_ARG_2).toBe(prefix);
-    expect(npm.args[2]).toBe('"%CMOS_NPM_ARG_2%"');
+    expect(npm.env.RBOOK_NPM_ARG_2).toBe(prefix);
+    expect(npm.args[2]).toBe('"%RBOOK_NPM_ARG_2%"');
     expect(npx.shell).toBe(false);
     expect(npx.args[1]).toBe('literal & argument');
   });

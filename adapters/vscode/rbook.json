@@ -1,0 +1,11 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "reasonbook hook session-start --harness vscode --hook-source rbook-vscode",
+        "timeout": 3
+      }
+    ]
+  }
+}

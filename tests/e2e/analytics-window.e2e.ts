@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-// ABOUTME: s86-m05 — cmos_sprint(analytics, limit=N) over real MCP stdio against the BUILT dist/,
-// ABOUTME: on a tmpdir COPY of the live cmos.sqlite. Proves `limit` survives the dispatch boundary.
+// ABOUTME: s86-m05 — rbook_sprint(analytics, limit=N) over real MCP stdio against the BUILT dist/,
+// ABOUTME: on a tmpdir COPY of the live rbook.sqlite. Proves `limit` survives the dispatch boundary.
 
 /**
  * Sprint 86 m05 — the analytics window, proven through the transport it actually ships over.
  *
- * WHY THIS EXISTS SEPARATELY FROM tests/tools/cmos/analytics-window-real-store.test.ts.
+ * WHY THIS EXISTS SEPARATELY FROM tests/tools/rbook/analytics-window-real-store.test.ts.
  * The sprint's load-bearing constraint has TWO halves and neither substitutes for the other:
  *   - a REAL-STORE positive fire proves the SQL matches a migrated store's actual columns;
  *   - a run over stdio AGAINST THE BUILT dist/ proves the parameter survives the MCP dispatch
@@ -43,7 +43,7 @@ const REPO_ROOT = path.resolve(__dirname, '../..');
 const DIST_ENTRY = path.join(REPO_ROOT, 'dist', 'index.js');
 const PRIVATE = requiresPrivateEvidence({
   reason:
-    'This built-server analytics E2E derives its scratch project from the private live CMOS store.',
+    'This built-server analytics E2E derives its scratch project from the private live Reasonbook store.',
   paths: { liveDb: 'cmos/db/cmos.sqlite' },
 });
 
@@ -56,12 +56,12 @@ function mkTmp(prefix: string): string {
 
 /** Copy the live store into a temp project root. The live file is never opened for writing. */
 function copyLiveStore(): string {
-  const projectRoot = mkTmp('cmos-m05-stdio-');
-  const dbDir = path.join(projectRoot, 'cmos', 'db');
+  const projectRoot = mkTmp('rbook-m05-stdio-');
+  const dbDir = path.join(projectRoot, 'rbook', 'db');
   fs.mkdirSync(dbDir, { recursive: true });
   for (const suffix of ['', '-wal', '-shm']) {
     const src = `${PRIVATE.paths.liveDb}${suffix}`;
-    if (fs.existsSync(src)) fs.copyFileSync(src, path.join(dbDir, `cmos.sqlite${suffix}`));
+    if (fs.existsSync(src)) fs.copyFileSync(src, path.join(dbDir, `rbook.sqlite${suffix}`));
   }
   return projectRoot;
 }
@@ -111,7 +111,7 @@ PRIVATE.describe('analytics window over stdio against the built dist (s86-m05)',
 
     // Ground both ends of the numeric ordering in the copy rather than hardcoded IDs, so the
     // assertion keeps meaning as sprints accumulate and proves the selected window's direction.
-    const db = new Database(path.join(projectRoot, 'cmos', 'db', 'cmos.sqlite'), {
+    const db = new Database(path.join(projectRoot, 'rbook', 'db', 'rbook.sqlite'), {
       readonly: true,
     });
     const eligibleIds = db
@@ -127,12 +127,12 @@ PRIVATE.describe('analytics window over stdio against the built dist (s86-m05)',
       cwd: projectRoot,
       env: {
         ...(process.env as Record<string, string>),
-        CMOS_PROJECT_ROOT: projectRoot,
+        RBOOK_PROJECT_ROOT: projectRoot,
         // Isolate the per-user registry so driving the built server never touches
-        // ~/.config/cmos-mcp/project-graph.sqlite.
-        CMOS_CONFIG_DIR: mkTmp('cmos-m05-cfg-'),
+        // ~/.config/rbook/project-graph.sqlite.
+        RBOOK_CONFIG_DIR: mkTmp('rbook-m05-cfg-'),
       },
-      clientName: 'cmos-m05-analytics-window',
+      clientName: 'rbook-m05-analytics-window',
     });
   }, 120000);
 
@@ -142,7 +142,7 @@ PRIVATE.describe('analytics window over stdio against the built dist (s86-m05)',
   });
 
   it('returns the NEWEST five sprints for limit=5, not the oldest five', async () => {
-    const res = await harness.callOk('cmos_sprint', {
+    const res = await harness.callOk('rbook_sprint', {
       action: 'analytics',
       limit: 5,
       projectRoot,
@@ -174,7 +174,7 @@ PRIVATE.describe('analytics window over stdio against the built dist (s86-m05)',
   it('renders the window in the answer text, not just the structured payload', async () => {
     // A field only present in structuredContent is invisible to an agent reading the answer —
     // the same fail-quiet shape s86-m02 fixed elsewhere in this sprint.
-    const res = await harness.callOk('cmos_sprint', {
+    const res = await harness.callOk('rbook_sprint', {
       action: 'analytics',
       limit: 5,
       projectRoot,
@@ -187,7 +187,7 @@ PRIVATE.describe('analytics window over stdio against the built dist (s86-m05)',
   }, 60000);
 
   it('leaves the unlimited call unbounded', async () => {
-    const res = await harness.callOk('cmos_sprint', { action: 'analytics', projectRoot });
+    const res = await harness.callOk('rbook_sprint', { action: 'analytics', projectRoot });
     const data = harness.dataOf(res) as {
       sprints: Array<{ sprintId: string }>;
       window: { requestedLimit: number | null };

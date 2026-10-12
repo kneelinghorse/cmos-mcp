@@ -8,7 +8,8 @@ const os = require('os');
 const path = require('path');
 const Database = require('better-sqlite3');
 const { queriesFor, invoke, summary, hash } = require('./measure-m05-hook-latency');
-const { targetForStore } = require('../dist/tools/cmos/local-telemetry');
+const { resolveRecordPaths } = require('../dist/intelligence/legacy-compat');
+const { targetForStore } = require('../dist/tools/rbook/local-telemetry');
 const { skipLaterPrompt } = require('../dist/cli/later-prompt-recall');
 const repo = path.resolve(__dirname, '..');
 
@@ -20,7 +21,7 @@ async function main() {
     projects.push(path.resolve(args[++index]));
   }
   if (!projects.length) throw Error('missing_projects');
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-m02-later-latency-'));
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-m02-later-latency-'));
   const manifest = path.join(repo, 'dist/.build-manifest.json');
   const buildHash = JSON.parse(fs.readFileSync(manifest)).buildHash;
   let passed = true;
@@ -40,12 +41,12 @@ async function main() {
   try {
     const bin = path.join(temporary, 'bin');
     fs.mkdirSync(bin);
-    fs.symlinkSync(path.join(repo, 'dist/bin.js'), path.join(bin, 'cmos-mcp'));
+    fs.symlinkSync(path.join(repo, 'dist/bin.js'), path.join(bin, 'reasonbook'));
     for (const [projectIndex, project] of projects.entries()) {
       const root = path.join(temporary, `project-${projectIndex}`);
-      const dbPath = path.join(root, 'cmos/db/cmos.sqlite');
+      const dbPath = path.join(root, 'rbook/db/rbook.sqlite');
       fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-      const source = new Database(path.join(project, 'cmos/db/cmos.sqlite'), {
+      const source = new Database(resolveRecordPaths(project).dbPath, {
         readonly: true,
         fileMustExist: true,
       });
@@ -65,21 +66,24 @@ async function main() {
       for (const arm of ['cli', 'plugin-path']) {
         const env = {
           ...process.env,
-          CMOS_CONFIG_DIR: path.join(temporary, `config-${projectIndex}-${arm}`),
+          RBOOK_CONFIG_DIR: path.join(temporary, `config-${projectIndex}-${arm}`),
           CLAUDE_PLUGIN_DATA: path.join(temporary, `plugin-data-${projectIndex}`),
           CLAUDE_PROJECT_DIR: root,
           CLAUDE_PID: String(process.pid),
-          CMOS_AMBIENT: 'on',
-          CMOS_CHECKPOINT_SYNC: 'off',
-          CMOS_OFFLINE_EMBEDDINGS: '1',
+          RBOOK_AMBIENT: 'on',
+          RBOOK_CHECKPOINT_SYNC: 'off',
+          RBOOK_OFFLINE_EMBEDDINGS: '1',
           PATH: `${bin}${path.delimiter}${process.env.PATH || ''}`,
         };
         const target = targetForStore(dbPath);
         if (!target) throw Error('copied_identity_unavailable');
-        const entry = path.join(repo, arm === 'cli' ? 'dist/bin.js' : 'plugins/cmos/hooks/run.mjs');
+        const entry = path.join(
+          repo,
+          arm === 'cli' ? 'dist/bin.js' : 'plugins/reasonbook/hooks/run.mjs'
+        );
         const samples = queries.map((query, index) => {
           const session = `later-${projectIndex}-${arm}-${index}`;
-          const first = invoke(root, env, session, 'the', target, entry, 'cmos-plugin');
+          const first = invoke(root, env, session, 'the', target, entry, 'rbook-plugin');
           if (
             first.exit !== 0 ||
             first.chars ||
@@ -94,7 +98,7 @@ async function main() {
             );
             throw Error('empty_bootstrap_failed');
           }
-          return invoke(root, env, session, query, target, entry, 'cmos-plugin');
+          return invoke(root, env, session, query, target, entry, 'rbook-plugin');
         });
         const failures = samples.filter(
           (sample) =>

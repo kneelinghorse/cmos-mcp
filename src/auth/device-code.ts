@@ -11,7 +11,7 @@
  *     - HTTP 400 + `{ error, error_description? }` where
  *       `error ∈ { authorization_pending, slow_down, expired_token, access_denied }`
  *   Strict RFC 8628 shape — all errors at HTTP 400.
- * - User-Agent on both endpoints: `cmos-mcp/<version> (<platform>; <hostname>)` so
+ * - User-Agent on both endpoints: `reasonbook/<version> (<platform>; <hostname>)` so
  *   the dashboard can auto-populate a human-readable label on issuance.
  *
  * @module auth/device-code
@@ -79,7 +79,7 @@ export function buildUserAgent(
   platform: string = os.platform(),
   hostname: string = os.hostname()
 ): string {
-  return `cmos-mcp/${version} (${platform}; ${hostname})`;
+  return `reasonbook/${version} (${platform}; ${hostname})`;
 }
 
 /** Read the package version so the runtime User-Agent matches the shipped build. */
@@ -295,7 +295,7 @@ export async function pollForToken(
  * Unlike `pollForToken` which blocks until a terminal state (approved, expired,
  * access_denied, or transport error), `pollForTokenBounded` returns a typed
  * status after at most `maxWaitSeconds` of wall-clock — letting the MCP
- * `cmos_auth(action="login_complete")` handler return control to the agent so
+ * `rbook_auth(action="login_complete")` handler return control to the agent so
  * the agent can keep polling or surface "still waiting" to the user.
  *
  * Terminal dashboard-side states (`expired_token`, `access_denied`) are
@@ -443,7 +443,7 @@ export function defaultPrompter(response: DeviceCodeResponse): void {
     [
       '',
       divider,
-      '[cmos-mcp] Dashboard authorization required',
+      '[reasonbook] Dashboard authorization required',
       divider,
       `Open:  ${response.verificationUri}`,
       `Code:  ${response.userCode}`,
@@ -455,7 +455,7 @@ export function defaultPrompter(response: DeviceCodeResponse): void {
 }
 
 export interface DeviceCodeFlowOptions {
-  /** Dashboard base URL (e.g. `https://dashboard.cmos.ai`). */
+  /** Dashboard base URL (e.g. `https://dashboard.rbook.ai`). */
   baseUrl: string;
   /** MCP version for the User-Agent (default: read from package.json at runtime). */
   version?: string;

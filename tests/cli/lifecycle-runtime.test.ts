@@ -38,10 +38,10 @@ function key(session = 'session') {
   return hookRuntimeIdentity({ session_id: session, cwd: root }, env)!;
 }
 beforeEach(() => {
-  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-lifecycle-'));
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-lifecycle-'));
   root = path.join(tmp, 'project');
   fs.mkdirSync(root);
-  env = { ...process.env, CMOS_CONFIG_DIR: path.join(tmp, 'config'), CLAUDE_PROJECT_DIR: root };
+  env = { ...process.env, RBOOK_CONFIG_DIR: path.join(tmp, 'config'), CLAUDE_PROJECT_DIR: root };
   git('init');
   git('config', 'user.email', 'test@example.invalid');
   git('config', 'user.name', 'Fixture');
@@ -104,7 +104,7 @@ it('cleans only owned transient files and retains election and another session m
   captureBaseline(key(), env, Date.now() + 2000);
   markPreCompact(key(), env);
   markPreCompact(key('other'), env);
-  electHookSource(key(), 'cmos-plugin', 'verified-epoch', env);
+  electHookSource(key(), 'rbook-plugin', 'verified-epoch', env);
   const election = fs.readFileSync(hookRuntimePath(key(), env));
   expect(hasCompactMarker(key(), env)).toBe(true);
   consumeCompactMarker(key(), env);

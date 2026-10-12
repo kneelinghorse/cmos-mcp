@@ -1,0 +1,11 @@
+{
+  "name": "reasonbook",
+  "version": "4.0.0",
+  "description": "Reasonbook: keep project decisions, learnings and work available across Claude Code sessions.",
+  "author": {
+    "name": "Reasonbook"
+  },
+  "homepage": "https://github.com/kneelinghorse/reasonbook",
+  "repository": "https://github.com/kneelinghorse/reasonbook",
+  "license": "Apache-2.0"
+}

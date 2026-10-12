@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// ABOUTME: s92-m06 — no text CMOS publishes to a model or ships to a stranger may cite this
+// ABOUTME: s92-m06 — no text Reasonbook publishes to a model or ships to a stranger may cite this
 // ABOUTME: repository's own sprints, missions, decisions or issues; worked examples are named.
 
 /**
@@ -32,7 +32,9 @@
  * worked examples remain explicit exemptions rather than guessed external references.
  *
  * NOT CHECKED, by rule: CHANGELOG.md (an immutable record of what each release did, sprint ids
- * included) and comments compiled into dist/ (maintainer commentary no answer carries).
+ * included), comments compiled into dist/ (maintainer commentary no answer carries), and
+ * docs/demo/README.md, whose transcript quotes the demo project's own decision and session ids
+ * from end to end; the prose-truth gate checks its claims instead.
  */
 
 import { describe, expect, it } from '@jest/globals';
@@ -41,8 +43,8 @@ import * as os from 'os';
 import * as path from 'path';
 import * as ts from 'typescript';
 
-import { CMOS_TOOL_DEFINITIONS } from '../../src/tools/cmos';
-import { toWireDefinition } from '../../src/tools/cmos/wire-descriptions';
+import { RBOOK_TOOL_DEFINITIONS } from '../../src/tools/rbook';
+import { toWireDefinition } from '../../src/tools/rbook/wire-descriptions';
 
 const REPO_ROOT = path.resolve(__dirname, '../..');
 
@@ -52,31 +54,31 @@ const INTERNAL_REFERENCE =
 /** Worked examples written in prose, where neither rule can see them as examples. */
 const ALLOWLIST: ReadonlyArray<{ file: string; match: string; text: string; reason: string }> = [
   {
-    file: 'cmos-seed/tiers/managed.md',
+    file: 'rbook-seed/tiers/managed.md',
     match: 's42-m01',
     text: 'Don\'t show mission IDs to the user unless they ask. Use task names: "The venue task is done" not "s42-m01 is complete."',
     reason: 'the guide quotes the mission id an agent should NOT show a managed-tier user',
   },
   ...[1, 2, 3, 4].map((sprint) => ({
-    file: 'cmos-seed/foundational-docs/roadmap_template.md',
+    file: 'rbook-seed/foundational-docs/roadmap_template.md',
     match: `Sprint ${sprint}`,
     text: `### Sprint ${sprint}: [Sprint Name]`,
     reason: "a blank roadmap heading for the adopting project, not this repository's sprint",
   })),
   {
-    file: 'cmos-seed/foundational-docs/roadmap_template.md',
+    file: 'rbook-seed/foundational-docs/roadmap_template.md',
     match: 'Sprint 5',
     text: '### Medium Term (Sprint 5-8)',
     reason: 'a planning-horizon example in the blank roadmap',
   },
   {
-    file: 'cmos-seed/foundational-docs/tech_arch_template.md',
+    file: 'rbook-seed/foundational-docs/tech_arch_template.md',
     match: 'Sprint 1',
     text: '### MVP (Sprint 1-2)',
     reason: 'an example MVP phase in the blank architecture template',
   },
   {
-    file: 'cmos-seed/foundational-docs/tech_arch_template.md',
+    file: 'rbook-seed/foundational-docs/tech_arch_template.md',
     match: 'Sprint 3',
     text: '### Sprint 3-4',
     reason: 'an example follow-on phase in the blank architecture template',
@@ -101,11 +103,27 @@ const SHIPPED_FILES = [
   'SECURITY.md',
   'docs/getting-started.md',
   'docs/harnesses.md',
+  // s95-m08: public, though not in the npm package; the plugin README links to it on GitHub.
+  'docs/trust.md',
+  'docs/privacy.md',
+  // s95-m01: the documentation home, public on GitHub like the trust page.
+  'docs/README.md',
+  // s95-m05: the method page and the starter templates.
+  'docs/method.md',
+  'templates/ledger/README.md',
+  'templates/ledger/AGENTS.md',
+  'templates/ledger/CLAUDE.md',
+  'templates/planner/README.md',
+  'templates/planner/AGENTS.md',
+  'templates/planner/CLAUDE.md',
+  'templates/builder/README.md',
+  'templates/builder/AGENTS.md',
+  'templates/builder/CLAUDE.md',
   'TOOL_REFERENCE.md',
-  'cmos-seed/README.md',
-  'cmos-seed/db/schema.sql',
+  'rbook-seed/README.md',
+  'rbook-seed/db/schema.sql',
   '.claude-plugin/marketplace.json',
-  ...publishedFiles('plugins/cmos'),
+  ...publishedFiles('plugins/reasonbook'),
   ...publishedFiles('adapters'),
   'src/cli.ts',
   ...fs
@@ -113,7 +131,7 @@ const SHIPPED_FILES = [
     .filter((name) => name.endsWith('.ts'))
     .map((name) => `src/cli/${name}`),
   ...['docs', 'templates', 'tiers', 'context', 'foundational-docs'].flatMap((dir) =>
-    publishedFiles(`cmos-seed/${dir}`)
+    publishedFiles(`rbook-seed/${dir}`)
   ),
 ];
 
@@ -257,7 +275,7 @@ describe('s92-m06 — no internal sprint, mission, decision or issue references 
 
   it.each(['full', 'tools/list'])('checks every schema string on the %s surface', (surface) => {
     const definition = {
-      name: 'cmos_context',
+      name: 'rbook_context',
       description: 'A public tool.',
       inputSchema: {
         type: 'object',
@@ -288,21 +306,24 @@ describe('s92-m06 — no internal sprint, mission, decision or issue references 
       expect.arrayContaining([
         'docs/harnesses.md',
         'adapters/codex/hooks.json',
-        'cmos-seed/context/master_context.json',
-        'cmos-seed/context/project_context.json',
-        'cmos-seed/foundational-docs/roadmap_template.md',
-        'cmos-seed/foundational-docs/tech_arch_template.md',
+        'rbook-seed/context/master_context.json',
+        'rbook-seed/context/project_context.json',
+        'rbook-seed/foundational-docs/roadmap_template.md',
+        'rbook-seed/foundational-docs/tech_arch_template.md',
       ])
     );
   });
 
   it('an example allowlist entry does not exempt a private claim with the same id', () => {
-    const finding = findingsIn('cmos-seed/tiers/managed.md:1', 'See s42-m01 for the rationale.')[0];
+    const finding = findingsIn(
+      'rbook-seed/tiers/managed.md:1',
+      'See s42-m01 for the rationale.'
+    )[0];
     expect(allowed(finding)).toBe(false);
   });
 
   it('finds nested seed Markdown and JSON rather than only immediate guide files', () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-reference-seed-'));
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-reference-seed-'));
     try {
       for (const file of ['context/nested/context.json', 'foundational-docs/nested/plan.md']) {
         fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
@@ -362,12 +383,12 @@ describe('s92-m06 — no internal sprint, mission, decision or issue references 
     expect(hits('The mission ID (e.g., "s12-m06")')).toEqual([]);
     expect(hits('A label (for example "Sprint 12 completed")')).toEqual([]);
     expect(hits('a sprint id such as sprint-22, and port 8080')).toEqual([]);
-    const fencedProbe = ['```', 'cmos_mission(action="add", missionId="s01-m01")', '```'];
+    const fencedProbe = ['```', 'rbook_mission(action="add", missionId="s01-m01")', '```'];
     expect(fencedProbe.join('\n').match(INTERNAL_REFERENCE)).not.toBeNull();
   });
 
   it('no tool definition the server publishes carries one, full or tools/list', () => {
-    const definitions = CMOS_TOOL_DEFINITIONS as unknown as readonly Record<string, unknown>[];
+    const definitions = RBOOK_TOOL_DEFINITIONS as unknown as readonly Record<string, unknown>[];
     expect(definitions.length).toBe(15);
     const findings = [
       ...definitionFindings(definitions, 'full'),

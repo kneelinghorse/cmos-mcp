@@ -3,7 +3,7 @@
   "hooks": {
     "sessionStart": [
       {
-        "command": "cmos-mcp hook session-start --harness cursor --hook-source cmos-cursor",
+        "command": "reasonbook hook session-start --harness cursor --hook-source rbook-cursor",
         "timeout": 3
       }
     ]

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// ABOUTME: Exposes portable CMOS commands as MCP prompts backed by the plugin's skill files.
+// ABOUTME: Exposes portable Reasonbook commands as MCP prompts backed by the plugin's skill files.
 // ABOUTME: Reads the installed sources so skill and prompt instructions cannot drift into copies.
 
 import * as fs from 'fs';
@@ -9,7 +9,7 @@ import { ProtocolError, ProtocolErrorCode } from '@modelcontextprotocol/server';
 import type { Server } from '@modelcontextprotocol/server';
 
 const COMMANDS = ['start', 'close-out', 'plan', 'build'] as const;
-const SKILL_ROOT = path.resolve(__dirname, '../plugins/cmos/skills');
+const SKILL_ROOT = path.resolve(__dirname, '../plugins/reasonbook/skills');
 
 function readSkill(command: (typeof COMMANDS)[number], skillRoot: string) {
   try {
@@ -30,17 +30,17 @@ function readSkill(command: (typeof COMMANDS)[number], skillRoot: string) {
     ) {
       throw new Error('Skill name, description or body is invalid');
     }
-    return { name: `cmos-${command}`, description: metadata.description, body };
+    return { name: `rbook-${command}`, description: metadata.description, body };
   } catch (error) {
     throw new ProtocolError(
       ProtocolErrorCode.InternalError,
-      `Cannot load cmos-${command}: ${error instanceof Error ? error.message : String(error)}. ` +
-        'Reinstall @aquex/cmos-mcp to restore its shared skill sources.'
+      `Cannot load rbook-${command}: ${error instanceof Error ? error.message : String(error)}. ` +
+        'Reinstall @aquex/reasonbook to restore its shared skill sources.'
     );
   }
 }
 
-export function registerCmosPromptHandlers(server: Server, skillRoot = SKILL_ROOT): void {
+export function registerRbookPromptHandlers(server: Server, skillRoot = SKILL_ROOT): void {
   server.setRequestHandler('prompts/list', async () => ({
     prompts: COMMANDS.map((command) => {
       const { name, description } = readSkill(command, skillRoot);
@@ -49,11 +49,11 @@ export function registerCmosPromptHandlers(server: Server, skillRoot = SKILL_ROO
   }));
 
   server.setRequestHandler('prompts/get', async (request) => {
-    const command = COMMANDS.find((candidate) => `cmos-${candidate}` === request.params.name);
+    const command = COMMANDS.find((candidate) => `rbook-${candidate}` === request.params.name);
     if (!command) {
       throw new ProtocolError(
         ProtocolErrorCode.InvalidParams,
-        `Unknown prompt '${request.params.name}'. Use ${COMMANDS.map((name) => `cmos-${name}`).join(', ')}.`
+        `Unknown prompt '${request.params.name}'. Use ${COMMANDS.map((name) => `rbook-${name}`).join(', ')}.`
       );
     }
     if (Object.keys(request.params.arguments ?? {}).length > 0) {

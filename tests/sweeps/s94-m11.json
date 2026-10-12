@@ -7,7 +7,8 @@
     "Only tracked UTF-8 text under src/ across all extensions; untracked files, non-src files (including these artifacts), binary NUL bytes and invalid UTF-8 are outside this universe and encoding exclusions are reported.",
     "This checks line syntax, current occurrence coverage, required replacement witnesses and historical count consistency; whole-tree coverage, pre-edit chronology, semantic classification and runtime dataflow remain reviewer judgment.",
     "Historical source text is public src-only evidence; original whole-tree provenance remains private. Recorded SHAs are labels, never runtime Git lookups.",
-    "Other command variable names, multiline/escaped commands and generated source can evade these textual arms. cli-remedy, hook-adapter and project-init tests separately verify actual project resolution and shell-inert output."
+    "Other command variable names, multiline/escaped commands and generated source can evade these textual arms. cli-remedy, hook-adapter and project-init tests separately verify actual project resolution and shell-inert output.",
+    "s99-m02 renamed the command. The literal arm's pinned predicate still counts cmos-mcp lines; its residual names the command as cmos-mcp, reasonbook, @aquex/reasonbook@<version> run through npx, npm exec or npm x (with any flags and an optional --), ${remedyCommand()} or ${cliCommand()}, so another spelling of the command (another variable, a constant built elsewhere) evades it."
   ],
   "universe": "tracked-src-utf8-lines",
   "recordedAt": {
@@ -403,7 +404,7 @@
       "witnesses": [
         {
           "id": "current-1",
-          "file": "src/tools/cmos/cmos-decisions-record.ts",
+          "file": "src/tools/rbook/rbook-decisions-record.ts",
           "line": 373,
           "text": "suggestion: `Read the drafts with ${formatCliRemedy('drafts list', { projectRoot: path.resolve(client.path, '../../..') })} before recording again.`,",
           "occurrence": 1,
@@ -412,7 +413,7 @@
         },
         {
           "id": "current-2",
-          "file": "src/tools/cmos/cmos-project-init.ts",
+          "file": "src/tools/rbook/rbook-project-init.ts",
           "line": 271,
           "text": "? [`${formatCliRemedy(`ambient ${reading.ambient}`, target)} sets the hooks as the line says`]",
           "occurrence": 1,
@@ -421,7 +422,7 @@
         },
         {
           "id": "current-3",
-          "file": "src/tools/cmos/digest-v2.ts",
+          "file": "src/tools/rbook/digest-v2.ts",
           "line": 167,
           "text": "const short = `Pending drafts: ${drafts.length}. Read them: ${formatCliRemedy('drafts list', target)}.`;",
           "occurrence": 1,
@@ -430,7 +431,7 @@
         },
         {
           "id": "current-4",
-          "file": "src/tools/cmos/draft-approval.ts",
+          "file": "src/tools/rbook/draft-approval.ts",
           "line": 131,
           "text": "suggestion: `Check the project (projectRoot) and the id with ${formatCliRemedy('drafts list', { projectRoot: path.resolve(client.path, '../../..') })}, or record without fromDraft.`,",
           "occurrence": 1,
@@ -439,7 +440,7 @@
         },
         {
           "id": "current-5",
-          "file": "src/tools/cmos/draft-approval.ts",
+          "file": "src/tools/rbook/draft-approval.ts",
           "line": 312,
           "text": "suggestion: `Read the drafts with ${formatCliRemedy('drafts list', { projectRoot })} before recording again.`,",
           "occurrence": 1,
@@ -447,55 +448,19 @@
           "reason": "Required formatCliRemedy call at the corrected runtime remedy site."
         },
         {
-          "id": "current-6",
-          "file": "src/cli/decisions.ts",
-          "line": 20,
-          "text": "io.stderr('cmos-mcp decisions: use record --session-id <id> --content <headline>.');",
-          "occurrence": 1,
-          "class": "outside",
-          "reason": "Added after the historical sweep: diagnostic/argument guidance for the already invoked command, not a separately scoped recovery command."
-        },
-        {
-          "id": "current-7",
-          "file": "src/cli/decisions.ts",
-          "line": 24,
-          "text": "io.stderr(`cmos-mcp decisions record: ${NO_SESSION_REMEDY}.`);",
-          "occurrence": 1,
-          "class": "outside",
-          "reason": "Added after the historical sweep: diagnostic/argument guidance for the already invoked command, not a separately scoped recovery command."
-        },
-        {
-          "id": "current-8",
-          "file": "src/cli/decisions.ts",
+          "id": "current-legacy-owned-block",
+          "file": "src/intelligence/legacy-compat.ts",
           "line": 28,
-          "text": "io.stderr('cmos-mcp decisions record: pass --content <headline>.');",
+          "text": "'<!-- CMOS hook-less block: written by `cmos-mcp init --no-hooks` for a harness without hooks. Delete it if the harness gains them. -->',",
           "occurrence": 1,
           "class": "outside",
-          "reason": "Added after the historical sweep: diagnostic/argument guidance for the already invoked command, not a separately scoped recovery command."
-        },
-        {
-          "id": "current-9",
-          "file": "src/cli/decisions.ts",
-          "line": 40,
-          "text": "io.stderr(`cmos-mcp decisions record: --${name} must be a JSON array of strings.`);",
-          "occurrence": 1,
-          "class": "outside",
-          "reason": "Added after the historical sweep: diagnostic/argument guidance for the already invoked command, not a separately scoped recovery command."
-        },
-        {
-          "id": "current-10",
-          "file": "src/cli/spin-out.ts",
-          "line": 73,
-          "text": "io.stderr(`cmos-mcp spin-out: ${error instanceof Error ? error.message : String(error)}`);",
-          "occurrence": 1,
-          "class": "outside",
-          "reason": "Added after the historical sweep: diagnostic/argument guidance for the already invoked command, not a separately scoped recovery command."
+          "reason": "Compatibility recognizer for an existing owned block; never emitted as a runnable recovery command. Added after the new compatibility file became tracked at the m06 boundary."
         }
       ],
       "residual": [
         {
           "op": "include",
-          "pattern": "cmos-mcp [a-z]+",
+          "pattern": "(?:\\bcmos-mcp|\\breasonbook|\\b(?:npx|npm (?:exec|x))(?:\\s+-{1,2}[\\w-]+)*\\s+@aquex/reasonbook@\\S+(?:\\s+--)?|\\$\\{(?:remedyCommand|cliCommand)\\(\\)\\}) (?:drafts list\\b|ambient (?:on|off|digest-off)(?![\\w:-])|ambient \\$\\{|init\\s)",
           "flags": ""
         },
         {
@@ -509,13 +474,13 @@
           "flags": ""
         },
         {
-          "op": "include",
-          "pattern": "cmos-mcp (?:drafts list\\b|ambient (?:on|off|digest-off)(?![\\w:-])|ambient \\$\\{|init\\s)",
+          "op": "exclude",
+          "pattern": "^\\s*return `\\$\\{head\\} Its (?:hooks|tools and hooks)",
           "flags": ""
         },
         {
           "op": "exclude",
-          "pattern": "^\\s*return `\\$\\{head\\} Its (?:hooks|tools and hooks)",
+          "pattern": "'<!\\-\\-\\ CMOS\\ hook\\-less\\ block:\\ written\\ by\\ `cmos\\-mcp\\ init\\ \\-\\-no\\-hooks`\\ for\\ a\\ harness\\ without\\ hooks\\.\\ Delete\\ it\\ if\\ the\\ harness\\ gains\\ them\\.\\ \\-\\->',",
           "flags": ""
         }
       ]
@@ -552,7 +517,7 @@
           "id": "current-1",
           "file": "src/cli/session-start.ts",
           "line": 30,
-          "text": "`kept across sessions, ${portable ? `run ${formatCliRemedy('init', target, command)} with their agreement to start one` : '/cmos:init starts one'}; if they decline, run ${formatCliRemedy('ambient off', target, command)} ` +",
+          "text": "`kept across sessions, ${portable ? `run ${formatCliRemedy('init', target, command)} with their agreement to start one` : '/reasonbook:init starts one'}; if they decline, run ${formatCliRemedy('ambient off', target, command)} ` +",
           "occurrence": 1,
           "class": "fixed",
           "reason": "The same physical line must route both init and ambient off through formatCliRemedy with target and command."

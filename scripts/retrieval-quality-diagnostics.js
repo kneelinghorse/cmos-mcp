@@ -133,7 +133,7 @@ async function measureDiagnostics(
 }
 
 async function measureFloorVariants(source, slice, text, sequence, emittedHookIds) {
-  const promptModule = source.moduleAt('tools/cmos/first-prompt-recall');
+  const promptModule = source.moduleAt('tools/rbook/first-prompt-recall');
   if (!('DEFAULT_MIN_KEYWORD_MATCHES' in promptModule)) return [];
   const original = promptModule.DEFAULT_MIN_KEYWORD_MATCHES;
   const variants = [];

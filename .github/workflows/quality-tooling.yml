@@ -45,6 +45,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Install release scanner
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
+          rg --pcre2-version
+
       - name: Run ESLint
         run: npm run lint
 

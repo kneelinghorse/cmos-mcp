@@ -13,7 +13,7 @@ import {
   deliverPromptRecall,
   recallStatePath,
 } from '../../src/cli/recall-runtime';
-import { seedCmosDb } from '../helpers/seedCmosDb';
+import { seedRbookDb } from '../helpers/seedRbookDb';
 
 let tmp: string;
 let dbPath: string;
@@ -25,9 +25,9 @@ const rendered = {
 };
 
 beforeEach(() => {
-  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-recall-runtime-'));
-  dbPath = seedCmosDb(path.join(tmp, 'project'), { projectId: 'runtime-test' });
-  env = { CMOS_CONFIG_DIR: path.join(tmp, 'config') };
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-recall-runtime-'));
+  dbPath = seedRbookDb(path.join(tmp, 'project'), { projectId: 'runtime-test' });
+  env = { RBOOK_CONFIG_DIR: path.join(tmp, 'config') };
 });
 afterEach(() => {
   jest.restoreAllMocks();
@@ -61,7 +61,7 @@ it('commits only after synchronous stdout succeeds and dedupes the session/store
 it('keeps first delivery and seen IDs when the same session changes a store spelling', () => {
   const aliasRoot = path.join(fs.realpathSync.native(tmp), 'PROJECT');
   if (!fs.existsSync(aliasRoot)) fs.symlinkSync(path.join(tmp, 'project'), aliasRoot, 'dir');
-  const aliasPath = path.join(aliasRoot, 'cmos', 'db', 'cmos.sqlite');
+  const aliasPath = path.join(aliasRoot, 'rbook', 'db', 'rbook.sqlite');
   const original = fs.realpathSync;
   // Native resolution is real; the non-native double models macOS on case-sensitive CI too.
   const nonNative = jest
@@ -186,7 +186,7 @@ it('stores only complete emitted spans, and different stores/sessions can each d
   deliverFirstPrompt(options(), () => rendered, emit);
   expect(state()).toEqual([{ completed: 1, ids: '[]' }]);
   deliverFirstPrompt(options('other-session'), () => rendered, emit);
-  const otherPath = seedCmosDb(path.join(tmp, 'other'), { projectId: 'runtime-test' });
+  const otherPath = seedRbookDb(path.join(tmp, 'other'), { projectId: 'runtime-test' });
   deliverFirstPrompt({ ...options(), dbPath: otherPath }, () => rendered, emit);
   expect(emit).toHaveBeenCalledTimes(3);
 });
@@ -200,7 +200,7 @@ it.each([
 ])('rejects %s before a project write and leaves a safe retry possible', (kind) => {
   const project = path.dirname(path.dirname(path.dirname(dbPath)));
   const unsafe = { ...env };
-  if (kind === 'config-in-project') unsafe.CMOS_CONFIG_DIR = project;
+  if (kind === 'config-in-project') unsafe.RBOOK_CONFIG_DIR = project;
   else {
     const file = recallStatePath('secret-session', unsafe);
     fs.mkdirSync(path.dirname(path.dirname(file)), { recursive: true });
@@ -221,7 +221,7 @@ it.each([
   expect(emit).not.toHaveBeenCalled();
   expect(fs.readFileSync(dbPath)).toEqual(before);
   expect(fs.readdirSync(project).sort()).toEqual(files);
-  const safe = { CMOS_CONFIG_DIR: path.join(tmp, 'safe-config') };
+  const safe = { RBOOK_CONFIG_DIR: path.join(tmp, 'safe-config') };
   deliverFirstPrompt({ ...options(), env: safe }, () => rendered, emit);
   expect(emit).toHaveBeenCalledTimes(1);
 });

@@ -12,6 +12,7 @@
  * @module index
  */
 
+import { getSetting } from './intelligence/legacy-compat';
 import * as fs from 'fs';
 import * as path from 'path';
 import { getServerVersion } from './server-version';
@@ -23,9 +24,9 @@ export { getServerVersion };
 
 // Load .env if present (before any other imports that read process.env).
 // Resolve project root from: env var → directory containing this script.
-// Overrides empty values (present-but-unset is treated as absent) so IDE
-// spawns that pass empty env keys don't shadow .env values.
-const __projectRoot = process.env.CMOS_PROJECT_ROOT ?? path.resolve(__dirname, '..');
+// Legacy/non-product empty values remain fillable for IDE spawns. A new RBOOK_
+// setting's empty value is an explicit clear and must survive the .env loader.
+const __projectRoot = getSetting('RBOOK_PROJECT_ROOT') ?? path.resolve(__dirname, '..');
 const envPath = path.join(__projectRoot, '.env');
 try {
   if (fs.existsSync(envPath)) {
@@ -44,12 +45,12 @@ try {
       ) {
         value = value.slice(1, -1);
       }
-      if (!process.env[key]) {
+      if (key.startsWith('RBOOK_') ? process.env[key] === undefined : !process.env[key]) {
         process.env[key] = value;
         loaded++;
       }
     }
-    // s92-m07: diagnostics, behind CMOS_DEBUG (checked after loading, so the .env can set it).
+    // s92-m07: diagnostics, behind RBOOK_DEBUG (checked after loading, so the .env can set it).
     if (debugEnabled())
       process.stderr.write(`[env-loader] loaded ${loaded} vars from ${envPath}\n`);
   } else if (debugEnabled()) {
@@ -68,7 +69,7 @@ import {
   ProtocolErrorCode,
   type Tool,
 } from '@modelcontextprotocol/server';
-import { CmosDetector } from './intelligence/cmos-detector';
+import { RbookDetector } from './intelligence/rbook-detector';
 import {
   withServerRequest,
   clientProjectRootsForCall,
@@ -98,9 +99,9 @@ import {
   assertReadOnlyAgentAllowed,
   isReadOnlyAgentSession,
   ReadOnlyAgentGuardError,
-} from './tools/cmos/read-only-agent-guard';
-import { classifyAction } from './tools/cmos/action-taxonomy';
-import { toolEffectMetadata } from './tools/cmos/tool-effects';
+} from './tools/rbook/read-only-agent-guard';
+import { classifyAction } from './tools/rbook/action-taxonomy';
+import { toolEffectMetadata } from './tools/rbook/tool-effects';
 import {
   captureToolCall,
   setToolProjectResolution,
@@ -109,90 +110,90 @@ import {
   projectIdentityDisclosuresForError,
   recordStoreUpkeepNote,
   unwrapCapturedToolCallError,
-} from './tools/cmos/tool-call-context';
+} from './tools/rbook/tool-call-context';
 import {
   noteTelemetryProject,
   noteTelemetryPresentedIds,
   withMcpTelemetry,
-} from './tools/cmos/telemetry-call';
-import { cmosReviewPresentation } from './tools/cmos/review-presentation';
+} from './tools/rbook/telemetry-call';
+import { rbookReviewPresentation } from './tools/rbook/review-presentation';
 import {
   runFirstWriteMaintenance,
   storeNeedsFirstWriteMaintenance,
-} from './tools/cmos/first-write-maintenance';
+} from './tools/rbook/first-write-maintenance';
 import {
   markDashboardUploadOwed,
   observeDashboardUploadProject,
-} from './tools/cmos/dashboard-upload-scheduler';
-import { CMOS_CHECKPOINT_SYNC_ENV } from './tools/cmos/checkpoint-backfill';
+} from './tools/rbook/dashboard-upload-scheduler';
+import { RBOOK_CHECKPOINT_SYNC_ENV } from './tools/rbook/checkpoint-backfill';
 import {
-  CMOS_TOOL_DEFINITIONS,
+  RBOOK_TOOL_DEFINITIONS,
   // Consolidated entity tools (Sprint 24)
-  cmosMission,
+  rbookMission,
   formatMissionForLLM,
-  cmosMissionTransition,
+  rbookMissionTransition,
   formatMissionTransitionForLLM,
-  cmosSprint,
+  rbookSprint,
   formatSprintForLLM,
-  cmosContext,
+  rbookContext,
   formatContextForLLM,
-  cmosSession,
+  rbookSession,
   formatSessionForLLM,
-  cmosDecisions,
+  rbookDecisions,
   formatDecisionsForLLM,
-  cmosLearnings,
+  rbookLearnings,
   formatLearningsForLLM,
-  cmosFeedback,
+  rbookFeedback,
   formatFeedbackForLLM,
-  cmosStatus,
+  rbookStatus,
   formatStatusForLLM,
-  cmosAuth,
+  rbookAuth,
   formatAuthForLLM,
-  cmosDb,
+  rbookDb,
   formatDbForLLM,
-  cmosProject,
+  rbookProject,
   formatProjectForLLM,
   // Messaging tool (Sprint 28)
-  cmosMessage,
+  rbookMessage,
   formatMessageForLLM,
   getWhoamiDiagnostics,
   // Agent utility tools
-  cmosAgentOnboard,
+  rbookAgentOnboard,
   formatAgentOnboardForLLM,
   // Utility
   resolveProjectRoot,
-  CMOS_PROJECT_ROOT_ENV,
-  CMOS_ERROR_CODES,
-  CmosErrors,
-} from './tools/cmos';
+  RBOOK_PROJECT_ROOT_ENV,
+  RBOOK_ERROR_CODES,
+  RbookErrors,
+} from './tools/rbook';
 import type {
-  CmosToolError,
-  CmosMissionParams,
-  CmosMissionTransitionParams,
-  CmosSprintParams,
-  CmosContextParams,
-  CmosSessionParams,
-  CmosDecisionsParams,
-  CmosLearningsParams,
-  CmosFeedbackParams,
-  CmosStatusParams,
-  CmosAuthParams,
-  CmosDbParams,
-  CmosProjectParams,
-  CmosAgentOnboardParams,
-  CmosMessageParams,
-  CmosReviewParams,
-} from './tools/cmos';
-import { findWrongTypedStringParam } from './tools/cmos/param-type-guard';
-import { classifySenderResolutionError } from './tools/cmos/sender-refusal';
-import { toWireDefinition } from './tools/cmos/wire-descriptions';
+  RbookToolError,
+  RbookMissionParams,
+  RbookMissionTransitionParams,
+  RbookSprintParams,
+  RbookContextParams,
+  RbookSessionParams,
+  RbookDecisionsParams,
+  RbookLearningsParams,
+  RbookFeedbackParams,
+  RbookStatusParams,
+  RbookAuthParams,
+  RbookDbParams,
+  RbookProjectParams,
+  RbookAgentOnboardParams,
+  RbookMessageParams,
+  RbookReviewParams,
+} from './tools/rbook';
+import { findWrongTypedStringParam } from './tools/rbook/param-type-guard';
+import { classifySenderResolutionError } from './tools/rbook/sender-refusal';
+import { toWireDefinition } from './tools/rbook/wire-descriptions';
 import { SERVER_INSTRUCTIONS } from './server-instructions';
-import { registerCmosPromptHandlers } from './server-prompts';
-import { closeOwnImplicitSessions } from './tools/cmos/implicit-session-lifecycle';
-import { findUnknownTopLevelParam } from './tools/cmos/unknown-param-guard';
+import { registerRbookPromptHandlers } from './server-prompts';
+import { closeOwnImplicitSessions } from './tools/rbook/implicit-session-lifecycle';
+import { findUnknownTopLevelParam } from './tools/rbook/unknown-param-guard';
 import { TokenCounter } from './intelligence/token-counters';
 import { SupportedModel } from './intelligence/types';
-import { CMOS_SCHEMA_VERSION } from './tools/cmos/schema';
+import { RBOOK_SCHEMA_VERSION } from './tools/rbook/schema';
 import { ErrorHandler } from './errors/handler';
 import { ErrorLogger } from './errors/logger';
 import type { JsonValue } from './errors/types';
@@ -204,11 +205,11 @@ import {
 
 /**
  * MCP Server Configuration — one truthful identity (s77-m04). The server NAME is
- * the literal 'cmos-mcp' (not the retired 'mission-protocol', nor the scoped
- * '@aquex/cmos-mcp'); the version is sourced from package.json.
+ * the literal 'rbook' (not the retired 'mission-protocol', nor the scoped
+ * '@aquex/reasonbook'); the version is sourced from package.json.
  */
 const SERVER_CONFIG = {
-  name: 'cmos-mcp',
+  name: 'rbook',
   version: getServerVersion(),
 } as const;
 
@@ -245,10 +246,10 @@ ErrorHandler.useLogger(errorLogger);
 export interface MissionProtocolContext {
   defaultModel: SupportedModel;
   tokenCounter: TokenCounter;
-  /** Whether CMOS is detected in the project */
-  cmosDetected: boolean;
-  /** Path to CMOS database if detected */
-  cmosDatabasePath?: string;
+  /** Whether Reasonbook is detected in the project */
+  rbookDetected: boolean;
+  /** Path to Reasonbook database if detected */
+  rbookDatabasePath?: string;
   /** Client's project root from MCP roots (set after connection) */
   clientProjectRoot?: string;
 }
@@ -264,21 +265,21 @@ export interface ToolDefinition {
 /**
  * Get tool definitions for the MCP surface.
  *
- * @returns Array of CMOS tool definitions
+ * @returns Array of Reasonbook tool definitions
  */
 /**
  * What tools/list sends: every published definition in its fixed, declared order, with the short
- * wire text (s92-m08). The full text stays on CMOS_TOOL_DEFINITIONS and in TOOL_REFERENCE.md.
+ * wire text (s92-m08). The full text stays on RBOOK_TOOL_DEFINITIONS and in TOOL_REFERENCE.md.
  */
 export function getToolDefinitions(): ToolDefinition[] {
-  return (CMOS_TOOL_DEFINITIONS as unknown as ToolDefinition[]).map((definition) => ({
+  return (RBOOK_TOOL_DEFINITIONS as unknown as ToolDefinition[]).map((definition) => ({
     ...toWireDefinition(definition),
     ...toolEffectMetadata(definition.name),
   }));
 }
 
 /**
- * Parameters whose malformed JSON type can throw before a CMOS handler gets a chance to return
+ * Parameters whose malformed JSON type can throw before a Reasonbook handler gets a chance to return
  * its normal structured validation error. This boundary list is intentionally unconditional:
  * every published tool accepts `projectRoot` as a string, and resolution reads it before the
  * action router for most tools.
@@ -294,8 +295,8 @@ interface PublishedToolSchema {
 }
 
 /** Return a known, schema-derived refusal before sender resolution; unknown tools pass through. */
-function preflightMissionProtocolTool(name: string, args: unknown): CmosToolError | null {
-  const definition = (CMOS_TOOL_DEFINITIONS as readonly ToolDefinition[]).find(
+function preflightMissionProtocolTool(name: string, args: unknown): RbookToolError | null {
+  const definition = (RBOOK_TOOL_DEFINITIONS as readonly ToolDefinition[]).find(
     (candidate) => candidate.name === name
   );
   if (!definition) return null;
@@ -306,7 +307,7 @@ function preflightMissionProtocolTool(name: string, args: unknown): CmosToolErro
     const providedAction =
       args && typeof args === 'object' ? (args as Record<string, unknown>)['action'] : undefined;
     if (!availableActions.includes(providedAction)) {
-      return CmosErrors.invalidAction(name, providedAction, availableActions.map(String));
+      return RbookErrors.invalidAction(name, providedAction, availableActions.map(String));
     }
   }
 
@@ -353,17 +354,17 @@ export async function buildMissionProtocolContext(options?: {
   // Initialize token counter for intelligence tools
   const tokenCounter = new TokenCounter();
 
-  // Detect CMOS in the project (respects CMOS_PROJECT_ROOT env var)
+  // Detect Reasonbook in the project (respects RBOOK_PROJECT_ROOT env var)
   const projectRoot = resolveProjectRoot();
-  const detector = CmosDetector.getInstance({ cacheTtlMs: 60_000 });
-  const cmosResult = await detector.detect(projectRoot);
-  const cmosDetected = cmosResult.hasCmosDirectory && cmosResult.hasDatabase;
+  const detector = RbookDetector.getInstance({ cacheTtlMs: 60_000 });
+  const rbookResult = await detector.detect(projectRoot);
+  const rbookDetected = rbookResult.hasRbookDirectory && rbookResult.hasDatabase;
 
   return {
     defaultModel,
     tokenCounter,
-    cmosDetected,
-    cmosDatabasePath: cmosResult.databasePath,
+    rbookDetected,
+    rbookDatabasePath: rbookResult.databasePath,
   };
 }
 
@@ -400,7 +401,7 @@ async function getClientProjectRoots(explicitRoot?: string): Promise<string[]> {
 /**
  * Ask the client for its roots, uncached. s93-m11 (#606 b): only a client that declared the roots
  * capability is asked. A client that never declared it may never answer roots/list, and the first
- * CMOS call then stalled until the request timed out (60 s).
+ * Reasonbook call then stalled until the request timed out (60 s).
  */
 export async function probeClientRoots(
   target: Pick<Server, 'listRoots' | 'getClientCapabilities'>
@@ -436,16 +437,16 @@ export async function probeClientRoots(
 /**
  * Resolve the sender context for a dispatched tool call.
  *
- * Sprint 53 m02: replaces the old `resolveCmosProjectRoot` (which silently fell
- * back to `CMOS_PROJECT_ROOT` env) with the single audited boundary from
+ * Sprint 53 m02: replaces the old `resolveRbookProjectRoot` (which silently fell
+ * back to `RBOOK_PROJECT_ROOT` env) with the single audited boundary from
  * `src/intelligence/sender-context.ts`. Every dispatcher case now flows through
- * this function. `CMOS_PROJECT_ROOT` is no longer consulted at tool dispatch
+ * this function. `RBOOK_PROJECT_ROOT` is no longer consulted at tool dispatch
  * time — it is retained only for `.env` bootstrap at src/index.ts:17 so the
  * server can locate its own environment file.
  *
  * @param explicitRoot - `params.projectRoot` from the tool call, if any
  * @param options.requireSenderIdentity - Pass `true` for any call that will hit
- *   the dashboard with authoritative attribution (today: cmos_message send;
+ *   the dashboard with authoritative attribution (today: rbook_message send;
  *   Sprint 53 m04 adds checkpoint-backfill, registerProject, purge). Defaults to
  *   `false` for local-DB ops.
  * @throws SenderResolutionError when no candidate produces an acceptable project.
@@ -483,19 +484,19 @@ async function executeWithStoreUpkeep(
   const result = await executeMissionProtocolTool(name, args, context);
   if (
     result.isError !== true &&
-    name !== 'cmos_agent_onboard' &&
+    name !== 'rbook_agent_onboard' &&
     currentToolCallActionMode() === 'write' &&
     !isReadOnlyAgentSession()
   ) {
     for (const dbPath of currentWrittenStores()) {
-      // <root>/cmos/db/cmos.sqlite → <root>
+      // <root>/rbook/db/rbook.sqlite → <root>
       const root = path.resolve(dbPath, '..', '..', '..');
       if (storeNeedsFirstWriteMaintenance(root)) {
         for (const note of await runFirstWriteMaintenance(root)) recordStoreUpkeepNote(note);
       }
       // Every caller write owes an upload, including later writes after upkeep has run.
       // The scheduler persists only the registry mark here; it never waits for the upload.
-      if (process.env[CMOS_CHECKPOINT_SYNC_ENV] !== 'off') {
+      if (getSetting(RBOOK_CHECKPOINT_SYNC_ENV) !== 'off') {
         await markDashboardUploadOwed(root);
       }
     }
@@ -535,7 +536,7 @@ const NO_PROJECT: ResolutionStamp = { projectRoot: null, resolvedBy: 'none' };
 
 function stampOf(ctx: SenderContext | null): ResolutionStamp {
   if (!ctx) return NO_PROJECT;
-  // The client advertised workspace roots, none of them is inside a CMOS project, and the
+  // The client advertised workspace roots, none of them is inside a Reasonbook project, and the
   // server's working directory answered instead. That is the documented order, but the caller
   // may be working in one of those roots — say so rather than resolve silently.
   const rootsSkipped =
@@ -545,7 +546,7 @@ function stampOf(ctx: SenderContext | null): ResolutionStamp {
     ? {
         projectRoot: ctx.projectRoot,
         resolvedBy: ctx.source,
-        note: "resolved by the server's working directory — the client's MCP roots hold no CMOS project",
+        note: "resolved by the server's working directory — the client's MCP roots hold no Reasonbook project",
       }
     : {
         projectRoot: ctx.projectRoot,
@@ -587,7 +588,7 @@ function inertProjectRoot(projectRoot: string): string {
 }
 
 /**
- * Build the MCP answer for a CMOS tool result. On success, `projectRoot` and `resolvedBy` are
+ * Build the MCP answer for a Reasonbook tool result. On success, `projectRoot` and `resolvedBy` are
  * added to `data` (a handler's own `projectRoot` is kept), and one line names the project. s93-m11
  * (#606 c): the line is rendered on every answer that touched a project, as the server
  * instructions promise; how the project was chosen is added when it was inferred rather than named.
@@ -651,7 +652,7 @@ function whoamiStamp(result: {
 /**
  * Resolve a project for an action that can run without one (a user-level dashboard action):
  * use the caller's project when one resolves, and run project-free when none does. An explicit
- * projectRoot is still final — naming a folder that is not a CMOS project is refused.
+ * projectRoot is still final — naming a folder that is not a Reasonbook project is refused.
  */
 async function resolveOptionalSenderContext(
   explicitRoot: string | undefined
@@ -679,7 +680,7 @@ export function registerToolHandlers(
     clearClientProjectRoots(targetServer);
   });
 
-  // List available tools (includes CMOS tools when detected)
+  // List available tools (includes Reasonbook tools when detected)
   targetServer.setRequestHandler('tools/list', async () => {
     return {
       tools: getToolDefinitions(),
@@ -735,9 +736,9 @@ export function registerToolHandlers(
                 );
               }
               // Sprint 74 m03: a tool HANDLER that throws an unhandled exception (a
-              // write-path crash — e.g. cmos_sprint(complete)/cmos_session(capture)
+              // write-path crash — e.g. rbook_sprint(complete)/rbook_session(capture)
               // hitting a store-specific failure) is a tool-EXECUTION failure, not a
-              // protocol error. Surface it as a structured CmosToolResult error
+              // protocol error. Surface it as a structured RbookToolResult error
               // (code + real message + suggestion) returned as an isError result —
               // never a bare JSON-RPC -32603 that swallows the cause (aquex.ai aa124685).
               // Genuine protocol errors (ProtocolError: unknown tool, uninitialized context)
@@ -759,7 +760,7 @@ export function registerToolHandlers(
 
 /**
  * Sprint 74 m03 — convert an unhandled tool-handler exception into a structured
- * CmosToolResult error returned as an `isError` tool result, so the caller sees a
+ * RbookToolResult error returned as an `isError` tool result, so the caller sees a
  * real `{code, message, suggestion}` instead of a bare JSON-RPC -32603 that hides
  * the cause. Logs the underlying error (via ErrorHandler.handle, never re-throws)
  * to keep the correlationId trail, then surfaces the REAL exception message —
@@ -795,8 +796,8 @@ export function buildToolExecutionErrorResult(
       ? missionError.message.trim()
       : 'unexpected internal error';
 
-  const structuredError: CmosToolError = {
-    code: CMOS_ERROR_CODES.TOOL_EXECUTION_ERROR,
+  const structuredError: RbookToolError = {
+    code: RBOOK_ERROR_CODES.TOOL_EXECUTION_ERROR,
     message: `The '${toolName}' tool failed with an unhandled internal error: ${detail}`,
     // s89-m08 CLASS 3. This used to open "This is an internal error, not an input-validation
     // problem". That is a UNIVERSAL claim about the CAUSE, made by a catch-all boundary that
@@ -814,7 +815,7 @@ export function buildToolExecutionErrorResult(
  * this helper performs no logging and creates no correlation id: expected client/setup faults are
  * not internal incidents.
  */
-export function buildKnownToolErrorResult(error: CmosToolError): CallToolResult {
+export function buildKnownToolErrorResult(error: RbookToolError): CallToolResult {
   const structured = { success: false as const, error };
   const suggestion = error.suggestion ? `\nSuggestion: ${error.suggestion}` : '';
   const text =
@@ -843,7 +844,7 @@ function extractActionArg(args: unknown): string | undefined {
   return undefined;
 }
 
-// s92-m01: `classifySenderResolutionError` moved to `tools/cmos/sender-refusal.ts` so the suggestion
+// s92-m01: `classifySenderResolutionError` moved to `tools/rbook/sender-refusal.ts` so the suggestion
 // oracle can drive it in-process; re-exported here for existing importers.
 export { classifySenderResolutionError };
 
@@ -945,7 +946,7 @@ export async function executeMissionProtocolTool(
 
   // Client/schema failures and protocol method lookup precede the authorization guard: neither can
   // mutate state, and they retain INVALID_ACTION / MethodNotFound even in a review-role process.
-  const definitionExists = (CMOS_TOOL_DEFINITIONS as readonly ToolDefinition[]).some(
+  const definitionExists = (RBOOK_TOOL_DEFINITIONS as readonly ToolDefinition[]).some(
     (definition) => definition.name === name
   );
   if (!definitionExists) {
@@ -959,7 +960,7 @@ export async function executeMissionProtocolTool(
 
   // Sprint 78 m04 (FORK-5): read-only review-agent guard. It still runs before the switch and any
   // resolveToolSenderContext / DB open, so a blocked valid write opens no DB and mutates no row.
-  // Strict no-op unless CMOS_AGENT_ROLE=review; then write-classified calls are hard-rejected.
+  // Strict no-op unless RBOOK_AGENT_ROLE=review; then write-classified calls are hard-rejected.
   try {
     assertReadOnlyAgentAllowed(name, extractActionArg(args));
   } catch (error) {
@@ -971,25 +972,25 @@ export async function executeMissionProtocolTool(
 
   switch (name) {
     // ========================================
-    // CMOS Tools (always available, return graceful error if not detected)
+    // Reasonbook Tools (always available, return graceful error if not detected)
     // ========================================
 
     // Consolidated DB admin tool (Sprint 24)
-    case 'cmos_db': {
-      const params = args as CmosDbParams;
+    case 'rbook_db': {
+      const params = args as RbookDbParams;
       const ctx = await resolveToolSenderContext(params.projectRoot);
       const projectRoot = ctx.projectRoot;
-      const result = await cmosDb({ ...params, projectRoot });
+      const result = await rbookDb({ ...params, projectRoot });
       const formatted = formatDbForLLM(params.action, result);
 
       return buildResolvedToolResult(result, formatted, stampOf(ctx));
     }
 
     // Consolidated mission CRUD tool (Sprint 24)
-    case 'cmos_mission': {
-      const params = args as CmosMissionParams;
+    case 'rbook_mission': {
+      const params = args as RbookMissionParams;
 
-      // s79-m04/m05 — no per-handler fan-out. cmos_mission(status) with no
+      // s79-m04/m05 — no per-handler fan-out. rbook_mission(status) with no
       // projectRoot resolves to the sender; "active missions across the portfolio"
       // is served by acrossProjects=true (the graph-backed queryAcrossStores),
       // which must NOT require a resolvable LOCAL store.
@@ -1002,58 +1003,58 @@ export async function executeMissionProtocolTool(
         ? await resolveOptionalSenderContext(params.projectRoot)
         : await resolveToolSenderContext(params.projectRoot);
       const projectRoot = ctx?.projectRoot;
-      const result = await cmosMission({ ...params, projectRoot });
+      const result = await rbookMission({ ...params, projectRoot });
       const formatted = formatMissionForLLM(params.action, result);
 
       return buildResolvedToolResult(result, formatted, portfolioRead ? NO_PROJECT : stampOf(ctx));
     }
 
     // Consolidated mission transition tool (Sprint 24)
-    case 'cmos_mission_transition': {
-      const params = args as CmosMissionTransitionParams;
+    case 'rbook_mission_transition': {
+      const params = args as RbookMissionTransitionParams;
       const ctx = await resolveToolSenderContext(params.projectRoot);
       const projectRoot = ctx.projectRoot;
-      const result = await cmosMissionTransition({ ...params, projectRoot });
+      const result = await rbookMissionTransition({ ...params, projectRoot });
       const formatted = formatMissionTransitionForLLM(params.action, result);
 
       return buildResolvedToolResult(result, formatted, stampOf(ctx));
     }
 
     // Consolidated context tool (Sprint 24)
-    case 'cmos_context': {
-      const params = args as CmosContextParams;
+    case 'rbook_context': {
+      const params = args as RbookContextParams;
 
       const ctx = await resolveToolSenderContext(params.projectRoot);
       const projectRoot = ctx.projectRoot;
-      const result = await cmosContext({ ...params, projectRoot });
+      const result = await rbookContext({ ...params, projectRoot });
       const formatted = formatContextForLLM(params.action, result, params.contextType);
 
       return buildResolvedToolResult(result, formatted, stampOf(ctx));
     }
 
     // Consolidated session tool (Sprint 24)
-    case 'cmos_session': {
-      const params = args as CmosSessionParams;
+    case 'rbook_session': {
+      const params = args as RbookSessionParams;
 
-      // s79-m04 — cmos_session(list) with no projectRoot pins to the sender (no
+      // s79-m04 — rbook_session(list) with no projectRoot pins to the sender (no
       // §5.4 named portfolio query; documented deviation from the master-plan wording).
       const ctx = await resolveToolSenderContext(params.projectRoot);
       const projectRoot = ctx.projectRoot;
-      const result = await cmosSession({ ...params, projectRoot });
+      const result = await rbookSession({ ...params, projectRoot });
       const formatted = formatSessionForLLM(params.action, result);
 
       return buildResolvedToolResult(result, formatted, stampOf(ctx));
     }
 
     // Consolidated decisions tool (Sprint 24)
-    case 'cmos_decisions': {
-      const params = args as CmosDecisionsParams;
+    case 'rbook_decisions': {
+      const params = args as RbookDecisionsParams;
       // s69-m06: the acrossProjects (list) path discovers stores via the project-graph
       // registry, NOT the sender root — so it must NOT require a resolvable LOCAL store
       // at the boundary. resolveToolSenderContext throws when no local store resolves,
       // which is the NORMAL case for a portfolio query run from a neutral directory
       // (and the registry-singleton fallback only accepts a 1-project registry, never a
-      // real multi-project portfolio). Skip resolution for that path; cmosDecisionsList
+      // real multi-project portfolio). Skip resolution for that path; rbookDecisionsList
       // ignores projectRoot on the acrossProjects branch anyway.
       // s92-m01: only list is the portfolio read. record/update/search with acrossProjects=true
       // used to skip resolution too, drop an explicit projectRoot and write the cwd project.
@@ -1062,49 +1063,49 @@ export async function executeMissionProtocolTool(
         ? await resolveOptionalSenderContext(params.projectRoot)
         : await resolveToolSenderContext(params.projectRoot);
       const projectRoot = ctx?.projectRoot;
-      const result = await cmosDecisions({ ...params, projectRoot });
+      const result = await rbookDecisions({ ...params, projectRoot });
       const formatted = formatDecisionsForLLM(params.action, result);
 
       return buildResolvedToolResult(result, formatted, portfolioRead ? NO_PROJECT : stampOf(ctx));
     }
 
     // Consolidated learnings tool (Sprint 38)
-    case 'cmos_learnings': {
-      const params = args as CmosLearningsParams;
+    case 'rbook_learnings': {
+      const params = args as RbookLearningsParams;
       // s79-m05: acrossProjects (list) is a graph-backed portfolio query — skip
-      // local-root resolution (mirrors cmos_decisions / cmos_mission).
+      // local-root resolution (mirrors rbook_decisions / rbook_mission).
       // s92-m01: only list is the portfolio read; every other action resolves normally.
       const portfolioRead = params.acrossProjects === true && params.action === 'list';
       const ctx = portfolioRead
         ? await resolveOptionalSenderContext(params.projectRoot)
         : await resolveToolSenderContext(params.projectRoot);
       const projectRoot = ctx?.projectRoot;
-      const result = await cmosLearnings({ ...params, projectRoot });
+      const result = await rbookLearnings({ ...params, projectRoot });
       const formatted = formatLearningsForLLM(params.action, result);
 
       return buildResolvedToolResult(result, formatted, portfolioRead ? NO_PROJECT : stampOf(ctx));
     }
 
     // Consolidated feedback tool (Sprint 56 m03)
-    case 'cmos_feedback': {
-      const params = args as CmosFeedbackParams;
+    case 'rbook_feedback': {
+      const params = args as RbookFeedbackParams;
       const portfolioRead = params.acrossProjects === true && params.action === 'list';
       const ctx = portfolioRead
         ? await resolveOptionalSenderContext(params.projectRoot)
         : await resolveToolSenderContext(params.projectRoot);
       const projectRoot = ctx?.projectRoot;
-      const result = await cmosFeedback({ ...params, projectRoot });
+      const result = await rbookFeedback({ ...params, projectRoot });
       const formatted = formatFeedbackForLLM(params.action, result);
 
       return buildResolvedToolResult(result, formatted, portfolioRead ? NO_PROJECT : stampOf(ctx));
     }
 
     // Credential lifecycle (Sprint 57 m03)
-    case 'cmos_auth': {
-      const params = args as CmosAuthParams;
+    case 'rbook_auth': {
+      const params = args as RbookAuthParams;
       // s92-m01: login, list and logout are USER-level — they need a dashboard credential, not a
       // project. Once the registry-singleton auto-pick was removed they would otherwise refuse from
-      // any non-CMOS folder, so they use the caller's project when one resolves and run
+      // any non-Reasonbook folder, so they use the caller's project when one resolves and run
       // project-free when none does. revoke takes the same route: with a keyId it needs no
       // project, and without one its handler refuses "revoke requires either keyId or
       // projectRoot". rotate and reissue act on a project's key and still require one. An
@@ -1120,41 +1121,41 @@ export async function executeMissionProtocolTool(
         ? await resolveOptionalSenderContext(params.projectRoot)
         : await resolveToolSenderContext(params.projectRoot);
       const projectRoot = ctx?.projectRoot;
-      const result = await cmosAuth({ ...params, projectRoot });
+      const result = await rbookAuth({ ...params, projectRoot });
       const formatted = formatAuthForLLM(params.action, result);
 
       return buildResolvedToolResult(result, formatted, stampOf(ctx));
     }
 
     // At-a-glance status payload (Sprint 62 m06)
-    case 'cmos_status': {
-      const params = args as CmosStatusParams;
+    case 'rbook_status': {
+      const params = args as RbookStatusParams;
       const ctx = await resolveToolSenderContext(params.projectRoot);
       const projectRoot = ctx.projectRoot;
-      const result = await cmosStatus({ ...params, projectRoot });
+      const result = await rbookStatus({ ...params, projectRoot });
       const formatted = formatStatusForLLM(result);
 
       return buildResolvedToolResult(result, formatted, stampOf(ctx));
     }
 
     // Sprint tools
-    case 'cmos_sprint': {
-      const params = args as CmosSprintParams;
+    case 'rbook_sprint': {
+      const params = args as RbookSprintParams;
 
       const ctx = await resolveToolSenderContext(params.projectRoot);
       const projectRoot = ctx.projectRoot;
-      const result = await cmosSprint({ ...params, projectRoot });
+      const result = await rbookSprint({ ...params, projectRoot });
       const formatted = formatSprintForLLM(params.action, result);
 
       return buildResolvedToolResult(result, formatted, stampOf(ctx));
     }
 
-    case 'cmos_agent_onboard': {
-      const params = args as CmosAgentOnboardParams;
+    case 'rbook_agent_onboard': {
+      const params = args as RbookAgentOnboardParams;
       const advertisedRoots = await getClientProjectRoots(params.projectRoot);
       const ctx = await resolveToolSenderContext(params.projectRoot);
       const projectRoot = ctx.projectRoot;
-      const result = await cmosAgentOnboard({
+      const result = await rbookAgentOnboard({
         ...params,
         projectRoot,
         advertisedRoots,
@@ -1167,15 +1168,15 @@ export async function executeMissionProtocolTool(
 
     // Bundled session-opener digest (Sprint 64 m03).
     // Project-scoped by design — does NOT walk the project registry.
-    case 'cmos_review': {
-      const params = args as CmosReviewParams;
+    case 'rbook_review': {
+      const params = args as RbookReviewParams;
       const advertisedRoots = await getClientProjectRoots(params.projectRoot);
       const ctx = await resolveToolSenderContext(params.projectRoot);
       const projectRoot = ctx.projectRoot;
       // s92-m01: the digest carries projectRoot/resolvedBy inside its own 4KB budget.
       // s92-m04: the roots and "the caller named the project" reach the nested onboard, so a
       // project the client or operator named is not reported as ambiguous (the whoami nudge).
-      const result = await cmosReviewPresentation(
+      const result = await rbookReviewPresentation(
         { ...params, projectRoot },
         {
           resolvedBy: ctx.source,
@@ -1188,8 +1189,8 @@ export async function executeMissionProtocolTool(
     }
 
     // Consolidated message tool (Sprint 28)
-    case 'cmos_message': {
-      const params = args as CmosMessageParams;
+    case 'rbook_message': {
+      const params = args as RbookMessageParams;
       const advertisedRoots = await getClientProjectRoots(params.projectRoot);
 
       if (params.action === 'whoami') {
@@ -1221,7 +1222,7 @@ export async function executeMissionProtocolTool(
         stamp = stampOf(ctx);
       } else if (params.projectRoot != null) {
         // s92-m01: an explicit projectRoot is final on every action. The dashboard-only actions
-        // used to pass it through unchecked (and a non-CMOS folder would have been reported as
+        // used to pass it through unchecked (and a non-Reasonbook folder would have been reported as
         // the project the call used). Null, like omission, does not name an explicit root.
         const ctx = await resolveToolSenderContext(params.projectRoot);
         projectRoot = ctx.projectRoot;
@@ -1249,15 +1250,15 @@ export async function executeMissionProtocolTool(
           // fail-open — user-scoped auth returns the operator's full inbox
         }
       }
-      const result = await cmosMessage({ ...params, projectRoot, advertisedRoots });
+      const result = await rbookMessage({ ...params, projectRoot, advertisedRoots });
       const formatted = formatMessageForLLM(params.action, result);
 
       return buildResolvedToolResult(result, formatted, stamp);
     }
 
     // Consolidated project tool (Sprint 24)
-    case 'cmos_project': {
-      const params = args as CmosProjectParams;
+    case 'rbook_project': {
+      const params = args as RbookProjectParams;
       // init/register/unregister take a literal user-supplied path (destination for a new
       // workspace, a path to register, a path to forget). Routing through resolveToolSenderContext
       // would substitute the caller's own project: before s92-m01 an unregister of a deleted
@@ -1281,9 +1282,9 @@ export async function executeMissionProtocolTool(
             success: false,
             error: {
               code: 'PROJECT_FOLDER_REQUIRED',
-              message: `cmos_project(action="${action}") requires a filesystem folder, not a project address.`,
+              message: `rbook_project(action="${action}") requires a filesystem folder, not a project address.`,
               suggestion:
-                'Pass projectRoot as a project folder. Call cmos_project(action="list") to find an existing project path.',
+                'Pass projectRoot as a project folder. Call rbook_project(action="list") to find an existing project path.',
             },
           };
           return buildResolvedToolResult(result, formatProjectForLLM(action, result), NO_PROJECT);
@@ -1296,7 +1297,7 @@ export async function executeMissionProtocolTool(
         projectRoot = ctx.projectRoot;
         stamp = stampOf(ctx);
       }
-      const result = await cmosProject({ ...params, projectRoot });
+      const result = await rbookProject({ ...params, projectRoot });
       const formatted = formatProjectForLLM(params.action, result, {
         validate: params.validate,
       });
@@ -1321,7 +1322,7 @@ async function runWhoamiCli(): Promise<number> {
 interface StartupRegistryPruneResult {
   /** Total entries before the prune (null on failure before load). */
   totalBefore: number | null;
-  /** Entries removed (stale directory or missing CMOS database). */
+  /** Entries removed (stale directory or missing Reasonbook database). */
   pruned: number;
   /** Remaining entries after prune. */
   remaining: number | null;
@@ -1331,16 +1332,16 @@ interface StartupRegistryPruneResult {
 
 /**
  * Walk the registry, drop entries whose `projectRoot` no longer contains a
- * CMOS database, and emit a concise log line so the operator can see drift.
+ * Reasonbook database, and emit a concise log line so the operator can see drift.
  *
  * Sprint 56 m01: registry pollution was blowing the fanout response cap on
  * read surfaces. Auto-prune at boot keeps the registry bounded by live
- * projects without requiring a manual `cmos_project(action="validate")`.
+ * projects without requiring a manual `rbook_project(action="validate")`.
  */
 async function runStartupRegistryPrune(): Promise<StartupRegistryPruneResult> {
   try {
     // s79-m03 — prune/archive against the project-graph registry (rows whose
-    // store's cmos/db/cmos.sqlite vanished). s80-m02: the graph is the single
+    // store's rbook/db/rbook.sqlite vanished). s80-m02: the graph is the single
     // discovery source — no JSON mirror to re-derive.
     const graph = await ProjectGraphRegistry.create();
     const before = graph.list().length;
@@ -1360,7 +1361,7 @@ let startupRegistryPruneRunner: typeof runStartupRegistryPrune = runStartupRegis
 export interface StartupTopologyResult {
   /** True when the ambiguous-attribution topology was detected and warned. */
   warned: boolean;
-  /** Whether CMOS_PROJECT_ROOT is pinned (non-empty). */
+  /** Whether RBOOK_PROJECT_ROOT is pinned (non-empty). */
   projectRootPinned: boolean;
   /** Registered project count consulted for the ambiguity check. */
   registryProjectCount: number;
@@ -1368,7 +1369,7 @@ export interface StartupTopologyResult {
 
 /**
  * s78-m06 topology diagnostic. WARNs ONLY in the single ambiguous-attribution
- * topology: a global MCP entry with CMOS_PROJECT_ROOT pinned to one repo WHILE more
+ * topology: a global MCP entry with RBOOK_PROJECT_ROOT pinned to one repo WHILE more
  * than one project is registered — the config where one env pins .env bootstrap +
  * fallback attribution to a single repo that every sibling session shares. Silent for
  * the safe cases (local per-project server, or a single registered project). Pure so
@@ -1467,28 +1468,28 @@ async function initializeServer(): Promise<MissionProtocolContext> {
   try {
     debugLog(`[INFO] Initializing MCP server...`);
     const context = await contextBuilder();
-    debugLog(`[INFO] CMOS bundled seed schema version: ${CMOS_SCHEMA_VERSION}`);
+    debugLog(`[INFO] Reasonbook bundled seed schema version: ${RBOOK_SCHEMA_VERSION}`);
     debugLog(`[INFO] Default intelligence model: ${context.defaultModel}`);
 
     // Sprint 53 m02 / m04: startup diagnostic for attribution. `SERVER_INSTALL_ROOT`
     // is the one path that must never be the *implicit* sender for another project;
     // operators see it here so they can verify before debugging misrouted sends.
-    const envProjectRoot = process.env[CMOS_PROJECT_ROOT_ENV];
+    const envProjectRoot = getSetting(RBOOK_PROJECT_ROOT_ENV);
     debugLog(`[INFO] Server install root: ${SERVER_INSTALL_ROOT}`);
     debugLog(
       `[INFO] Sender attribution diagnostics: Server install root: ${SERVER_INSTALL_ROOT}. ` +
-        `${CMOS_PROJECT_ROOT_ENV} env: ${envProjectRoot ?? 'unset'}. Roots support: probed on first call.`
+        `${RBOOK_PROJECT_ROOT_ENV} env: ${envProjectRoot ?? 'unset'}. Roots support: probed on first call.`
     );
     if (envProjectRoot) {
       console.error(
-        `[WARN] ${CMOS_PROJECT_ROOT_ENV}=${envProjectRoot} is set. It does not select a project for ` +
+        `[WARN] ${RBOOK_PROJECT_ROOT_ENV}=${envProjectRoot} is set. It does not select a project for ` +
           `tool calls; the server reads it only to find its own .env. If you relied on ` +
           `this env to pin attribution, pass projectRoot explicitly or ensure your MCP client advertises ` +
           `roots. Every outbound send will fail-closed rather than silently attribute to the server's ` +
           `own project.`
       );
     } else {
-      debugLog(`[INFO] ${CMOS_PROJECT_ROOT_ENV} env: unset (it does not select a project).`);
+      debugLog(`[INFO] ${RBOOK_PROJECT_ROOT_ENV} env: unset (it does not select a project).`);
     }
     const registryPrune = await startupRegistryPruneRunner();
     if (registryPrune.error) {
@@ -1515,7 +1516,7 @@ async function initializeServer(): Promise<MissionProtocolContext> {
         );
       } else {
         console.error(
-          `[WARN] ${PROJECT_ROOT_ARG}: ${serverProjectRoot} holds no CMOS database; calls with no project context will be refused until it does.`
+          `[WARN] ${PROJECT_ROOT_ARG}: ${serverProjectRoot} holds no Reasonbook database; calls with no project context will be refused until it does.`
         );
       }
     }
@@ -1524,7 +1525,7 @@ async function initializeServer(): Promise<MissionProtocolContext> {
       const notice = unappliedDefaultNotice(status);
       if (notice && status.entry) {
         // Stays visible (s92-m07): an upgrader must re-confirm a pre-3.2.0 default, and this line,
-        // whoami and cmos_review are where they learn it.
+        // whoami and rbook_review are where they learn it.
         console.error(`[INFO] ${notice}: ${reconfirmDefaultCall(status.entry)}`);
       }
     } catch {
@@ -1582,7 +1583,7 @@ async function initializeServer(): Promise<MissionProtocolContext> {
     }
 
     // Sprint 58 m02: surface an empty credential store with a one-line
-    // [WARN] pointing at cmos_auth(action="login"). Makes the "just nothing
+    // [WARN] pointing at rbook_auth(action="login"). Makes the "just nothing
     // happens" first-run state audible. Non-fatal.
     try {
       await startupCredentialCheckRunner();
@@ -1594,15 +1595,15 @@ async function initializeServer(): Promise<MissionProtocolContext> {
     }
 
     // Sprint 78 m06: topology diagnostic. WARN only in the ambiguous-attribution
-    // config — CMOS_PROJECT_ROOT pinned while >1 project is registered. Non-fatal.
+    // config — RBOOK_PROJECT_ROOT pinned while >1 project is registered. Non-fatal.
     try {
       const topology = evaluateStartupTopology(
-        process.env[CMOS_PROJECT_ROOT_ENV],
+        getSetting(RBOOK_PROJECT_ROOT_ENV),
         registryPrune.remaining ?? 0
       );
       if (topology.warned) {
         console.error(
-          `[WARN] cmos-mcp: ${CMOS_PROJECT_ROOT_ENV}=${process.env[CMOS_PROJECT_ROOT_ENV]} is pinned ` +
+          `[WARN] reasonbook: ${RBOOK_PROJECT_ROOT_ENV}=${getSetting(RBOOK_PROJECT_ROOT_ENV)} is pinned ` +
             `while ${topology.registryProjectCount} projects are registered. A single global MCP entry ` +
             `with this env pins .env bootstrap (and any dashboard key that .env holds) to one repo ` +
             `that every sibling session shares. Prefer a project-local server, or pass projectRoot ` +
@@ -1624,10 +1625,10 @@ async function initializeServer(): Promise<MissionProtocolContext> {
       const bundledEnv = startupBundledEnvCheckRunner();
       if (bundledEnv.envFileBundled && bundledEnv.envFilePath) {
         console.error(
-          `[WARN] cmos-mcp: a .env file was found inside the installed package at ${bundledEnv.envFilePath}. ` +
+          `[WARN] reasonbook: a .env file was found inside the installed package at ${bundledEnv.envFilePath}. ` +
             `This may contain credentials that should not have been published. ` +
             `Inspect the file, treat any contained secrets as compromised, and report the issue at ` +
-            `https://github.com/kneelinghorse/cmos-mcp/issues. The server will continue running.`
+            `https://github.com/kneelinghorse/reasonbook/issues. The server will continue running.`
         );
       }
     } catch (error) {
@@ -1702,18 +1703,18 @@ async function main(argv: readonly string[] = process.argv.slice(2)): Promise<vo
     // and server.connect() (mirror the --whoami branch) — else they would hang the
     // stdio server for every MCP host. Both print to stdout and exit 0.
     if (argv.includes('--version')) {
-      process.stdout.write(`cmos-mcp ${getServerVersion()}\n`);
+      process.stdout.write(`reasonbook ${getServerVersion()}\n`);
       process.exit(0);
     }
     if (argv.includes('--help')) {
       process.stdout.write(
-        `cmos-mcp ${getServerVersion()} — MCP server for CMOS project management over SQLite.\n\n` +
+        `reasonbook ${getServerVersion()} — the MCP server for Reasonbook, a project record over SQLite.\n\n` +
           `Usage:\n` +
-          `  cmos-mcp              Run the MCP server over stdio (default; also: cmos-mcp serve).\n` +
-          `  cmos-mcp --version    Print the version and exit.\n` +
-          `  cmos-mcp --help       Print this help and exit.\n` +
-          `  cmos-mcp --whoami     Print sender-attribution diagnostics and exit.\n` +
-          `  cmos-mcp ${PROJECT_ROOT_ARG} <dir>\n` +
+          `  reasonbook              Run the MCP server over stdio (default; also: reasonbook serve).\n` +
+          `  reasonbook --version    Print the version and exit.\n` +
+          `  reasonbook --help       Print this help and exit.\n` +
+          `  reasonbook --whoami     Print sender-attribution diagnostics and exit.\n` +
+          `  reasonbook ${PROJECT_ROOT_ARG} <dir>\n` +
           `                        Use <dir> for calls that carry no project context (no projectRoot,\n` +
           `                        no MCP roots, and a working directory of /, $HOME or the install\n` +
           `                        root) — the Claude Desktop recipe. Set it per server config.\n\n` +
@@ -1742,7 +1743,7 @@ async function main(argv: readonly string[] = process.argv.slice(2)): Promise<vo
       () => {
         server = createProtocolServer();
         registerToolHandlers(context, server);
-        registerCmosPromptHandlers(server);
+        registerRbookPromptHandlers(server);
         return server;
       },
       { legacy: 'serve', onerror: (error) => console.error(`[WARN] MCP stdio: ${error.message}`) }
@@ -1759,14 +1760,16 @@ async function main(argv: readonly string[] = process.argv.slice(2)): Promise<vo
     debugLog(`[INFO] Server: ${SERVER_CONFIG.name} v${SERVER_CONFIG.version}`);
     const totalTools = getToolDefinitions().length;
     debugLog(`[INFO] ${totalTools} tools registered`);
-    if (context.cmosDetected) {
-      debugLog(`[INFO] CMOS detected, ${CMOS_TOOL_DEFINITIONS.length} CMOS tools enabled`);
-      debugLog(`[INFO] CMOS database: ${context.cmosDatabasePath}`);
+    if (context.rbookDetected) {
+      debugLog(
+        `[INFO] Reasonbook detected, ${RBOOK_TOOL_DEFINITIONS.length} Reasonbook tools enabled`
+      );
+      debugLog(`[INFO] Reasonbook database: ${context.rbookDatabasePath}`);
     }
 
-    // s92-m07: the two lines a normal start writes. Everything above is behind CMOS_DEBUG=1.
-    console.error(`[cmos-mcp] v${SERVER_CONFIG.version} ready on stdio (${totalTools} tools)`);
-    console.error(`[cmos-mcp] ${await startupProjectDescriber()}`);
+    // s92-m07: the two lines a normal start writes. Everything above is behind RBOOK_DEBUG=1.
+    console.error(`[reasonbook] v${SERVER_CONFIG.version} ready on stdio (${totalTools} tools)`);
+    console.error(`[reasonbook] ${await startupProjectDescriber()}`);
   } catch (error) {
     const missionError = ErrorHandler.handle(
       error,

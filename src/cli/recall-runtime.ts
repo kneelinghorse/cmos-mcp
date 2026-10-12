@@ -6,9 +6,9 @@ import Database from 'better-sqlite3';
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { harnessSessionHash, runtimeDir } from '../tools/cmos/harness-session';
-import { safeDestination, targetForStore, telemetryKey } from '../tools/cmos/local-telemetry';
-import type { RenderedContext } from '../tools/cmos/rendered-context';
+import { harnessSessionHash, runtimeDir } from '../tools/rbook/harness-session';
+import { safeDestination, targetForStore, telemetryKey } from '../tools/rbook/local-telemetry';
+import type { RenderedContext } from '../tools/rbook/rendered-context';
 import { emittedRenderedIds } from './telemetry';
 
 export interface FirstPromptOptions {

@@ -23,7 +23,7 @@ import type { CliIo } from '../../src/cli/core';
 import * as digestModule from '../../src/cli/digest';
 import { initOffer } from '../../src/cli/session-start';
 import { buildMissionProtocolContext, executeMissionProtocolTool } from '../../src/index';
-import { CmosDetector } from '../../src/intelligence/cmos-detector';
+import { RbookDetector } from '../../src/intelligence/rbook-detector';
 import { ProjectGraphRegistry } from '../../src/intelligence/project-graph-registry';
 import {
   harnessLinkEnded,
@@ -32,10 +32,10 @@ import {
   readHarnessLink,
   setAncestorsForTesting,
   setParentPidForTesting,
-} from '../../src/tools/cmos/harness-session';
-import { closeOwnImplicitSessions } from '../../src/tools/cmos/implicit-session-lifecycle';
-import { currentSessionOwner, setExternalSessionOwner } from '../../src/tools/cmos/session-owner';
-import { reidentifyCmosTestStore, seedCmosDb } from '../helpers/seedCmosDb';
+} from '../../src/tools/rbook/harness-session';
+import { closeOwnImplicitSessions } from '../../src/tools/rbook/implicit-session-lifecycle';
+import { currentSessionOwner, setExternalSessionOwner } from '../../src/tools/rbook/session-owner';
+import { reidentifyRbookTestStore, seedRbookDb } from '../helpers/seedRbookDb';
 
 // Live pids, as a harness's own pid is while its session runs (session start prunes dead ones).
 const HARNESS_PID = process.pid;
@@ -45,7 +45,7 @@ let context: Awaited<ReturnType<typeof buildMissionProtocolContext>>;
 let tmp: string;
 let projectRoot: string;
 let dbPath: string;
-const savedConfigDir = process.env.CMOS_CONFIG_DIR;
+const savedConfigDir = process.env.RBOOK_CONFIG_DIR;
 // This suite may itself run under Claude Code, whose session id would be this "server's" start id.
 const savedStartId = process.env.CLAUDE_CODE_SESSION_ID;
 
@@ -55,13 +55,13 @@ beforeAll(async () => {
 
 beforeEach(() => {
   delete process.env.CLAUDE_CODE_SESSION_ID;
-  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-s93m01-hooks-'));
-  process.env.CMOS_CONFIG_DIR = path.join(tmp, 'config');
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-s93m01-hooks-'));
+  process.env.RBOOK_CONFIG_DIR = path.join(tmp, 'config');
   projectRoot = path.join(tmp, 'project');
   fs.mkdirSync(projectRoot, { recursive: true });
-  dbPath = seedCmosDb(projectRoot, { projectName: 'hook cli' });
-  reidentifyCmosTestStore(projectRoot);
-  CmosDetector.resetInstance();
+  dbPath = seedRbookDb(projectRoot, { projectName: 'hook cli' });
+  reidentifyRbookTestStore(projectRoot);
+  RbookDetector.resetInstance();
 });
 
 afterEach(() => {
@@ -70,8 +70,8 @@ afterEach(() => {
   setExternalSessionOwner(null);
   if (savedStartId === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
   else process.env.CLAUDE_CODE_SESSION_ID = savedStartId;
-  if (savedConfigDir === undefined) delete process.env.CMOS_CONFIG_DIR;
-  else process.env.CMOS_CONFIG_DIR = savedConfigDir;
+  if (savedConfigDir === undefined) delete process.env.RBOOK_CONFIG_DIR;
+  else process.env.RBOOK_CONFIG_DIR = savedConfigDir;
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -125,7 +125,7 @@ function rows<T>(sql: string, ...params: unknown[]): T[] {
 /** A capture through the MCP dispatch, as the harness's server makes it. */
 async function serverCapture(content: string): Promise<void> {
   const captured = await executeMissionProtocolTool(
-    'cmos_session',
+    'rbook_session',
     { action: 'capture', category: 'context', content, projectRoot },
     context
   );
@@ -136,7 +136,7 @@ const capturesOf = (id: string) =>
   rows<{ captures: string }>('SELECT captures FROM sessions WHERE id = ?', id)[0].captures;
 
 const failOpenLog = (): string => {
-  const file = path.join(process.env.CMOS_CONFIG_DIR!, 'runtime', 'fail-open.jsonl');
+  const file = path.join(process.env.RBOOK_CONFIG_DIR!, 'runtime', 'fail-open.jsonl');
   return fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
 };
 
@@ -220,7 +220,7 @@ describe('s93-m01 — hook session-start', () => {
     setParentPidForTesting(HARNESS_PID);
     await hook('session-start', { session_id: 'raw-explicit-1', source: 'startup' });
     const started = await executeMissionProtocolTool(
-      'cmos_session',
+      'rbook_session',
       { action: 'start', type: 'planning', title: 'Before clear', projectRoot },
       context
     );
@@ -237,7 +237,7 @@ describe('s93-m01 — hook session-start', () => {
     // The new conversation is not blocked, and its writes and close are its own.
     const keyAfter = `ext:${harnessSessionHash('raw-explicit-2')}`;
     const startedAgain = await executeMissionProtocolTool(
-      'cmos_session',
+      'rbook_session',
       { action: 'start', type: 'planning', title: 'After clear', projectRoot },
       context
     );
@@ -247,7 +247,7 @@ describe('s93-m01 — hook session-start', () => {
     expect(own).toMatchObject({ status: 'active', implicit: 0 });
     expect(capturesOf(own.id)).toContain('Into the new explicit session.');
     const completed = await executeMissionProtocolTool(
-      'cmos_session',
+      'rbook_session',
       { action: 'complete', summary: 'Done after clear.', projectRoot },
       context
     );
@@ -256,7 +256,7 @@ describe('s93-m01 — hook session-start', () => {
   });
 });
 
-// The m01 build critic, B2: `npx cmos-mcp` and a Windows .cmd shim put a launcher between the
+// The m01 build critic, B2: `npx @aquex/reasonbook` and a Windows .cmd shim put a launcher between the
 // harness and its server, so the server's parent has no link. Its environment still carries the
 // session id the harness started with, which the link records as its origin.
 describe("s93-m01 — a server that is not the harness's direct child", () => {
@@ -417,8 +417,8 @@ describe("s93-m01 — the harness key applies only in the conversation's own sto
   it('a linked server writes into another project as itself, and session end leaves that alone', async () => {
     const otherRoot = path.join(tmp, 'other-project');
     fs.mkdirSync(otherRoot, { recursive: true });
-    const otherDb = seedCmosDb(otherRoot, { projectName: 'other project' });
-    reidentifyCmosTestStore(otherRoot);
+    const otherDb = seedRbookDb(otherRoot, { projectName: 'other project' });
+    reidentifyRbookTestStore(otherRoot);
     setParentPidForTesting(HARNESS_PID);
     await hook('session-start', { session_id: 'raw-scoped', source: 'startup' });
     const key = `ext:${harnessSessionHash('raw-scoped')}`;
@@ -426,7 +426,7 @@ describe("s93-m01 — the harness key applies only in the conversation's own sto
     expect(currentSessionOwner(dbPath).key).toBe(key);
     expect(currentSessionOwner(otherDb).kind).toBe('process');
     const elsewhere = await executeMissionProtocolTool(
-      'cmos_session',
+      'rbook_session',
       {
         action: 'capture',
         category: 'context',
@@ -484,7 +484,7 @@ describe('s93-m01 — the server writes into the harness session (decision #1189
 
     for (const content of ['First server.', 'After a restart.']) {
       const captured = await executeMissionProtocolTool(
-        'cmos_session',
+        'rbook_session',
         { action: 'capture', category: 'context', content, projectRoot },
         context
       );
@@ -516,7 +516,7 @@ describe('s93-m01 — the server writes into the harness session (decision #1189
     // Harness A starts an explicit session; it carries A's key.
     setParentPidForTesting(HARNESS_PID);
     const started = await executeMissionProtocolTool(
-      'cmos_session',
+      'rbook_session',
       { action: 'start', type: 'research', title: 'A explicit', projectRoot },
       context
     );
@@ -530,7 +530,7 @@ describe('s93-m01 — the server writes into the harness session (decision #1189
     const write = async (pid: number, content: string) => {
       setParentPidForTesting(pid);
       const captured = await executeMissionProtocolTool(
-        'cmos_session',
+        'rbook_session',
         { action: 'capture', category: 'context', content, projectRoot },
         context
       );
@@ -606,7 +606,7 @@ describe('s93-m01 — hook session-end', () => {
       reason: 'other',
     });
     expect(ended).toEqual({ code: 0, stdout: '', stderr: [] });
-    const db = new Database(path.join(checkout, 'cmos', 'db', 'cmos.sqlite'), { readonly: true });
+    const db = new Database(path.join(checkout, 'rbook', 'db', 'rbook.sqlite'), { readonly: true });
     try {
       expect(
         db
@@ -630,11 +630,11 @@ describe('s93-m01 — the off switch (#1183)', () => {
     expect(sessionsOwnedBy(`ext:${harnessSessionHash('raw-silent')}`)).toEqual([]);
   });
 
-  it('CMOS_AMBIENT=off silences one session without touching the setting', async () => {
+  it('RBOOK_AMBIENT=off silences one session without touching the setting', async () => {
     const ran = await hook(
       'session-start',
       { session_id: 'raw-env-off', source: 'startup' },
-      { CMOS_AMBIENT: 'off' }
+      { RBOOK_AMBIENT: 'off' }
     );
     expect(ran).toEqual({ code: 0, stdout: '', stderr: [] });
     expect((await run(['ambient'])).stdout.trim()).toBe('on');
@@ -715,10 +715,10 @@ describe('s93-m01 — failing open', () => {
 
   // The m01 build critic, B3: the MCP path refuses a store whose database is gone by name. The
   // hook says so too, and never offers init, which would create an empty store in its place.
-  it('a CMOS folder whose database is gone: one stderr line, a fail-open record, no init offer', async () => {
+  it('a Reasonbook folder whose database is gone: one stderr line, a fail-open record, no init offer', async () => {
     const repo = path.join(tmp, 'lost-store');
     fs.mkdirSync(path.join(repo, '.git'), { recursive: true });
-    fs.mkdirSync(path.join(repo, 'cmos', 'db'), { recursive: true });
+    fs.mkdirSync(path.join(repo, 'rbook', 'db'), { recursive: true });
     const ran = await run(['hook', 'session-start'], {
       stdin: { session_id: 'raw-lost', source: 'startup', cwd: repo },
       cwd: repo,
@@ -747,7 +747,7 @@ describe('s93-m01 — failing open', () => {
       },
     });
     expect(code).toBe(0);
-    expect(stderr).toEqual(['cmos-mcp hook stop: a library log line']);
+    expect(stderr).toEqual(['reasonbook hook stop: a library log line']);
   });
 
   it('the deadline counts from process start, so module loading is inside the budget', async () => {
@@ -784,7 +784,7 @@ describe('s93-m01 — failing open', () => {
     expect(stdout).toBe('');
     expect(stderr).toEqual([]);
     const log = fs.readFileSync(
-      path.join(process.env.CMOS_CONFIG_DIR!, 'runtime', 'fail-open.jsonl'),
+      path.join(process.env.RBOOK_CONFIG_DIR!, 'runtime', 'fail-open.jsonl'),
       'utf8'
     );
     expect(log).toContain('"verb":"hook prompt"');

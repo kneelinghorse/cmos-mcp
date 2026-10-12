@@ -7,16 +7,16 @@ import path from 'path';
 import { describe, expect, it, beforeEach, afterEach } from '@jest/globals';
 import { computeAuthState } from '../../src/auth/auth-state';
 import { recordDeliveryAck, resetDeliveryAckCache } from '../../src/auth/delivery-ack-cache';
-import { CMOS_CONFIG_DIR_ENV, CredentialStore } from '../../src/intelligence/credential-store';
+import { RBOOK_CONFIG_DIR_ENV, CredentialStore } from '../../src/intelligence/credential-store';
 import type {
   ProjectKeyRecord,
   UserScopedKeyRecord,
 } from '../../src/intelligence/credential-store';
 import {
-  CMOS_DASHBOARD_API_KEY_ENV,
-  CMOS_DASHBOARD_USER_ENV,
-  CMOS_DASHBOARD_PASSWORD_ENV,
-} from '../../src/tools/cmos/dashboard-client';
+  RBOOK_DASHBOARD_API_KEY_ENV,
+  RBOOK_DASHBOARD_USER_ENV,
+  RBOOK_DASHBOARD_PASSWORD_ENV,
+} from '../../src/tools/rbook/dashboard-client';
 
 function userRecord(overrides: Partial<UserScopedKeyRecord> = {}): UserScopedKeyRecord {
   const now = new Date().toISOString();
@@ -49,7 +49,7 @@ describe('computeAuthState', () => {
 
   beforeEach(async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'auth-state-'));
-    delete process.env[CMOS_CONFIG_DIR_ENV];
+    delete process.env[RBOOK_CONFIG_DIR_ENV];
     CredentialStore.resetInstance();
     resetDeliveryAckCache();
     store = await CredentialStore.create({ configDir: tempDir });
@@ -146,31 +146,31 @@ describe('computeAuthState', () => {
     await store.upsertUserScopedKey('u', userRecord());
     // Env vars should be ignored when the store has keys — the priority
     // chain takes the store first.
-    process.env[CMOS_DASHBOARD_API_KEY_ENV] = 'cmk_legacy';
+    process.env[RBOOK_DASHBOARD_API_KEY_ENV] = 'cmk_legacy';
     const result = await computeAuthState({ store });
     expect(result.authTier).toBe('device-code');
   });
 
-  it('authTier="legacy-env" when the store is empty and CMOS_DASHBOARD_API_KEY is set', async () => {
-    delete process.env[CMOS_DASHBOARD_USER_ENV];
-    delete process.env[CMOS_DASHBOARD_PASSWORD_ENV];
-    process.env[CMOS_DASHBOARD_API_KEY_ENV] = 'cmk_legacy';
+  it('authTier="legacy-env" when the store is empty and RBOOK_DASHBOARD_API_KEY is set', async () => {
+    delete process.env[RBOOK_DASHBOARD_USER_ENV];
+    delete process.env[RBOOK_DASHBOARD_PASSWORD_ENV];
+    process.env[RBOOK_DASHBOARD_API_KEY_ENV] = 'cmk_legacy';
     const result = await computeAuthState({ store });
     expect(result.authTier).toBe('legacy-env');
   });
 
   it('authTier="password-fallback" when only USER + PASSWORD env vars are set', async () => {
-    delete process.env[CMOS_DASHBOARD_API_KEY_ENV];
-    process.env[CMOS_DASHBOARD_USER_ENV] = 'user@example.com';
-    process.env[CMOS_DASHBOARD_PASSWORD_ENV] = 'secret';
+    delete process.env[RBOOK_DASHBOARD_API_KEY_ENV];
+    process.env[RBOOK_DASHBOARD_USER_ENV] = 'user@example.com';
+    process.env[RBOOK_DASHBOARD_PASSWORD_ENV] = 'secret';
     const result = await computeAuthState({ store });
     expect(result.authTier).toBe('password-fallback');
   });
 
   it('authTier="none" when nothing is configured', async () => {
-    delete process.env[CMOS_DASHBOARD_API_KEY_ENV];
-    delete process.env[CMOS_DASHBOARD_USER_ENV];
-    delete process.env[CMOS_DASHBOARD_PASSWORD_ENV];
+    delete process.env[RBOOK_DASHBOARD_API_KEY_ENV];
+    delete process.env[RBOOK_DASHBOARD_USER_ENV];
+    delete process.env[RBOOK_DASHBOARD_PASSWORD_ENV];
     const result = await computeAuthState({ store });
     expect(result.authTier).toBe('none');
   });

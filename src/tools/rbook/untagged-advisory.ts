@@ -1,0 +1,84 @@
+// SPDX-License-Identifier: Apache-2.0
+// ABOUTME: s85-m03 — the "N rows have no sprint tag" advisories. Sprint-scoped surfaces count
+// ABOUTME: strictly by sprint_id, so honest NULLs must be reported, never silently dropped.
+
+/**
+ * Untagged-row advisories (s85-m03).
+ *
+ * s85-m03 made a session started with no open sprint record `sprint_id = NULL` instead of
+ * inheriting a Completed sprint. That is the honest record, but it has a cost: every surface
+ * that counts strictly by `sessions.sprint_id = ?` or `strategic_decisions.sprint_id` now
+ * under-reports, and an under-report is indistinguishable from "there was no work".
+ *
+ * The fix is to SAY SO rather than to guess. Deliberately NOT done: falling back to
+ * `session_missions` to re-attribute an untagged session — that would reinvent exactly the
+ * attribution the write path just refused to invent (RF-10).
+ *
+ * Three consumers: `rbook_sprint(action="retro")`, `rbook_sprint(action="complete")` and
+ * `rbook_decisions(action="review")`. One implementation each so the wording cannot drift.
+ *
+ * @module tools/rbook/untagged-advisory
+ */
+
+import type { RbookDatabaseClient } from './client';
+
+/**
+ * Count sessions carrying no sprint tag, or `null` when the query cannot run.
+ *
+ * Global rather than sprint-scoped by necessity: an untagged row has no sprint to scope to.
+ * That is the whole point — these rows are invisible to every sprint-scoped query.
+ */
+export function countUntaggedSessions(client: RbookDatabaseClient): number | null {
+  // s93-m01 (#610 related): implicit sessions carry no sprint by design (a process outlives sprints)
+  // and every row they write resolves its own, so only explicit sessions count as untagged.
+  const implicitColumn = client.getOne<{ n: number }>(
+    "SELECT COUNT(*) AS n FROM pragma_table_info('sessions') WHERE name = 'implicit'",
+    []
+  );
+  const explicitOnly =
+    implicitColumn.success && (implicitColumn.data?.n ?? 0) > 0 ? ' AND implicit = 0' : '';
+  const result = client.getOne<{ count: number }>(
+    `SELECT COUNT(*) AS count FROM sessions WHERE sprint_id IS NULL${explicitOnly}`,
+    []
+  );
+  return result.success && result.data ? result.data.count : null;
+}
+
+/**
+ * Build the sprint-surface advisory, or `null` when there is nothing to report.
+ *
+ * Used by retro and by the sprint-close summary. Both count sessions (and, through them,
+ * decisions and learnings) strictly by `sprint_id`, so both under-report by exactly this many.
+ */
+export function buildUntaggedSessionAdvisory(client: RbookDatabaseClient): string | null {
+  const count = countUntaggedSessions(client);
+  if (count === null || count === 0) return null;
+  return (
+    `${count} session(s) in this store carry no sprint tag and are therefore NOT counted here ` +
+    `(nor are the decisions, learnings, constraints and next-steps captured in them). This is ` +
+    `expected for sessions started while no sprint was in an open status — the record is ` +
+    `untagged by design, not missing. Work can stay unscheduled; use rbook_sprint(action="add") if ` +
+    `you want it sprint-scoped.`
+  );
+}
+
+/**
+ * Build the decision-triage advisory, or `null` when there is nothing to report.
+ *
+ * s91-m08: `rbook_decisions(action="review")` now scores untagged decisions by wall-clock age
+ * (they used to be permanently invisible to triage). The advisory still names how many there
+ * are, because their age is approximate: it counts 14-day periods, not real sprint closes.
+ */
+export function buildUntaggedDecisionAdvisory(client: RbookDatabaseClient): string | null {
+  const result = client.getOne<{ count: number }>(
+    "SELECT COUNT(*) AS count FROM strategic_decisions WHERE sprint_id IS NULL AND COALESCE(status, 'active') = 'active'",
+    []
+  );
+  if (!result.success || !result.data || result.data.count === 0) return null;
+  return (
+    `${result.data.count} active decision(s) have no sprint tag and are aged on wall-clock time ` +
+    `because they carry no sprint tag (one sprint per 14 days since creation). Decisions ` +
+    `captured while no sprint was open are untagged by design. Review them directly ` +
+    `with rbook_decisions(action="list").`
+  );
+}

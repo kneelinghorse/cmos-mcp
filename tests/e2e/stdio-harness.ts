@@ -90,7 +90,7 @@ export async function connectStdioServer(opts: {
     stderr: 'ignore',
   });
   const client = new Client(
-    { name: opts.clientName ?? 'cmos-stdio-harness', version: '0.0.0' },
+    { name: opts.clientName ?? 'rbook-stdio-harness', version: '0.0.0' },
     {
       capabilities: opts.roots ? { roots: { listChanged: false } } : {},
       supportedProtocolVersions: ['2025-11-25'],

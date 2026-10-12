@@ -4,7 +4,8 @@
 
 import * as path from 'path';
 import type { ResolvedBy } from '../intelligence/sender-context';
-import { currentToolProjectResolution } from '../tools/cmos/tool-call-context';
+import { getServerVersion } from '../server-version';
+import { currentToolProjectResolution } from '../tools/rbook/tool-call-context';
 
 export interface CliRemedyTarget {
   readonly projectRoot: string;
@@ -16,10 +17,13 @@ function quote(text: string): string {
   return `'${text.replace(/'/g, "'\\''")}'`;
 }
 
+/** The command installed by this package. */
+const INSTALLED_COMMANDS = ['reasonbook'];
+
 /** The executable the hook actually used, with paths preserved as literal POSIX words. */
 export function cliCommand(argv: readonly string[] = process.argv): string {
   const script = argv[1] ?? '';
-  if (path.basename(script) === 'cmos-mcp') return 'cmos-mcp';
+  if (INSTALLED_COMMANDS.includes(path.basename(script))) return path.basename(script);
   const word = (text: string): string => (/^[\w@%+=:,./-]+$/.test(text) ? text : quote(text));
   return `${word(argv[0] ?? 'node')} ${word(script)}`;
 }
@@ -39,11 +43,20 @@ export function inertCliPath(text: string): string {
     .replace(/\u2029/g, '\\u2029');
 }
 
+/**
+ * s99-m02: the command a remedy names when the caller cannot know how the reader runs the CLI (a
+ * plugin user has no global command). The exact scoped package, because a bare `reasonbook` invites
+ * `npx reasonbook`, which fetches an unrelated 2017 package.
+ */
+export function remedyCommand(): string {
+  return `npx @aquex/reasonbook@${getServerVersion()}`;
+}
+
 /** Only a known cwd resolution can omit the root; direct handlers conservatively name theirs. */
 export function formatCliRemedy(
   verb: string,
   target: CliRemedyTarget,
-  command = 'cmos-mcp'
+  command = remedyCommand()
 ): string {
   const root = path.resolve(target.projectRoot);
   if (unsafeDisplay(root) || unsafeDisplay(command)) {

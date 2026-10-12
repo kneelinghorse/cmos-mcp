@@ -3,12 +3,17 @@
 // ABOUTME: Address lookup needs complete discovery because an unreadable store can hide a duplicate.
 
 import Database from 'better-sqlite3';
-import path from 'path';
-import { processBusyTimeout } from '../tools/cmos/sqlite-busy';
+import {
+  isRecordAddress,
+  normalizeAddressScheme,
+  resolveRecordPaths,
+  storedAddress,
+} from './legacy-compat';
+import { processBusyTimeout } from '../tools/rbook/sqlite-busy';
 import type { ProjectGraphRegistry } from './project-graph-registry';
 
 export const ADDRESS_REMEDY =
-  'Call cmos_project(action="list") to see registered addresses and paths, then pass projectRoot as an exact address or a project folder.';
+  'Call rbook_project(action="list") to see registered addresses and paths, then pass projectRoot as an exact address or a project folder.';
 
 export interface StoredProjectAddress {
   readonly id: string;
@@ -21,16 +26,16 @@ export type StoredAddressResult =
 
 /** Includes invalid spellings so an attempted address never becomes a relative filesystem path. */
 export function isProjectAddress(value: string): boolean {
-  return /^cmos:/i.test(value.trim()) || value === 'local-only';
+  return isRecordAddress(value) || value === 'local-only';
 }
 
-const ADDRESS_PATTERN = /^cmos:\/\/[a-zA-Z0-9_-]+\/[a-zA-Z0-9_-]+$/;
+const ADDRESS_PATTERN = /^rbook:\/\/[a-zA-Z0-9_-]+\/[a-zA-Z0-9_-]+$/;
 
 /** No client wrapper here: that wrapper may migrate, seed identity, or turn on WAL. */
 export function readStoredProjectAddress(projectRoot: string): StoredAddressResult {
   let db: Database.Database | undefined;
   try {
-    db = new Database(path.join(projectRoot, 'cmos/db/cmos.sqlite'), {
+    db = new Database(resolveRecordPaths(projectRoot).dbPath, {
       readonly: true,
       fileMustExist: true,
       timeout: processBusyTimeout() ?? 5000,
@@ -53,12 +58,14 @@ export function readStoredProjectAddress(projectRoot: string): StoredAddressResu
     if (!identity || typeof identity !== 'object' || Array.isArray(identity)) {
       throw new Error('project_identity is not an object');
     }
-    const { cmos_address: address } = identity as Record<string, unknown>;
+    const rawAddress = storedAddress(identity as Record<string, unknown>);
+    const address =
+      typeof rawAddress === 'string' ? normalizeAddressScheme(rawAddress) : rawAddress;
     if (address !== null && typeof address !== 'string') {
-      throw new Error('project_identity has an invalid cmos_address');
+      throw new Error('project_identity has an invalid rbook_address');
     }
     if (address && !ADDRESS_PATTERN.test(address)) {
-      throw new Error('project_identity has an invalid cmos_address');
+      throw new Error('project_identity has an invalid rbook_address');
     }
     return { identity: { id, address: address || null } };
   } catch (error) {
@@ -73,9 +80,10 @@ export function resolveRegisteredAddress(
   address: string,
   registry: ProjectGraphRegistry
 ): { readonly projectRoot: string } | { readonly error: string } {
+  address = normalizeAddressScheme(address);
   if (!ADDRESS_PATTERN.test(address)) {
     return {
-      error: `Project address '${address}' is not an exact cmos://owner/project address. Local-only projects need a folder.`,
+      error: `Project address '${address}' is not an exact rbook://owner/project address. Local-only projects need a folder.`,
     };
   }
   const matches: string[] = [];

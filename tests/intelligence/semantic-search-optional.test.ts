@@ -23,13 +23,13 @@ import {
   setTransformersLoaderForTesting,
   setTransformersResolverForTesting,
 } from '../../src/intelligence/embedding-pipeline';
-import { CmosDetector } from '../../src/intelligence/cmos-detector';
-import { CmosDatabaseClient } from '../../src/tools/cmos/client';
-import { cmosDb, formatDbForLLM } from '../../src/tools/cmos/cmos-db';
-import type { CmosDbHealthResult } from '../../src/tools/cmos/cmos-db-health';
-import { HybridRetriever } from '../../src/tools/cmos/fts5-retriever';
-import { ensureDecisionsFts5, ensureVectorStorage } from '../../src/tools/cmos/schema-migrations';
-import { reidentifyCmosTestStore, seedCmosDb } from '../helpers/seedCmosDb';
+import { RbookDetector } from '../../src/intelligence/rbook-detector';
+import { RbookDatabaseClient } from '../../src/tools/rbook/client';
+import { rbookDb, formatDbForLLM } from '../../src/tools/rbook/rbook-db';
+import type { RbookDbHealthResult } from '../../src/tools/rbook/rbook-db-health';
+import { HybridRetriever } from '../../src/tools/rbook/fts5-retriever';
+import { ensureDecisionsFts5, ensureVectorStorage } from '../../src/tools/rbook/schema-migrations';
+import { reidentifyRbookTestStore, seedRbookDb } from '../helpers/seedRbookDb';
 
 const REPO_ROOT = path.resolve(__dirname, '../..');
 
@@ -54,9 +54,9 @@ beforeEach(() => {
   setTransformersResolverForTesting(() => false);
   errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
   warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
-  projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-s92m07-semantic-'));
-  dbPath = seedCmosDb(projectRoot, { projectName: 's92-m07 semantic' });
-  reidentifyCmosTestStore(projectRoot);
+  projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-s92m07-semantic-'));
+  dbPath = seedRbookDb(projectRoot, { projectName: 's92-m07 semantic' });
+  reidentifyRbookTestStore(projectRoot);
 });
 
 afterEach(() => {
@@ -65,15 +65,15 @@ afterEach(() => {
   setTransformersLoaderForTesting(null);
   setTransformersResolverForTesting(null);
   __resetEmbedderCacheForTesting();
-  CmosDetector.resetInstance();
+  RbookDetector.resetInstance();
   fs.rmSync(projectRoot, { recursive: true, force: true });
-  delete process.env.CMOS_DEBUG;
+  delete process.env.RBOOK_DEBUG;
 });
 
 const stderrLines = (): string[] => errorSpy.mock.calls.map((call) => String(call[0]));
 
-async function openClient(): Promise<CmosDatabaseClient> {
-  const opened = await CmosDatabaseClient.create({ dbPath });
+async function openClient(): Promise<RbookDatabaseClient> {
+  const opened = await RbookDatabaseClient.create({ dbPath });
   if (!opened.success || !opened.data) throw new Error('open failed');
   return opened.data;
 }
@@ -154,9 +154,9 @@ describe('s92-m07 — without the package, semantic search is off and silent', (
   });
 
   it('health says semantic search is off and why', async () => {
-    const health = await cmosDb({ action: 'health', projectRoot });
+    const health = await rbookDb({ action: 'health', projectRoot });
     expect(health.success).toBe(true);
-    expect((health.data as CmosDbHealthResult).semanticSearch).toMatchObject({
+    expect((health.data as RbookDbHealthResult).semanticSearch).toMatchObject({
       enabled: false,
       state: 'not-installed',
     });
@@ -178,8 +178,8 @@ describe('s92-m07 — without the package, semantic search is off and silent', (
     expect(stderrLines()).toEqual([]);
   });
 
-  it('with CMOS_DEBUG=1 the missing package is named on stderr once', async () => {
-    process.env.CMOS_DEBUG = '1';
+  it('with RBOOK_DEBUG=1 the missing package is named on stderr once', async () => {
+    process.env.RBOOK_DEBUG = '1';
     await getEmbedder();
     await getEmbedder();
     expect(stderrLines().filter((line) => line.includes('@xenova/transformers'))).toHaveLength(1);
@@ -192,8 +192,8 @@ describe('s92-m07 — POSITIVE CONTROLS: an installed package is on, and a broke
     setTransformersLoaderForTesting(loader);
     setTransformersResolverForTesting(() => true);
     expect(semanticSearchStatus()).toMatchObject({ enabled: true, state: 'installed' });
-    const health = await cmosDb({ action: 'health', projectRoot });
-    expect((health.data as CmosDbHealthResult).semanticSearch.enabled).toBe(true);
+    const health = await rbookDb({ action: 'health', projectRoot });
+    expect((health.data as RbookDbHealthResult).semanticSearch.enabled).toBe(true);
     expect(loader).not.toHaveBeenCalled();
   });
 

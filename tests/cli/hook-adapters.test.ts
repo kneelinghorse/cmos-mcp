@@ -6,7 +6,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { runCli } from '../../src/cli';
-import { seedCmosDb } from '../helpers/seedCmosDb';
+import { seedRbookDb } from '../helpers/seedRbookDb';
 
 const verb = jest.fn();
 jest.mock('../../src/cli/session-start', () => ({ run: (...args: unknown[]) => verb(...args) }));
@@ -15,9 +15,9 @@ jest.mock('../../src/cli/stop', () => ({ run: (...args: unknown[]) => verb(...ar
 let tmp: string;
 let root: string;
 beforeEach(() => {
-  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-adapters-'));
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-adapters-'));
   root = path.join(tmp, 'project');
-  seedCmosDb(root);
+  seedRbookDb(root);
   verb.mockReset().mockResolvedValue('The project digest.');
 });
 afterEach(() => fs.rmSync(tmp, { recursive: true, force: true }));
@@ -27,7 +27,7 @@ async function run(harness: string, event: string, input: object) {
   const stderr: string[] = [];
   const code = await runCli(['hook', event, '--harness', harness], {
     cwd: root,
-    env: { CMOS_CONFIG_DIR: path.join(tmp, 'config') },
+    env: { RBOOK_CONFIG_DIR: path.join(tmp, 'config') },
     readStdin: async () => JSON.stringify(input),
     stdout: (text) => {
       stdout += text;

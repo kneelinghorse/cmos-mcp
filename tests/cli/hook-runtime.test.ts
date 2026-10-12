@@ -18,10 +18,10 @@ let tmp: string;
 let root: string;
 let env: NodeJS.ProcessEnv;
 beforeEach(() => {
-  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-hook-runtime-'));
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-hook-runtime-'));
   root = path.join(tmp, 'project');
   fs.mkdirSync(root);
-  env = { CMOS_CONFIG_DIR: path.join(tmp, 'config'), CLAUDE_PROJECT_DIR: root };
+  env = { RBOOK_CONFIG_DIR: path.join(tmp, 'config'), CLAUDE_PROJECT_DIR: root };
 });
 afterEach(() => fs.rmSync(tmp, { recursive: true, force: true }));
 const input = { session_id: 'private-session' };
@@ -29,31 +29,31 @@ function identity() {
   return hookRuntimeIdentity(input, env)!;
 }
 
-it('keys a canonical harness directory independently of CMOS discovery and respects env precedence', () => {
+it('keys a canonical harness directory independently of Reasonbook discovery and respects env precedence', () => {
   const first = identity();
   const alias = path.join(tmp, 'alias');
   fs.symlinkSync(root, alias);
   expect(
     hookRuntimeIdentity({ ...input, cwd: '/ignored' }, { ...env, CLAUDE_PROJECT_DIR: alias })
   ).toEqual(first);
-  fs.mkdirSync(path.join(root, 'cmos', 'db'), { recursive: true });
-  fs.writeFileSync(path.join(root, 'cmos', 'db', 'cmos.sqlite'), 'created after first hook');
+  fs.mkdirSync(path.join(root, 'rbook', 'db'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'rbook', 'db', 'rbook.sqlite'), 'created after first hook');
   expect(identity()).toEqual(first);
   expect(hookRuntimeIdentity({ ...input, cwd: root }, { ...env, CLAUDE_PROJECT_DIR: '' })).toEqual(
     first
   );
-  expect(hookRuntimeIdentity(input, { CMOS_CONFIG_DIR: env.CMOS_CONFIG_DIR })).toBeNull();
+  expect(hookRuntimeIdentity(input, { RBOOK_CONFIG_DIR: env.RBOOK_CONFIG_DIR })).toBeNull();
 });
 
 it('elects only explicit sources with a verified epoch and retains a winner until a new process epoch', () => {
   const key = identity();
-  expect(electHookSource(key, 'cmos-plugin', 'verified-epoch-one', env)).toBe(true);
+  expect(electHookSource(key, 'rbook-plugin', 'verified-epoch-one', env)).toBe(true);
   const before = fs.readFileSync(hookRuntimePath(key, env));
   expect(electHookSource(key, 'legacy-adapter', 'verified-epoch-one', env)).toBe(false);
   expect(fs.readFileSync(hookRuntimePath(key, env))).toEqual(before);
-  expect(electHookSource(key, 'cmos-plugin', 'verified-epoch-one', env)).toBe(true);
+  expect(electHookSource(key, 'rbook-plugin', 'verified-epoch-one', env)).toBe(true);
   expect(electHookSource(key, 'legacy-adapter', 'verified-epoch-two', env)).toBe(true);
-  expect(electHookSource(key, 'cmos-plugin', 'verified-epoch-two', env)).toBe(false);
+  expect(electHookSource(key, 'rbook-plugin', 'verified-epoch-two', env)).toBe(false);
   expect(electHookSource(key, 'legacy-adapter', null, env)).toBe(true);
   expect(electHookSource(key, undefined, 'verified-epoch-two', env)).toBe(true);
   expect(fs.readFileSync(hookRuntimePath(key, env)).toString()).not.toContain('private-session');
@@ -93,14 +93,14 @@ it('holds identified prompt receipts through delivery; rollback permits retry an
 });
 
 it('refuses runtime placement in the harness directory even before init creates a store', () => {
-  const unsafe = { ...env, CMOS_CONFIG_DIR: path.join(root, 'config') };
-  expect(() => electHookSource(identity(), 'cmos-plugin', 'epoch', unsafe)).toThrow(/unsafe/);
+  const unsafe = { ...env, RBOOK_CONFIG_DIR: path.join(root, 'config') };
+  expect(() => electHookSource(identity(), 'rbook-plugin', 'epoch', unsafe)).toThrow(/unsafe/);
   expect(fs.existsSync(path.join(root, 'config'))).toBe(false);
 });
 
 it('an established losing source reads its election without competing for a writer lock', () => {
   const key = identity();
-  electHookSource(key, 'cmos-plugin', 'verified-epoch', env);
+  electHookSource(key, 'rbook-plugin', 'verified-epoch', env);
   const held = new Database(hookRuntimePath(key, env), { timeout: 0 });
   held.exec('BEGIN IMMEDIATE');
   try {

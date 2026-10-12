@@ -8,7 +8,7 @@
  * 32 KiB of a rules file. The reference moved to cmos/docs/architecture.md, linked from agents.md,
  * and CLAUDE.md imports agents.md so Claude Code loads every rule rather than a pointer to them.
  *
- * Private evidence: agents.md, CLAUDE.md and cmos/ are not mirrored, so the public repository skips
+ * Private evidence: agents.md, CLAUDE.md and rbook/ are not mirrored, so the public repository skips
  * this block by scope (tests/helpers/public-mirror.ts), and says so.
  */
 

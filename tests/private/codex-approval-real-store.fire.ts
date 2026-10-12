@@ -2,6 +2,7 @@
 // ABOUTME: Proves Codex approval binding against a temporary backup of a real project store.
 // ABOUTME: The explicit source is opened read-only; every hook, record and registry write uses the copy.
 
+import { resolveRecordPaths } from '../../src/intelligence/legacy-compat';
 import type { Server } from '@modelcontextprotocol/server';
 import Database from 'better-sqlite3';
 import * as fs from 'fs';
@@ -10,19 +11,19 @@ import * as path from 'path';
 import { pathToFileURL } from 'url';
 import { runCli } from '../../src/cli';
 import { buildMissionProtocolContext, registerToolHandlers } from '../../src/index';
-import { CmosDetector } from '../../src/intelligence/cmos-detector';
+import { RbookDetector } from '../../src/intelligence/rbook-detector';
 import { ProjectGraphRegistry } from '../../src/intelligence/project-graph-registry';
-import { setExternalSessionOwner } from '../../src/tools/cmos/session-owner';
-import { reidentifyCmosTestStore } from '../helpers/seedCmosDb';
+import { setExternalSessionOwner } from '../../src/tools/rbook/session-owner';
+import { reidentifyRbookTestStore } from '../helpers/seedRbookDb';
 
 it('a real-store copy binds the hook approval to the Codex request once', async () => {
-  const sourceRoot = process.env.CMOS_CODEX_REAL_STORE_ROOT;
-  if (!sourceRoot) throw new Error('Set CMOS_CODEX_REAL_STORE_ROOT to an existing real project.');
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-codex-real-'));
+  const sourceRoot = process.env.RBOOK_CODEX_REAL_STORE_ROOT;
+  if (!sourceRoot) throw new Error('Set RBOOK_CODEX_REAL_STORE_ROOT to an existing real project.');
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-codex-real-'));
   const root = path.join(temp, 'copy');
-  const destination = path.join(root, 'cmos/db/cmos.sqlite');
+  const destination = path.join(root, 'rbook/db/rbook.sqlite');
   fs.mkdirSync(path.dirname(destination), { recursive: true });
-  const source = new Database(path.join(sourceRoot, 'cmos/db/cmos.sqlite'), {
+  const source = new Database(resolveRecordPaths(sourceRoot).dbPath, {
     readonly: true,
     fileMustExist: true,
   });
@@ -34,13 +35,13 @@ it('a real-store copy binds the hook approval to the Codex request once', async 
   } finally {
     source.close();
   }
-  const prior = { config: process.env.CMOS_CONFIG_DIR, sync: process.env.CMOS_CHECKPOINT_SYNC };
-  process.env.CMOS_CONFIG_DIR = path.join(temp, 'config');
-  process.env.CMOS_CHECKPOINT_SYNC = 'off';
+  const prior = { config: process.env.RBOOK_CONFIG_DIR, sync: process.env.RBOOK_CHECKPOINT_SYNC };
+  process.env.RBOOK_CONFIG_DIR = path.join(temp, 'config');
+  process.env.RBOOK_CHECKPOINT_SYNC = 'off';
   ProjectGraphRegistry.resetInstance();
-  CmosDetector.resetInstance();
+  RbookDetector.resetInstance();
   try {
-    reidentifyCmosTestStore(root, `codex-fire-${path.basename(temp)}`);
+    reidentifyRbookTestStore(root, `codex-fire-${path.basename(temp)}`);
     const copy = new Database(destination);
     copy.prepare("UPDATE sessions SET status = 'completed' WHERE status = 'active'").run();
     copy.close();
@@ -80,7 +81,7 @@ it('a real-store copy binds the hook approval to the Codex request once', async 
     } as unknown as Server);
     const request = {
       params: {
-        name: 'cmos_decisions',
+        name: 'rbook_decisions',
         arguments: { action: 'record', content, fromDraft: `P${draft}` },
         _meta: {
           'x-codex-turn-metadata': {},
@@ -106,10 +107,10 @@ it('a real-store copy binds the hook approval to the Codex request once', async 
   } finally {
     setExternalSessionOwner(null);
     ProjectGraphRegistry.resetInstance();
-    CmosDetector.resetInstance();
+    RbookDetector.resetInstance();
     for (const [key, value] of [
-      ['CMOS_CONFIG_DIR', prior.config],
-      ['CMOS_CHECKPOINT_SYNC', prior.sync],
+      ['RBOOK_CONFIG_DIR', prior.config],
+      ['RBOOK_CHECKPOINT_SYNC', prior.sync],
     ] as const) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;

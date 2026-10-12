@@ -4,7 +4,7 @@
 /**
  * Cross-store fan-out read API (s68 ADR Section 4.1 — application-level fan-out as
  * the PRIMARY path). It discovers stores via the project-graph registry (s69-m05),
- * opens each per-project `cmos.sqlite` READ-ONLY, runs the same parameterized query
+ * opens each per-project `rbook.sqlite` READ-ONLY, runs the same parameterized query
  * per store, and merges the results by the m03 per-row schema keys
  * `(occurred_at, origin_seq, project_id)`.
  *
@@ -18,9 +18,9 @@
  * @module intelligence/cross-store-query
  */
 
+import { resolveRecordPaths } from './legacy-compat';
 import Database from 'better-sqlite3';
 import { existsSync } from 'fs';
-import path from 'path';
 import { ProjectGraphRegistry, type ProjectGraphEntry } from './project-graph-registry';
 
 /** Busy timeout (ms) for the read-only per-store opens. */
@@ -135,7 +135,7 @@ export interface CrossStoreQueryResult<T extends CrossStoreRow = CrossStoreRow> 
 
 /** Absolute path to a store's SQLite DB given the project ROOT. */
 export function storeDbPath(storeRoot: string): string {
-  return path.join(storeRoot, 'cmos', 'db', 'cmos.sqlite');
+  return resolveRecordPaths(storeRoot).dbPath;
 }
 
 /**

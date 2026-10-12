@@ -9,12 +9,12 @@ import * as path from 'path';
 
 import { runCli } from '../../src/cli';
 import type { CliIo } from '../../src/cli/core';
-import { readTelemetry } from '../../src/tools/cmos/local-telemetry';
-import { currentToolCallActionMode } from '../../src/tools/cmos/tool-call-context';
-import { seedCmosDb } from '../helpers/seedCmosDb';
+import { readTelemetry } from '../../src/tools/rbook/local-telemetry';
+import { currentToolCallActionMode } from '../../src/tools/rbook/tool-call-context';
+import { seedRbookDb } from '../helpers/seedRbookDb';
 
 const recall = jest.fn();
-jest.mock('../../src/tools/cmos/first-prompt-recall', () => ({
+jest.mock('../../src/tools/rbook/first-prompt-recall', () => ({
   recallFirstPrompt: (...args: unknown[]) => recall(...args),
 }));
 
@@ -24,10 +24,10 @@ let dbPath: string;
 let env: NodeJS.ProcessEnv;
 
 beforeEach(() => {
-  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-prompt-recall-'));
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-prompt-recall-'));
   root = path.join(tmp, 'project');
-  dbPath = seedCmosDb(root, { projectId: 'prompt-test' });
-  env = { ...process.env, CMOS_CONFIG_DIR: path.join(tmp, 'config'), CLAUDE_PROJECT_DIR: '' };
+  dbPath = seedRbookDb(root, { projectId: 'prompt-test' });
+  env = { ...process.env, RBOOK_CONFIG_DIR: path.join(tmp, 'config'), CLAUDE_PROJECT_DIR: '' };
   recall.mockReset();
   recall.mockReturnValue({
     available: true,
@@ -118,7 +118,7 @@ it('a failed query retries, while an available empty search consumes the attempt
 it('does not consume a blank prompt, missing session or ambient-off request', async () => {
   await hook({ prompt: '' });
   await hook({ session_id: '' });
-  await hook({}, { env: { ...env, CMOS_AMBIENT: 'off' } });
+  await hook({}, { env: { ...env, RBOOK_AMBIENT: 'off' } });
   expect(recall).not.toHaveBeenCalled();
   expect((await hook()).stdout).toContain('d:1');
 });
@@ -162,7 +162,7 @@ it('frames foreign preview text and excludes its local-looking id from measureme
 
 it('unsafe runtime configuration fails visibly without writing a hook failure log into the project', async () => {
   const before = fs.readFileSync(dbPath);
-  const result = await hook({}, { env: { ...env, CMOS_CONFIG_DIR: root } });
+  const result = await hook({}, { env: { ...env, RBOOK_CONFIG_DIR: root } });
   expect(result.stdout).toBe('');
   expect(result.stderr.join(' ')).toMatch(/unsafe|outside|linked/);
   expect(fs.existsSync(path.join(root, 'runtime'))).toBe(false);

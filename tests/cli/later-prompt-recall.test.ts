@@ -18,8 +18,8 @@ let tmp: string;
 let file: string;
 let db: Database.Database;
 beforeEach(() => {
-  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-later-recall-'));
-  file = path.join(tmp, 'cmos.sqlite');
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-later-recall-'));
+  file = path.join(tmp, 'rbook.sqlite');
   db = new Database(file);
   db.exec(`CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT);
     INSERT INTO metadata VALUES('project_id','local');
@@ -78,7 +78,7 @@ it('filters seen and foreign/superseded decisions before selecting three keyword
     result.items.every((item) => item.retrievalSource === 'keyword' && item.via.length === 0)
   ).toBe(true);
   expect(fs.readFileSync(file)).toEqual(before);
-  expect(fs.readdirSync(tmp)).toEqual(['cmos.sqlite']);
+  expect(fs.readdirSync(tmp)).toEqual(['rbook.sqlite']);
 });
 it('rejects weak one and two keyword matches below the calibrated floor of three', () => {
   row(1, 'Database');

@@ -52,7 +52,7 @@ async function loadClaudeTokenizer(): Promise<ClaudeTokenizer | null> {
         const module = await (claudeModuleLoader
           ? claudeModuleLoader()
           : (import('@xenova/transformers') as Promise<ClaudeModule>));
-        // Local-forever hook (s78-m03): honor CMOS_OFFLINE_EMBEDDINGS / CMOS_MODEL_CACHE_DIR
+        // Local-forever hook (s78-m03): honor RBOOK_OFFLINE_EMBEDDINGS / RBOOK_MODEL_CACHE_DIR
         // before from_pretrained so an offline install fails fast into the negative cache.
         const env =
           (module as { env?: TransformersEnv }).env ??

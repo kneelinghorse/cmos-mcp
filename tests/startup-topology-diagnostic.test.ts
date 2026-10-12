@@ -1,11 +1,11 @@
 import { describe, expect, test } from '@jest/globals';
 import { evaluateStartupTopology } from '../src/index';
-import { CmosErrors } from '../src/tools/cmos/errors';
+import { RbookErrors } from '../src/tools/rbook/errors';
 
 // s78-m06: topology diagnostic + /register nudge repoint.
 
 describe('evaluateStartupTopology (s78-m06)', () => {
-  test('WARNs only when CMOS_PROJECT_ROOT is pinned AND >1 project is registered', () => {
+  test('WARNs only when RBOOK_PROJECT_ROOT is pinned AND >1 project is registered', () => {
     expect(evaluateStartupTopology('/repo', 2).warned).toBe(true);
     expect(evaluateStartupTopology('/repo', 5).warned).toBe(true);
   });
@@ -15,7 +15,7 @@ describe('evaluateStartupTopology (s78-m06)', () => {
     expect(evaluateStartupTopology('/repo', 0).warned).toBe(false);
   });
 
-  test('silent when CMOS_PROJECT_ROOT is unset/empty/whitespace (project-local server)', () => {
+  test('silent when RBOOK_PROJECT_ROOT is unset/empty/whitespace (project-local server)', () => {
     expect(evaluateStartupTopology(undefined, 9).warned).toBe(false);
     expect(evaluateStartupTopology('', 9).warned).toBe(false);
     expect(evaluateStartupTopology('   ', 9).warned).toBe(false);
@@ -30,19 +30,19 @@ describe('evaluateStartupTopology (s78-m06)', () => {
 
 describe('sign-up nudges repointed to /register (s78-m06)', () => {
   test('dashboardNotConfigured points sign-up at /register', () => {
-    const err = CmosErrors.dashboardNotConfigured();
-    expect(err.message).toContain('https://cmos.aquex.ai/register');
-    // s92-m06: the suggestion no longer tells the user to set CMOS_DASHBOARD_URL — the URL has a
+    const err = RbookErrors.dashboardNotConfigured();
+    expect(err.message).toContain('https://reasonbook.ai/register');
+    // s92-m06: the suggestion no longer tells the user to set RBOOK_DASHBOARD_URL — the URL has a
     // default, so a missing sign-in, not the URL, is what this error means. It names the sign-in
     // and the bare base URL, never /register.
-    expect(err.suggestion).toContain('cmos_auth(action="login_init")');
-    expect(err.suggestion).toContain('https://cmos.aquex.ai');
+    expect(err.suggestion).toContain('rbook_auth(action="login_init")');
+    expect(err.suggestion).toContain('https://reasonbook.ai');
     expect(err.suggestion).not.toContain('/register');
   });
 
   test('dashboardUpgradeRequired points upgrade at /register', () => {
-    const err = CmosErrors.dashboardUpgradeRequired('vector search');
-    expect(err.message).toContain('https://cmos.aquex.ai/register');
-    expect(err.suggestion).toContain('https://cmos.aquex.ai/register');
+    const err = RbookErrors.dashboardUpgradeRequired('vector search');
+    expect(err.message).toContain('https://reasonbook.ai/register');
+    expect(err.suggestion).toContain('https://reasonbook.ai/register');
   });
 });

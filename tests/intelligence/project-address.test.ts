@@ -13,53 +13,56 @@ import {
   readStoredProjectAddress,
   resolveRegisteredAddress,
 } from '../../src/intelligence/project-address';
-import { CmosDetector } from '../../src/intelligence/cmos-detector';
+import { RbookDetector } from '../../src/intelligence/rbook-detector';
 import { ProjectGraphRegistry } from '../../src/intelligence/project-graph-registry';
 import { resolveSenderContext, SenderResolutionError } from '../../src/intelligence/sender-context';
-import { cmosProjectInit } from '../../src/tools/cmos/cmos-project-init';
-import { cmosProjectList, formatProjectListForLLM } from '../../src/tools/cmos/cmos-project-list';
-import { classifySenderResolutionError } from '../../src/tools/cmos/sender-refusal';
+import { rbookProjectInit } from '../../src/tools/rbook/rbook-project-init';
+import {
+  rbookProjectList,
+  formatProjectListForLLM,
+} from '../../src/tools/rbook/rbook-project-list';
+import { classifySenderResolutionError } from '../../src/tools/rbook/sender-refusal';
 import {
   captureToolCall,
   unwrapCapturedToolCallError,
-} from '../../src/tools/cmos/tool-call-context';
-import { seedCmosDb } from '../helpers/seedCmosDb';
+} from '../../src/tools/rbook/tool-call-context';
+import { seedRbookDb } from '../helpers/seedRbookDb';
 
-const ADDRESS = 'cmos://operator/address-test';
+const ADDRESS = 'rbook://operator/address-test';
 let temp: string;
 let graph: ProjectGraphRegistry;
 let target: string;
 let sibling: string;
-const oldConfig = process.env.CMOS_CONFIG_DIR;
-const oldBootstrapRoot = process.env.CMOS_PROJECT_ROOT;
+const oldConfig = process.env.RBOOK_CONFIG_DIR;
+const oldBootstrapRoot = process.env.RBOOK_PROJECT_ROOT;
 
 beforeEach(async () => {
-  temp = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-address-'));
-  process.env.CMOS_CONFIG_DIR = path.join(temp, 'config');
-  delete process.env.CMOS_PROJECT_ROOT;
+  temp = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-address-'));
+  process.env.RBOOK_CONFIG_DIR = path.join(temp, 'config');
+  delete process.env.RBOOK_PROJECT_ROOT;
   ProjectGraphRegistry.resetInstance();
-  CmosDetector.resetInstance();
+  RbookDetector.resetInstance();
   graph = await ProjectGraphRegistry.create();
   target = add('target', ADDRESS);
   sibling = add('sibling', '');
 });
 afterEach(() => {
   ProjectGraphRegistry.resetInstance();
-  CmosDetector.resetInstance();
-  if (oldConfig === undefined) delete process.env.CMOS_CONFIG_DIR;
-  else process.env.CMOS_CONFIG_DIR = oldConfig;
-  if (oldBootstrapRoot === undefined) delete process.env.CMOS_PROJECT_ROOT;
-  else process.env.CMOS_PROJECT_ROOT = oldBootstrapRoot;
+  RbookDetector.resetInstance();
+  if (oldConfig === undefined) delete process.env.RBOOK_CONFIG_DIR;
+  else process.env.RBOOK_CONFIG_DIR = oldConfig;
+  if (oldBootstrapRoot === undefined) delete process.env.RBOOK_PROJECT_ROOT;
+  else process.env.RBOOK_PROJECT_ROOT = oldBootstrapRoot;
   fs.rmSync(temp, { recursive: true, force: true });
 });
 function add(name: string, address: string): string {
   const root = path.join(temp, name);
-  seedCmosDb(root, { projectName: name, cmosAddress: address });
+  seedRbookDb(root, { projectName: name, rbookAddress: address });
   graph.register({ project_id: name, store_path: root, name });
   return root;
 }
 function dbPath(root: string) {
-  return path.join(root, 'cmos/db/cmos.sqlite');
+  return path.join(root, 'rbook/db/rbook.sqlite');
 }
 function alter(root: string, sql: string) {
   const db = new Database(dbPath(root));
@@ -88,23 +91,23 @@ async function refusal(address = ADDRESS) {
     const error = unwrapCapturedToolCallError(caught);
     expect(error).toBeInstanceOf(SenderResolutionError);
     const result = await classifySenderResolutionError(error as SenderResolutionError);
-    expect(result.suggestion).toContain('cmos_project(action="list")');
+    expect(result.suggestion).toContain('rbook_project(action="list")');
     expect(result.suggestion).toMatch(/projectRoot.*folder/);
     return result;
   }
   throw new Error('Expected address refusal');
 }
 
-it('resolves the exact stored address explicitly with CMOS_PROJECT_ROOT unset, leaving scanned bytes alone', async () => {
+it('resolves the exact stored address explicitly with RBOOK_PROJECT_ROOT unset, leaving scanned bytes alone', async () => {
   const before = [target, sibling].map((root) => fs.readFileSync(dbPath(root)));
   expect(resolveRegisteredAddress(ADDRESS, graph)).toEqual({ projectRoot: target });
   expect([target, sibling].map((root) => fs.readFileSync(dbPath(root)))).toEqual(before);
   const result = await resolve();
-  expect(result).toMatchObject({ projectRoot: target, source: 'explicit', cmosAddress: ADDRESS });
+  expect(result).toMatchObject({ projectRoot: target, source: 'explicit', rbookAddress: ADDRESS });
   expect(fs.readFileSync(dbPath(sibling))).toEqual(before[1]);
   expect(fs.existsSync(`${dbPath(sibling)}-wal`)).toBe(false);
 });
-it.each(['cmos://operator/absent', 'cmos://OPERATOR/address-test', `${ADDRESS}/`, 'local-only'])(
+it.each(['rbook://operator/absent', 'rbook://OPERATOR/address-test', `${ADDRESS}/`, 'local-only'])(
   'refuses %s rather than falling back to cwd or normalizing the name',
   async (address) => {
     expect((await refusal(address)).code).toBe('PROJECT_ADDRESS_UNRESOLVABLE');
@@ -119,11 +122,26 @@ it('ignores archived registry rows', async () => {
   graph.archive('archived');
   expect((await resolve()).projectRoot).toBe(target);
 });
+
+it('treats the new scheme as the same stored address without rewriting the identity', async () => {
+  const before = fs.readFileSync(dbPath(target));
+  expect(resolveRegisteredAddress(ADDRESS.replace('rbook://', 'rbook://'), graph)).toEqual({
+    projectRoot: target,
+  });
+  expect(fs.readFileSync(dbPath(target))).toEqual(before);
+  expect((await resolve(ADDRESS.replace('rbook://', 'rbook://'))).projectRoot).toBe(target);
+  expect(readStoredProjectAddress(target).identity?.address).toBe(ADDRESS);
+});
+
+it('refuses duplicate identities even when the two stores use different address schemes', async () => {
+  add('new-scheme-duplicate', ADDRESS.replace('rbook://', 'rbook://'));
+  expect((await refusal()).message).toMatch(/2.*match/);
+});
 it.each([
   'DROP TABLE contexts',
   "UPDATE contexts SET content = 'null' WHERE id = 'project_identity'",
   "UPDATE contexts SET content = 'not JSON' WHERE id = 'project_identity'",
-  "UPDATE contexts SET content = '{\"cmos_address\":42}' WHERE id = 'project_identity'",
+  "UPDATE contexts SET content = '{\"rbook_address\":42}' WHERE id = 'project_identity'",
 ])('refuses an incomplete scan; never seeds or migrates (%s)', async (sql) => {
   alter(sibling, sql);
   const before = fs.readFileSync(dbPath(sibling));
@@ -133,7 +151,7 @@ it.each([
 it('a normally initialized registered project without an identity row cannot block another stored address', async () => {
   const fresh = path.join(temp, 'fresh-init');
   fs.mkdirSync(fresh);
-  const initialized = await cmosProjectInit({
+  const initialized = await rbookProjectInit({
     projectRoot: fresh,
     projectName: 'Fresh local record',
   });
@@ -176,7 +194,7 @@ it('a normally initialized registered project without an identity row cannot blo
     identity: { id: initialized.data!.projectId, address: null },
   });
   expect(resolveRegisteredAddress(ADDRESS, graph)).toEqual({ projectRoot: target });
-  const listed = await cmosProjectList({});
+  const listed = await rbookProjectList({});
   expect(listed.success).toBe(true);
   const item = listed.data?.projects.find((project) => project.projectRoot === fresh);
   expect(item).toMatchObject({ id: initialized.data!.projectId, address: null });
@@ -204,7 +222,7 @@ it('refuses SQL NULL identity from an older nullable schema', async () => {
   expect((await refusal()).code).toBe('PROJECT_ADDRESS_UNRESOLVABLE');
 });
 it('reads local-only identities for list without inventing an address', async () => {
-  const result = await cmosProjectList({});
+  const result = await rbookProjectList({});
   expect(result.success).toBe(true);
   expect(result.data?.projects).toEqual(
     expect.arrayContaining([
@@ -221,7 +239,7 @@ it('reads the canonical metadata id when an older identity blob does not repeat 
   );
   const before = fs.readFileSync(dbPath(target));
   expect(resolveRegisteredAddress(ADDRESS, graph)).toEqual({ projectRoot: target });
-  const result = await cmosProjectList({});
+  const result = await rbookProjectList({});
   expect(result.data?.projects).toEqual(
     expect.arrayContaining([
       expect.objectContaining({ id: 'target', address: ADDRESS, projectRoot: target }),
@@ -231,7 +249,7 @@ it('reads the canonical metadata id when an older identity blob does not repeat 
 });
 it('list still gives paths and an explicit warning when one store cannot supply identity', async () => {
   alter(sibling, 'DROP TABLE contexts');
-  const result = await cmosProjectList({});
+  const result = await rbookProjectList({});
   expect(result.success).toBe(true);
   expect(result.warnings?.join(' ')).toContain(sibling);
   expect(result.data?.projects).toEqual(

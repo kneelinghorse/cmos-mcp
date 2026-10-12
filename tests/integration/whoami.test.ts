@@ -1,55 +1,56 @@
-// ABOUTME: Real-DB integration coverage for cmos_message(action="whoami") diagnostics.
+// ABOUTME: Real-DB integration coverage for rbook_message(action="whoami") diagnostics.
 // ABOUTME: Verifies candidate traces include rejected and accepted roots in precedence order.
 
+import { LEGACY } from '../../src/intelligence/legacy-compat';
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 import Database from 'better-sqlite3';
 import { promises as fs } from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { formatMessageForLLM, getWhoamiDiagnostics } from '../../src/tools/cmos/cmos-message';
-import { CmosDetector } from '../../src/intelligence/cmos-detector';
+import { formatMessageForLLM, getWhoamiDiagnostics } from '../../src/tools/rbook/rbook-message';
+import { RbookDetector } from '../../src/intelligence/rbook-detector';
 import { ProjectGraphRegistry } from '../../src/intelligence/project-graph-registry';
 import { resolveSenderContext } from '../../src/intelligence/sender-context';
-import { createSeededCmosProject, type SeededCmosProject } from '../helpers/seedCmosDb';
+import { createSeededRbookProject, type SeededRbookProject } from '../helpers/seedRbookDb';
 
 async function makeTempDir(prefix: string): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), prefix));
 }
 
 describe('whoami diagnostics', () => {
-  let stage1Project: SeededCmosProject;
+  let stage1Project: SeededRbookProject;
   let invalidRoot: string;
 
   beforeEach(async () => {
-    CmosDetector.resetInstance();
+    RbookDetector.resetInstance();
     invalidRoot = await makeTempDir('whoami-invalid-');
-    stage1Project = await createSeededCmosProject(
+    stage1Project = await createSeededRbookProject(
       {
         projectName: 'Stage1',
         projectId: 'stage1',
         slug: 'stage1',
         dashboardProjectId: 'ddb34d24-30e3-4eb3-b13c-20b106a75970',
-        cmosAddress: 'cmos://derek/stage1',
+        rbookAddress: 'rbook://derek/stage1',
       },
       'whoami-stage1-'
     );
   });
 
   afterEach(async () => {
-    CmosDetector.resetInstance();
+    RbookDetector.resetInstance();
     await Promise.all([
       fs.rm(invalidRoot, { recursive: true, force: true }),
       stage1Project.cleanup(),
     ]);
   });
 
-  it('shows an explicit non-CMOS root as final: rejected, with no other project consulted', async () => {
+  it('shows an explicit non-Reasonbook root as final: rejected, with no other project consulted', async () => {
     // s92-m01: an explicit projectRoot is never swapped for an MCP root or the cwd project.
     const result = await getWhoamiDiagnostics({
       explicitProjectRoot: invalidRoot,
       mcpRoots: [stage1Project.projectRoot],
-      cwdOverride: '/tmp/no-cmos-here',
+      cwdOverride: '/tmp/no-rbook-here',
       serverInstallRootOverride: '/mock/server-install',
     });
 
@@ -59,7 +60,7 @@ describe('whoami diagnostics', () => {
       expect.objectContaining({
         source: 'explicit',
         accepted: false,
-        rejectReason: expect.stringMatching(/no CMOS database/i),
+        rejectReason: expect.stringMatching(/no Reasonbook database/i),
       }),
     ]);
 
@@ -72,7 +73,7 @@ describe('whoami diagnostics', () => {
   it('returns a full candidate trace showing a skipped store-less MCP root and the accepted one', async () => {
     const result = await getWhoamiDiagnostics({
       mcpRoots: [invalidRoot, stage1Project.projectRoot],
-      cwdOverride: '/tmp/no-cmos-here',
+      cwdOverride: '/tmp/no-rbook-here',
       serverInstallRootOverride: '/mock/server-install',
     });
 
@@ -82,7 +83,7 @@ describe('whoami diagnostics', () => {
         projectRoot: path.resolve(stage1Project.projectRoot),
         source: 'mcp-roots',
         dashboardProjectId: 'ddb34d24-30e3-4eb3-b13c-20b106a75970',
-        cmosAddress: 'cmos://derek/stage1',
+        rbookAddress: 'rbook://derek/stage1',
       },
     });
     expect(result.data?.candidates).toEqual([
@@ -90,7 +91,7 @@ describe('whoami diagnostics', () => {
         source: 'mcp-roots',
         accepted: false,
         projectRoot: path.resolve(invalidRoot),
-        rejectReason: expect.stringMatching(/no CMOS database/i),
+        rejectReason: expect.stringMatching(/no Reasonbook database/i),
       }),
       expect.objectContaining({
         source: 'mcp-roots',
@@ -106,8 +107,8 @@ describe('whoami diagnostics', () => {
 
   it('s92-m01: shows the registry default, says it is not applied, and names the re-confirm call', async () => {
     const configDir = await makeTempDir('whoami-default-cfg-');
-    const savedConfigDir = process.env.CMOS_CONFIG_DIR;
-    process.env.CMOS_CONFIG_DIR = configDir;
+    const savedConfigDir = process.env.RBOOK_CONFIG_DIR;
+    process.env.RBOOK_CONFIG_DIR = configDir;
     ProjectGraphRegistry.resetInstance();
     try {
       const registry = await ProjectGraphRegistry.create({ configDir });
@@ -116,7 +117,7 @@ describe('whoami diagnostics', () => {
 
       const result = await getWhoamiDiagnostics({
         mcpRoots: [stage1Project.projectRoot],
-        cwdOverride: '/tmp/no-cmos-here',
+        cwdOverride: '/tmp/no-rbook-here',
         serverInstallRootOverride: '/mock/server-install',
       });
 
@@ -127,15 +128,15 @@ describe('whoami diagnostics', () => {
       });
       expect(result.data?.serverProjectRoot).toBeNull();
       expect(result.warnings).toContainEqual(
-        `registry default: Stage1 — not applied; re-run setAsDefault to enable: cmos_project(action="register", projectRoot=${JSON.stringify(path.resolve(stage1Project.projectRoot))}, setAsDefault=true)`
+        `registry default: Stage1 — not applied; re-run setAsDefault to enable: rbook_project(action="register", projectRoot=${JSON.stringify(path.resolve(stage1Project.projectRoot))}, setAsDefault=true)`
       );
       expect(formatMessageForLLM('whoami', result)).toContain(
         'Registry default: Stage1 (not applied)'
       );
     } finally {
       ProjectGraphRegistry.resetInstance();
-      if (savedConfigDir === undefined) delete process.env.CMOS_CONFIG_DIR;
-      else process.env.CMOS_CONFIG_DIR = savedConfigDir;
+      if (savedConfigDir === undefined) delete process.env.RBOOK_CONFIG_DIR;
+      else process.env.RBOOK_CONFIG_DIR = savedConfigDir;
       await fs.rm(configDir, { recursive: true, force: true });
     }
   });
@@ -156,7 +157,7 @@ describe('whoami diagnostics', () => {
    * existing test above, which passes a non-empty `mcpRoots`, would have produced exactly the
    * vacuous gate this sprint is named against. The no-roots path is real and named:
    * `runWhoamiCli()` calls `getWhoamiDiagnostics()` with no arguments at all — that is
-   * `cmos-mcp --whoami`, the entry point that generated the nine false rows.
+   * `reasonbook --whoami`, the entry point that generated the nine false rows.
    */
   describe('s87-m05 (#1015): the no-roots warning', () => {
     it('does NOT fire when resolution SUCCEEDED and no roots were advertised', async () => {
@@ -219,11 +220,11 @@ describe('whoami diagnostics', () => {
    * s87-m05 (#1015) — THE TRUE NEGATIVE. The same one argument was ALSO dropping a real notice.
    *
    * `:560` reads `.healed` off the context it is handed. Because that was `relaxedContext` —
-   * assigned only when strict resolution FAILS — the "Healed stale cmos_address" notice has been
+   * assigned only when strict resolution FAILS — the "Healed stale rbook_address" notice has been
    * silently dropped on every strict-SUCCESS path since sprint-53. And a strict success is
    * exactly when a heal is most likely: `resolveSenderContext`'s `accept()` sets `healed` on any
    * accepted candidate regardless of `requireSenderIdentity`, and `validateProject` heals by
-   * default — so a store whose `cmos://unknown/*` address is rewritten to canonical is then
+   * default — so a store whose `rbook://unknown/*` address is rewritten to canonical is then
    * ACCEPTED by strict resolution, and said nothing about it.
    *
    * This is why the fix is "pass resolvedContext", not "rename the parameter": the rename alone
@@ -231,14 +232,14 @@ describe('whoami diagnostics', () => {
    */
   describe('s87-m05 (#1015): the heal notice, silently dropped since sprint-53', () => {
     it('reports the repair a send would make, on the STRICT-success path, without making it', async () => {
-      const healable = await createSeededCmosProject(
+      const healable = await createSeededRbookProject(
         {
           projectName: 'Healable',
           projectId: 'healable',
           slug: 'healable',
           dashboardProjectId: '11111111-2222-4333-8444-555555555555',
           // Stale on purpose: this is what the heal rewrites.
-          cmosAddress: 'cmos://unknown/healable',
+          rbookAddress: `${LEGACY.addressScheme}unknown/healable`,
           owner: 'derek',
         },
         'whoami-heal-'
@@ -254,23 +255,25 @@ describe('whoami diagnostics', () => {
         // repairs it before resolving), and the notice says that repair is still to come.
         expect(result.success).toBe(true);
         expect(result.data?.resolved.projectRoot).toBe(healable.projectRoot);
-        expect(result.data?.wouldAttributeAs.senderAddress).toBe('cmos://derek/healable');
+        expect(result.data?.wouldAttributeAs.senderAddress).toBe('rbook://derek/healable');
 
         const warnings = (result.warnings ?? []).join('\n');
         expect(warnings).toContain(
-          'Stale cmos_address cmos://unknown/healable: the next write repairs it to cmos://derek/healable'
+          'Stale rbook_address rbook://unknown/healable: the next write repairs it to rbook://derek/healable'
         );
         expect(warnings).not.toContain('fail-closed');
 
         // ...and the store still holds the stale address: whoami repaired nothing.
-        const db = new Database(path.join(healable.projectRoot, 'cmos', 'db', 'cmos.sqlite'), {
+        const db = new Database(path.join(healable.projectRoot, 'rbook', 'db', 'rbook.sqlite'), {
           readonly: true,
         });
         try {
           const row = db
             .prepare("SELECT content FROM contexts WHERE id = 'project_identity'")
             .get() as { content: string };
-          expect(JSON.parse(row.content).cmos_address).toBe('cmos://unknown/healable');
+          expect(JSON.parse(row.content)[LEGACY.identityAddressKey]).toBe(
+            `${LEGACY.addressScheme}unknown/healable`
+          );
         } finally {
           db.close();
         }
@@ -285,7 +288,7 @@ describe('s93-m11 — diagnostics outside a dispatched call write nothing', () =
   // The confirming critic: whoami from the CLI and the startup lines run with no call context, where
   // callMayWrite() is true, and validation seeded a missing project_identity row.
   it('whoami and a startup resolution leave a store with no identity row as they found it', async () => {
-    const project = await createSeededCmosProject(
+    const project = await createSeededRbookProject(
       {
         projectName: 'Rowless',
         projectId: 'rowless',
@@ -295,7 +298,7 @@ describe('s93-m11 — diagnostics outside a dispatched call write nothing', () =
       },
       'whoami-rowless-'
     );
-    const dbPath = path.join(project.projectRoot, 'cmos', 'db', 'cmos.sqlite');
+    const dbPath = path.join(project.projectRoot, 'rbook', 'db', 'rbook.sqlite');
     const rows = (): number => {
       const db = new Database(dbPath, { readonly: true });
       try {

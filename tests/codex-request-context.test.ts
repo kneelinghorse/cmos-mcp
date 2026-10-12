@@ -11,36 +11,36 @@ import { spawn } from 'child_process';
 import { currentCodexRequest, withCodexRequest } from '../src/codex-request-context';
 import { resolveSenderContext } from '../src/intelligence/sender-context';
 import { ProjectGraphRegistry } from '../src/intelligence/project-graph-registry';
-import { CmosDetector } from '../src/intelligence/cmos-detector';
-import { openDraftRuntime, recordSessionStart } from '../src/tools/cmos/draft-runtime';
-import { harnessSessionHash } from '../src/tools/cmos/harness-session';
-import { currentSessionOwner, processSessionOwner } from '../src/tools/cmos/session-owner';
+import { RbookDetector } from '../src/intelligence/rbook-detector';
+import { openDraftRuntime, recordSessionStart } from '../src/tools/rbook/draft-runtime';
+import { harnessSessionHash } from '../src/tools/rbook/harness-session';
+import { currentSessionOwner, processSessionOwner } from '../src/tools/rbook/session-owner';
 import { formatCliRemedy } from '../src/utils/cli-remedy';
-import { seedCmosDb } from './helpers/seedCmosDb';
+import { seedRbookDb } from './helpers/seedRbookDb';
 
 let temp: string;
 let project: string;
 let dbPath: string;
-const saved = process.env.CMOS_CONFIG_DIR;
+const saved = process.env.RBOOK_CONFIG_DIR;
 const meta = (folder: string, sessionId = 'test-session') => ({
   'x-codex-turn-metadata': {},
   sessionId,
   'codex/sandbox-state-meta': { sandboxCwd: pathToFileURL(folder).href },
 });
 beforeEach(() => {
-  temp = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-codex-context-'));
+  temp = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-codex-context-'));
   project = path.join(temp, 'project');
-  dbPath = seedCmosDb(project);
-  process.env.CMOS_CONFIG_DIR = path.join(temp, 'config');
+  dbPath = seedRbookDb(project);
+  process.env.RBOOK_CONFIG_DIR = path.join(temp, 'config');
   ProjectGraphRegistry.resetInstance();
-  CmosDetector.resetInstance();
+  RbookDetector.resetInstance();
 });
 afterEach(() => {
   jest.restoreAllMocks();
   ProjectGraphRegistry.resetInstance();
-  CmosDetector.resetInstance();
-  if (saved === undefined) delete process.env.CMOS_CONFIG_DIR;
-  else process.env.CMOS_CONFIG_DIR = saved;
+  RbookDetector.resetInstance();
+  if (saved === undefined) delete process.env.RBOOK_CONFIG_DIR;
+  else process.env.RBOOK_CONFIG_DIR = saved;
   fs.rmSync(temp, { recursive: true, force: true });
 });
 
@@ -98,7 +98,7 @@ it.each(['home', 'root'])(
 
 it('honors the home ceiling instead of claiming an unrelated project under the home store', async () => {
   const home = path.join(temp, 'home');
-  seedCmosDb(home);
+  seedRbookDb(home);
   const child = path.join(home, 'uninitialized');
   fs.mkdirSync(child);
   await expect(
@@ -116,7 +116,7 @@ it('a hookless lookup creates no draft runtime and cannot borrow a conversation 
     expect(currentSessionOwner(dbPath)).toEqual(processSessionOwner());
     expect(currentSessionOwner()).toEqual(processSessionOwner());
   });
-  expect(fs.existsSync(path.join(process.env.CMOS_CONFIG_DIR!, 'runtime/drafts'))).toBe(false);
+  expect(fs.existsSync(path.join(process.env.RBOOK_CONFIG_DIR!, 'runtime/drafts'))).toBe(false);
 });
 
 it('rechecks hook state after an absent table is created instead of caching its absence', () => {
@@ -157,7 +157,7 @@ it('does not treat NULL session keys in a foreign runtime as hook proof', () => 
 });
 
 it('keeps an un-migrated store without readable identity on the pid owner', () => {
-  const foreign = path.join(temp, 'foreign/cmos/db/cmos.sqlite');
+  const foreign = path.join(temp, 'foreign/rbook/db/rbook.sqlite');
   fs.mkdirSync(path.dirname(foreign), { recursive: true });
   const db = new Database(foreign);
   db.exec('CREATE TABLE legacy (value TEXT)');

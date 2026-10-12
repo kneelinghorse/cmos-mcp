@@ -43,8 +43,8 @@ import * as path from 'path';
 
 const REPO_ROOT = path.resolve(__dirname, '../..');
 const AUTH_DIR = path.join(REPO_ROOT, 'src', 'auth');
-const DASHBOARD_CLIENT = path.join(REPO_ROOT, 'src', 'tools', 'cmos', 'dashboard-client.ts');
-const CMOS_AUTH = path.join(REPO_ROOT, 'src', 'tools', 'cmos', 'cmos-auth.ts');
+const DASHBOARD_CLIENT = path.join(REPO_ROOT, 'src', 'tools', 'rbook', 'dashboard-client.ts');
+const RBOOK_AUTH = path.join(REPO_ROOT, 'src', 'tools', 'rbook', 'rbook-auth.ts');
 
 /**
  * Every `.ts` file under src/auth (the credential-capture surface), RECURSIVELY — a future
@@ -109,7 +109,7 @@ describe('s86-m06 structural gate: user-scoped resolution for credential repair'
   });
 
   it('the reissue success payload does not hardcode an empty revoked list', () => {
-    const content = fs.readFileSync(CMOS_AUTH, 'utf8');
+    const content = fs.readFileSync(RBOOK_AUTH, 'utf8');
 
     // Premise: the field is still reported at all.
     expect(content).toContain('revokedKeyIds');
@@ -123,16 +123,16 @@ describe('s86-m06 structural gate: user-scoped resolution for credential repair'
     // where the wording has moved on it could never fail, which is the tautology the header
     // above claims this gate avoids. The premise makes a reword redden the gate instead.
     const files = [
-      { file: CMOS_AUTH, premise: 'holds no user-scoped keys' },
+      { file: RBOOK_AUTH, premise: 'holds no user-scoped keys' },
       { file: path.join(AUTH_DIR, 'project-key-capture.ts'), premise: 'holds no user-scoped keys' },
       {
-        file: path.join(REPO_ROOT, 'src', 'tools', 'cmos', 'checkpoint-backfill.ts'),
+        file: path.join(REPO_ROOT, 'src', 'tools', 'rbook', 'checkpoint-backfill.ts'),
         premise: 'checkAndRegister(',
       },
       {
         // s94-m10: registration and its key-attribution remedy moved together; keep the caller
         // and extracted module under the forbidden-wording check.
-        file: path.join(REPO_ROOT, 'src', 'tools', 'cmos', 'checkpoint-registration.ts'),
+        file: path.join(REPO_ROOT, 'src', 'tools', 'rbook', 'checkpoint-registration.ts'),
         premise: 'keySource=',
       },
     ];
@@ -252,7 +252,7 @@ describe('s87-m07 (#530) — no caller passes an apiKey override to the resolver
     const offenders: string[] = [];
     for (const file of files) {
       const rel = path.relative(REPO_ROOT, file);
-      if (rel === 'src/tools/cmos/dashboard-client.ts') continue; // the definitions themselves
+      if (rel === 'src/tools/rbook/dashboard-client.ts') continue; // the definitions themselves
       const lines = fs.readFileSync(file, 'utf8').split('\n');
       for (let i = 0; i < lines.length; i += 1) {
         const line = lines[i];

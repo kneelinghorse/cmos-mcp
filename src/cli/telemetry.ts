@@ -6,17 +6,17 @@ import Database from 'better-sqlite3';
 import { createHash } from 'crypto';
 import * as path from 'path';
 
-import { cmosConfigDir, harnessSessionHash } from '../tools/cmos/harness-session';
+import { rbookConfigDir, harnessSessionHash } from '../tools/rbook/harness-session';
 import {
   appendTelemetry,
   targetForStore,
   type TelemetryRecord,
   type TelemetryTarget,
-} from '../tools/cmos/local-telemetry';
-import { matchPrompt } from '../tools/cmos/prompt-patterns';
-import { restatedRuleIds, type RuleInForce } from '../tools/cmos/restatement';
-import { returnedIds, usedIds } from '../tools/cmos/telemetry-extract';
-import type { RenderedContext } from '../tools/cmos/rendered-context';
+} from '../tools/rbook/local-telemetry';
+import { matchPrompt } from '../tools/rbook/prompt-patterns';
+import { restatedRuleIds, type RuleInForce } from '../tools/rbook/restatement';
+import { returnedIds, usedIds } from '../tools/rbook/telemetry-extract';
+import type { RenderedContext } from '../tools/rbook/rendered-context';
 import {
   parseArgs,
   resolveCliProject,
@@ -168,7 +168,7 @@ export class CliTelemetry {
     };
     this.target = {
       projectId: 'unattributed',
-      dbPath: path.join(cmosConfigDir(io.env), 'unattributed.sqlite'),
+      dbPath: path.join(rbookConfigDir(io.env), 'unattributed.sqlite'),
     };
     this.resolve(
       resolveCliProject({ projectRootArg: flags['project-root'], env: io.env, cwd: io.cwd })
@@ -185,7 +185,7 @@ export class CliTelemetry {
     this.resolution = resolution;
     const unattributed = {
       projectId: 'unattributed',
-      dbPath: path.join(cmosConfigDir(this.io.env), 'unattributed.sqlite'),
+      dbPath: path.join(rbookConfigDir(this.io.env), 'unattributed.sqlite'),
     };
     this.target =
       resolution.kind === 'store'

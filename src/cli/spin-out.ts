@@ -4,7 +4,7 @@
 import path from 'path';
 import { parseArgs, type CliIo } from './core';
 import { CliTelemetry } from './telemetry';
-import { spinOut } from '../tools/cmos/spin-out';
+import { spinOut } from '../tools/rbook/spin-out';
 
 export async function runSpinOut(argv: readonly string[], io: CliIo): Promise<number> {
   try {
@@ -70,7 +70,7 @@ export async function runSpinOut(argv: readonly string[], io: CliIo): Promise<nu
       telemetry.finish(code);
     }
   } catch (error) {
-    io.stderr(`cmos-mcp spin-out: ${error instanceof Error ? error.message : String(error)}`);
+    io.stderr(`reasonbook spin-out: ${error instanceof Error ? error.message : String(error)}`);
     return 1;
   }
 }

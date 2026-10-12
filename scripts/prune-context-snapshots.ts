@@ -2,15 +2,16 @@
 // ABOUTME: s84-m04 (#478) — CLI to prune context_snapshots content (the ~99%/31.9MB write-only
 // ABOUTME: audit blob). Dry-run by DEFAULT; --apply mutates. Content-tombstone unless --hard.
 
-import { withClientAsync } from '../src/tools/cmos/client';
-import { readPruneInputs, tombstoneSnapshot } from '../src/tools/cmos/cmos-db-prune-snapshots';
-import { createError, createSuccess } from '../src/tools/cmos/errors';
-import { ensureContentPrunedColumn } from '../src/tools/cmos/schema-migrations';
+import { getSetting } from '../src/intelligence/legacy-compat';
+import { withClientAsync } from '../src/tools/rbook/client';
+import { readPruneInputs, tombstoneSnapshot } from '../src/tools/rbook/rbook-db-prune-snapshots';
+import { createError, createSuccess } from '../src/tools/rbook/errors';
+import { ensureContentPrunedColumn } from '../src/tools/rbook/schema-migrations';
 import {
   selectSnapshotsToPrune,
   resolveKeepN,
   type PruneSelection,
-} from '../src/tools/cmos/context-snapshot-prune';
+} from '../src/tools/rbook/context-snapshot-prune';
 
 interface Args {
   apply: boolean;
@@ -48,7 +49,7 @@ interface PruneReport {
 
 async function main(): Promise<number> {
   const args = parseArgs(process.argv.slice(2));
-  const keepN = resolveKeepN(args.keep, process.env['CMOS_SNAPSHOT_PRUNE_KEEP']);
+  const keepN = resolveKeepN(args.keep, getSetting('RBOOK_SNAPSHOT_PRUNE_KEEP'));
 
   const result = await withClientAsync<PruneReport>(
     async (client) => {
@@ -56,7 +57,7 @@ async function main(): Promise<number> {
       // predating the column is NOT altered just to preview. The migration (ALTER ADD COLUMN) is
       // deferred to the --apply path, which lands the column before any write filters on it.
       // s92-m09: the rows, references and sprint closes come from the same readers
-      // cmos_db(prune_snapshots) uses. Live references — NEVER hardcode. FAIL CLOSED: a source
+      // rbook_db(prune_snapshots) uses. Live references — NEVER hardcode. FAIL CLOSED: a source
       // that could not be read could hold a reference, so --apply aborts rather than under-protect.
       const read = readPruneInputs(client);
       if (!read.ok) {
@@ -93,7 +94,7 @@ async function main(): Promise<number> {
         }
         try {
           for (const id of selection.prunableIds) {
-            // s92-m09: the tombstone is shared with cmos_db(prune_snapshots); it is idempotent
+            // s92-m09: the tombstone is shared with rbook_db(prune_snapshots); it is idempotent
             // (guarded on content_pruned_at IS NULL) and prefixes the hash `pruned:`.
             const res = args.hard
               ? client.execute('DELETE FROM context_snapshots WHERE id = ?', [id])
@@ -158,7 +159,7 @@ async function main(): Promise<number> {
     console.log(
       `[prune:snapshots] APPLIED: ${applied} row(s) ${hard ? 'hard-deleted' : 'content-tombstoned'}. ` +
         `${hard ? 'Rows are GONE.' : 'Content is GONE (row/metadata/FK/event preserved).'} ` +
-        `Recovery is ONLY via a DB-file backup (cmos-db-snapshot).`
+        `Recovery is ONLY via a DB-file backup (rbook-db-snapshot).`
     );
   } else {
     console.log(

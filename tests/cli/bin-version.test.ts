@@ -14,7 +14,7 @@ let bin: string;
 let guard: string;
 
 beforeAll(() => {
-  fixture = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-bin-version-')));
+  fixture = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-bin-version-')));
   const output = path.join(fixture, 'dist');
   fs.mkdirSync(output);
   // Compile only the tested entry and its lightweight helper, never the real dist/ tree.
@@ -87,7 +87,7 @@ describe('the bin answers server --version without loading the server', () => {
     expect(result.error).toBeUndefined();
     expect(result.stderr).toBe('');
     expect(result.status).toBe(0);
-    expect(result.stdout).toBe('cmos-mcp 3.3.0-rc.1\n');
+    expect(result.stdout).toBe('reasonbook 3.3.0-rc.1\n');
   });
 
   it.each([undefined, '{}', '{"version":""}', '{"version":42}'])(
@@ -97,7 +97,7 @@ describe('the bin answers server --version without loading the server', () => {
       const result = run(['--version']);
       expect(result.stderr).toBe('');
       expect(result.status).toBe(0);
-      expect(result.stdout).toBe('cmos-mcp 2.0.0\n');
+      expect(result.stdout).toBe('reasonbook 2.0.0\n');
     }
   );
 
@@ -153,7 +153,7 @@ describe('the bin answers server --version without loading the server', () => {
   it.each([
     ["require('./index')", 'DEPENDENCY_DENIED: ./index'],
     ["require('@modelcontextprotocol/server')", 'DEPENDENCY_DENIED: @modelcontextprotocol'],
-    ["require('./tools/cmos/client')", 'DEPENDENCY_DENIED: ./tools/cmos/client'],
+    ["require('./tools/rbook/client')", 'DEPENDENCY_DENIED: ./tools/rbook/client'],
     ["require('fs').writeFileSync('forbidden', 'data')", 'WRITE_DENIED: writeFileSync'],
   ])('the child guard catches forbidden work: %s', (code, refusal) => {
     const result = spawnSync(process.execPath, ['--require', guard, '-e', code], {

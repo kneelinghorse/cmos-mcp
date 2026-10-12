@@ -2,11 +2,11 @@
 // per-type embedding-input composition, and recordEmbedding() — the write-path hook that hash-compares against
 // last_embedded_hash, embeds on change, and upserts into <type>_vec. Architecture per cmos/planning/adr/s66-vector-retrieval.md.
 
-import { composeDecisionText, type DecisionTextRow } from '../tools/cmos/decision-fields';
+import { composeDecisionText, type DecisionTextRow } from '../tools/rbook/decision-fields';
 import * as crypto from 'crypto';
 import { debugLog } from '../debug-log';
-import type { CmosDatabaseClient } from '../tools/cmos/client';
-import { checkWrite } from '../tools/cmos/write-guard';
+import type { RbookDatabaseClient } from '../tools/rbook/client';
+import { checkWrite } from '../tools/rbook/write-guard';
 import { applyOfflineTransformersEnv, type TransformersEnv } from './transformers-offline-env';
 
 // ─── Public types ────────────────────────────────────────────────────────────
@@ -60,7 +60,7 @@ export const EMBEDDING_DIM = 384;
  * s92-m07: the embedding stack is an OPTIONAL peer dependency. On 2,132 natural citation labels,
  * keyword-only recall@10 (0.637) beat equal-weight hybrid (0.592) once the keyword arm read every
  * query keyword, and the stack was about 81% of a 306 MB install. Absent, writes and searches run
- * keyword-only and print nothing; `cmos_db(action="health")` says which state this process is in.
+ * keyword-only and print nothing; `rbook_db(action="health")` says which state this process is in.
  */
 export const TRANSFORMERS_PACKAGE = '@xenova/transformers';
 
@@ -111,7 +111,7 @@ function isPackageAbsent(error: unknown): boolean {
   );
 }
 
-/** What `cmos_db(action="health")` reports about semantic (vector) search in this process. */
+/** What `rbook_db(action="health")` reports about semantic (vector) search in this process. */
 export interface SemanticSearchStatus {
   /** True when the vector term can take part: the package is installed and has not failed. */
   enabled: boolean;
@@ -126,7 +126,7 @@ export function semanticSearchStatus(): SemanticSearchStatus {
     state: 'not-installed',
     detail:
       `the optional package ${TRANSFORMERS_PACKAGE} is not installed, so search is keyword-only. ` +
-      'Install it next to cmos-mcp to add a vector term.',
+      'Install it next to @aquex/reasonbook to add a vector term.',
   };
   switch (availability.state) {
     case 'loaded':
@@ -146,7 +146,7 @@ export function semanticSearchStatus(): SemanticSearchStatus {
             state: 'installed',
             detail:
               `${TRANSFORMERS_PACKAGE} is installed; ${EMBEDDING_MODEL} loads on first use and is ` +
-              'downloaded once, unless CMOS_OFFLINE_EMBEDDINGS=1',
+              'downloaded once, unless RBOOK_OFFLINE_EMBEDDINGS=1',
           }
         : notInstalled;
   }
@@ -180,7 +180,7 @@ export function setEmbedderForTesting(embedder: Embedder | null): void {
  * embedder OR the negative-cache no-op) > a single lazy-load attempt.
  *
  * NEGATIVE CACHE (Sprint 78 m03): `loadXenovaEmbedder` is attempted AT MOST ONCE
- * per process. On failure — e.g. offline (`CMOS_OFFLINE_EMBEDDINGS=1`) with the
+ * per process. On failure — e.g. offline (`RBOOK_OFFLINE_EMBEDDINGS=1`) with the
  * model not in the local cache — we cache a no-op embedder that throws on use, so
  * `recordEmbedding` and `HybridRetriever.embedQuery` fall into their catch/degrade
  * paths instantly instead of re-hitting HuggingFace (a per-call network timeout).
@@ -198,7 +198,7 @@ export async function getEmbedder(): Promise<Embedder> {
       } catch (error) {
         const message = error instanceof Error ? error.message : 'unknown error';
         if (isPackageAbsent(error)) {
-          // s92-m07: a supported configuration, not a failure. Named once, and only under CMOS_DEBUG.
+          // s92-m07: a supported configuration, not a failure. Named once, and only under RBOOK_DEBUG.
           availability = { state: 'not-installed' };
           debugLog(
             `[DEBUG] embedding-pipeline: ${TRANSFORMERS_PACKAGE} is not installed — semantic ` +
@@ -241,7 +241,7 @@ async function loadXenovaEmbedder(): Promise<Embedder> {
     pipeline: (task: string, model: string) => Promise<XenovaFeatureExtractor>;
     env: TransformersEnv;
   };
-  // Local-forever hook (s78-m03): honor CMOS_OFFLINE_EMBEDDINGS / CMOS_MODEL_CACHE_DIR
+  // Local-forever hook (s78-m03): honor RBOOK_OFFLINE_EMBEDDINGS / RBOOK_MODEL_CACHE_DIR
   // BEFORE pipeline() so an offline install fails fast into the negative cache instead
   // of blocking on a HuggingFace fetch.
   applyOfflineTransformersEnv(transformers.env);
@@ -330,7 +330,7 @@ export function packEmbedding(values: Float32Array): Buffer {
  * after a successful INSERT/UPDATE returns).
  */
 export async function recordEmbedding(
-  client: CmosDatabaseClient,
+  client: RbookDatabaseClient,
   target: RecordEmbeddingTarget
 ): Promise<RecordEmbeddingResult> {
   try {
@@ -402,7 +402,7 @@ function coerceVecId(id: number | string, needsBigInt: boolean): unknown {
 }
 
 function readLastEmbeddedHash(
-  client: CmosDatabaseClient,
+  client: RbookDatabaseClient,
   type: EmbeddingType,
   id: number | string
 ): string | null {
@@ -417,7 +417,7 @@ function readLastEmbeddedHash(
 
 /** Returns a DB-error string when the UPDATE failed, null when it ran (s86-m02b). */
 function writeLastEmbeddedHash(
-  client: CmosDatabaseClient,
+  client: RbookDatabaseClient,
   type: EmbeddingType,
   id: number | string,
   hash: string
@@ -434,7 +434,7 @@ function writeLastEmbeddedHash(
 
 /** Returns a DB-error string when either statement failed, null when both ran (s86-m02b). */
 function upsertVector(
-  client: CmosDatabaseClient,
+  client: RbookDatabaseClient,
   type: EmbeddingType,
   id: number | string,
   blob: Buffer

@@ -13,15 +13,16 @@
  *
  * The test has no private evidence and no live-store dependency. It uses isolated temp fixtures
  * for literal first-run, initialized-project, wrong-root, and missing-database states. Every
- * server gets a literal environment whitelist with isolated HOME + CMOS_CONFIG_DIR and pins
- * CMOS_PROJECT_ROOT to its own scratch cwd so the repository .env cannot enter the process.
+ * server gets a literal environment whitelist with isolated HOME + RBOOK_CONFIG_DIR and pins
+ * RBOOK_PROJECT_ROOT to its own scratch cwd so the repository .env cannot enter the process.
  * The sweeps that exercise runnable auth actions use a 127.0.0.1 dashboard double. The dedicated
- * auth harness leaves CMOS_DASHBOARD_URL unset and preloads a strict baked-host redirect, so the
+ * auth harness leaves RBOOK_DASHBOARD_URL unset and preloads a strict baked-host redirect, so the
  * built artifact proves default resolution without permitting a live-network request.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from '@jest/globals';
 import Database from 'better-sqlite3';
+import { LEGACY } from '../../src/intelligence/legacy-compat';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -40,8 +41,8 @@ const DASHBOARD_DEFAULT_REDIRECT_PRELOAD = path.join(
 const INVALID_ACTION = '__s90_m04_invalid_action__';
 const UNKNOWN_TOOL = '__s90_m04_unknown_tool__';
 const REQUEST_TIMEOUT_MS = 5_000;
-const AUTH_LOOPBACK_PAIR_KEYS = new Set(['cmos_auth\0login', 'cmos_auth\0login_init']);
-const LOGIN_COMPLETE_PAIR_KEY = 'cmos_auth\0login_complete';
+const AUTH_LOOPBACK_PAIR_KEYS = new Set(['rbook_auth\0login', 'rbook_auth\0login_init']);
+const LOGIN_COMPLETE_PAIR_KEY = 'rbook_auth\0login_complete';
 const WIRE_DASHBOARD_PROJECT_ID = '823c15ea-8a9b-4a70-bc54-444b4e8b2f45';
 
 const WRONG_PROJECT_ROOTS = [
@@ -67,8 +68,8 @@ interface PublishedPair {
 
 interface WireEnvironment extends Record<string, string> {
   HOME: string;
-  CMOS_CONFIG_DIR: string;
-  CMOS_PROJECT_ROOT: string;
+  RBOOK_CONFIG_DIR: string;
+  RBOOK_PROJECT_ROOT: string;
   PATH: string;
   NODE_ENV: string;
 }
@@ -98,19 +99,19 @@ function mkTmp(prefix: string): string {
 
 function isolatedEnvironment(prefix: string, cwd: string, dashboardUrl?: string): WireEnvironment {
   // This object is intentionally a literal whitelist. In particular, do not spread
-  // process.env: dashboard credentials would invalidate the fixture. CMOS_PROJECT_ROOT
+  // process.env: dashboard credentials would invalidate the fixture. RBOOK_PROJECT_ROOT
   // is deliberately pinned to cwd so dist/index.js cannot bootstrap the repository .env.
   const environment: WireEnvironment = {
     HOME: mkTmp(`${prefix}-home-`),
-    CMOS_CONFIG_DIR: mkTmp(`${prefix}-config-`),
-    CMOS_PROJECT_ROOT: cwd,
+    RBOOK_CONFIG_DIR: mkTmp(`${prefix}-config-`),
+    RBOOK_PROJECT_ROOT: cwd,
     PATH: process.env.PATH ?? path.dirname(process.execPath),
     NODE_ENV: 'test',
   };
   if (dashboardUrl !== undefined) {
-    environment.CMOS_DASHBOARD_URL = dashboardUrl;
+    environment.RBOOK_DASHBOARD_URL = dashboardUrl;
     environment.NODE_OPTIONS = `--require=${DASHBOARD_DEFAULT_REDIRECT_PRELOAD}`;
-    environment.CMOS_TEST_DASHBOARD_REDIRECT_ORIGIN = dashboardUrl;
+    environment.RBOOK_TEST_DASHBOARD_REDIRECT_ORIGIN = dashboardUrl;
   }
   environments.push({ cwd, environment, dashboardUrl });
   return environment;
@@ -118,13 +119,13 @@ function isolatedEnvironment(prefix: string, cwd: string, dashboardUrl?: string)
 
 /** Give the initialized fixture the identity facts required by the strict sender boundary. */
 function seedValidSenderIdentity(projectRoot: string): void {
-  const databasePath = path.join(projectRoot, 'cmos', 'db', 'cmos.sqlite');
+  const databasePath = path.join(projectRoot, 'rbook', 'db', 'rbook.sqlite');
   const db = new Database(databasePath);
   const now = new Date().toISOString();
   const identity = {
     project_id: 's90-m04-wire-fixture',
     project_name: 's90-m04-wire-fixture',
-    cmos_address: 'cmos://wire-e2e/s90-m04-wire-fixture',
+    [LEGACY.identityAddressKey]: `${LEGACY.addressScheme}wire-e2e/s90-m04-wire-fixture`,
   };
 
   try {
@@ -135,7 +136,7 @@ function seedValidSenderIdentity(projectRoot: string): void {
       );
       db.prepare(
         `INSERT OR REPLACE INTO contexts (id, source_path, content, updated_at)
-         VALUES ('project_identity', 'cmos/contexts/project-identity.json', ?, ?)`
+         VALUES ('project_identity', 'rbook/contexts/project-identity.json', ?, ?)`
       ).run(JSON.stringify(identity), now);
     })();
   } finally {
@@ -211,7 +212,7 @@ function prescribedInitRoot(result: ToolResult): string {
   if (typeof suggestion !== 'string') {
     throw new Error(`Expected an init prescription, received ${JSON.stringify(suggestion)}`);
   }
-  const match = suggestion.match(/cmos_project\(action="init", projectRoot=("(?:\\.|[^"\\])*")\)/);
+  const match = suggestion.match(/rbook_project\(action="init", projectRoot=("(?:\\.|[^"\\])*")\)/);
   if (!match) {
     throw new Error(`Init prescription does not carry a JSON-string projectRoot: ${suggestion}`);
   }
@@ -255,8 +256,8 @@ function sortedCounts(counts: ReadonlyMap<string, number>): Record<string, numbe
 
 function normalizeWireString(value: string, environment: WireEnvironment): string {
   const fixturePaths: Array<[string, string]> = [
-    [environment.CMOS_PROJECT_ROOT, '<PROJECT_ROOT>'],
-    [environment.CMOS_CONFIG_DIR, '<CONFIG_DIR>'],
+    [environment.RBOOK_PROJECT_ROOT, '<PROJECT_ROOT>'],
+    [environment.RBOOK_CONFIG_DIR, '<CONFIG_DIR>'],
     [environment.HOME, '<HOME>'],
   ];
   let normalized = value;
@@ -370,13 +371,13 @@ describe('s90-m04 wire preflight and first-run classification over built stdio',
       errorDescription: 'wire preflight terminal fixture',
     });
 
-    const authBoundaryRoot = mkTmp('cmos-s90-m04-auth-boundary-');
+    const authBoundaryRoot = mkTmp('rbook-s90-m04-auth-boundary-');
     const authBoundaryEnvironment = isolatedEnvironment(
-      'cmos-s90-m04-auth-boundary',
+      'rbook-s90-m04-auth-boundary',
       authBoundaryRoot
     );
     authBoundaryEnvironment.NODE_OPTIONS = `--require=${DASHBOARD_DEFAULT_REDIRECT_PRELOAD}`;
-    authBoundaryEnvironment.CMOS_TEST_DASHBOARD_REDIRECT_ORIGIN = dashboardDouble.origin;
+    authBoundaryEnvironment.RBOOK_TEST_DASHBOARD_REDIRECT_ORIGIN = dashboardDouble.origin;
     authBoundaryHarness = await connectStdioServer({
       serverPath: DIST_ENTRY,
       cwd: authBoundaryRoot,
@@ -384,17 +385,17 @@ describe('s90-m04 wire preflight and first-run classification over built stdio',
       clientName: 's90-m04-auth-boundary-wire',
     });
     harnesses.push(authBoundaryHarness);
-    await authBoundaryHarness.callOk('cmos_project', {
+    await authBoundaryHarness.callOk('rbook_project', {
       action: 'init',
       projectRoot: authBoundaryRoot,
       projectName: 's90-m04-auth-loopback-fixture',
     });
 
-    firstRunRoot = mkTmp('cmos-s90-m04-first-run-');
+    firstRunRoot = mkTmp('rbook-s90-m04-first-run-');
     firstRunHarness = await connectStdioServer({
       serverPath: DIST_ENTRY,
       cwd: firstRunRoot,
-      env: isolatedEnvironment('cmos-s90-m04-first-run', firstRunRoot, dashboardDouble.origin),
+      env: isolatedEnvironment('rbook-s90-m04-first-run', firstRunRoot, dashboardDouble.origin),
       clientName: 's90-m04-first-run-wire',
     });
     harnesses.push(firstRunHarness);
@@ -403,34 +404,34 @@ describe('s90-m04 wire preflight and first-run classification over built stdio',
     tools = listed.tools as PublishedTool[];
     pairs = derivePairs(tools);
 
-    initializedRoot = mkTmp('cmos-s90-m04-initialized-');
+    initializedRoot = mkTmp('rbook-s90-m04-initialized-');
     initializedHarness = await connectStdioServer({
       serverPath: DIST_ENTRY,
       cwd: initializedRoot,
-      env: isolatedEnvironment('cmos-s90-m04-initialized', initializedRoot),
+      env: isolatedEnvironment('rbook-s90-m04-initialized', initializedRoot),
       clientName: 's90-m04-wrong-root-wire',
     });
     harnesses.push(initializedHarness);
-    await initializedHarness.callOk('cmos_project', {
+    await initializedHarness.callOk('rbook_project', {
       action: 'init',
       projectRoot: initializedRoot,
       projectName: 's90-m04-wire-fixture',
     });
     seedValidSenderIdentity(initializedRoot);
 
-    missingDbRoot = mkTmp('cmos-s90-m04-missing-db-');
-    fs.mkdirSync(path.join(missingDbRoot, 'cmos', 'db'), { recursive: true });
+    missingDbRoot = mkTmp('rbook-s90-m04-missing-db-');
+    fs.mkdirSync(path.join(missingDbRoot, 'rbook', 'db'), { recursive: true });
     missingDbHarness = await connectStdioServer({
       serverPath: DIST_ENTRY,
       cwd: missingDbRoot,
-      env: isolatedEnvironment('cmos-s90-m04-missing-db', missingDbRoot),
+      env: isolatedEnvironment('rbook-s90-m04-missing-db', missingDbRoot),
       clientName: 's90-m04-missing-db-wire',
     });
     harnesses.push(missingDbHarness);
 
-    const omittedRoot = mkTmp('cmos-s90-m04-omitted-root-');
+    const omittedRoot = mkTmp('rbook-s90-m04-omitted-root-');
     omittedRootEnvironment = isolatedEnvironment(
-      'cmos-s90-m04-omitted-root',
+      'rbook-s90-m04-omitted-root',
       omittedRoot,
       dashboardDouble.origin
     );
@@ -441,15 +442,15 @@ describe('s90-m04 wire preflight and first-run classification over built stdio',
       clientName: 's90-m04-omitted-root-wire',
     });
     harnesses.push(omittedRootHarness);
-    await omittedRootHarness.callOk('cmos_project', {
+    await omittedRootHarness.callOk('rbook_project', {
       action: 'init',
       projectRoot: omittedRoot,
       projectName: 's90-m04-null-semantics',
     });
 
-    const nullRoot = mkTmp('cmos-s90-m04-null-root-');
+    const nullRoot = mkTmp('rbook-s90-m04-null-root-');
     nullRootEnvironment = isolatedEnvironment(
-      'cmos-s90-m04-null-root',
+      'rbook-s90-m04-null-root',
       nullRoot,
       dashboardDouble.origin
     );
@@ -460,7 +461,7 @@ describe('s90-m04 wire preflight and first-run classification over built stdio',
       clientName: 's90-m04-null-root-wire',
     });
     harnesses.push(nullRootHarness);
-    await nullRootHarness.callOk('cmos_project', {
+    await nullRootHarness.callOk('rbook_project', {
       action: 'init',
       projectRoot: nullRoot,
       projectName: 's90-m04-null-semantics',
@@ -506,27 +507,27 @@ describe('s90-m04 wire preflight and first-run classification over built stdio',
     expect(pairs.length).toBeGreaterThan(tools.length);
 
     for (const { cwd, environment, dashboardUrl } of environments) {
-      const expectedKeys = ['CMOS_CONFIG_DIR', 'CMOS_PROJECT_ROOT', 'HOME', 'NODE_ENV', 'PATH'];
-      if (dashboardUrl !== undefined) expectedKeys.push('CMOS_DASHBOARD_URL');
+      const expectedKeys = ['RBOOK_CONFIG_DIR', 'RBOOK_PROJECT_ROOT', 'HOME', 'NODE_ENV', 'PATH'];
+      if (dashboardUrl !== undefined) expectedKeys.push('RBOOK_DASHBOARD_URL');
       if (environment.NODE_OPTIONS !== undefined) {
-        expectedKeys.push('NODE_OPTIONS', 'CMOS_TEST_DASHBOARD_REDIRECT_ORIGIN');
+        expectedKeys.push('NODE_OPTIONS', 'RBOOK_TEST_DASHBOARD_REDIRECT_ORIGIN');
       }
       expect(Object.keys(environment).sort()).toEqual(expectedKeys.sort());
-      expect(environment.CMOS_PROJECT_ROOT).toBe(cwd);
-      if (dashboardUrl === undefined) expect(environment).not.toHaveProperty('CMOS_DASHBOARD_URL');
-      else expect(environment.CMOS_DASHBOARD_URL).toBe(dashboardUrl);
+      expect(environment.RBOOK_PROJECT_ROOT).toBe(cwd);
+      if (dashboardUrl === undefined) expect(environment).not.toHaveProperty('RBOOK_DASHBOARD_URL');
+      else expect(environment.RBOOK_DASHBOARD_URL).toBe(dashboardUrl);
       if (environment.NODE_OPTIONS !== undefined) {
         expect(environment.NODE_OPTIONS).toBe(`--require=${DASHBOARD_DEFAULT_REDIRECT_PRELOAD}`);
-        expect(environment.CMOS_TEST_DASHBOARD_REDIRECT_ORIGIN).toBe(dashboardDouble.origin);
+        expect(environment.RBOOK_TEST_DASHBOARD_REDIRECT_ORIGIN).toBe(dashboardDouble.origin);
       }
-      expect(environment).not.toHaveProperty('CMOS_DASHBOARD_API_KEY');
+      expect(environment).not.toHaveProperty('RBOOK_DASHBOARD_API_KEY');
     }
 
     console.log(
       `[s90-m04 wire universe] tools=${tools.length} enum-actions=${enumActionCount} ` +
         `actionless=${actionlessTools.length} pairs=${pairs.length}; ` +
         `auth loopback rule=${loopbackAuthPairs.map(displayPair).join(',')}; ` +
-        `${displayPair({ tool: 'cmos_auth', action: 'login_complete' })}=local validation + loopback poll`
+        `${displayPair({ tool: 'rbook_auth', action: 'login_complete' })}=local validation + loopback poll`
     );
   });
 
@@ -598,11 +599,11 @@ describe('s90-m04 wire preflight and first-run classification over built stdio',
     // Two passes of login_init + login (2 code + 1 token each), plus login_complete with a code.
     expectHermeticDeviceFlowRequests(dashboardDouble, 3, 4);
     expect(failures).toEqual([]);
-    expect(codeByPair.get('cmos_review\0<actionless>')).toBe('CMOS_NOT_DETECTED');
+    expect(codeByPair.get('rbook_review\0<actionless>')).toBe('RBOOK_NOT_DETECTED');
     expect(loginCompleteResult.structuredContent?.error?.code).toBe('MISSING_PARAMETER');
     expect(loginCompleteWithCode.structuredContent?.success).toBe(true);
     expect(loginCompleteWithCode.structuredContent?.data).toMatchObject({ status: 'expired' });
-    expect(codes.get('CMOS_NOT_DETECTED') ?? 0).toBeGreaterThan(0);
+    expect(codes.get('RBOOK_NOT_DETECTED') ?? 0).toBeGreaterThan(0);
     expect(codes.get('TOOL_EXECUTION_ERROR') ?? 0).toBe(0);
 
     console.log(
@@ -638,10 +639,10 @@ describe('s90-m04 wire preflight and first-run classification over built stdio',
 
     expect(driven.size).toBe(pairs.length * WRONG_PROJECT_ROOTS.length);
     for (const specimen of WRONG_PROJECT_ROOTS) {
-      expect(driven).toContain(`${specimen.label}\0cmos_auth\0login`);
+      expect(driven).toContain(`${specimen.label}\0rbook_auth\0login`);
     }
     expect(failures).toEqual([]);
-    expect(fs.existsSync(path.join(initializedRoot, 'cmos', 'db', 'cmos.sqlite'))).toBe(true);
+    expect(fs.existsSync(path.join(initializedRoot, 'rbook', 'db', 'rbook.sqlite'))).toBe(true);
 
     console.log(
       `[s90-m04 wrong-root wire] specimens=${WRONG_PROJECT_ROOTS.length} ` +
@@ -654,7 +655,7 @@ describe('s90-m04 wire preflight and first-run classification over built stdio',
   // so a refusal proves the key was rejected before any store was resolved or opened.
   it('refuses one unknown top-level key on every published pair before dispatch', async () => {
     const failures: ObservedFailure[] = [];
-    const storePath = path.join(firstRunRoot, 'cmos', 'db', 'cmos.sqlite');
+    const storePath = path.join(firstRunRoot, 'rbook', 'db', 'rbook.sqlite');
     const storeExistedBefore = fs.existsSync(storePath);
 
     for (const pair of pairs) {
@@ -742,7 +743,7 @@ describe('s90-m04 wire preflight and first-run classification over built stdio',
   });
 
   it('extracts and executes the DB_NOT_FOUND init prescription on the same root', async () => {
-    const pair = { tool: 'cmos_review', action: null } satisfies PublishedPair;
+    const pair = { tool: 'rbook_review', action: null } satisfies PublishedPair;
     const triggers = [
       await callBounded(missingDbHarness, pair, {}),
       await callBounded(missingDbHarness, pair, { projectRoot: missingDbRoot }),
@@ -758,7 +759,7 @@ describe('s90-m04 wire preflight and first-run classification over built stdio',
       fs.realpathSync(missingDbRoot),
     ]);
 
-    await missingDbHarness.callOk('cmos_project', {
+    await missingDbHarness.callOk('rbook_project', {
       action: 'init',
       projectRoot: prescribedRoots[0],
     });
@@ -775,7 +776,7 @@ describe('s90-m04 wire preflight and first-run classification over built stdio',
   });
 
   it('proves the SENDER_UNRESOLVABLE projectRoot prescription succeeds on a valid root', async () => {
-    const pair = { tool: 'cmos_message', action: 'whoami' } satisfies PublishedPair;
+    const pair = { tool: 'rbook_message', action: 'whoami' } satisfies PublishedPair;
     const trigger = await callBounded(firstRunHarness, pair, argsFor(pair));
     const triggerError = trigger.structuredContent?.error;
 
@@ -801,10 +802,10 @@ describe('s90-m04 wire preflight and first-run classification over built stdio',
     });
   });
 
-  it('extracts every CMOS_NOT_DETECTED init prescription and executes its same root', async () => {
-    const reviewPair = { tool: 'cmos_review', action: null } satisfies PublishedPair;
-    const healthPair = { tool: 'cmos_db', action: 'health' } satisfies PublishedPair;
-    const registerPair = { tool: 'cmos_project', action: 'register' } satisfies PublishedPair;
+  it('extracts every RBOOK_NOT_DETECTED init prescription and executes its same root', async () => {
+    const reviewPair = { tool: 'rbook_review', action: null } satisfies PublishedPair;
+    const healthPair = { tool: 'rbook_db', action: 'health' } satisfies PublishedPair;
+    const registerPair = { tool: 'rbook_project', action: 'register' } satisfies PublishedPair;
     const triggers = [
       await callBounded(firstRunHarness, reviewPair, {}),
       await callBounded(firstRunHarness, reviewPair, { projectRoot: firstRunRoot }),
@@ -820,7 +821,7 @@ describe('s90-m04 wire preflight and first-run classification over built stdio',
 
     for (const trigger of triggers) {
       expect(trigger.isError).toBe(true);
-      expect(trigger.structuredContent?.error?.code).toBe('CMOS_NOT_DETECTED');
+      expect(trigger.structuredContent?.error?.code).toBe('RBOOK_NOT_DETECTED');
       expect(hasCatchAllDisclosure(trigger)).toBe(false);
     }
     const prescribedRoots = triggers.map(prescribedInitRoot);
@@ -828,7 +829,7 @@ describe('s90-m04 wire preflight and first-run classification over built stdio',
       fs.realpathSync(firstRunRoot),
     ]);
 
-    await firstRunHarness.callOk('cmos_project', {
+    await firstRunHarness.callOk('rbook_project', {
       action: 'init',
       projectRoot: prescribedRoots[0],
     });
@@ -848,7 +849,7 @@ describe('s90-m04 wire preflight and first-run classification over built stdio',
     for (const remedy of remedies) {
       expect(remedy.isError).not.toBe(true);
       expect(remedy.structuredContent?.success).toBe(true);
-      expect(remedy.structuredContent?.error?.code).not.toBe('CMOS_NOT_DETECTED');
+      expect(remedy.structuredContent?.error?.code).not.toBe('RBOOK_NOT_DETECTED');
     }
   });
 });

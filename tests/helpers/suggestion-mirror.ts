@@ -12,13 +12,13 @@
  * interpolated template (`errors.ts:319/333/466`) yields an unmatchable anchored pattern.
  *
  * Making `suggestion` a structured `{text, remedy}` object would be a BREAKING change to
- * `CmosToolError` on the MCP wire, across 181 sites, in the sprint whose own review dinged 2.8.0
+ * `RbookToolError` on the MCP wire, across 181 sites, in the sprint whose own review dinged 2.8.0
  * for shipping an undisclosed wire break. An additive `remedy?:` field beside `suggestion` avoids
  * the break but still costs 181 authoring edits AND creates a second source of truth that can
  * silently disagree with the string — the precise defect class Arc F is named for.
  *
  * So the harness carries the provenance instead of the source: every `suggestion:` initializer `E`
- * is rewritten to `(globalThis.__CMOS_SUGGESTION_SITE__("<relpath>:<line>", E))`, which records the
+ * is rewritten to `(globalThis.__RBOOK_SUGGESTION_SITE__("<relpath>:<line>", E))`, which records the
  * site and returns `E` unchanged. ZERO `src/` edits. The shipped bytes are what ships.
  *
  * WHY `.js` AND NOT `.ts` (proven at plan time). `preset: 'ts-jest'` transforms `^.+\.tsx?$` and
@@ -57,10 +57,15 @@ const SRC_ROOT = path.join(REPO_ROOT, 'src');
  * `roots: ['<rootDir>/tests']`, outside `collectCoverageFrom: ['src/**\/*.ts']` — and additionally
  * resolves `<repo>/node_modules` from inside itself, while being no part of any mirror exclusion.
  */
-export const MIRROR_ROOT = path.join(REPO_ROOT, 'node_modules', '.cache', 'cmos-suggestion-mirror');
+export const MIRROR_ROOT = path.join(
+  REPO_ROOT,
+  'node_modules',
+  '.cache',
+  'rbook-suggestion-mirror'
+);
 
 /** The global the transform calls. Declared here so both the sink and the wrapper agree on it. */
-export const SINK_NAME = '__CMOS_SUGGESTION_SITE__';
+export const SINK_NAME = '__RBOOK_SUGGESTION_SITE__';
 
 export interface SuggestionSink {
   /** `<relpath>:<line>` for every site that fired at least once, in first-fire order. */
@@ -88,9 +93,9 @@ interface SinkState {
  */
 export function installSuggestionSink(): SuggestionSink {
   const holder = globalThis as unknown as Record<string, unknown>;
-  const existing = holder.__CMOS_SUGGESTION_STATE__ as SinkState | undefined;
+  const existing = holder.__RBOOK_SUGGESTION_STATE__ as SinkState | undefined;
   const state: SinkState = existing ?? { fired: new Set(), counts: new Map(), values: new Map() };
-  holder.__CMOS_SUGGESTION_STATE__ = state;
+  holder.__RBOOK_SUGGESTION_STATE__ = state;
   holder[SINK_NAME] = <T>(site: string, value: T): T => {
     state.fired.add(site);
     state.counts.set(site, (state.counts.get(site) ?? 0) + 1);
@@ -254,7 +259,7 @@ export function buildSuggestionMirror(): SuggestionMirrorResult {
   // the mirror, or every init past the seed lookup refuses with the missing-seed FAULT and its later
   // refusals (a re-init naming another project's id) can never be driven. A link, never a copy: the
   // seed is read, and init writes only into the case's own temp project.
-  fs.symlinkSync(path.join(REPO_ROOT, 'cmos-seed'), path.join(MIRROR_ROOT, 'cmos-seed'), 'dir');
+  fs.symlinkSync(path.join(REPO_ROOT, 'rbook-seed'), path.join(MIRROR_ROOT, 'rbook-seed'), 'dir');
 
   const sites: MirrorSite[] = [];
   const changedFiles: string[] = [];

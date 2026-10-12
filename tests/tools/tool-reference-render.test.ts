@@ -18,7 +18,7 @@
  *  2. The same invariant over an ADVERSARIAL SYNTHETIC definition. This half is load-bearing,
  *     not decoration: assertion 1 decays to a no-op the moment the real definitions happen to
  *     contain no pipe-bearing content, which is exactly the state the repo was in before
- *     `cmos_mission.context` gained `type: ['string','object']`.
+ *     `rbook_mission.context` gained `type: ['string','object']`.
  *
  * The defect class: `renderType` returns a JSON-Schema union as `string | object`. Interpolated
  * raw into a table row, that bare pipe splits the row into an extra column. Fixed by routing the
@@ -26,7 +26,7 @@
  */
 
 import { describe, expect, it } from '@jest/globals';
-import { CMOS_ACTION_PARAMS, CMOS_TOOL_DEFINITIONS } from '../../src/tools/cmos';
+import { RBOOK_ACTION_PARAMS, RBOOK_TOOL_DEFINITIONS } from '../../src/tools/rbook';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { renderToolReference } = require('../../scripts/lib/render-tool-reference.js') as {
@@ -121,14 +121,14 @@ function countBodyRows(markdown: string): number {
  * exercises a distinct branch — do not prune this without replacing the coverage.
  */
 const ADVERSARIAL_TOOL = {
-  name: 'cmos_adversarial',
+  name: 'rbook_adversarial',
   description: 'A synthetic tool | whose own description carries a pipe.',
   inputSchema: {
     type: 'object',
     properties: {
       // renderType's array branch — the actual s85-m01 defect.
       unionType: { type: ['string', 'object'], description: 'A union type.' },
-      // A 6-member union, matching cmos_context fieldUpdates[].value.
+      // A 6-member union, matching rbook_context fieldUpdates[].value.
       wideUnion: {
         type: ['string', 'number', 'boolean', 'object', 'array', 'null'],
         description: 'The complete JSON Schema type set.',
@@ -174,7 +174,7 @@ const ADVERSARIAL_TOOL = {
 
 /** s86-m04: the adversarial tool declares an action enum, so it needs a map like any other. */
 const ADVERSARIAL_ACTION_PARAMS = {
-  cmos_adversarial: {
+  rbook_adversarial: {
     run: [
       'action',
       'unionType',
@@ -194,8 +194,8 @@ const ADVERSARIAL_ACTION_PARAMS = {
 describe('TOOL_REFERENCE render validity (s85-m01)', () => {
   it('renders every real tool row with the same cell count as its header', () => {
     const markdown = renderToolReference(
-      CMOS_TOOL_DEFINITIONS as unknown as unknown[],
-      CMOS_ACTION_PARAMS
+      RBOOK_TOOL_DEFINITIONS as unknown as unknown[],
+      RBOOK_ACTION_PARAMS
     );
     const violations = findColumnCountViolations(markdown);
     expect(violations).toEqual([]);
@@ -207,8 +207,8 @@ describe('TOOL_REFERENCE render validity (s85-m01)', () => {
     // per-action tables multiply that (a param applicable to N actions renders N rows), so the
     // floor is raised to match the new shape rather than left at a number the old one cleared.
     const markdown = renderToolReference(
-      CMOS_TOOL_DEFINITIONS as unknown as unknown[],
-      CMOS_ACTION_PARAMS
+      RBOOK_TOOL_DEFINITIONS as unknown as unknown[],
+      RBOOK_ACTION_PARAMS
     );
     expect(countBodyRows(markdown)).toBeGreaterThanOrEqual(400);
   });

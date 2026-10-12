@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// ABOUTME: s86-m06 — cmos_auth(reissue) over real MCP stdio against the BUILT dist/, both the
+// ABOUTME: s86-m06 — rbook_auth(reissue) over real MCP stdio against the BUILT dist/, both the
 // ABOUTME: failure surface (row survives, honest text) and the success surface (user key on the wire).
 
 /**
@@ -18,11 +18,11 @@
  *
  * BOTH LEGS ARE OFFLINE. Leg (a) touches no network at all (the classification fails first).
  * Leg (b) binds a stub dashboard to 127.0.0.1 on an ephemeral port and points
- * CMOS_DASHBOARD_URL at it, so the assertion "the reissue POST carried the USER key" is made
+ * RBOOK_DASHBOARD_URL at it, so the assertion "the reissue POST carried the USER key" is made
  * against a real HTTP request off a real socket.
  *
- * NEVER THE OPERATOR'S CREDENTIALS. Every leg writes its own `CMOS_CONFIG_DIR` under
- * os.tmpdir(). The real `~/.config/cmos-mcp/credentials.json` holds live `cmk_` secrets at mode
+ * NEVER THE OPERATOR'S CREDENTIALS. Every leg writes its own `RBOOK_CONFIG_DIR` under
+ * os.tmpdir(). The real `~/.config/rbook/credentials.json` holds live `cmk_` secrets at mode
  * 0600 and is never read, copied, or written by this suite.
  *
  * NO SILENT FAIL-OPEN. A missing dist/ or live store FAILS in the private tree. Only a
@@ -43,7 +43,7 @@ const REPO_ROOT = path.resolve(__dirname, '../..');
 const DIST_ENTRY = path.join(REPO_ROOT, 'dist', 'index.js');
 const PRIVATE = requiresPrivateEvidence({
   reason:
-    'This built-server reissue E2E derives its scratch project from the private live CMOS store.',
+    'This built-server reissue E2E derives its scratch project from the private live Reasonbook store.',
   paths: { liveDb: 'cmos/db/cmos.sqlite' },
 });
 const DASHBOARD_PROJECT_ID = 'e2e-project-uuid';
@@ -63,13 +63,13 @@ function mkTmp(prefix: string): string {
  */
 function scratchProject(prefix: string): string {
   const projectRoot = mkTmp(prefix);
-  const dbDir = path.join(projectRoot, 'cmos', 'db');
+  const dbDir = path.join(projectRoot, 'rbook', 'db');
   fs.mkdirSync(dbDir, { recursive: true });
   for (const suffix of ['', '-wal', '-shm']) {
     const src = `${PRIVATE.paths.liveDb}${suffix}`;
-    if (fs.existsSync(src)) fs.copyFileSync(src, path.join(dbDir, `cmos.sqlite${suffix}`));
+    if (fs.existsSync(src)) fs.copyFileSync(src, path.join(dbDir, `rbook.sqlite${suffix}`));
   }
-  const db = new Database(path.join(dbDir, 'cmos.sqlite'));
+  const db = new Database(path.join(dbDir, 'rbook.sqlite'));
   db.prepare(
     `INSERT OR REPLACE INTO metadata (key, value) VALUES ('dashboard_registered', 'true')`
   ).run();
@@ -125,7 +125,7 @@ function readCredentials(configDir: string): {
   return JSON.parse(fs.readFileSync(path.join(configDir, 'credentials.json'), 'utf8'));
 }
 
-PRIVATE.describe('cmos_auth(reissue) over stdio against the built dist (s86-m06)', () => {
+PRIVATE.describe('rbook_auth(reissue) over stdio against the built dist (s86-m06)', () => {
   beforeAll(() => {
     if (!fs.existsSync(DIST_ENTRY)) {
       throw new Error(
@@ -147,8 +147,8 @@ PRIVATE.describe('cmos_auth(reissue) over stdio against the built dist (s86-m06)
   // ─── leg (a): the failure surface ─────────────────────────────────────────
 
   it('names the empty credential store and LEAVES THE PROJECT ROW INTACT', async () => {
-    const projectRoot = scratchProject('cmos-m06-fail-');
-    const configDir = scratchConfigDir('cmos-m06-fail-cfg-', {
+    const projectRoot = scratchProject('rbook-m06-fail-');
+    const configDir = scratchConfigDir('rbook-m06-fail-cfg-', {
       // A project row is present, and there is NO user-scoped key — the exact state the
       // operator is in when they reach for reissue, and the one that used to destroy the row.
       projectKeys: {
@@ -163,25 +163,25 @@ PRIVATE.describe('cmos_auth(reissue) over stdio against the built dist (s86-m06)
         cwd: projectRoot,
         env: {
           ...(process.env as Record<string, string>),
-          CMOS_PROJECT_ROOT: projectRoot,
-          CMOS_CONFIG_DIR: configDir,
-          CMOS_DASHBOARD_URL: 'http://127.0.0.1:9/unreachable-on-purpose',
+          RBOOK_PROJECT_ROOT: projectRoot,
+          RBOOK_CONFIG_DIR: configDir,
+          RBOOK_DASHBOARD_URL: 'http://127.0.0.1:9/unreachable-on-purpose',
           // Strip the legacy arms so resolution cannot fall through to them.
-          CMOS_DASHBOARD_API_KEY: '',
-          CMOS_DASHBOARD_USER: '',
-          CMOS_DASHBOARD_PASSWORD: '',
+          RBOOK_DASHBOARD_API_KEY: '',
+          RBOOK_DASHBOARD_USER: '',
+          RBOOK_DASHBOARD_PASSWORD: '',
         },
-        clientName: 'cmos-m06-reissue-failure',
+        clientName: 'rbook-m06-reissue-failure',
       });
 
-      const res = await harness.callTool('cmos_auth', { action: 'reissue', projectRoot });
+      const res = await harness.callTool('rbook_auth', { action: 'reissue', projectRoot });
       const text = harness.textOf(res);
 
       // The rendered text — not the structured envelope — carries the cause AND the fix.
       expect(text).toContain('credential store');
       expect(text).toContain(path.join(configDir, 'credentials.json'));
       expect(text).toContain('Suggestion:');
-      expect(text).toContain('cmos_auth(action="login_init")');
+      expect(text).toContain('rbook_auth(action="login_init")');
 
       // The false cause is gone from the channel the agent reads.
       expect(text).not.toContain('device code flow must be run');
@@ -199,8 +199,8 @@ PRIVATE.describe('cmos_auth(reissue) over stdio against the built dist (s86-m06)
   // ─── leg (b): the success surface, against a real socket ──────────────────
 
   it('sends the USER-scoped key on the reissue POST and persists the fresh row', async () => {
-    const projectRoot = scratchProject('cmos-m06-ok-');
-    const configDir = scratchConfigDir('cmos-m06-ok-cfg-', {
+    const projectRoot = scratchProject('rbook-m06-ok-');
+    const configDir = scratchConfigDir('rbook-m06-ok-cfg-', {
       userScopedKeys: { 'user-live-1': { key: 'cmk_user_live' } },
       // A present-but-revoked project row: the state that used to short-circuit resolution.
       projectKeys: {
@@ -244,17 +244,17 @@ PRIVATE.describe('cmos_auth(reissue) over stdio against the built dist (s86-m06)
         cwd: projectRoot,
         env: {
           ...(process.env as Record<string, string>),
-          CMOS_PROJECT_ROOT: projectRoot,
-          CMOS_CONFIG_DIR: configDir,
-          CMOS_DASHBOARD_URL: `http://127.0.0.1:${port}`,
-          CMOS_DASHBOARD_API_KEY: '',
-          CMOS_DASHBOARD_USER: '',
-          CMOS_DASHBOARD_PASSWORD: '',
+          RBOOK_PROJECT_ROOT: projectRoot,
+          RBOOK_CONFIG_DIR: configDir,
+          RBOOK_DASHBOARD_URL: `http://127.0.0.1:${port}`,
+          RBOOK_DASHBOARD_API_KEY: '',
+          RBOOK_DASHBOARD_USER: '',
+          RBOOK_DASHBOARD_PASSWORD: '',
         },
-        clientName: 'cmos-m06-reissue-success',
+        clientName: 'rbook-m06-reissue-success',
       });
 
-      const res = await harness.callTool('cmos_auth', { action: 'reissue', projectRoot });
+      const res = await harness.callTool('rbook_auth', { action: 'reissue', projectRoot });
       const text = harness.textOf(res);
       expect(text).toContain('Reissued project key');
       // The revoked list reaches the RENDERED answer, not only structuredContent.

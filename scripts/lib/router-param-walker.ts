@@ -6,7 +6,7 @@
  * Sprint 86 m03 — "no consolidated router may declare a parameter it silently drops".
  *
  * ONE WALKER, TWO CONSUMERS, DELIBERATELY (critic 2, major 2). This module is imported by BOTH
- * `tests/tools/cmos/router-param-forwarding.test.ts` (the gate) and `scripts/probe-router-params.ts`
+ * `tests/tools/rbook/router-param-forwarding.test.ts` (the gate) and `scripts/probe-router-params.ts`
  * (the codegen entry point `npm run probe:router-params`, which s86-m04 uses to generate its
  * ACTION_PARAMS first cut). A jest test is not invokable as a codegen step, and two copies of this
  * walk would drift on the unwrap trap documented below. Nothing new ships: `scripts/` is absent
@@ -14,15 +14,15 @@
  *
  * ── THE NON-OBVIOUS AST MECHANIC ───────────────────────────────────────────────────────────────
  * The forwarded object literal is wrapped in a `satisfies` or `as` expression in NINE of the
- * routers — `satisfies` in cmos-learnings / decisions / sprint / db / mission / mission-transition /
- * project, `as` in cmos-context / cmos-session, and cmos-project carries one of each — so
+ * routers — `satisfies` in rbook-learnings / decisions / sprint / db / mission / mission-transition /
+ * project, `as` in rbook-context / rbook-session, and rbook-project carries one of each — so
  * `ts.isObjectLiteralExpression(call.arguments[0])` is FALSE for them.
  *
  * MEASURED, not assumed: deleting only the satisfies/as arm of `unwrap()` moves 49 calls from
  * OBJECT-LITERAL to NOT-A-FORWARDING-SITE (67 -> 18). POSITIONAL is unchanged at 13, so the
  * once-stated "reports (positional) for every one of them" was wrong. The consequence is worse than
  * that phrasing suggested in one direction and different in the other: assertion A goes VACUOUSLY
- * GREEN (nothing left to score), while assertion B turns RED on a false positive — `cmos_context
+ * GREEN (nothing left to score), while assertion B turns RED on a false positive — `rbook_context
  * types`, whose rename source `params.searchTypes as RankedResultType[]` is lost with the unwrap.
  * That is why this lives in exactly one place.
  *
@@ -86,7 +86,7 @@ export interface DelegatedCall extends SourceRef {
    * For a PASS-THROUGH callee, the accepted keys its own body actually READS — s86-m04.
    *
    * A pass-through hands the WHOLE params object over, so `forwarded` is every accepted key and
-   * says nothing about applicability: it would claim `deviceCode` applies to `cmos_auth(rotate)`.
+   * says nothing about applicability: it would claim `deviceCode` applies to `rbook_auth(rotate)`.
    * The callee's own reads are the honest per-action answer. Empty for every other shape, where
    * `forwardedFrom` already names keys one at a time.
    */
@@ -113,9 +113,9 @@ export interface Branch {
   /**
    * Every `<params>.<key>` this branch READS, forwarded or not — s86-m04's second arm.
    *
-   * FORWARDING ALONE IS NOT CONSUMPTION. `cmos_learnings(action="list")` reads
+   * FORWARDING ALONE IS NOT CONSUMPTION. `rbook_learnings(action="list")` reads
    * `params.acrossProjects` to pick between two handlers and hands it to neither
-   * (cmos-learnings.ts:254); `cmos_project(action="list")` does the same with `params.validate`.
+   * (rbook-learnings.ts:254); `rbook_project(action="list")` does the same with `params.validate`.
    * Those params are live and applicable to their action, so a per-action applicability contract
    * scored on forwarding alone would call them dead. A key in NEITHER set is the real defect:
    * the tool publishes it for an action that does nothing with it.
@@ -140,9 +140,9 @@ export interface ToolModel {
    *
    * TWO REAL INSTANCES, both invisible to a per-branch read: `action` itself (every router opens
    * with `typeof params.action === 'string' ? params.action : ''` before the switch), and
-   * `cmos_message.projectRoot`, which `cmosMessage` consumes ONCE at cmos-message.ts:1175 to build
+   * `rbook_message.projectRoot`, which `rbookMessage` consumes ONCE at rbook-message.ts:1175 to build
    * the dashboard client for all six delegated actions. Scoring branch-local reads alone would
-   * publish `projectRoot` as inapplicable to every cmos_message action.
+   * publish `projectRoot` as inapplicable to every rbook_message action.
    */
   readonly routerScopeReadKeys: readonly string[];
   /** Raw `params.<key>` reads in src/index.ts before this case reaches its entry call. */
@@ -163,7 +163,7 @@ export interface WalkResult {
   readonly unclassifiable: readonly Unclassifiable[];
   /** Every @internal/underscore/outside-parameter-0 exclusion made anywhere in the walk. */
   readonly exclusions: readonly ExcludedKey[];
-  /** In-src calls inside a branch that return no CmosToolResult — printed, never silently dropped. */
+  /** In-src calls inside a branch that return no RbookToolResult — printed, never silently dropped. */
   readonly nonDelegatingCalls: readonly (SourceRef & { readonly callee: string })[];
   readonly programFileCount: number;
   readonly programBuildMs: number;
@@ -185,9 +185,9 @@ export interface WalkResult {
  * (2) Every exclusion it makes is recorded in `ctx.exclusions` and printed, exactly like the
  * @internal ones — it used to `return` silently, so the "complete excluded set" was not complete.
  */
-const INFRASTRUCTURE_TYPES = new Set(['CmosDatabaseClient']);
+const INFRASTRUCTURE_TYPES = new Set(['RbookDatabaseClient']);
 
-/** Union-safe: `t.getSymbol()` is undefined for `CmosDatabaseClient | undefined`. */
+/** Union-safe: `t.getSymbol()` is undefined for `RbookDatabaseClient | undefined`. */
 function isInfrastructureType(t: ts.Type, checker: ts.TypeChecker): boolean {
   const parts = t.isUnion() ? t.types : [t];
   return parts.some((part) => {
@@ -249,20 +249,20 @@ function unwrapPromise(type: ts.Type, checker: ts.TypeChecker): ts.Type {
 }
 
 /**
- * Does this call return a `CmosToolResult<…>` (possibly promise-wrapped, possibly one arm of a
+ * Does this call return a `RbookToolResult<…>` (possibly promise-wrapped, possibly one arm of a
  * union)?
  *
  * THE UNION ARM MATTERS (build-time critic finding 4). Matching only the top-level alias name
- * demotes a real handler returning `CmosToolResult<T> | null` — a shape live in-tree at
- * cmos-context-condense.ts:646 — to a "non-delegating call", where nothing scores it.
+ * demotes a real handler returning `RbookToolResult<T> | null` — a shape live in-tree at
+ * rbook-context-condense.ts:646 — to a "non-delegating call", where nothing scores it.
  */
-function returnsCmosToolResult(sig: ts.Signature, checker: ts.TypeChecker): boolean {
+function returnsRbookToolResult(sig: ts.Signature, checker: ts.TypeChecker): boolean {
   const ret = unwrapPromise(checker.getReturnTypeOfSignature(sig), checker);
   const names = (t: ts.Type): string[] =>
     t.isUnion()
       ? t.types.flatMap(names)
       : [t.aliasSymbol?.getName() ?? t.getSymbol()?.getName() ?? ''];
-  return names(ret).includes('CmosToolResult');
+  return names(ret).includes('RbookToolResult');
 }
 
 /**
@@ -273,7 +273,7 @@ function returnsCmosToolResult(sig: ts.Signature, checker: ts.TypeChecker): bool
  *
  * Scoring these was a structural green (build-time critic finding 2): `accepted` was read from
  * parameter 0 — a function type with no properties — so every combinator reported `accepted: []`
- * and could never be red, while `cmos_status` and `cmos_agent_onboard` had NO other scored call.
+ * and could never be red, while `rbook_status` and `rbook_agent_onboard` had NO other scored call.
  */
 function isCombinator(sig: ts.Signature, checker: ts.TypeChecker, at: ts.Node): boolean {
   const p0 = sig.parameters[0];
@@ -353,11 +353,11 @@ interface Ctx {
  * THE DISCRIMINANT TEST IS LOAD-BEARING (build-time critic 1, #5). "First string-cased switch
  * anywhere in the body" is hijackable, and each hijack yields a GREEN gate that walked the wrong
  * branches and scored nothing: a `switch (poll.status)` inside a nested helper (live at
- * cmos-auth.ts:847, which is why `handleLoginComplete` was being mislabelled a sub-router), or any
- * incidental string switch in a delegate (`switch (type)` in cmos-mission-depends.ts).
+ * rbook-auth.ts:847, which is why `handleLoginComplete` was being mislabelled a sub-router), or any
+ * incidental string switch in a delegate (`switch (type)` in rbook-mission-depends.ts).
  *
  * ANY params property, not just `action` — the sub-routers dispatch on `params.constraintAction`
- * (cmos-constraints.ts:142) and `params.nextStepAction` (cmos-next-steps.ts:73). Requiring the
+ * (rbook-constraints.ts:142) and `params.nextStepAction` (rbook-next-steps.ts:73). Requiring the
  * literal name `action` silently stopped recursing into BOTH of them, which cost every depth-2
  * POSITIONAL call its scoring. That regression was caught by this walker's own printed output.
  *
@@ -465,7 +465,7 @@ function declarationOf(
  *
  * THIS IS WHAT MAKES A CALL A FORWARDING SITE, and both halves of the rule are load-bearing.
  *
- * Returning a `CmosToolResult` is NOT sufficient. `createError({code, message})` and
+ * Returning a `RbookToolResult` is NOT sufficient. `createError({code, message})` and
  * `createSuccess({...})` return one too, and they are RESPONSE CONSTRUCTORS: a router that does
  * not pass `suggestion` to `createError` has dropped nothing. Scoring them produced a red set of
  * error-shape keys (`validValues`, `availableActions`, `phase`, …) on first measurement — noise
@@ -480,7 +480,7 @@ function declarationOf(
  * `handleLogin(store, deviceCodeFlow, dashboardBaseUrl)` — and is printed, never scored.
  *
  * FALSE NEGATIVE, NAMED: a delegated handler invoked with a wholly literal argument
- * (`cmosMissionStatus({})`) forwards nothing and is therefore not scored. No such call exists in
+ * (`rbookMissionStatus({})`) forwards nothing and is therefore not scored. No such call exists in
  * the tree today; if one is added, assertion A will not see its drops.
  */
 function paramsSourceKey(
@@ -512,7 +512,7 @@ function paramsSourceKey(
   if (ts.isNonNullExpression(u))
     return paramsSourceKey(u.expression, routerParamName, checker, hops);
   if (ts.isIdentifier(u) && hops < 1) {
-    // ONE hop through a local binding. `cmos-review.ts:297` does `const projectRoot =
+    // ONE hop through a local binding. `rbook-review.ts:297` does `const projectRoot =
     // params.projectRoot` and forwards the LOCAL, so a purely syntactic `params.<key>` test reports
     // "no params reach this call" about a call params demonstrably reach (build-time critic 1, #2).
     const sym = checker.getSymbolAtLocation(u);
@@ -532,7 +532,7 @@ function paramsSourceKey(
  *
  * THIS IS WHAT MAKES A CALL A FORWARDING SITE, and both halves of the rule are load-bearing.
  *
- * Returning a `CmosToolResult` is NOT sufficient. `createError({code, message})` returns one too and
+ * Returning a `RbookToolResult` is NOT sufficient. `createError({code, message})` returns one too and
  * is a RESPONSE CONSTRUCTOR: a router that does not pass `suggestion` to `createError` has dropped
  * nothing. Scoring the constructors produced a red set of error-shape keys (`validValues`,
  * `availableActions`, `phase`, …) on first measurement — noise that would have been silenced with
@@ -632,7 +632,7 @@ function callsIn(node: ts.Node): ts.CallExpression[] {
  * Four shapes, all derived (no configuration):
  *   OBJECT-LITERAL         — argument 0 unwraps to an object literal; forwarded = its keys.
  *   PASS-THROUGH           — an argument is the bare `params` identifier; A is satisfied by
- *                            identity (cmos_auth, cmos_message are structurally immune).
+ *                            identity (rbook_auth, rbook_message are structurally immune).
  *   POSITIONAL             — no object literal, no bare `params`, but ≥1 `params.<key>` access;
  *                            accepted = non-infrastructure parameter names.
  *   NOT-A-FORWARDING-SITE  — none of the above and no params reach it at all
@@ -674,7 +674,7 @@ function classifyCall(
   // THE SAME PREDICATE as `forwardsAnything`, deliberately. A strict raw-PropertyAccess filter here
   // while `forwardsAnything` accepted `??`/ternary/locals meant a call could prove params reach it
   // and then fall through to the `else` and be PRINTED as "no params reach them, nothing to drop" —
-  // a false statement about three live sites (cmos-next-steps.ts:92/:95, cmos-constraints.ts:164/:166)
+  // a false statement about three live sites (rbook-next-steps.ts:92/:95, rbook-constraints.ts:164/:166)
   // whose siblings three lines away WERE scored (build-time critic 1, #1).
   const positionalArgs = args.filter(
     (a) =>
@@ -685,11 +685,11 @@ function classifyCall(
   const forwardedFrom: Record<string, string> = {};
   const calleeReadKeys: string[] = [];
   let shape: CallShape;
-  // A CmosToolResult-returning call that no params REACH cannot have dropped one. Two very
+  // A RbookToolResult-returning call that no params REACH cannot have dropped one. Two very
   // different callees land here and both are correctly scored at zero: `handleLogin(store,
-  // deviceCodeFlow, dashboardBaseUrl)` (cmos-auth), whose parameter 0 is a CredentialStore and
+  // deviceCodeFlow, dashboardBaseUrl)` (rbook-auth), whose parameter 0 is a CredentialStore and
   // which takes no params at all; and the response CONSTRUCTORS `createError`/`createSuccess`,
-  // which return a CmosToolResult but whose keys (`suggestion`, `validValues`, `phase`, …) were
+  // which return a RbookToolResult but whose keys (`suggestion`, `validValues`, `phase`, …) were
   // never the router's to supply. Scoring the constructors produced a red set of error-shape keys
   // on first measurement — noise that would have been silenced with an allowlist.
   const forwardsAnything = referencesParams(call, routerParamName, checker);
@@ -708,7 +708,7 @@ function classifyCall(
 
     // Forwarded keys. An unnameable key (spread, computed) is an assertion-C failure, never a skip:
     // a spread could satisfy any obligation and the walk would have no way to know.
-    // UNION across ternary arms — `projectRoot ? { projectRoot } : {}` (cmos-review.ts:299) is one
+    // UNION across ternary arms — `projectRoot ? { projectRoot } : {}` (rbook-review.ts:299) is one
     // forwarding site with two literals. NAMED LIMIT, see the gate's false-negative profile: a key
     // forwarded on only ONE arm reads as forwarded, because this gate checks name flow, not value
     // flow, and an intersection would report a drop on a path the caller deliberately guards.
@@ -762,7 +762,7 @@ function classifyCall(
       // used to leave NO trace anywhere — making "move it to parameter 1" the cheapest way to
       // silence this gate, with none of the @internal anti-abuse constraints applying and nothing
       // in the printed set to show for it. This mission itself used that move twice
-      // (cmos-learnings-list.ts, cmos-mission-status.ts), so the hole was self-inflicted.
+      // (rbook-learnings-list.ts, rbook-mission-status.ts), so the hole was self-inflicted.
       sig.parameters.forEach((otherParam, i) => {
         if (i === objectArgIndex) return;
         const t = checker.getTypeOfSymbolAtLocation(otherParam, call);
@@ -795,8 +795,8 @@ function classifyCall(
     shape = 'PASS-THROUGH';
     // The whole params object goes over, so A is satisfied by identity — there is no key to drop.
     // But the EXCLUSION RULES still apply and the keys still reach assertion B: a pass-through
-    // handler's parameter-0 type IS the tool's wire surface, and a widened one (cmos-message.ts's
-    // `InternalCmosMessageParams extends CmosMessageParams`) can smuggle an unpublished, untagged
+    // handler's parameter-0 type IS the tool's wire surface, and a widened one (rbook-message.ts's
+    // `InternalRbookMessageParams extends RbookMessageParams`) can smuggle an unpublished, untagged
     // key past both. It did — `advertisedRoots` (build-time critic finding 6).
     if (sig && sig.parameters.length > 0) {
       const p0 = checker.getTypeOfSymbolAtLocation(sig.parameters[0], call);
@@ -904,20 +904,20 @@ function walkBranch(
       // `declarationOf` resolves function declarations, methods, arrows and function-valued
       // variables. A handler reached any OTHER way — an object property, a dispatch table, a
       // re-export whose initializer is a factory call — resolves to nothing. If such a call
-      // nonetheless returns a CmosToolResult from src/, the walk cannot say what it accepts, which
+      // nonetheless returns a RbookToolResult from src/, the walk cannot say what it accepts, which
       // is assertion C's exact trigger. Dropping it silently was a real hole (critic finding 3).
       const declFile = sig?.declaration?.getSourceFile().fileName;
       if (
         sig &&
         declFile &&
         isUnderSrc(declFile, ctx.paths) &&
-        returnsCmosToolResult(sig, ctx.checker)
+        returnsRbookToolResult(sig, ctx.checker)
       ) {
         ctx.unclassifiable.push({
           ...refOf(call, ctx.paths),
           what: `unresolvable callee ${call.expression.getText()}`,
           detail:
-            'the call returns a CmosToolResult from src/ but its declaration could not be resolved ' +
+            'the call returns a RbookToolResult from src/ but its declaration could not be resolved ' +
             'to a function-like node, so the walk cannot enumerate what it accepts.',
         });
         continue;
@@ -925,9 +925,9 @@ function walkBranch(
       continue; // genuinely out of tree (lib / node_modules) — never a forwarding site
     }
 
-    // A call that returns no CmosToolResult is not a handler at all — a string helper, a logger,
+    // A call that returns no RbookToolResult is not a handler at all — a string helper, a logger,
     // a date format. Recorded and printed, never scored.
-    if (!sig || !returnsCmosToolResult(sig, ctx.checker)) {
+    if (!sig || !returnsRbookToolResult(sig, ctx.checker)) {
       ctx.nonDelegatingCalls.push({ ...refOf(call, ctx.paths), callee: call.expression.getText() });
       continue;
     }
@@ -1546,14 +1546,14 @@ function readDispatchMap(
 
     // RULE, TWO PARTS. (1) Candidate entry calls are the initializers of `result` bindings in the
     // case body. (2) The entry is the candidate whose parameter-0 type ACCEPTS the case's own
-    // `args as Cmos…Params` cast type.
+    // `args as Rbook…Params` cast type.
     //
-    // Part (2) is not decoration. cmos_message's case has an EARLY-RETURN `whoami` branch with its
+    // Part (2) is not decoration. rbook_message's case has an EARLY-RETURN `whoami` branch with its
     // own `result` binding (`getWhoamiDiagnostics({explicitProjectRoot, mcpRoots})`) BEFORE the
-    // main `cmosMessage` call, so "first result binding" silently walks the wrong function and
-    // reports cmos_message's dispatch shape and accepted keys off a diagnostics helper. Assignability
-    // rather than name equality, because cmos_agent_onboard's handler widens the cast type
-    // (`InternalCmosAgentOnboardParams extends CmosAgentOnboardParams`).
+    // main `rbookMessage` call, so "first result binding" silently walks the wrong function and
+    // reports rbook_message's dispatch shape and accepted keys off a diagnostics helper. Assignability
+    // rather than name equality, because rbook_agent_onboard's handler widens the cast type
+    // (`InternalRbookAgentOnboardParams extends RbookAgentOnboardParams`).
     let castType: ts.Type | undefined;
     let paramsName: string | undefined;
     let paramsDeclaration: ts.Identifier | undefined;
@@ -1679,7 +1679,7 @@ export function walkRouterParams(opts: WalkOptions): WalkResult {
         file: path.relative(paths.repoRoot, paths.indexTs),
         line: 0,
         what: `no dispatch case for registered tool ${def.name}`,
-        detail: `${def.name} is in CMOS_TOOL_DEFINITIONS but ${DISPATCH_FN} has no case binding a \`result\` call for it. The walk cannot classify its dispatch, so it must not report it as covered.`,
+        detail: `${def.name} is in RBOOK_TOOL_DEFINITIONS but ${DISPATCH_FN} has no case binding a \`result\` call for it. The walk cannot classify its dispatch, so it must not report it as covered.`,
       });
       continue;
     }
@@ -1689,7 +1689,7 @@ export function walkRouterParams(opts: WalkOptions): WalkResult {
     const routerParamName = callee.parameters[0]?.name.getText() ?? 'params';
     const entryRef = { ...refOf(callee, paths), fn: def.name };
     // The SAME three exclusion rules apply here as at a delegated call. Without this a MONOLITHIC
-    // tool's internal seams (cmos_agent_onboard's `advertisedRoots`/`callerProvidedProjectRoot`,
+    // tool's internal seams (rbook_agent_onboard's `advertisedRoots`/`callerProvidedProjectRoot`,
     // which only src/index.ts can supply) would read as unpublished surface obligations.
     const entryParamKeys = (() => {
       const p0 = callee.parameters[0];
@@ -1791,11 +1791,11 @@ export interface SurfaceKey {
  *
  *   • SWITCH-ROUTER  → the union of every OBJECT-LITERAL **and PASS-THROUGH** delegated handler's
  *     accepted keys. Those are the sets whose members are wire KEYS. This is what makes B red on
- *     the reachability gaps: `CmosSessionCaptureParams` accepts `expiresAt` while cmos_session's
+ *     the reachability gaps: `RbookSessionCaptureParams` accepts `expiresAt` while rbook_session's
  *     inputSchema did not declare it. PASS-THROUGH was added after a build-time critic showed its
- *     omission left cmos_auth and cmos_message with an EMPTY B oracle — 2 of 15 tools with no
+ *     omission left rbook_auth and rbook_message with an EMPTY B oracle — 2 of 15 tools with no
  *     effective coverage from either assertion, which is how `advertisedRoots` stayed unpublished,
- *     untagged and green on cmos_message while its twin on cmos_agent_onboard had to carry a tag.
+ *     untagged and green on rbook_message while its twin on rbook_agent_onboard had to carry a tag.
  *
  *   • MONOLITHIC     → the entry function's own parameter-0 keys, since there is no delegate.
  *     Assertion A is vacuous for these tools by construction, so B is their only coverage.
@@ -1806,7 +1806,7 @@ export interface SurfaceKey {
  *     red on a name that was never a wire contract. Those callees are still fully covered by
  *     assertion A, which checks SUPPLY rather than naming.
  *
- *   • RENAMES ARE NOT GAPS. A router may rename on the way through — cmos_context forwards
+ *   • RENAMES ARE NOT GAPS. A router may rename on the way through — rbook_context forwards
  *     `limit: params.searchLimit` and `types: params.searchTypes`. The handler key `limit` is not
  *     on the inputSchema and never should be; `searchLimit` is. So B is satisfied when EITHER the
  *     accepted key OR the router key it was forwarded from is declared. Requiring the handler's
@@ -1817,8 +1817,8 @@ export function surfaceAcceptedKeys(model: ToolModel): SurfaceKey[] {
   const keys = new Map<string, SurfaceKey>();
   for (const branch of model.branches) {
     for (const call of branch.calls) {
-      // OBJECT-LITERAL and PASS-THROUGH both name wire KEYS. Excluding PASS-THROUGH left cmos_auth
-      // and cmos_message with an EMPTY B oracle — 2 of 15 tools with no effective A or B coverage,
+      // OBJECT-LITERAL and PASS-THROUGH both name wire KEYS. Excluding PASS-THROUGH left rbook_auth
+      // and rbook_message with an EMPTY B oracle — 2 of 15 tools with no effective A or B coverage,
       // which is how `advertisedRoots` stayed unpublished, untagged and green (critic finding 6).
       if (call.shape !== 'OBJECT-LITERAL' && call.shape !== 'PASS-THROUGH') continue;
       for (const k of call.accepted) {
@@ -1856,7 +1856,7 @@ export interface ActionEvidence {
  * one the callee declares. Checking only the first half would score
  * `someHandler({ notAParam: params.x })` as evidence for `x`.
  *
- * MONOLITHIC tools return an EMPTY map on purpose. cmos_feedback is action-bearing but dispatches
+ * MONOLITHIC tools return an EMPTY map on purpose. rbook_feedback is action-bearing but dispatches
  * with inline `if (action === '…')` blocks, so no per-action branch exists to read evidence from;
  * inventing an if-chain dispatch shape here to serve one tool would put a second, differently-
  * derived notion of "branch" in the tree. The gate names the fallback and records the false

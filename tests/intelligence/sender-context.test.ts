@@ -1,13 +1,14 @@
 // ABOUTME: Unit tests for resolveSenderContext — the single audited boundary
-// ABOUTME: that attributes outbound tool calls to a local CMOS project (Sprint 53 m01).
+// ABOUTME: that attributes outbound tool calls to a local Reasonbook project (Sprint 53 m01).
 
 import Database from 'better-sqlite3';
+import { LEGACY, toDashboardAddress } from '../../src/intelligence/legacy-compat';
 import { promises as fs } from 'fs';
 import * as fsSync from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { CmosDetector } from '../../src/intelligence/cmos-detector';
+import { RbookDetector } from '../../src/intelligence/rbook-detector';
 import { ProjectGraphRegistry } from '../../src/intelligence/project-graph-registry';
 import {
   SenderResolutionError,
@@ -21,7 +22,7 @@ const OTHER_UUID = 'deadbeef-1234-4abc-89ef-0123456789ab';
 
 interface SeedOptions {
   dashboardProjectId?: string | null;
-  cmosAddress?: string | null;
+  rbookAddress?: string | null;
   owner?: string | null;
   slug?: string | null;
   projectName?: string;
@@ -31,10 +32,10 @@ async function makeTmp(prefix: string): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), prefix));
 }
 
-function seedCmosDb(root: string, opts: SeedOptions = {}): string {
-  const dbDir = path.join(root, 'cmos', 'db');
+function seedRbookDb(root: string, opts: SeedOptions = {}): string {
+  const dbDir = path.join(root, 'rbook', 'db');
   fsSync.mkdirSync(dbDir, { recursive: true });
-  const dbPath = path.join(dbDir, 'cmos.sqlite');
+  const dbPath = path.join(dbDir, 'rbook.sqlite');
   if (fsSync.existsSync(dbPath)) fsSync.unlinkSync(dbPath);
 
   const db = new Database(dbPath);
@@ -56,7 +57,7 @@ function seedCmosDb(root: string, opts: SeedOptions = {}): string {
   const identity = {
     project_id: opts.slug ?? 'test-project',
     project_name: opts.projectName ?? 'Test Project',
-    cmos_address: opts.cmosAddress ?? '',
+    [LEGACY.identityAddressKey]: toDashboardAddress(opts.rbookAddress ?? ''),
     platform: 'aquex.ai',
     domain: '',
     project_type: 'build',
@@ -74,7 +75,7 @@ function seedCmosDb(root: string, opts: SeedOptions = {}): string {
   };
   db.prepare('INSERT INTO contexts (id, source_path, content, updated_at) VALUES (?, ?, ?, ?)').run(
     'project_identity',
-    'cmos/contexts/project-identity.json',
+    'rbook/contexts/project-identity.json',
     JSON.stringify(identity),
     now
   );
@@ -103,12 +104,12 @@ describe('sender-context', () => {
   }
 
   beforeEach(() => {
-    CmosDetector.resetInstance();
+    RbookDetector.resetInstance();
     ProjectGraphRegistry.resetInstance();
   });
 
   afterEach(async () => {
-    CmosDetector.resetInstance();
+    RbookDetector.resetInstance();
     ProjectGraphRegistry.resetInstance();
     for (const dir of tmpDirs.splice(0)) {
       await fs.rm(dir, { recursive: true, force: true }).catch(() => void 0);
@@ -118,17 +119,17 @@ describe('sender-context', () => {
   // ─── validateProject ──────────────────────────────────────────────────────
 
   describe('validateProject', () => {
-    it('rejects a directory without a CMOS database', async () => {
+    it('rejects a directory without a Reasonbook database', async () => {
       const root = await trackTmp('sctx-no-db-');
       const result = await validateProject(root);
       expect(result.hasDatabase).toBe(false);
       expect(result.hasValidSenderIdentity).toBe(false);
-      expect(result.rejectReason).toMatch(/no CMOS database/i);
+      expect(result.rejectReason).toMatch(/no Reasonbook database/i);
     });
 
     it('rejects a DB missing dashboard_project_id UUID', async () => {
       const root = await trackTmp('sctx-no-uuid-');
-      seedCmosDb(root, { cmosAddress: 'cmos://derek/thing' });
+      seedRbookDb(root, { rbookAddress: 'rbook://derek/thing' });
       const result = await validateProject(root);
       expect(result.hasDatabase).toBe(true);
       expect(result.dashboardProjectId).toBeNull();
@@ -138,68 +139,68 @@ describe('sender-context', () => {
 
     it('rejects a DB with a non-UUID dashboard_project_id value', async () => {
       const root = await trackTmp('sctx-bad-uuid-');
-      seedCmosDb(root, { dashboardProjectId: 'not-a-uuid', cmosAddress: 'cmos://derek/thing' });
+      seedRbookDb(root, { dashboardProjectId: 'not-a-uuid', rbookAddress: 'rbook://derek/thing' });
       const result = await validateProject(root);
       expect(result.dashboardProjectId).toBe('not-a-uuid');
       expect(result.hasValidSenderIdentity).toBe(false);
       expect(result.rejectReason).toMatch(/dashboard_project_id/i);
     });
 
-    it('rejects an empty cmos_address when UUID is present', async () => {
+    it('rejects an empty rbook_address when UUID is present', async () => {
       const root = await trackTmp('sctx-empty-addr-');
-      seedCmosDb(root, { dashboardProjectId: VALID_UUID, cmosAddress: '' });
+      seedRbookDb(root, { dashboardProjectId: VALID_UUID, rbookAddress: '' });
       const result = await validateProject(root);
       expect(result.hasValidSenderIdentity).toBe(false);
-      expect(result.rejectReason).toMatch(/cmos_address/i);
+      expect(result.rejectReason).toMatch(/rbook_address/i);
     });
 
-    it('heals cmos://unknown/* when owner metadata is present', async () => {
+    it('heals rbook://unknown/* when owner metadata is present', async () => {
       const root = await trackTmp('sctx-heal-');
-      seedCmosDb(root, {
+      seedRbookDb(root, {
         dashboardProjectId: VALID_UUID,
-        cmosAddress: 'cmos://unknown/my-slug',
+        rbookAddress: 'rbook://unknown/my-slug',
         owner: 'derek',
         slug: 'my-slug',
       });
       const result = await validateProject(root);
       expect(result.hasValidSenderIdentity).toBe(true);
-      expect(result.cmosAddress).toBe('cmos://derek/my-slug');
+      expect(result.rbookAddress).toBe('rbook://derek/my-slug');
       expect(result.healed).toBeDefined();
-      expect(result.healed?.previous).toBe('cmos://unknown/my-slug');
-      expect(result.healed?.next).toBe('cmos://derek/my-slug');
+      expect(result.healed?.previous).toBe('rbook://unknown/my-slug');
+      expect(result.healed?.next).toBe('rbook://derek/my-slug');
     });
 
-    it('stays invalid when cmos://unknown/* has no owner to heal with', async () => {
+    it('stays invalid when rbook://unknown/* has no owner to heal with', async () => {
       const root = await trackTmp('sctx-no-owner-');
-      seedCmosDb(root, {
+      seedRbookDb(root, {
         dashboardProjectId: VALID_UUID,
-        cmosAddress: 'cmos://unknown/orphan',
+        rbookAddress: 'rbook://unknown/orphan',
       });
       const result = await validateProject(root);
       expect(result.hasValidSenderIdentity).toBe(false);
       expect(result.healed).toBeUndefined();
-      expect(result.rejectReason).toMatch(/cmos_address/i);
+      expect(result.rejectReason).toMatch(/rbook_address/i);
     });
 
-    it('accepts a DB with UUID and canonical cmos_address', async () => {
+    it('accepts a DB with UUID and canonical rbook_address', async () => {
       const root = await trackTmp('sctx-valid-');
-      seedCmosDb(root, {
+      seedRbookDb(root, {
         dashboardProjectId: VALID_UUID,
-        cmosAddress: 'cmos://derek/demo',
+        rbookAddress: 'rbook://derek/demo',
       });
       const result = await validateProject(root);
       expect(result.hasDatabase).toBe(true);
       expect(result.dashboardProjectId).toBe(VALID_UUID);
-      expect(result.cmosAddress).toBe('cmos://derek/demo');
+      expect(result.rbookAddress).toBe('rbook://derek/demo');
       expect(result.hasValidSenderIdentity).toBe(true);
       expect(result.healed).toBeUndefined();
     });
 
     it('honors heal=false and does not rewrite stale addresses', async () => {
       const root = await trackTmp('sctx-noheal-');
-      seedCmosDb(root, {
+      seedRbookDb(root, {
         dashboardProjectId: VALID_UUID,
-        cmosAddress: 'cmos://unknown/my-slug',
+        rbookAddress: 'rbook://unknown/my-slug',
         owner: 'derek',
         slug: 'my-slug',
       });
@@ -214,7 +215,7 @@ describe('sender-context', () => {
   describe('resolveSenderContext — precedence chain', () => {
     it('step 1: explicit projectRoot wins when valid', async () => {
       const root = await trackTmp('sctx-p1-explicit-');
-      seedCmosDb(root, { dashboardProjectId: VALID_UUID, cmosAddress: 'cmos://derek/explicit' });
+      seedRbookDb(root, { dashboardProjectId: VALID_UUID, rbookAddress: 'rbook://derek/explicit' });
 
       const registry = await isolatedRegistry();
       const ctx = await resolveSenderContext({
@@ -227,14 +228,14 @@ describe('sender-context', () => {
       expect(ctx.source).toBe('explicit');
       expect(ctx.projectRoot).toBe(path.resolve(root));
       expect(ctx.dashboardProjectId).toBe(VALID_UUID);
-      expect(ctx.cmosAddress).toBe('cmos://derek/explicit');
+      expect(ctx.rbookAddress).toBe('rbook://derek/explicit');
     });
 
-    it('step 1: an explicit root naming a non-CMOS folder is final — never the cwd project', async () => {
+    it('step 1: an explicit root naming a non-Reasonbook folder is final — never the cwd project', async () => {
       // s92-m01: projectRoot=/B called from cwd A used to fall through and write A.
-      const folderB = await trackTmp('sctx-explicit-non-cmos-');
+      const folderB = await trackTmp('sctx-explicit-non-rbook-');
       const projectA = await trackTmp('sctx-cwd-project-a-');
-      seedCmosDb(projectA, { dashboardProjectId: VALID_UUID, cmosAddress: 'cmos://derek/a' });
+      seedRbookDb(projectA, { dashboardProjectId: VALID_UUID, rbookAddress: 'rbook://derek/a' });
 
       const registry = await isolatedRegistry();
       let caught: SenderResolutionError | null = null;
@@ -258,9 +259,9 @@ describe('sender-context', () => {
 
     it('step 1: an explicit store without a sender identity is refused, not swapped for cwd', async () => {
       const explicitNoIdentity = await trackTmp('sctx-explicit-no-identity-');
-      seedCmosDb(explicitNoIdentity, { cmosAddress: 'cmos://derek/b' });
+      seedRbookDb(explicitNoIdentity, { rbookAddress: 'rbook://derek/b' });
       const cwdValid = await trackTmp('sctx-explicit-cwd-valid-');
-      seedCmosDb(cwdValid, { dashboardProjectId: VALID_UUID, cmosAddress: 'cmos://derek/a' });
+      seedRbookDb(cwdValid, { dashboardProjectId: VALID_UUID, rbookAddress: 'rbook://derek/a' });
 
       const registry = await isolatedRegistry();
       await expect(
@@ -286,21 +287,21 @@ describe('sender-context', () => {
     it('step 2: mcp-roots chosen when explicit absent', async () => {
       const rootA = await trackTmp('sctx-p2-invalid-');
       const rootB = await trackTmp('sctx-p2-valid-');
-      seedCmosDb(rootB, {
+      seedRbookDb(rootB, {
         dashboardProjectId: VALID_UUID,
-        cmosAddress: 'cmos://derek/roots-win',
+        rbookAddress: 'rbook://derek/roots-win',
       });
 
       const registry = await isolatedRegistry();
       const ctx = await resolveSenderContext({
         mcpRoots: [rootA, rootB],
-        cwdOverride: '/tmp/does-not-have-cmos',
+        cwdOverride: '/tmp/does-not-have-rbook',
         registryOverride: registry,
         serverInstallRootOverride: '/some/other/install',
       });
       expect(ctx.source).toBe('mcp-roots');
       expect(ctx.projectRoot).toBe(path.resolve(rootB));
-      expect(ctx.cmosAddress).toBe('cmos://derek/roots-win');
+      expect(ctx.rbookAddress).toBe('rbook://derek/roots-win');
       expect(ctx.candidates.filter((c) => c.source === 'mcp-roots').length).toBeGreaterThanOrEqual(
         2
       );
@@ -308,15 +309,18 @@ describe('sender-context', () => {
 
     it('step 2: the first MCP root holding a store is final, even when a later one is valid', async () => {
       const rootNoIdentity = await trackTmp('sctx-p2-first-store-');
-      seedCmosDb(rootNoIdentity, { cmosAddress: 'cmos://derek/first' });
+      seedRbookDb(rootNoIdentity, { rbookAddress: 'rbook://derek/first' });
       const rootValid = await trackTmp('sctx-p2-later-valid-');
-      seedCmosDb(rootValid, { dashboardProjectId: VALID_UUID, cmosAddress: 'cmos://derek/later' });
+      seedRbookDb(rootValid, {
+        dashboardProjectId: VALID_UUID,
+        rbookAddress: 'rbook://derek/later',
+      });
 
       const registry = await isolatedRegistry();
       await expect(
         resolveSenderContext({
           mcpRoots: [rootNoIdentity, rootValid],
-          cwdOverride: '/tmp/does-not-have-cmos',
+          cwdOverride: '/tmp/does-not-have-rbook',
           registryOverride: registry,
           serverInstallRootOverride: '/some/other/install',
           requireSenderIdentity: true,
@@ -329,7 +333,10 @@ describe('sender-context', () => {
 
     it('step 2: an MCP root opened on a subfolder of a project resolves to that project', async () => {
       const project = await trackTmp('sctx-p2-root-walkup-');
-      seedCmosDb(project, { dashboardProjectId: VALID_UUID, cmosAddress: 'cmos://derek/rootwalk' });
+      seedRbookDb(project, {
+        dashboardProjectId: VALID_UUID,
+        rbookAddress: 'rbook://derek/rootwalk',
+      });
       const subfolder = path.join(project, 'packages', 'web');
       fsSync.mkdirSync(subfolder, { recursive: true });
 
@@ -347,7 +354,7 @@ describe('sender-context', () => {
 
     it('step 3: cwd used when explicit + mcp-roots empty/invalid', async () => {
       const cwdRoot = await trackTmp('sctx-p3-cwd-');
-      seedCmosDb(cwdRoot, { dashboardProjectId: VALID_UUID, cmosAddress: 'cmos://derek/cwd3' });
+      seedRbookDb(cwdRoot, { dashboardProjectId: VALID_UUID, rbookAddress: 'rbook://derek/cwd3' });
 
       const registry = await isolatedRegistry();
       const ctx = await resolveSenderContext({
@@ -361,7 +368,7 @@ describe('sender-context', () => {
 
     it('step 3: a cwd inside a project resolves to that project by walking up', async () => {
       const project = await trackTmp('sctx-p3-walkup-');
-      seedCmosDb(project, { dashboardProjectId: VALID_UUID, cmosAddress: 'cmos://derek/walk' });
+      seedRbookDb(project, { dashboardProjectId: VALID_UUID, rbookAddress: 'rbook://derek/walk' });
       const nested = path.join(project, 'packages', 'web', 'src');
       fsSync.mkdirSync(nested, { recursive: true });
 
@@ -377,7 +384,7 @@ describe('sender-context', () => {
 
     it('step 3: the walk-up stops below $HOME, so a store there cannot capture a subfolder', async () => {
       const fakeHome = await trackTmp('sctx-home-');
-      seedCmosDb(fakeHome, { dashboardProjectId: VALID_UUID, cmosAddress: 'cmos://derek/home' });
+      seedRbookDb(fakeHome, { dashboardProjectId: VALID_UUID, rbookAddress: 'rbook://derek/home' });
       const workFolder = path.join(fakeHome, 'work', 'new-thing');
       fsSync.mkdirSync(workFolder, { recursive: true });
 
@@ -407,7 +414,7 @@ describe('sender-context', () => {
       // learning #387: with exactly one registered project A, a call from uninitialised folder B
       // used to resolve to A by the registry-singleton step and write there.
       const projectA = await trackTmp('sctx-singleton-a-');
-      seedCmosDb(projectA, { dashboardProjectId: VALID_UUID, cmosAddress: 'cmos://derek/a' });
+      seedRbookDb(projectA, { dashboardProjectId: VALID_UUID, rbookAddress: 'rbook://derek/a' });
       const registry = await isolatedRegistry();
       registry.registerStore(projectA);
 
@@ -464,9 +471,17 @@ describe('sender-context', () => {
       b: string;
     }> {
       const a = await trackTmp('sctx-default-a-');
-      seedCmosDb(a, { dashboardProjectId: VALID_UUID, cmosAddress: 'cmos://derek/a', slug: 'a' });
+      seedRbookDb(a, {
+        dashboardProjectId: VALID_UUID,
+        rbookAddress: 'rbook://derek/a',
+        slug: 'a',
+      });
       const b = await trackTmp('sctx-default-b-');
-      seedCmosDb(b, { dashboardProjectId: OTHER_UUID, cmosAddress: 'cmos://derek/b', slug: 'b' });
+      seedRbookDb(b, {
+        dashboardProjectId: OTHER_UUID,
+        rbookAddress: 'rbook://derek/b',
+        slug: 'b',
+      });
       const registry = await isolatedRegistry();
       registry.registerStore(a);
       registry.registerStore(b);
@@ -549,7 +564,7 @@ describe('sender-context', () => {
       ).rejects.toMatchObject({ outcome: 'no-project-here', workingDir: path.resolve(advertised) });
     });
 
-    it('refuses a --project-root that holds no CMOS store instead of moving on', async () => {
+    it('refuses a --project-root that holds no Reasonbook store instead of moving on', async () => {
       const { registry, a } = await twoProjects();
       registry.registerStore(a, { setAsDefault: true });
       const notAStore = await trackTmp('sctx-bad-project-root-');
@@ -573,9 +588,9 @@ describe('sender-context', () => {
   describe('server install root', () => {
     it('resolves by cwd when cwd is the install root and it holds a store, even for a send', async () => {
       const installRoot = await trackTmp('sctx-install-');
-      seedCmosDb(installRoot, {
+      seedRbookDb(installRoot, {
         dashboardProjectId: VALID_UUID,
-        cmosAddress: 'cmos://derek/cmos-mcp',
+        rbookAddress: 'rbook://derek/cmos-mcp',
       });
       const registry = await isolatedRegistry();
 
@@ -609,7 +624,7 @@ describe('sender-context', () => {
   describe('requireSenderIdentity=false', () => {
     it('accepts a DB that lacks identity metadata when requireSenderIdentity=false', async () => {
       const cwdRoot = await trackTmp('sctx-nonreq-cwd-');
-      seedCmosDb(cwdRoot, { cmosAddress: '' });
+      seedRbookDb(cwdRoot, { rbookAddress: '' });
       const registry = await isolatedRegistry();
 
       const ctx: SenderContext = await resolveSenderContext({
@@ -620,7 +635,7 @@ describe('sender-context', () => {
       });
       expect(ctx.source).toBe('cwd');
       expect(ctx.dashboardProjectId).toBeNull();
-      expect(ctx.cmosAddress).toBeNull();
+      expect(ctx.rbookAddress).toBeNull();
     });
 
     it('still fails closed when nothing has a database, even with requireSenderIdentity=false', async () => {

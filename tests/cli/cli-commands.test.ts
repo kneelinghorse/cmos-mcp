@@ -11,35 +11,38 @@ import * as path from 'path';
 import { routeArgv } from '../../src/bin';
 import { runCli } from '../../src/cli';
 import { resolveCliProject, type CliIo } from '../../src/cli/core';
-import { CmosDetector } from '../../src/intelligence/cmos-detector';
+import { RbookDetector } from '../../src/intelligence/rbook-detector';
 import { resolveSenderContext } from '../../src/intelligence/sender-context';
-import { cmosAgentOnboard } from '../../src/tools/cmos/cmos-agent-onboard';
-import { withClient } from '../../src/tools/cmos/client';
-import { createSuccess } from '../../src/tools/cmos/errors';
-import { harnessSessionHash } from '../../src/tools/cmos/harness-session';
-import { automaticCloseSummary, setExternalSessionOwner } from '../../src/tools/cmos/session-owner';
-import { countUntaggedSessions } from '../../src/tools/cmos/untagged-advisory';
-import { reidentifyCmosTestStore, seedCmosDb } from '../helpers/seedCmosDb';
+import { rbookAgentOnboard } from '../../src/tools/rbook/rbook-agent-onboard';
+import { withClient } from '../../src/tools/rbook/client';
+import { createSuccess } from '../../src/tools/rbook/errors';
+import { harnessSessionHash } from '../../src/tools/rbook/harness-session';
+import {
+  automaticCloseSummary,
+  setExternalSessionOwner,
+} from '../../src/tools/rbook/session-owner';
+import { countUntaggedSessions } from '../../src/tools/rbook/untagged-advisory';
+import { reidentifyRbookTestStore, seedRbookDb } from '../helpers/seedRbookDb';
 
 let tmp: string;
 let projectRoot: string;
 let dbPath: string;
-const savedConfigDir = process.env.CMOS_CONFIG_DIR;
+const savedConfigDir = process.env.RBOOK_CONFIG_DIR;
 
 beforeEach(() => {
-  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-s93m01-cli-'));
-  process.env.CMOS_CONFIG_DIR = path.join(tmp, 'config');
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-s93m01-cli-'));
+  process.env.RBOOK_CONFIG_DIR = path.join(tmp, 'config');
   projectRoot = path.join(tmp, 'project');
   fs.mkdirSync(projectRoot, { recursive: true });
-  dbPath = seedCmosDb(projectRoot, { projectName: 'cli commands' });
-  reidentifyCmosTestStore(projectRoot);
-  CmosDetector.resetInstance();
+  dbPath = seedRbookDb(projectRoot, { projectName: 'cli commands' });
+  reidentifyRbookTestStore(projectRoot);
+  RbookDetector.resetInstance();
 });
 
 afterEach(() => {
   setExternalSessionOwner(null);
-  if (savedConfigDir === undefined) delete process.env.CMOS_CONFIG_DIR;
-  else process.env.CMOS_CONFIG_DIR = savedConfigDir;
+  if (savedConfigDir === undefined) delete process.env.RBOOK_CONFIG_DIR;
+  else process.env.RBOOK_CONFIG_DIR = savedConfigDir;
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -96,7 +99,7 @@ describe('s93-m01 — the bin routes before any server module loads', () => {
     expect((await run(['feedback'])).code).toBe(1);
     const usage = await run([]);
     expect(usage.code).toBe(1);
-    expect(usage.stderr[0]).toContain('Usage: cmos-mcp');
+    expect(usage.stderr[0]).toContain('Usage: reasonbook');
     // Exit 2 from a UserPromptSubmit hook blocks the prompt in Claude Code.
     const typo = await run(['hooks', 'prompt']);
     expect(typo.code).toBe(1);
@@ -152,12 +155,12 @@ describe('s93-m01 — capture and session need a harness session (fork 8)', () =
 });
 
 describe('s93-m01 — ambient', () => {
-  it('shows and sets the project setting, and CMOS_AMBIENT overrides it for a session', async () => {
+  it('shows and sets the project setting, and RBOOK_AMBIENT overrides it for a session', async () => {
     expect((await run(['ambient'])).stdout.trim()).toBe('on');
     expect((await run(['ambient', 'digest-off'])).code).toBe(0);
     expect((await run(['ambient'])).stdout.trim()).toBe('digest-off');
-    expect((await run(['ambient'], projectRoot, { CMOS_AMBIENT: 'off' })).stdout.trim()).toBe(
-      'off (CMOS_AMBIENT, this session only)'
+    expect((await run(['ambient'], projectRoot, { RBOOK_AMBIENT: 'off' })).stdout.trim()).toBe(
+      'off (RBOOK_AMBIENT, this session only)'
     );
     expect((await run(['ambient', 'loud'])).code).toBe(1);
   });
@@ -200,7 +203,7 @@ describe('s93-m01 — review --format=context prints the digest', () => {
     fs.mkdirSync(elsewhere);
     const refused = await run(['review'], elsewhere);
     expect(refused.code).toBe(1);
-    expect(refused.stderr[0]).toContain('no CMOS project');
+    expect(refused.stderr[0]).toContain('no Reasonbook project');
   });
 });
 
@@ -229,17 +232,17 @@ describe('s93-m01 — the CLI resolves a project as the MCP path does (fork 3)',
     expect(cli.kind === 'store' ? cli.projectRoot : null).toBe(mcp);
   });
 
-  // The m01 build critic, B3: a CMOS layout whose database is gone ends the walk in both, and
-  // neither treats it as a folder without CMOS.
+  // The m01 build critic, B3: a Reasonbook layout whose database is gone ends the walk in both, and
+  // neither treats it as a folder without Reasonbook.
   it('a store whose database is gone: both stop there, and neither resolves a store', async () => {
     const lost = path.join(tmp, 'lost');
-    fs.mkdirSync(path.join(lost, 'cmos', 'db'), { recursive: true });
+    fs.mkdirSync(path.join(lost, 'rbook', 'db'), { recursive: true });
     const inside = path.join(lost, 'src');
     fs.mkdirSync(inside);
     expect(resolveCliProject({ env: {}, cwd: inside, homeDir: tmp })).toEqual({
       kind: 'store-missing',
       projectRoot: lost,
-      dbPath: path.join(lost, 'cmos', 'db', 'cmos.sqlite'),
+      dbPath: path.join(lost, 'rbook', 'db', 'rbook.sqlite'),
     });
     await expect(
       resolveSenderContext({
@@ -315,7 +318,7 @@ describe('s93-m01 — the #610 follow-ups', () => {
     } finally {
       db.close();
     }
-    expect((await cmosAgentOnboard({ projectRoot })).data?.lastSession?.id).toBe('PS-HANDOFF');
+    expect((await rbookAgentOnboard({ projectRoot })).data?.lastSession?.id).toBe('PS-HANDOFF');
 
     const again = new Database(dbPath);
     try {
@@ -328,7 +331,7 @@ describe('s93-m01 — the #610 follow-ups', () => {
     } finally {
       again.close();
     }
-    expect((await cmosAgentOnboard({ projectRoot })).data?.lastSession?.id).toBe('PS-LATER-WORK');
+    expect((await rbookAgentOnboard({ projectRoot })).data?.lastSession?.id).toBe('PS-LATER-WORK');
   });
 });
 

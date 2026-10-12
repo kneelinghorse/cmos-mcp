@@ -2,7 +2,8 @@
 // ABOUTME: s93-m01 — the non-hook verbs: review, relevant, capture, session, ambient, init and profile. Exit 0
 // ABOUTME: on success, 1 on a refusal, a failure or a usage error (never 2); one stderr line says why.
 
-import { prepareSpinOutRead, spinOutSqliteReader } from '../tools/cmos/spin-out-read';
+import { getSetting } from '../intelligence/legacy-compat';
+import { prepareSpinOutRead, spinOutSqliteReader } from '../tools/rbook/spin-out-read';
 import Database from 'better-sqlite3';
 import * as path from 'path';
 
@@ -16,14 +17,14 @@ import {
   type CliIo,
   type CliResolution,
 } from './core';
-import { previewText } from '../tools/cmos/text-preview';
+import { previewText } from '../tools/rbook/text-preview';
 import { observeCliResult, observeInjected, observeRelevantIds } from './telemetry';
-import { captureToolCall } from '../tools/cmos/tool-call-context';
+import { captureToolCall } from '../tools/rbook/tool-call-context';
 
 /** A hand-run write names its harness session; the CLI never opens a session per process (fork 8). */
 export const NO_SESSION_REMEDY =
   'name the harness session with --session-id <id>, or write through the MCP tools ' +
-  '(cmos_session, cmos_decisions); the CLI never opens a session of its own';
+  '(rbook_session, rbook_decisions); the CLI never opens a session of its own';
 
 type Store = Extract<CliResolution, { kind: 'store' }>;
 
@@ -32,14 +33,14 @@ function requireStore(verb: string, resolution: CliResolution, io: CliIo): Store
     case 'store':
       return resolution;
     case 'explicit-missing':
-      io.stderr(`cmos-mcp ${verb}: no CMOS project at ${resolution.dir}.`);
+      io.stderr(`reasonbook ${verb}: no Reasonbook project at ${resolution.dir}.`);
       return null;
     case 'store-missing':
-      io.stderr(`cmos-mcp ${verb}: the CMOS store is missing: ${resolution.dbPath}.`);
+      io.stderr(`reasonbook ${verb}: the Reasonbook store is missing: ${resolution.dbPath}.`);
       return null;
     case 'none':
       io.stderr(
-        `cmos-mcp ${verb}: no CMOS project encloses ${resolution.workingDir}; pass --project-root.`
+        `reasonbook ${verb}: no Reasonbook project encloses ${resolution.workingDir}; pass --project-root.`
       );
       return null;
   }
@@ -78,7 +79,7 @@ export async function runCommand(
     case 'profile':
       return profile(positional, io);
     default:
-      io.stderr(`cmos-mcp: unknown verb ${verb}.`);
+      io.stderr(`reasonbook: unknown verb ${verb}.`);
       return 1;
   }
 }
@@ -98,7 +99,7 @@ async function review(
     io.env.CLAUDE_PROJECT_DIR ? 'explicit' : store.source
   );
   if (text === null) {
-    io.stderr('cmos-mcp review: the digest could not be built.');
+    io.stderr('reasonbook review: the digest could not be built.');
     return 1;
   }
   io.stdout(flags.format === 'json' ? `${JSON.stringify({ digest: text })}\n` : `${text}\n`);
@@ -199,7 +200,7 @@ async function relevant(
 ): Promise<number> {
   const query = flags.query?.trim();
   if (!query || query === 'true') {
-    io.stderr('cmos-mcp relevant: pass --query <text>.');
+    io.stderr('reasonbook relevant: pass --query <text>.');
     return 1;
   }
   const store = requireStore('relevant', resolution, io);
@@ -216,7 +217,7 @@ async function relevant(
     `${items
       .map((item) => `#${item.id} ${item.kind} [${item.status}] — ${item.text}`)
       .join('\n')}\n` +
-      'Read one in full with cmos_decisions(action="show") or cmos_learnings(action="show").\n'
+      'Read one in full with rbook_decisions(action="show") or rbook_learnings(action="show").\n'
   );
   return 0;
 }
@@ -228,23 +229,23 @@ async function capture(
 ): Promise<number> {
   const rawSessionId = flags['session-id'];
   if (!rawSessionId || rawSessionId === 'true') {
-    io.stderr(`cmos-mcp capture: ${NO_SESSION_REMEDY}.`);
+    io.stderr(`reasonbook capture: ${NO_SESSION_REMEDY}.`);
     return 1;
   }
   const category = flags.category;
   const content = flags.content;
   if (!category || !content || category === 'true' || content === 'true') {
-    io.stderr('cmos-mcp capture: pass --category <c> and --content <text>.');
+    io.stderr('reasonbook capture: pass --category <c> and --content <text>.');
     return 1;
   }
   const store = requireStore('capture', resolution, io);
   if (!store) return 1;
-  const owner = await import('../tools/cmos/session-owner');
-  const context = await import('../tools/cmos/tool-call-context');
-  const sessions = await import('../tools/cmos/cmos-session');
+  const owner = await import('../tools/rbook/session-owner');
+  const context = await import('../tools/rbook/tool-call-context');
+  const sessions = await import('../tools/rbook/rbook-session');
   owner.setExternalSessionOwner(rawSessionId);
   const result = await context.captureToolCall('write', () =>
-    sessions.cmosSession({
+    sessions.rbookSession({
       action: 'capture',
       category: category as 'decision' | 'learning' | 'constraint' | 'context' | 'next-step',
       content,
@@ -252,7 +253,7 @@ async function capture(
       projectRoot: store.projectRoot,
     })
   );
-  observeCliResult(io, 'cmos_session', { action: 'capture', category, content }, result.value);
+  observeCliResult(io, 'rbook_session', { action: 'capture', category, content }, result.value);
   io.stdout(`${sessions.formatSessionForLLM('capture', result.value)}\n`);
   return result.value.success ? 0 : 1;
 }
@@ -265,12 +266,12 @@ async function session(
 ): Promise<number> {
   const action = positional[0];
   if (action !== 'ensure' && action !== 'close') {
-    io.stderr('cmos-mcp session: ensure or close, with --session-id <id>.');
+    io.stderr('reasonbook session: ensure or close, with --session-id <id>.');
     return 1;
   }
   const rawSessionId = flags['session-id'];
   if (!rawSessionId || rawSessionId === 'true') {
-    io.stderr(`cmos-mcp session ${action}: ${NO_SESSION_REMEDY}.`);
+    io.stderr(`reasonbook session ${action}: ${NO_SESSION_REMEDY}.`);
     return 1;
   }
   const store = requireStore(`session ${action}`, resolution, io);
@@ -279,7 +280,7 @@ async function session(
   if (action === 'ensure') {
     const ensured = await ops.ensureHarnessSession(store.projectRoot, rawSessionId);
     if (!ensured) {
-      io.stderr('cmos-mcp session ensure: no session could be opened in this store.');
+      io.stderr('reasonbook session ensure: no session could be opened in this store.');
       return 1;
     }
     io.stdout(`${ensured.sessionId}${ensured.opened ? ' (opened)' : ''}\n`);
@@ -289,7 +290,7 @@ async function session(
   const failed = receipts.find((receipt) => !receipt.closed);
   if (failed) {
     io.stderr(
-      `cmos-mcp session close: ${failed.sessionId}: ${failed.error ?? 'the close failed'}.`
+      `reasonbook session close: ${failed.sessionId}: ${failed.error ?? 'the close failed'}.`
     );
     return 1;
   }
@@ -308,46 +309,50 @@ async function ambient(
 ): Promise<number> {
   const mode = positional[0] as AmbientMode | undefined;
   if (mode !== undefined && !AMBIENT_MODES.includes(mode)) {
-    io.stderr(`cmos-mcp ambient: ${AMBIENT_MODES.join(', ')}, or nothing to show the setting.`);
+    io.stderr(`reasonbook ambient: ${AMBIENT_MODES.join(', ')}, or nothing to show the setting.`);
     return 1;
   }
   if (resolution.kind === 'store-missing') {
-    io.stderr(`cmos-mcp ambient: the CMOS store is missing: ${resolution.dbPath}.`);
+    io.stderr(`reasonbook ambient: the Reasonbook store is missing: ${resolution.dbPath}.`);
     return 1;
   }
   if (resolution.kind !== 'store') {
-    // No store: the only setting is whether this repository is offered CMOS at session start.
+    // No store: the only setting is whether this repository is offered Reasonbook at session start.
     const start = await import('./session-start');
-    const harness = await import('../tools/cmos/harness-session');
+    const harness = await import('../tools/rbook/harness-session');
     const dir = resolution.kind === 'none' ? resolution.workingDir : resolution.dir;
     const repo = start.gitWorkTreeRoot(dir);
     if (!repo) {
-      io.stderr('cmos-mcp ambient: no CMOS project and no git repository here.');
+      io.stderr('reasonbook ambient: no Reasonbook project and no git repository here.');
       return 1;
     }
     if (mode === undefined) {
-      io.stdout(`${harness.isDeclined(repo, io.env) ? 'declined' : 'offered'} (no CMOS record)\n`);
+      io.stdout(
+        `${harness.isDeclined(repo, io.env) ? 'declined' : 'offered'} (no Reasonbook record)\n`
+      );
       return 0;
     }
     if (mode === 'digest-off') {
-      io.stderr('cmos-mcp ambient digest-off: this repository has no CMOS record.');
+      io.stderr('reasonbook ambient digest-off: this repository has no Reasonbook record.');
       return 1;
     }
     harness.setDeclined(repo, mode === 'off', io.env);
     io.stdout(
-      mode === 'off' ? 'CMOS will not be offered here.\n' : 'CMOS will be offered here again.\n'
+      mode === 'off'
+        ? 'Reasonbook will not be offered here.\n'
+        : 'Reasonbook will be offered here again.\n'
     );
     return 0;
   }
   if (mode === undefined) {
     const effective = readAmbient(resolution.dbPath, io.env);
-    const fromEnv = (io.env.CMOS_AMBIENT ?? '').trim() !== '';
-    io.stdout(`${effective}${fromEnv ? ' (CMOS_AMBIENT, this session only)' : ''}\n`);
+    const fromEnv = (getSetting('RBOOK_AMBIENT', io.env) ?? '').trim() !== '';
+    io.stdout(`${effective}${fromEnv ? ' (RBOOK_AMBIENT, this session only)' : ''}\n`);
     return 0;
   }
-  const { withClientAsync } = await import('../tools/cmos/client');
-  const { createError, createSuccess } = await import('../tools/cmos/errors');
-  const { checkWrite } = await import('../tools/cmos/write-guard');
+  const { withClientAsync } = await import('../tools/rbook/client');
+  const { createError, createSuccess } = await import('../tools/rbook/errors');
+  const { checkWrite } = await import('../tools/rbook/write-guard');
   const written = await withClientAsync(
     async (client) => {
       const failures: string[] = [];
@@ -359,13 +364,11 @@ async function ambient(
         failures,
         'metadata.ambient'
       );
-      // The line names the level too, so the refresh is handed the store's (s93-m12).
-      const tier = client.getOne<{ value: string }>(
-        "SELECT value FROM metadata WHERE key = 'project_type'",
-        []
-      );
+      // The line names the level too, so the refresh is handed the store's (s93-m12), read as
+      // every level-aware answer reads it (s95-m06).
+      const { readProjectTier } = await import('../tools/rbook/project-level');
       return ok
-        ? createSuccess(tier.success ? (tier.data?.value ?? null) : null)
+        ? createSuccess(readProjectTier(client))
         : createError<string | null>({
             code: 'DB_QUERY_FAILED',
             message: failures[0] ?? 'the setting was not written',
@@ -375,14 +378,14 @@ async function ambient(
   );
   observeCliResult(io, 'ambient', { action: mode }, written);
   if (!written.success) {
-    io.stderr(`cmos-mcp ambient: ${written.error?.message ?? 'the setting was not written'}.`);
+    io.stderr(`reasonbook ambient: ${written.error?.message ?? 'the setting was not written'}.`);
     return 1;
   }
-  // s93-m12: the agents file's CMOS line names the hooks' state, so it follows the setting.
-  const { describeCmosLineRefresh, levelOfTier, refreshCmosLine } =
-    await import('../tools/cmos/rules-files');
-  const note = describeCmosLineRefresh(
-    refreshCmosLine(resolution.projectRoot, {
+  // s93-m12: the agents file's Reasonbook line names the hooks' state, so it follows the setting.
+  const { describeRbookLineRefresh, levelOfTier, refreshRbookLine } =
+    await import('../tools/rbook/rules-files');
+  const note = describeRbookLineRefresh(
+    refreshRbookLine(resolution.projectRoot, {
       level: levelOfTier(written.data),
       ambient: mode,
     })
@@ -393,7 +396,7 @@ async function ambient(
 
 /**
  * s93-m12: `init` starts a record in a folder: the store, AGENTS.md and CLAUDE.md, through the same
- * code as `cmos_project(action="init")`, so both write the same files. The folder is
+ * code as `rbook_project(action="init")`, so both write the same files. The folder is
  * `--project-root` or the working directory, never a guess further up. A contextless folder is
  * refused; so is a working directory inside another project (a subfolder is rarely meant), while a
  * folder named with --project-root is taken as meant, as the MCP tool takes it. `--level` is the
@@ -402,29 +405,29 @@ async function ambient(
  * block for a harness without hooks. The output names the level and where it came from.
  */
 async function init(flags: Readonly<Record<string, string>>, io: CliIo): Promise<number> {
-  const rules = await import('../tools/cmos/rules-files');
+  const rules = await import('../tools/rbook/rules-files');
   const level = flags.level?.toLowerCase();
   if (level !== undefined && !(rules.PROJECT_LEVELS as readonly string[]).includes(level)) {
-    io.stderr(`cmos-mcp init: --level is ${rules.PROJECT_LEVELS.join(', ')}.`);
+    io.stderr(`reasonbook init: --level is ${rules.PROJECT_LEVELS.join(', ')}.`);
     return 1;
   }
   const named = flags['project-root'];
   const target = path.resolve(named && named !== 'true' ? named : io.cwd);
   const policy = await import('../intelligence/resolution-policy');
   if (policy.isContextlessDirectory(target)) {
-    io.stderr(`cmos-mcp init: ${target} is not a project folder; pass --project-root.`);
+    io.stderr(`reasonbook init: ${target} is not a project folder; pass --project-root.`);
     return 1;
   }
   const explicit = Boolean(named && named !== 'true');
   const enclosing = explicit ? null : policy.findEnclosingStore(target);
   if (enclosing && !policy.isSameDirectory(enclosing.root, target)) {
     io.stderr(
-      `cmos-mcp init: ${target} is inside the CMOS project at ${enclosing.root}; run init there, or name this folder with --project-root to start a separate record in it.`
+      `reasonbook init: ${target} is inside the Reasonbook project at ${enclosing.root}; run init there, or name this folder with --project-root to start a separate record in it.`
     );
     return 1;
   }
-  const { cmosProjectInit } = await import('../tools/cmos/cmos-project-init');
-  const result = await cmosProjectInit(
+  const { rbookProjectInit } = await import('../tools/rbook/rbook-project-init');
+  const result = await rbookProjectInit(
     {
       projectRoot: target,
       ...(flags.name && flags.name !== 'true' ? { projectName: flags.name } : {}),
@@ -432,9 +435,9 @@ async function init(flags: Readonly<Record<string, string>>, io: CliIo): Promise
     },
     { hooks: flags['no-hooks'] !== 'true', cliSource: explicit ? 'explicit' : 'cwd' }
   );
-  observeCliResult(io, 'cmos_project', { action: 'init' }, result);
+  observeCliResult(io, 'rbook_project', { action: 'init' }, result);
   if (!result.success || !result.data) {
-    io.stderr(`cmos-mcp init: ${result.error?.message ?? 'init failed'}`);
+    io.stderr(`reasonbook init: ${result.error?.message ?? 'init failed'}`);
     return 1;
   }
   const rulesFiles = result.data.created.files
@@ -443,11 +446,11 @@ async function init(flags: Readonly<Record<string, string>>, io: CliIo): Promise
   const levelFrom = {
     passed: 'as asked',
     stored: 'kept from the store',
-    'agents-file': "from the agents file's CMOS line",
+    'agents-file': "from the agents file's Reasonbook line",
     default: 'the default for a new project; --level changes it',
   }[result.data.levelSource];
   io.stdout(
-    `CMOS record ${result.data.isNewProject ? 'started' : 'already here'} at ${target}.` +
+    `Reasonbook record ${result.data.isNewProject ? 'started' : 'already here'} at ${target}.` +
       (rulesFiles.length > 0 ? ` Wrote ${rulesFiles.join(' and ')}.` : '') +
       `\nLevel: ${rules.levelName(result.data.level)} (${levelFrom}).\n` +
       (result.warnings ?? []).map((warning) => `${warning}\n`).join('')
@@ -458,11 +461,11 @@ async function init(flags: Readonly<Record<string, string>>, io: CliIo): Promise
 /** s93-m12: `profile show` prints the operator profile every project's digest reads. */
 async function profile(positional: readonly string[], io: CliIo): Promise<number> {
   if (positional[0] !== 'show') {
-    io.stderr('cmos-mcp profile: show prints the operator profile.');
+    io.stderr('reasonbook profile: show prints the operator profile.');
     return 1;
   }
   const { PROFILE_CAP_CHARS, profilePath, readProfile } =
-    await import('../tools/cmos/operator-profile');
+    await import('../tools/rbook/operator-profile');
   const current = readProfile(io.env);
   if (!current) {
     io.stdout(

@@ -1,4 +1,4 @@
-// ABOUTME: End-to-end wiring tests for the content sanitizer across CMOS write-path handlers.
+// ABOUTME: End-to-end wiring tests for the content sanitizer across Reasonbook write-path handlers.
 // ABOUTME: Asserts that corrupted input is cleaned before persistence and surfaced via sanitizedFields.
 
 import Database from 'better-sqlite3';
@@ -6,16 +6,16 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-import { CmosDetector } from '../../src/intelligence/cmos-detector';
-import { cmosSessionStart } from '../../src/tools/cmos/cmos-session-start';
-import { cmosSessionCapture } from '../../src/tools/cmos/cmos-session-capture';
-import { cmosSessionComplete } from '../../src/tools/cmos/cmos-session-complete';
-import { cmosMissionAdd } from '../../src/tools/cmos/cmos-mission-add';
-import { cmosMissionUpdate } from '../../src/tools/cmos/cmos-mission-update';
-import { cmosMissionComplete } from '../../src/tools/cmos/cmos-mission-complete';
-import { cmosMissionBlock } from '../../src/tools/cmos/cmos-mission-block';
-import { cmosMissionDefer } from '../../src/tools/cmos/cmos-mission-defer';
-import { cmosContextUpdate } from '../../src/tools/cmos/cmos-context-update';
+import { RbookDetector } from '../../src/intelligence/rbook-detector';
+import { rbookSessionStart } from '../../src/tools/rbook/rbook-session-start';
+import { rbookSessionCapture } from '../../src/tools/rbook/rbook-session-capture';
+import { rbookSessionComplete } from '../../src/tools/rbook/rbook-session-complete';
+import { rbookMissionAdd } from '../../src/tools/rbook/rbook-mission-add';
+import { rbookMissionUpdate } from '../../src/tools/rbook/rbook-mission-update';
+import { rbookMissionComplete } from '../../src/tools/rbook/rbook-mission-complete';
+import { rbookMissionBlock } from '../../src/tools/rbook/rbook-mission-block';
+import { rbookMissionDefer } from '../../src/tools/rbook/rbook-mission-defer';
+import { rbookContextUpdate } from '../../src/tools/rbook/rbook-context-update';
 
 interface TestDb {
   tempDir: string;
@@ -24,10 +24,10 @@ interface TestDb {
 }
 
 function createTestDb(): TestDb {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-sanitizer-wiring-'));
-  const cmosDir = path.join(tempDir, 'cmos', 'db');
-  fs.mkdirSync(cmosDir, { recursive: true });
-  const dbPath = path.join(cmosDir, 'cmos.sqlite');
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-sanitizer-wiring-'));
+  const rbookDir = path.join(tempDir, 'rbook', 'db');
+  fs.mkdirSync(rbookDir, { recursive: true });
+  const dbPath = path.join(rbookDir, 'rbook.sqlite');
   const db = new Database(dbPath);
 
   db.exec(`
@@ -143,13 +143,13 @@ const CORRUPTED =
   'The real decision we want to persist.</content>\n<parameter name="missionId">s56-m02';
 const CLEAN = 'The real decision we want to persist.';
 
-describe('Content sanitizer wiring: cmos_session_capture', () => {
+describe('Content sanitizer wiring: rbook_session_capture', () => {
   let testDb: TestDb;
 
   beforeEach(async () => {
     testDb = createTestDb();
-    CmosDetector.resetInstance();
-    await cmosSessionStart({
+    RbookDetector.resetInstance();
+    await rbookSessionStart({
       type: 'planning',
       title: 'Test session',
       sprintId: 'sprint-56',
@@ -160,7 +160,7 @@ describe('Content sanitizer wiring: cmos_session_capture', () => {
   afterEach(() => cleanup(testDb));
 
   it('strips XML artifact from content and reports sanitizedFields', async () => {
-    const result = await cmosSessionCapture({
+    const result = await rbookSessionCapture({
       category: 'decision',
       content: CORRUPTED,
       projectRoot: testDb.tempDir,
@@ -178,7 +178,7 @@ describe('Content sanitizer wiring: cmos_session_capture', () => {
   });
 
   it('leaves clean content untouched and omits sanitizedFields', async () => {
-    const result = await cmosSessionCapture({
+    const result = await rbookSessionCapture({
       category: 'decision',
       content: CLEAN,
       projectRoot: testDb.tempDir,
@@ -189,14 +189,14 @@ describe('Content sanitizer wiring: cmos_session_capture', () => {
   });
 });
 
-describe('Content sanitizer wiring: cmos_session_complete', () => {
+describe('Content sanitizer wiring: rbook_session_complete', () => {
   let testDb: TestDb;
   let sessionId: string;
 
   beforeEach(async () => {
     testDb = createTestDb();
-    CmosDetector.resetInstance();
-    const start = await cmosSessionStart({
+    RbookDetector.resetInstance();
+    const start = await rbookSessionStart({
       type: 'planning',
       title: 'Test complete session',
       sprintId: 'sprint-56',
@@ -208,7 +208,7 @@ describe('Content sanitizer wiring: cmos_session_complete', () => {
   afterEach(() => cleanup(testDb));
 
   it('sanitizes summary, decisions[], and nextSteps[] and reports index-addressed fields', async () => {
-    const result = await cmosSessionComplete({
+    const result = await rbookSessionComplete({
       sessionId,
       summary: `Wrapped up.${''}</content>noise`,
       decisions: ['clean decision', CORRUPTED, 'also clean'],
@@ -235,18 +235,18 @@ describe('Content sanitizer wiring: cmos_session_complete', () => {
   });
 });
 
-describe('Content sanitizer wiring: cmos_mission_add + cmos_mission_update', () => {
+describe('Content sanitizer wiring: rbook_mission_add + rbook_mission_update', () => {
   let testDb: TestDb;
 
   beforeEach(() => {
     testDb = createTestDb();
-    CmosDetector.resetInstance();
+    RbookDetector.resetInstance();
   });
 
   afterEach(() => cleanup(testDb));
 
-  it('cmos_mission_add sanitizes objective and notes', async () => {
-    const result = await cmosMissionAdd({
+  it('rbook_mission_add sanitizes objective and notes', async () => {
+    const result = await rbookMissionAdd({
       missionId: 's56-new',
       name: 'New mission',
       sprintId: 'sprint-56',
@@ -265,8 +265,8 @@ describe('Content sanitizer wiring: cmos_mission_add + cmos_mission_update', () 
     expect(row.notes).toBe('Notes are clean.');
   });
 
-  it('cmos_mission_add sanitizes corrupted notes as well', async () => {
-    const result = await cmosMissionAdd({
+  it('rbook_mission_add sanitizes corrupted notes as well', async () => {
+    const result = await rbookMissionAdd({
       missionId: 's56-dirty',
       name: 'Dirty mission',
       sprintId: 'sprint-56',
@@ -284,8 +284,8 @@ describe('Content sanitizer wiring: cmos_mission_add + cmos_mission_update', () 
     expect(row.notes).toBe(CLEAN);
   });
 
-  it('cmos_mission_update sanitizes fields.notes and arrays', async () => {
-    const result = await cmosMissionUpdate({
+  it('rbook_mission_update sanitizes fields.notes and arrays', async () => {
+    const result = await rbookMissionUpdate({
       missionId: 's56-x01',
       fields: {
         notes: CORRUPTED,
@@ -307,18 +307,18 @@ describe('Content sanitizer wiring: cmos_mission_add + cmos_mission_update', () 
   });
 });
 
-describe('Content sanitizer wiring: cmos_mission_complete (Sprint 60 m02)', () => {
+describe('Content sanitizer wiring: rbook_mission_complete (Sprint 60 m02)', () => {
   let testDb: TestDb;
 
   beforeEach(() => {
     testDb = createTestDb();
-    CmosDetector.resetInstance();
+    RbookDetector.resetInstance();
   });
 
   afterEach(() => cleanup(testDb));
 
   it('sanitizes notes and decisions[]; surfaces per-field reports; persists clean text', async () => {
-    const result = await cmosMissionComplete({
+    const result = await rbookMissionComplete({
       missionId: 's60-mc01',
       notes: `Wrapped up the work.${''}</content>\n<parameter name="missionId">noise`,
       decisions: ['clean architectural decision', CORRUPTED, 'another clean one'],
@@ -350,7 +350,7 @@ describe('Content sanitizer wiring: cmos_mission_complete (Sprint 60 m02)', () =
   });
 
   it('persists every entry in a clean decisions[] array (decisionCount contract)', async () => {
-    const result = await cmosMissionComplete({
+    const result = await rbookMissionComplete({
       missionId: 's60-mc02',
       notes: 'No surprises here.',
       decisions: ['decision A', 'decision B', 'decision C', 'decision D', 'decision E'],
@@ -377,7 +377,7 @@ describe('Content sanitizer wiring: cmos_mission_complete (Sprint 60 m02)', () =
   // `decisions=[...]` into `notes`, the sanitizer stripped it, `decisions` arrived undefined, and the
   // mission transitioned anyway. The transition is unrepeatable, so the server must refuse FIRST.
   it('refuses to complete when notes absorbed a missing decisions parameter', async () => {
-    const result = await cmosMissionComplete({
+    const result = await rbookMissionComplete({
       missionId: 's60-mc02',
       notes: 'Shipped the thing. <parameter name="decisions">["the lost decision"]',
       projectRoot: testDb.tempDir,
@@ -386,7 +386,7 @@ describe('Content sanitizer wiring: cmos_mission_complete (Sprint 60 m02)', () =
     expect(result.success).toBe(false);
     expect(result.error).toMatchObject({ code: 'INVALID_PARAMETER', field: 'decisions' });
     expect(result.error?.message).toContain('was not completed');
-    expect(result.error?.suggestion).toContain('cmos_decisions(action="record"');
+    expect(result.error?.suggestion).toContain('rbook_decisions(action="record"');
     expect(result.sanitizedFields?.map((f) => f.field)).toContain('notes');
 
     const row = testDb.db.prepare('SELECT status FROM missions WHERE id = ?').get('s60-mc02') as {
@@ -406,7 +406,7 @@ describe('Content sanitizer wiring: cmos_mission_complete (Sprint 60 m02)', () =
   });
 
   it('refuses when notes absorbed a missing agentFeedback parameter', async () => {
-    const result = await cmosMissionComplete({
+    const result = await rbookMissionComplete({
       missionId: 's60-mc02',
       notes: 'Done.\n<parameter name="agentFeedback">rough edge',
       decisions: ['kept decision'],
@@ -418,7 +418,7 @@ describe('Content sanitizer wiring: cmos_mission_complete (Sprint 60 m02)', () =
   });
 
   it('keeps completing when the absorbed tag names no missing sibling (content/invoke)', async () => {
-    const result = await cmosMissionComplete({
+    const result = await rbookMissionComplete({
       missionId: 's60-mc02',
       notes: 'Done. <invoke name="something">',
       projectRoot: testDb.tempDir,
@@ -429,27 +429,27 @@ describe('Content sanitizer wiring: cmos_mission_complete (Sprint 60 m02)', () =
   });
 
   it('names the record remedy on an already-Completed retry that carried decisions', async () => {
-    await cmosMissionComplete({ missionId: 's60-mc03', projectRoot: testDb.tempDir });
-    const withDecisions = await cmosMissionComplete({
+    await rbookMissionComplete({ missionId: 's60-mc03', projectRoot: testDb.tempDir });
+    const withDecisions = await rbookMissionComplete({
       missionId: 's60-mc03',
       decisions: ['arrived late'],
       projectRoot: testDb.tempDir,
     });
-    const without = await cmosMissionComplete({
+    const without = await rbookMissionComplete({
       missionId: 's60-mc03',
       projectRoot: testDb.tempDir,
     });
 
     expect(withDecisions.error?.code).toBe('MISSION_ALREADY_COMPLETED');
     expect(withDecisions.error?.suggestion).toContain(
-      'cmos_decisions(action="record", missionId="s60-mc03"'
+      'rbook_decisions(action="record", missionId="s60-mc03"'
     );
     expect(withDecisions.error?.suggestion).not.toContain('No action needed');
     expect(without.error?.suggestion).toContain('No action needed');
   });
 
   it('leaves clean inputs untouched and omits sanitizedFields', async () => {
-    const result = await cmosMissionComplete({
+    const result = await rbookMissionComplete({
       missionId: 's60-mc03',
       notes: 'Plain notes, no XML.',
       decisions: ['plain decision'],
@@ -462,18 +462,18 @@ describe('Content sanitizer wiring: cmos_mission_complete (Sprint 60 m02)', () =
   });
 });
 
-describe('Content sanitizer wiring: cmos_mission_block (Sprint 60 m02)', () => {
+describe('Content sanitizer wiring: rbook_mission_block (Sprint 60 m02)', () => {
   let testDb: TestDb;
 
   beforeEach(() => {
     testDb = createTestDb();
-    CmosDetector.resetInstance();
+    RbookDetector.resetInstance();
   });
 
   afterEach(() => cleanup(testDb));
 
   it('sanitizes reason and blockers[]; persists clean text', async () => {
-    const result = await cmosMissionBlock({
+    const result = await rbookMissionBlock({
       missionId: 's60-mb01',
       reason: `Waiting on dashboard endpoint.${''}</content>noise`,
       blockers: ['dashboard m04 deploy', CORRUPTED],
@@ -496,18 +496,18 @@ describe('Content sanitizer wiring: cmos_mission_block (Sprint 60 m02)', () => {
   });
 });
 
-describe('Content sanitizer wiring: cmos_mission_defer (Sprint 60 m02)', () => {
+describe('Content sanitizer wiring: rbook_mission_defer (Sprint 60 m02)', () => {
   let testDb: TestDb;
 
   beforeEach(() => {
     testDb = createTestDb();
-    CmosDetector.resetInstance();
+    RbookDetector.resetInstance();
   });
 
   afterEach(() => cleanup(testDb));
 
   it('sanitizes reason and deferUntil; persists clean values into domain_fields', async () => {
-    const result = await cmosMissionDefer({
+    const result = await rbookMissionDefer({
       missionId: 's60-md01',
       reason: `Parked until partner ships.${''}</content>noise`,
       deferUntil: `after sprint 70${''}</content>more-noise`,
@@ -530,18 +530,18 @@ describe('Content sanitizer wiring: cmos_mission_defer (Sprint 60 m02)', () => {
   });
 });
 
-describe('Content sanitizer wiring: cmos_mission_update -> Deferred status (Sprint 60 m02)', () => {
+describe('Content sanitizer wiring: rbook_mission_update -> Deferred status (Sprint 60 m02)', () => {
   let testDb: TestDb;
 
   beforeEach(() => {
     testDb = createTestDb();
-    CmosDetector.resetInstance();
+    RbookDetector.resetInstance();
   });
 
   afterEach(() => cleanup(testDb));
 
   it('sanitizes notes when transitioning to Deferred via update', async () => {
-    const result = await cmosMissionUpdate({
+    const result = await rbookMissionUpdate({
       missionId: 's60-mu01',
       fields: {
         status: 'Deferred',
@@ -562,18 +562,18 @@ describe('Content sanitizer wiring: cmos_mission_update -> Deferred status (Spri
   });
 });
 
-describe('Content sanitizer wiring: cmos_context_update', () => {
+describe('Content sanitizer wiring: rbook_context_update', () => {
   let testDb: TestDb;
 
   beforeEach(() => {
     testDb = createTestDb();
-    CmosDetector.resetInstance();
+    RbookDetector.resetInstance();
   });
 
   afterEach(() => cleanup(testDb));
 
   it('sanitizes string values in arrayUpdates.constraints', async () => {
-    const result = await cmosContextUpdate({
+    const result = await rbookContextUpdate({
       contextType: 'project_context',
       arrayUpdates: {
         constraints: ['must be idempotent', CORRUPTED],

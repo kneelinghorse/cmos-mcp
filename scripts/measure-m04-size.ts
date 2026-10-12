@@ -2,12 +2,13 @@
 // ABOUTME: Reconstruct count-only telemetry records from one project's local transcript day and measure bytes.
 // ABOUTME: Uses the shipped serializer in an external temporary config, prints aggregates, and removes every packet.
 
+import { resolveRecordPaths } from '../src/intelligence/legacy-compat';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as readline from 'readline';
-import { classifyAction } from '../src/tools/cmos/action-taxonomy';
-import { harnessSessionHash } from '../src/tools/cmos/harness-session';
+import { classifyAction } from '../src/tools/rbook/action-taxonomy';
+import { harnessSessionHash } from '../src/tools/rbook/harness-session';
 import {
   appendTelemetry,
   readTelemetryReport,
@@ -15,8 +16,8 @@ import {
   telemetryDir,
   type TelemetryRecord,
   type TelemetryTarget,
-} from '../src/tools/cmos/local-telemetry';
-import { returnedIds, usedIds } from '../src/tools/cmos/telemetry-extract';
+} from '../src/tools/rbook/local-telemetry';
+import { returnedIds, usedIds } from '../src/tools/rbook/telemetry-extract';
 
 type Obj = Record<string, unknown>;
 const object = (value: unknown): Obj =>
@@ -159,7 +160,7 @@ async function claude(root: string, day: string): Promise<TelemetryRecord[]> {
           counts.claudeCompactions++;
         for (const blockValue of array(message.content)) {
           const block = object(blockValue);
-          if (inDay && block.type === 'tool_use' && /cmos/i.test(text(block.name))) {
+          if (inDay && block.type === 'tool_use' && /rbook/i.test(text(block.name))) {
             const name = text(block.name).split('__').pop()!;
             calls.set(text(block.id), {
               ts: text(row.timestamp),
@@ -207,7 +208,7 @@ async function codex(root: string, day: string): Promise<TelemetryRecord[]> {
       if (payload.type !== 'item_completed') continue;
       const item = object(payload.item);
       if (item.type === 'ContextCompaction') counts.codexCompactions++;
-      if (item.type !== 'McpToolCall' || !/cmos/i.test(text(item.server))) continue;
+      if (item.type !== 'McpToolCall' || !/rbook/i.test(text(item.server))) continue;
       let args = object(item.arguments);
       if (typeof item.arguments === 'string') {
         try {
@@ -293,7 +294,7 @@ function hookSizes(day: string, target: TelemetryTarget, env: NodeJS.ProcessEnv)
               { length: 13 },
               (_, i) => `P${String(i + 1).padStart(2, '0')}`
             ),
-            ceremony: `/cmos:${'x'.repeat(31)}`,
+            ceremony: `/reasonbook:${'x'.repeat(31)}`,
             ruleReadFailed: true,
           }
         : {}),
@@ -323,10 +324,10 @@ async function main(): Promise<void> {
     ![prompts, sessions].every((n) => Number.isSafeInteger(n) && n >= 0)
   )
     throw new Error('Pass explicit nonnegative prompt and session projection counts');
-  const target = targetForStore(path.join(root, 'cmos', 'db', 'cmos.sqlite'));
+  const target = targetForStore(resolveRecordPaths(root).dbPath);
   if (!target) throw new Error('The selected project store is unreadable');
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-m04-size-'));
-  const env = { ...process.env, CMOS_CONFIG_DIR: temp };
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-m04-size-'));
+  const env = { ...process.env, RBOOK_CONFIG_DIR: temp };
   let output: unknown;
   try {
     const claudeRecords = await claude(root, day);

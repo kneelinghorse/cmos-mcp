@@ -48,7 +48,7 @@ describe('cleanup-stale-credkeys', () => {
 
   /**
    * Register a projectRoot directly into the project-graph registry so we can seed a
-   * "registered" project regardless of whether it has CMOS — the low-level register()
+   * "registered" project regardless of whether it has Reasonbook — the low-level register()
    * takes an explicit project_id and never opens a store DB, which is exactly what
    * these tests need (we're exercising the cleanup logic, not the detector). s80-m02:
    * runCleanup now reads the graph registry (the JSON ProjectRegistry was deleted).

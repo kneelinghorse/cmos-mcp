@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// ABOUTME: s86-m08 — cmos_mission(action="move") and parked_missions over real MCP stdio against
+// ABOUTME: s86-m08 — rbook_mission(action="move") and parked_missions over real MCP stdio against
 // ABOUTME: the BUILT dist/, on a tmpdir COPY of the live store.
 
 /**
@@ -8,7 +8,7 @@
  * WHY THIS EXISTS ALONGSIDE THE HANDLER TESTS. `statusFilter`, `expiresAt` and `agentFeedback`
  * were each declared, handled correctly, and shipped DEAD — nothing reached the handler, because
  * the parameter never made it past the MCP boundary. A new ACTION plus a new PARAMETER is exactly
- * that shape: `cmos_mission`'s root inputSchema is `additionalProperties: false`, so an
+ * that shape: `rbook_mission`'s root inputSchema is `additionalProperties: false`, so an
  * unpublished `toSprintId` would be REJECTED at the boundary rather than silently ignored, and a
  * handler-only test would never notice.
  *
@@ -33,7 +33,7 @@ const REPO_ROOT = path.resolve(__dirname, '../..');
 const DIST_ENTRY = path.join(REPO_ROOT, 'dist', 'index.js');
 const PRIVATE = requiresPrivateEvidence({
   reason:
-    'This built-server mission-move E2E derives its scratch project from the private live CMOS store.',
+    'This built-server mission-move E2E derives its scratch project from the private live Reasonbook store.',
   paths: { liveDb: 'cmos/db/cmos.sqlite' },
 });
 
@@ -46,10 +46,10 @@ function mkTmp(prefix: string): string {
 
 /** A scratch project whose store is a COPY of the live one, plus two sprints to move between. */
 function scratchProject(): { projectRoot: string; dbPath: string } {
-  const projectRoot = mkTmp('cmos-m08-e2e-');
-  const dbDir = path.join(projectRoot, 'cmos', 'db');
+  const projectRoot = mkTmp('rbook-m08-e2e-');
+  const dbDir = path.join(projectRoot, 'rbook', 'db');
   fs.mkdirSync(dbDir, { recursive: true });
-  const dbPath = path.join(dbDir, 'cmos.sqlite');
+  const dbPath = path.join(dbDir, 'rbook.sqlite');
   for (const suffix of ['', '-wal', '-shm']) {
     const src = `${PRIVATE.paths.liveDb}${suffix}`;
     if (fs.existsSync(src)) fs.copyFileSync(src, `${dbPath}${suffix}`);
@@ -109,7 +109,7 @@ function row(
   }
 }
 
-PRIVATE.describe('cmos_mission(move) + parked_missions over stdio (s86-m08)', () => {
+PRIVATE.describe('rbook_mission(move) + parked_missions over stdio (s86-m08)', () => {
   let harness: StdioHarness | undefined;
   let projectRoot: string;
   let dbPath: string;
@@ -132,11 +132,11 @@ PRIVATE.describe('cmos_mission(move) + parked_missions over stdio (s86-m08)', ()
       cwd: projectRoot,
       env: {
         ...(process.env as Record<string, string>),
-        CMOS_PROJECT_ROOT: projectRoot,
-        CMOS_CONFIG_DIR: mkTmp('cmos-m08-e2e-cfg-'),
-        CMOS_CHECKPOINT_SYNC: 'off',
+        RBOOK_PROJECT_ROOT: projectRoot,
+        RBOOK_CONFIG_DIR: mkTmp('rbook-m08-e2e-cfg-'),
+        RBOOK_CHECKPOINT_SYNC: 'off',
       },
-      clientName: 'cmos-m08-move',
+      clientName: 'rbook-m08-move',
     });
   }, 180000);
 
@@ -149,7 +149,7 @@ PRIVATE.describe('cmos_mission(move) + parked_missions over stdio (s86-m08)', ()
     const tools = (await harness!.client.listTools()) as {
       tools: Array<{ name: string; inputSchema: Record<string, unknown> }>;
     };
-    const mission = tools.tools.find((t) => t.name === 'cmos_mission')!;
+    const mission = tools.tools.find((t) => t.name === 'rbook_mission')!;
     const schema = mission.inputSchema as {
       properties: Record<string, { enum?: string[]; description?: string }>;
     };
@@ -163,7 +163,7 @@ PRIVATE.describe('cmos_mission(move) + parked_missions over stdio (s86-m08)', ()
   }, 120000);
 
   it('executes a move end to end and writes the binding through the real dispatch path', async () => {
-    const res = await harness!.callTool('cmos_mission', {
+    const res = await harness!.callTool('rbook_mission', {
       action: 'move',
       missionId: 'e2e-m01',
       toSprintId: 'sprint-e2e-open',
@@ -181,7 +181,7 @@ PRIVATE.describe('cmos_mission(move) + parked_missions over stdio (s86-m08)', ()
   }, 120000);
 
   it('refuses a closed destination over the wire, with the reason an operator can act on', async () => {
-    const res = await harness!.callTool('cmos_mission', {
+    const res = await harness!.callTool('rbook_mission', {
       action: 'move',
       missionId: 'e2e-m01',
       toSprintId: 'sprint-e2e-closed',
@@ -196,7 +196,7 @@ PRIVATE.describe('cmos_mission(move) + parked_missions over stdio (s86-m08)', ()
   }, 120000);
 
   it('upgrades the copied store on a sprint read and reports parked work', async () => {
-    const res = await harness!.callOk('cmos_sprint', {
+    const res = await harness!.callOk('rbook_sprint', {
       action: 'show',
       sprintId: 'sprint-85',
       projectRoot,
@@ -226,19 +226,19 @@ PRIVATE.describe('cmos_mission(move) + parked_missions over stdio (s86-m08)', ()
 
   it('agrees across list, show and analytics — no two sprint read surfaces disagree', async () => {
     const list = harness!.dataOf(
-      await harness!.callOk('cmos_sprint', { action: 'list', limit: 100, projectRoot })
+      await harness!.callOk('rbook_sprint', { action: 'list', limit: 100, projectRoot })
     ) as { sprints: Array<{ id: string; totalMissions: number; parkedMissions: number }> };
     const s85List = list.sprints.find((s) => s.id === 'sprint-85')!;
     expect(s85List).toMatchObject({ totalMissions: 5, parkedMissions: 4 });
 
     const analytics = harness!.dataOf(
-      await harness!.callOk('cmos_sprint', { action: 'analytics', limit: 100, projectRoot })
+      await harness!.callOk('rbook_sprint', { action: 'analytics', limit: 100, projectRoot })
     ) as { sprints: Array<{ sprintId: string; totalMissions: number; parkedMissions: number }> };
     const s85Analytics = analytics.sprints.find((s) => s.sprintId === 'sprint-85')!;
     expect(s85Analytics).toMatchObject({ totalMissions: 5, parkedMissions: 4 });
 
     const retro = harness!.dataOf(
-      await harness!.callOk('cmos_sprint', { action: 'retro', sprintId: 'sprint-85', projectRoot })
+      await harness!.callOk('rbook_sprint', { action: 'retro', sprintId: 'sprint-85', projectRoot })
     ) as { kpis: { totalMissions: number; completionRate: number; parkedMissions: number } };
     // Retro computes from a raw missions SELECT, not the view — so this is the assertion that
     // catches the two code paths drifting apart.

@@ -18,6 +18,11 @@ describe('fs utility helpers', () => {
 
   afterEach(async () => {
     await removeDir(sandbox, { recursive: true, force: true });
+    // s95-m09: ensureTempDir puts the sandbox inside a fixed `<tmp>/fs-utils-test-` folder that
+    // runs sharing a temp folder also use, so remove that parent only once it is empty.
+    await fsPromises.rmdir(path.dirname(sandbox)).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== 'ENOTEMPTY' && error.code !== 'ENOENT') throw error;
+    });
   });
 
   it('returns false from pathExists for missing files', async () => {

@@ -16,13 +16,13 @@ function freshEnv(): TransformersEnv {
 
 describe('applyOfflineTransformersEnv (s78-m03)', () => {
   test('isOfflineEmbeddingsEnabled recognizes 1 / true only', () => {
-    expect(isOfflineEmbeddingsEnabled({ CMOS_OFFLINE_EMBEDDINGS: '1' } as NodeJS.ProcessEnv)).toBe(
+    expect(isOfflineEmbeddingsEnabled({ RBOOK_OFFLINE_EMBEDDINGS: '1' } as NodeJS.ProcessEnv)).toBe(
       true
     );
     expect(
-      isOfflineEmbeddingsEnabled({ CMOS_OFFLINE_EMBEDDINGS: 'true' } as NodeJS.ProcessEnv)
+      isOfflineEmbeddingsEnabled({ RBOOK_OFFLINE_EMBEDDINGS: 'true' } as NodeJS.ProcessEnv)
     ).toBe(true);
-    expect(isOfflineEmbeddingsEnabled({ CMOS_OFFLINE_EMBEDDINGS: '0' } as NodeJS.ProcessEnv)).toBe(
+    expect(isOfflineEmbeddingsEnabled({ RBOOK_OFFLINE_EMBEDDINGS: '0' } as NodeJS.ProcessEnv)).toBe(
       false
     );
     expect(isOfflineEmbeddingsEnabled({} as NodeJS.ProcessEnv)).toBe(false);
@@ -30,14 +30,14 @@ describe('applyOfflineTransformersEnv (s78-m03)', () => {
 
   test('offline flag forces allowRemoteModels=false', () => {
     const env = freshEnv();
-    applyOfflineTransformersEnv(env, { CMOS_OFFLINE_EMBEDDINGS: '1' } as NodeJS.ProcessEnv);
+    applyOfflineTransformersEnv(env, { RBOOK_OFFLINE_EMBEDDINGS: '1' } as NodeJS.ProcessEnv);
     expect(env.allowRemoteModels).toBe(false);
   });
 
   test('cache dir sets both cacheDir and localModelPath', () => {
     const env = freshEnv();
     applyOfflineTransformersEnv(env, {
-      CMOS_MODEL_CACHE_DIR: '/models/cache',
+      RBOOK_MODEL_CACHE_DIR: '/models/cache',
     } as NodeJS.ProcessEnv);
     expect(env.cacheDir).toBe('/models/cache');
     expect(env.localModelPath).toBe('/models/cache');
@@ -53,15 +53,15 @@ describe('applyOfflineTransformersEnv (s78-m03)', () => {
 
   test('blank cache dir is ignored', () => {
     const env = freshEnv();
-    applyOfflineTransformersEnv(env, { CMOS_MODEL_CACHE_DIR: '   ' } as NodeJS.ProcessEnv);
+    applyOfflineTransformersEnv(env, { RBOOK_MODEL_CACHE_DIR: '   ' } as NodeJS.ProcessEnv);
     expect(env.cacheDir).toBeUndefined();
   });
 
   test('both flags together', () => {
     const env = freshEnv();
     applyOfflineTransformersEnv(env, {
-      CMOS_OFFLINE_EMBEDDINGS: 'true',
-      CMOS_MODEL_CACHE_DIR: '/pre/seeded/models',
+      RBOOK_OFFLINE_EMBEDDINGS: 'true',
+      RBOOK_MODEL_CACHE_DIR: '/pre/seeded/models',
     } as NodeJS.ProcessEnv);
     expect(env.allowRemoteModels).toBe(false);
     expect(env.cacheDir).toBe('/pre/seeded/models');

@@ -26,7 +26,7 @@ function setup(mirror = false) {
   git('config', 'user.name', 'Fixture');
   git('config', 'user.email', 'fixture@example.invalid');
   put('public.txt', 'public');
-  if (!mirror) put('cmos/private.txt', 'private checkout identity');
+  if (!mirror) put(`${fixturePath.split('/')[0]}/private.txt`, 'private checkout identity');
   git('add', '.');
   git('commit', '-qm', 'fixture');
   put(
@@ -144,7 +144,11 @@ if(fs.existsSync(mutation)){const target=JSON.parse(fs.readFileSync(mutation,'ut
   };
   put(`${fixturePath}/frozen-baseline.json`, baseline);
   const contract = {
-    schemaVersion: 1,
+    schemaVersion: 2,
+    sourceRenames: {} as Record<
+      string,
+      { path: string; replacements: Array<{ from: string; to: string; count: number }> }
+    >,
     mission: 's94-m06',
     fixtureRoot: fixturePath,
     baseline: {
@@ -202,6 +206,84 @@ it.each(['src/parser.ts', 'scripts/retrieval-quality-fixture.js'])(
     expect(fs.existsSync(path.join(root, 'child-ran'))).toBe(false);
   }
 );
+function renameSealedSources() {
+  const fixture = setup();
+  const parser = fs.readFileSync(path.join(root, 'src/parser.ts'), 'utf8');
+  put('src/renamed-parser.ts', parser.replace('parser', 'renamedParser'));
+  fs.unlinkSync(path.join(root, 'src/parser.ts'));
+  fixture.contract.sourceRenames['src/parser.ts'] = {
+    path: 'src/renamed-parser.ts',
+    replacements: [{ from: 'parser', to: 'renamedParser', count: 1 }],
+  };
+  fixture.contract.requiredSourceFiles[0] = 'src/renamed-parser.ts';
+  Reflect.deleteProperty(fixture.candidate.sourceHashes, 'src/parser.ts');
+  Object.assign(fixture.candidate.sourceHashes, {
+    'src/renamed-parser.ts': hash('src/renamed-parser.ts'),
+  });
+  const evaluator = 'scripts/measure-retrieval-quality.js';
+  const bytes = fs.readFileSync(path.join(root, evaluator), 'utf8');
+  put(evaluator, bytes.split('mutation').join('renamedMutation'));
+  fixture.contract.sourceRenames[evaluator] = {
+    path: evaluator,
+    replacements: [
+      { from: 'mutation', to: 'renamedMutation', count: bytes.split('mutation').length - 1 },
+    ],
+  };
+  fixture.candidate.evaluatorHashes['measure-retrieval-quality.js'] = hash(evaluator);
+  put(contractPath, fixture.contract);
+  fixture.saveCandidate();
+  return fixture;
+}
+it('proves renamed parser/evaluator bytes against their original seals without rewriting frozen evidence', () => {
+  const fixture = renameSealedSources();
+  const sealed = Object.entries(fixture.contract.evidenceHashes).map(([name, digest]) => [
+    name,
+    digest,
+  ]);
+  expect(runGate({ root }).skipped).toBe(false);
+  for (const [name, digest] of sealed) expect(hash(`${fixturePath}/${name}`)).toBe(digest);
+  expect(fixture.contract.parserHashes['src/parser.ts']).not.toBe(hash('src/renamed-parser.ts'));
+});
+it.each([
+  'parser',
+  'evaluator',
+  'missing',
+  'unrecorded',
+  'count',
+  'duplicate-path',
+  'extra-mapping',
+])('rejects a %s defect in the recorded source rename before running the evaluator', (change) => {
+  const fixture = renameSealedSources();
+  if (change === 'parser') put('src/renamed-parser.ts', 'export const renamedParser = false;');
+  if (change === 'evaluator')
+    fs.appendFileSync(path.join(root, 'scripts/measure-retrieval-quality.js'), '\n// unreviewed');
+  if (change === 'missing') fs.unlinkSync(path.join(root, 'src/renamed-parser.ts'));
+  if (change === 'unrecorded')
+    Reflect.deleteProperty(fixture.contract.sourceRenames, 'src/parser.ts');
+  if (change === 'count') fixture.contract.sourceRenames['src/parser.ts'].replacements[0].count++;
+  if (change === 'duplicate-path')
+    fixture.contract.sourceRenames['scripts/measure-retrieval-quality.js'].path =
+      'src/renamed-parser.ts';
+  if (change === 'extra-mapping')
+    fixture.contract.sourceRenames['src/unknown.ts'] = { path: 'src/other.ts', replacements: [] };
+  put(contractPath, fixture.contract);
+  expect(() => runGate({ root })).toThrow(/sealed hash|source rename/);
+  expect(fs.existsSync(path.join(root, 'child-ran'))).toBe(false);
+});
+it('rejects changes to renamed source during the evaluator child', () => {
+  renameSealedSources();
+  put('child-renamedMutation.json', JSON.stringify('src/renamed-parser.ts'));
+  expect(() => runGate({ root })).toThrow(/sealed hash/);
+  expect(fs.existsSync(path.join(root, 'child-ran'))).toBe(true);
+});
+it('requires the current evaluator receipt instead of reusing its historical seal', () => {
+  const fixture = renameSealedSources();
+  fixture.candidate.evaluatorHashes['measure-retrieval-quality.js'] =
+    fixture.contract.evaluatorHashes['scripts/measure-retrieval-quality.js'];
+  fixture.saveCandidate();
+  expect(() => runGate({ root })).toThrow(/candidate evaluator hashes/);
+  expect(fs.existsSync(path.join(root, 'child-ran'))).toBe(true);
+});
 it.each(['labels-v5-review/manifest.json', 'labels-v5-review/labels.json'])(
   'requires unchanged independent parser equivalence evidence: %s',
   (name) => {
@@ -277,7 +359,7 @@ it('skips a structurally identified public mirror with a reason and without read
 });
 it('does not treat missing private fixtures or deleted HEAD-tracked roots as a mirror', () => {
   setup();
-  fs.rmSync(path.join(root, 'cmos'), { recursive: true });
+  fs.rmSync(path.join(root, fixturePath.split('/')[0]), { recursive: true });
   git('add', '-u');
   expect(() => runGate({ root })).toThrow(/missing/);
 });
@@ -287,8 +369,8 @@ it('fails closed when mirror exclusion syntax is not the supported literal inven
   expect(() => runGate({ root })).toThrow(/contract path/);
 });
 it.each([
-  'PRIVATE_PATHS=(cmos) ; PRIVATE_PATHS=(other)\nDOCS_EXCLUDES=(docs/private)',
-  'PRIVATE_PATHS=(cmos)\nDOCS_EXCLUDES=(cmos)',
+  'PRIVATE_PATHS=(rbook) ; PRIVATE_PATHS=(other)\nDOCS_EXCLUDES=(docs/private)',
+  'PRIVATE_PATHS=(rbook)\nDOCS_EXCLUDES=(rbook)',
 ])('does not guess the mirror policy from ambiguous shell arrays', (source) => {
   setup(true);
   put('scripts/mirror-to-public.sh', source);

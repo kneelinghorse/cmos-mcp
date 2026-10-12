@@ -6,8 +6,8 @@ import { promises as fs } from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-import { CmosDetector } from '../../src/intelligence/cmos-detector';
-import { CMOS_SCHEMA } from '../../src/tools/cmos/schema';
+import { RbookDetector } from '../../src/intelligence/rbook-detector';
+import { RBOOK_SCHEMA } from '../../src/tools/rbook/schema';
 
 export interface BddTestInstance {
   projectRoot: string;
@@ -16,21 +16,21 @@ export interface BddTestInstance {
 }
 
 /**
- * Creates a minimal CMOS project structure at a temp directory.
- * The sqlite db lives at <projectRoot>/cmos/db/cmos.sqlite, matching
+ * Creates a minimal Reasonbook project structure at a temp directory.
+ * The sqlite db lives at <projectRoot>/rbook/db/rbook.sqlite, matching
  * what the production client resolves when given a projectRoot.
  */
 export async function createBddInstance(): Promise<BddTestInstance> {
-  const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'cmos-bdd-'));
-  const dbDir = path.join(projectRoot, 'cmos', 'db');
+  const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'rbook-bdd-'));
+  const dbDir = path.join(projectRoot, 'rbook', 'db');
   await fs.mkdir(dbDir, { recursive: true });
-  const dbPath = path.join(dbDir, 'cmos.sqlite');
+  const dbPath = path.join(dbDir, 'rbook.sqlite');
 
   const db = new Database(dbPath);
-  db.exec(CMOS_SCHEMA);
+  db.exec(RBOOK_SCHEMA);
   db.close();
 
-  CmosDetector.resetInstance();
+  RbookDetector.resetInstance();
 
   return {
     projectRoot,

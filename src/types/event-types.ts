@@ -1,4 +1,4 @@
-// ABOUTME: Sprint 69 m03 — the CmosGenesisEventType discriminated union and the
+// ABOUTME: Sprint 69 m03 — the RbookGenesisEventType discriminated union and the
 // table → genesis-verb map (s68 ADR Section 2.4). This is the single source of
 // truth shared between row INSERT sites (via genesisColumns) and the
 // sync_event_queue backfill emitters; adding a new event_type without updating
@@ -13,7 +13,7 @@
  * 8 active values + 1 reserved (`capture_recorded`, activated when `captures`
  * becomes its own table — FUTURE, not s69).
  */
-export type CmosGenesisEventType =
+export type RbookGenesisEventType =
   | 'decision_captured'
   | 'learning_captured'
   | 'mission_added'
@@ -48,7 +48,7 @@ export type FirehoseTable = (typeof FIREHOSE_TABLES)[number];
  * (e.g. `decision_imported`), expand both this map's value type and the CHECK —
  * but only with same-sprint sync-emitter parity (ADR §2.5).
  */
-export const GENESIS_TYPE_BY_TABLE: Record<FirehoseTable, CmosGenesisEventType> = {
+export const GENESIS_TYPE_BY_TABLE: Record<FirehoseTable, RbookGenesisEventType> = {
   strategic_decisions: 'decision_captured',
   learnings: 'learning_captured',
   missions: 'mission_added',

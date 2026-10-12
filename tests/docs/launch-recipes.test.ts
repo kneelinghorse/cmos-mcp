@@ -30,7 +30,7 @@ function packageSpecs(text: string): string[] {
   return text
     .split('\n')
     .filter((line) => !line.includes('img.shields.io') && !line.includes('npmjs.com/package'))
-    .flatMap((line) => line.match(/@aquex\/cmos-mcp(@[^\s"'`,\]]*)?/g) ?? []);
+    .flatMap((line) => line.match(/@aquex\/reasonbook(@[^\s"'`,\]]*)?/g) ?? []);
 }
 
 function parseSemver(value: string): { core: bigint[]; pre: string[] } | undefined {
@@ -66,24 +66,25 @@ function compareSemver(a: string, b: string): number {
 }
 
 function isExactPackageSpec(spec: string): boolean {
-  const prefix = '@aquex/cmos-mcp@';
+  const prefix = '@aquex/reasonbook@';
   return spec.startsWith(prefix) && parseSemver(spec.slice(prefix.length)) !== undefined;
 }
 
 describe('s92-m07 — launch recipes', () => {
   it('accepts exact stable and prerelease pins, but refuses ranges, tags and malformed versions', () => {
     for (const version of ['3.2.0', '3.3.0-rc.1', '3.3.0-rc.1+build.2']) {
-      expect(isExactPackageSpec(`@aquex/cmos-mcp@${version}`)).toBe(true);
+      expect(isExactPackageSpec(`@aquex/reasonbook@${version}`)).toBe(true);
     }
     for (const spec of [
-      '@aquex/cmos-mcp',
-      '@aquex/cmos-mcp@latest',
-      '@aquex/cmos-mcp@^3.3.0',
-      '@aquex/cmos-mcp@~3.3.0',
-      '@aquex/cmos-mcp@3.3.x',
-      '@aquex/cmos-mcp@3.03.0',
-      '@aquex/cmos-mcp@3.3.0-rc.01',
-      '@aquex/cmos-mcp@3.3.0-',
+      '@aquex/reasonbook',
+      '@aquex/reasonbook@latest',
+      '@aquex/reasonbook@^3.3.0',
+      '@aquex/reasonbook@~3.3.0',
+      '@aquex/reasonbook@3.3.x',
+      '@aquex/reasonbook@3.03.0',
+      '@aquex/reasonbook@3.3.0-rc.01',
+      '@aquex/reasonbook@3.3.0-',
+      '@aquex/cmos-mcp@3.3.0',
     ]) {
       expect(isExactPackageSpec(spec)).toBe(false);
     }
@@ -119,7 +120,7 @@ describe('s92-m07 — launch recipes', () => {
       for (const line of text.split('\n')) {
         if (
           /\bnpx\b/.test(line) &&
-          line.includes('@aquex/cmos-mcp') &&
+          line.includes('@aquex/reasonbook') &&
           !line.includes('--prefer-offline')
         ) {
           offenders.push(`${doc}: ${line.trim()}`);
@@ -135,7 +136,7 @@ describe('s92-m07 — launch recipes', () => {
     expect(offenders).toEqual([]);
     // Non-vacuity: both forms are present in the docs this gate reads.
     expect(DOCS.some((doc) => /"command":\s*"npx"/.test(read(doc)))).toBe(true);
-    expect(DOCS.some((doc) => /^npx .*@aquex\/cmos-mcp/m.test(read(doc)))).toBe(true);
+    expect(DOCS.some((doc) => /^npx .*@aquex\/reasonbook/m.test(read(doc)))).toBe(true);
   });
 
   it('pin one version, and that version is this release', () => {
@@ -162,7 +163,85 @@ describe('s92-m07 — launch recipes', () => {
 
   it('recommend the global install as well', () => {
     for (const doc of DOCS) {
-      expect(read(doc)).toContain(`npm install -g @aquex/cmos-mcp@`);
+      expect(read(doc)).toContain(`npm install -g @aquex/reasonbook@`);
     }
+  });
+
+  it('name the former package only to uninstall it (s99-m02)', () => {
+    // The pins above follow the new name, so an install or launch of @aquex/cmos-mcp would pass
+    // them unseen. Remove a global old package so an obsolete launcher cannot remain on PATH;
+    // the uninstall instruction is the one place the former package belongs.
+    const strays = DOCS.flatMap((doc) =>
+      read(doc)
+        .split('\n')
+        .filter(
+          (line) =>
+            line.includes('@aquex/cmos-mcp') && !line.includes('npm uninstall -g @aquex/cmos-mcp')
+        )
+        .map((line) => `${doc}: ${line.trim()}`)
+    );
+    expect(strays).toEqual([]);
+    for (const doc of DOCS) expect(read(doc)).toContain('npm uninstall -g @aquex/cmos-mcp');
+  });
+
+  it('never run the unscoped reasonbook package (s99-m02)', () => {
+    // `npx reasonbook` fetches an unrelated 2017 package, not this one. Scope: the public pages and
+    // the shipped skills; shell lines that run it through npx, npm exec, npm x, bunx, pnpm dlx or
+    // yarn dlx (directly or with --package / -p), lines that install it with npm, pnpm, yarn or bun,
+    // and any JSON args array holding the bare name. Holes: a command split across lines, other
+    // launchers and installers, and text outside these files (the server's own remedies are pinned
+    // by their tests).
+    const pages = [
+      ...DOCS,
+      'docs/harnesses.md',
+      'docs/trust.md',
+      'SECURITY.md',
+      'plugins/reasonbook/README.md',
+      'rbook-seed/README.md',
+      'rbook-seed/docs/getting-started.md',
+      ...['plugins/reasonbook/skills', 'plugins/reasonbook-chat/skills'].flatMap((dir) =>
+        fs.readdirSync(path.join(REPO_ROOT, dir)).map((name) => `${dir}/${name}/SKILL.md`)
+      ),
+    ];
+    const shell =
+      /\b(?:npx|bunx|pnpm\s+dlx|yarn\s+dlx|npm\s+(?:exec|x))(?:\s+-{1,2}[\w-]+(?:=\S+)?)*\s+reasonbook\b|(?:--package[= ]|\s-p\s+)reasonbook\b|\b(?:npm\s+(?:install|i|add)|pnpm\s+add|yarn\s+(?:global\s+)?add|bun\s+add)(?:\s+-{1,2}[\w-]+(?:=\S+)?)*\s+reasonbook(?:@\S*)?(?![\w/-])/;
+    const config = /"args":\s*\[[^\]]*"reasonbook(?:@[^"]*)?"/g;
+    for (const line of [
+      'npx -y reasonbook serve',
+      'npm exec reasonbook',
+      'bunx reasonbook',
+      'pnpm dlx reasonbook init',
+      'npx --package=reasonbook reasonbook',
+      'npx -p reasonbook init',
+      'npm x reasonbook',
+      'npm install -g reasonbook',
+      'npm i reasonbook@latest',
+      'pnpm add -g reasonbook',
+      'yarn global add reasonbook',
+      'bun add -g reasonbook',
+    ])
+      expect({ line, flagged: shell.test(line) }).toEqual({ line, flagged: true });
+    for (const line of [
+      'npx --prefer-offline -y @aquex/reasonbook@3.6.0 serve',
+      'npm install -g @aquex/reasonbook@3.6.0',
+      'npm uninstall -g @aquex/cmos-mcp',
+    ])
+      expect({ line, flagged: shell.test(line) }).toEqual({ line, flagged: false });
+    expect(shell.test('npm install -g @aquex/reasonbook@3.6.0 && reasonbook --version')).toBe(
+      false
+    );
+    expect('"command": "npx",\n  "args": ["-y", "reasonbook@3.6.0"]'.match(config)).toHaveLength(1);
+    expect('{ "args": ["exec", "reasonbook"], "command": "npm" }'.match(config)).toHaveLength(1);
+    expect(
+      '"args": ["--prefer-offline", "-y", "@aquex/reasonbook@3.6.0"]'.match(config)
+    ).toBeNull();
+    const offenders = pages.flatMap((page) => {
+      const text = read(page);
+      return [
+        ...text.split('\n').filter((line) => shell.test(line)),
+        ...(text.match(config) ?? []),
+      ].map((hit) => `${page}: ${hit.replace(/\s+/g, ' ').trim()}`);
+    });
+    expect(offenders).toEqual([]);
   });
 });

@@ -22,9 +22,10 @@
  * @module auth/project-key-capture
  */
 
-import { DashboardClient } from '../tools/cmos/dashboard-client';
-import type { RegisterProjectResult } from '../tools/cmos/dashboard-client';
-import { withClientAsync } from '../tools/cmos/client';
+import { getSetting } from '../intelligence/legacy-compat';
+import { DashboardClient } from '../tools/rbook/dashboard-client';
+import type { RegisterProjectResult } from '../tools/rbook/dashboard-client';
+import { withClientAsync } from '../tools/rbook/client';
 import {
   CredentialStore,
   type KeySource,
@@ -526,13 +527,13 @@ function startupResultForAttributionFailure(
       return {
         checked: true,
         status: 'skipped-no-user-scoped-key',
-        message: `credential store at ${failure.storePath} holds no user-scoped keys, so an auto-issued project key cannot be attributed; run cmos_auth(action="login") to bootstrap one`,
+        message: `credential store at ${failure.storePath} holds no user-scoped keys, so an auto-issued project key cannot be attributed; run rbook_auth(action="login") to bootstrap one`,
       };
     case 'unattributable-credential':
       return {
         checked: true,
         status: 'skipped-unattributable-credential',
-        message: `the resolved dashboard credential (${describeAttributionArm(failure.via)}) is not a device-code user key, so the dashboard cannot bind a reissued project key to a parent; migrate to a device-code user key via cmos_auth(action="login")`,
+        message: `the resolved dashboard credential (${describeAttributionArm(failure.via)}) is not a device-code user key, so the dashboard cannot bind a reissued project key to a parent; migrate to a device-code user key via rbook_auth(action="login")`,
       };
     case 'inconsistent-resolution':
       return {
@@ -551,9 +552,9 @@ export function describeAttributionArm(
     case 'explicit-override':
       return 'a caller-supplied apiKey override';
     case 'legacy-env':
-      return 'the legacy CMOS_DASHBOARD_API_KEY environment variable';
+      return 'the legacy RBOOK_DASHBOARD_API_KEY environment variable';
     case 'password-fallback':
-      return 'the CMOS_DASHBOARD_USER + CMOS_DASHBOARD_PASSWORD fallback';
+      return 'the RBOOK_DASHBOARD_USER + RBOOK_DASHBOARD_PASSWORD fallback';
   }
 }
 
@@ -567,7 +568,7 @@ export interface StartupCredentialCheckResult {
   warned: boolean;
   /** Count of user-scoped keys observed in the local store (0 when empty). */
   userScopedKeyCount: number;
-  /** s78-m06: whether a dashboard was explicitly configured (CMOS_DASHBOARD_URL set).
+  /** s78-m06: whether a dashboard was explicitly configured (RBOOK_DASHBOARD_URL set).
    *  The empty-store WARN is gated on this so a local-forever install boots silent. */
   dashboardConfigured: boolean;
 }
@@ -577,23 +578,23 @@ export interface StartupCredentialCheckResult {
  * when no user-scoped keys are present. A fresh install with no device-code
  * bootstrap looks identical to a broken install from the MCP's perspective —
  * this makes that state audible so the operator knows to run
- * `cmos_auth(action="login")` before attempting a send.
+ * `rbook_auth(action="login")` before attempting a send.
  *
  * Non-fatal: never throws. Startup continues regardless.
  *
  * s78-m06: the empty-store WARN is gated on dashboard INTENT. A local-forever install
- * with no CMOS_DASHBOARD_URL needs no credentials, so the WARN was pure noise on the
+ * with no RBOOK_DASHBOARD_URL needs no credentials, so the WARN was pure noise on the
  * quietest, most common path — it is suppressed there. When the operator explicitly
- * configured a dashboard (CMOS_DASHBOARD_URL set), an empty store IS actionable, so the
+ * configured a dashboard (RBOOK_DASHBOARD_URL set), an empty store IS actionable, so the
  * WARN stands.
  */
 /**
- * s78-m06 / s92-m04 — whether the operator EXPLICITLY configured a dashboard: CMOS_DASHBOARD_URL
+ * s78-m06 / s92-m04 — whether the operator EXPLICITLY configured a dashboard: RBOOK_DASHBOARD_URL
  * is set. Deliberately not the effective URL, whose baked default would make every local-only
  * install look opted in. The startup WARN and onboard's login nag both ask this one question.
  */
 export function dashboardExplicitlyConfigured(dashboardUrl?: string): boolean {
-  return (dashboardUrl ?? process.env.CMOS_DASHBOARD_URL ?? '').trim().length > 0;
+  return (dashboardUrl ?? getSetting('RBOOK_DASHBOARD_URL') ?? '').trim().length > 0;
 }
 
 export async function runStartupCredentialCheck(
@@ -613,7 +614,7 @@ export async function runStartupCredentialCheck(
   if (count === 0) {
     if (dashboardConfigured) {
       writer(
-        '[WARN] cmos-mcp: no user-scoped credentials found; run cmos_auth(action="login") to bootstrap\n'
+        '[WARN] reasonbook: no user-scoped credentials found; run rbook_auth(action="login") to bootstrap\n'
       );
       return {
         status: 'empty-credential-store',

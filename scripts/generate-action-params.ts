@@ -22,7 +22,7 @@
  * Prints only. Never writes, never asserts.
  */
 
-import { CMOS_TOOL_DEFINITIONS, CMOS_ACTION_PARAMS } from '../src/tools/cmos/index';
+import { RBOOK_TOOL_DEFINITIONS, RBOOK_ACTION_PARAMS } from '../src/tools/rbook/index';
 import { walkRouterParams, actionEvidence } from './lib/router-param-walker';
 
 interface ToolDefLike {
@@ -39,14 +39,14 @@ function actionEnumOf(def: ToolDefLike): readonly string[] | undefined {
 }
 
 function main(): void {
-  const defs = CMOS_TOOL_DEFINITIONS as unknown as ToolDefLike[];
+  const defs = RBOOK_TOOL_DEFINITIONS as unknown as ToolDefLike[];
   const result = walkRouterParams({
     toolDefinitions: defs as Array<{
       name: string;
       inputSchema?: { properties?: Record<string, unknown> };
     }>,
   });
-  const shipped = CMOS_ACTION_PARAMS as Record<string, Record<string, readonly string[]>>;
+  const shipped = RBOOK_ACTION_PARAMS as Record<string, Record<string, readonly string[]>>;
 
   console.log('╔══════════════════════════════════════════════════════════════════════════════╗');
   console.log('║ s86-m04 ACTION_PARAMS first cut — generated, then hand-audited               ║');
@@ -78,7 +78,7 @@ function main(): void {
     );
     for (const action of enumMembers) {
       actions += 1;
-      // An action with no branch is NOT evidence-free: cmos_message's `whoami` early-returns
+      // An action with no branch is NOT evidence-free: rbook_message's `whoami` early-returns
       // before the switch, so the switch has no case for it, and the router-scope reads
       // (`projectRoot`, consumed for every action) still apply.
       const ev =

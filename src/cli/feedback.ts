@@ -5,16 +5,16 @@
 import { oneLine, parseArgs, resolveCliProject, type CliIo } from './core';
 import { sanitizeContentField } from '../intelligence/content-sanitizer';
 import { observeCliResult } from './telemetry';
-import { recordAgentFeedback } from '../tools/cmos/agent-feedback';
-import { withClient } from '../tools/cmos/client';
-import { createError, createSuccess } from '../tools/cmos/errors';
-import { attachWarnings } from '../tools/cmos/format-warnings';
-import { getProjectId } from '../tools/cmos/project-id';
-import { isReadOnlyAgentSession } from '../tools/cmos/read-only-agent-guard';
-import { captureToolCall } from '../tools/cmos/tool-call-context';
-import type { CmosToolResult } from '../tools/cmos/types';
+import { recordAgentFeedback } from '../tools/rbook/agent-feedback';
+import { withClient } from '../tools/rbook/client';
+import { createError, createSuccess } from '../tools/rbook/errors';
+import { attachWarnings } from '../tools/rbook/format-warnings';
+import { getProjectId } from '../tools/rbook/project-id';
+import { isReadOnlyAgentSession } from '../tools/rbook/read-only-agent-guard';
+import { captureToolCall } from '../tools/rbook/tool-call-context';
+import type { RbookToolResult } from '../tools/rbook/types';
 
-type FeedbackReceipt = CmosToolResult<
+type FeedbackReceipt = RbookToolResult<
   { feedbackId: number } | { dryRun: true; content: string; projectRoot: string }
 >;
 
@@ -29,7 +29,7 @@ export async function runFeedback(argv: readonly string[], io: CliIo): Promise<n
     } else if (!result.success) {
       io.stderr(
         oneLine(
-          `cmos-mcp feedback: ${result.error?.message ?? 'Feedback was not recorded.'} ` +
+          `reasonbook feedback: ${result.error?.message ?? 'Feedback was not recorded.'} ` +
             `${result.error?.suggestion ?? ''} ${(result.warnings ?? []).join(' ')}`
         )
       );
@@ -62,7 +62,7 @@ export async function runFeedback(argv: readonly string[], io: CliIo): Promise<n
     return finish(
       createError({
         code: 'READ_ONLY_AGENT',
-        message: 'CMOS_AGENT_ROLE=review permits only reads; feedback was not recorded.',
+        message: 'RBOOK_AGENT_ROLE=review permits only reads; feedback was not recorded.',
         suggestion: 'Use a write-enabled session to file feedback.',
       })
     );
@@ -75,12 +75,12 @@ export async function runFeedback(argv: readonly string[], io: CliIo): Promise<n
   if (resolution.kind !== 'store') {
     return finish(
       createError({
-        code: 'CMOS_NOT_DETECTED',
+        code: 'RBOOK_NOT_DETECTED',
         message:
           resolution.kind === 'store-missing'
-            ? `The CMOS store is missing: ${resolution.dbPath}.`
-            : `No CMOS project at ${resolution.kind === 'none' ? resolution.workingDir : resolution.dir}.`,
-        suggestion: 'Pass --project-root <dir> for an existing CMOS project.',
+            ? `The Reasonbook store is missing: ${resolution.dbPath}.`
+            : `No Reasonbook project at ${resolution.kind === 'none' ? resolution.workingDir : resolution.dir}.`,
+        suggestion: 'Pass --project-root <dir> for an existing Reasonbook project.',
       })
     );
   }
@@ -110,7 +110,7 @@ export async function runFeedback(argv: readonly string[], io: CliIo): Promise<n
     const result = await withClient<{ feedbackId: number }>(
       (client) => {
         const recorded = recordAgentFeedback(client, content, {
-          toolName: 'cmos-mcp feedback',
+          toolName: 'reasonbook feedback',
           projectId: getProjectId(client),
         });
         warnings.push(...recorded.warnings);

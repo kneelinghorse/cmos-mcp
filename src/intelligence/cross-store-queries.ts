@@ -1,12 +1,12 @@
-// ABOUTME: Sprint 69 m06 — the four named CMOS portfolio queries (s68 ADR Section 5.4).
+// ABOUTME: Sprint 69 m06 — the four named Reasonbook portfolio queries (s68 ADR Section 5.4).
 // ABOUTME: Example consumers of queryAcrossStores, each carrying per-project source attribution.
 
 /**
  * Worked implementations of the four named cross-store queries from s68 ADR
  * Section 5.4, built on {@link queryAcrossStores}. Each row carries `project_id`
  * source attribution. These double as the end-to-end exercise of the fan-out API
- * and as ready-made building blocks for the `cmos_decisions(acrossProjects)`
- * integration and any future `cmos_portfolio` surface.
+ * and as ready-made building blocks for the `rbook_decisions(acrossProjects)`
+ * integration and any future `rbook_portfolio` surface.
  *
  * @module intelligence/cross-store-queries
  */
@@ -95,7 +95,7 @@ export function activeMissionsAcrossProjects(
     concurrency: opts.concurrency,
     projectFilter: opts.projectFilter,
     registry: opts.registry,
-    // s87-m03: forwarded so `cmos_review` can derive store freshness from CONTENT on the
+    // s87-m03: forwarded so `rbook_review` can derive store freshness from CONTENT on the
     // connection this fan-out already holds, instead of from a `-wal` mtime this fan-out itself
     // created. Optional and undefined by default — every other caller is unaffected.
     perStoreProbe: opts.perStoreProbe,

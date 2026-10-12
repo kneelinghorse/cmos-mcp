@@ -6,7 +6,7 @@
 /**
  * Sprint 86 m03 — the second consumer of `scripts/lib/router-param-walker`.
  *
- * The gate (tests/tools/cmos/router-param-forwarding.test.ts) is the first. A jest test is not
+ * The gate (tests/tools/rbook/router-param-forwarding.test.ts) is the first. A jest test is not
  * invokable as a codegen step, so m04 — which must generate its ACTION_PARAMS first cut from the
  * same walk — calls THIS. One walker, two consumers: the unwrap trap documented in the walker's
  * header is solved in exactly one place and the two walks cannot drift.
@@ -14,7 +14,7 @@
  * Prints only. Never writes, never asserts.
  */
 
-import { CMOS_TOOL_DEFINITIONS } from '../src/tools/cmos/index';
+import { RBOOK_TOOL_DEFINITIONS } from '../src/tools/rbook/index';
 import {
   walkRouterParams,
   surfaceAcceptedKeys,
@@ -23,7 +23,7 @@ import {
 
 function main(): void {
   const result = walkRouterParams({
-    toolDefinitions: CMOS_TOOL_DEFINITIONS as unknown as Array<{
+    toolDefinitions: RBOOK_TOOL_DEFINITIONS as unknown as Array<{
       name: string;
       inputSchema?: { properties?: Record<string, unknown> };
     }>,
@@ -34,7 +34,7 @@ function main(): void {
   console.log('╚══════════════════════════════════════════════════════════════════════════════╝');
   console.log(
     `\nts.Program: ${result.programFileCount} src files in ${result.programBuildMs}ms\n` +
-      `Registered tools walked: ${result.tools.length} of ${CMOS_TOOL_DEFINITIONS.length}\n`
+      `Registered tools walked: ${result.tools.length} of ${RBOOK_TOOL_DEFINITIONS.length}\n`
   );
 
   console.log('── DISPATCH SHAPE (computed for every registered tool) ─────────────────────────');
@@ -47,7 +47,7 @@ function main(): void {
     console.log(`\n### ${t.tool}  [${t.shape}]  entry ${t.entry.file}:${t.entry.line}`);
     for (const branch of t.branches) {
       if (branch.calls.length === 0) {
-        console.log(`  ${branch.action}: (no delegated CmosToolResult call)`);
+        console.log(`  ${branch.action}: (no delegated RbookToolResult call)`);
         continue;
       }
       const scored = branch.calls.filter((c) => c.shape !== 'NOT-A-FORWARDING-SITE');

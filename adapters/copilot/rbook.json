@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "type": "command",
+        "bash": "reasonbook hook session-start --harness copilot --hook-source rbook-copilot",
+        "powershell": "reasonbook hook session-start --harness copilot --hook-source rbook-copilot",
+        "timeoutSec": 3
+      }
+    ]
+  }
+}

@@ -20,44 +20,44 @@ import { runCli } from '../../src/cli';
 import type { CliIo } from '../../src/cli/core';
 import { onStop } from '../../src/cli/drafts-hook';
 import { transcriptKey } from '../../src/cli/transcript-scan';
-import { CmosDetector } from '../../src/intelligence/cmos-detector';
-import { cmosDecisions } from '../../src/tools/cmos/cmos-decisions';
+import { RbookDetector } from '../../src/intelligence/rbook-detector';
+import { rbookDecisions } from '../../src/tools/rbook/rbook-decisions';
 import {
   openDraftRuntime,
   readExcerpt,
   readScans,
   startsSince,
-} from '../../src/tools/cmos/draft-runtime';
-import { harnessSessionHash } from '../../src/tools/cmos/harness-session';
-import * as proposals from '../../src/tools/cmos/proposals';
-import { setExternalSessionOwner } from '../../src/tools/cmos/session-owner';
-import { currentToolCallActionMode } from '../../src/tools/cmos/tool-call-context';
-import { reidentifyCmosTestStore, seedCmosDb } from '../helpers/seedCmosDb';
+} from '../../src/tools/rbook/draft-runtime';
+import { harnessSessionHash } from '../../src/tools/rbook/harness-session';
+import * as proposals from '../../src/tools/rbook/proposals';
+import { setExternalSessionOwner } from '../../src/tools/rbook/session-owner';
+import { currentToolCallActionMode } from '../../src/tools/rbook/tool-call-context';
+import { reidentifyRbookTestStore, seedRbookDb } from '../helpers/seedRbookDb';
 
 const HARNESS_PID = process.pid;
 let tmp: string;
 let projectRoot: string;
 let dbPath: string;
-const savedConfigDir = process.env.CMOS_CONFIG_DIR;
+const savedConfigDir = process.env.RBOOK_CONFIG_DIR;
 const savedStartId = process.env.CLAUDE_CODE_SESSION_ID;
 
 beforeEach(() => {
   delete process.env.CLAUDE_CODE_SESSION_ID;
-  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-s93m06-hooks-'));
-  process.env.CMOS_CONFIG_DIR = path.join(tmp, 'config');
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-s93m06-hooks-'));
+  process.env.RBOOK_CONFIG_DIR = path.join(tmp, 'config');
   projectRoot = path.join(tmp, 'project');
   fs.mkdirSync(projectRoot, { recursive: true });
-  dbPath = seedCmosDb(projectRoot, { projectName: 'drafts' });
-  reidentifyCmosTestStore(projectRoot);
-  CmosDetector.resetInstance();
+  dbPath = seedRbookDb(projectRoot, { projectName: 'drafts' });
+  reidentifyRbookTestStore(projectRoot);
+  RbookDetector.resetInstance();
 });
 
 afterEach(() => {
   setExternalSessionOwner(null);
   if (savedStartId === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
   else process.env.CLAUDE_CODE_SESSION_ID = savedStartId;
-  if (savedConfigDir === undefined) delete process.env.CMOS_CONFIG_DIR;
-  else process.env.CMOS_CONFIG_DIR = savedConfigDir;
+  if (savedConfigDir === undefined) delete process.env.RBOOK_CONFIG_DIR;
+  else process.env.RBOOK_CONFIG_DIR = savedConfigDir;
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -213,11 +213,11 @@ describe('Stop stores the proposal and says nothing', () => {
     expect(drafts()).toHaveLength(1);
   });
 
-  it('stays silent and stores nothing when the project switched CMOS off', async () => {
+  it('stays silent and stores nothing when the project switched Reasonbook off', async () => {
     await hook(
       'stop',
       { session_id: 's-one', cwd: projectRoot, last_assistant_message: PROPOSAL },
-      { CMOS_AMBIENT: 'off' }
+      { RBOOK_AMBIENT: 'off' }
     );
     expect(drafts()).toEqual([]);
   });
@@ -234,7 +234,7 @@ describe('the offer rides on the operator’s next messages', () => {
       markOffered(...args);
     });
     try {
-      expect(context(await prompt('s-one', 'approved'))).toContain('CMOS draft P1');
+      expect(context(await prompt('s-one', 'approved'))).toContain('Reasonbook draft P1');
       expect(modes).toEqual(['write']);
       expect(drafts()[0].offered_at).not.toBeNull();
     } finally {
@@ -246,7 +246,9 @@ describe('the offer rides on the operator’s next messages', () => {
     await start('s-one');
     await stop('s-one', PROPOSAL);
     const first = context(await prompt('s-one', 'Let us also look at the export command next'));
-    expect(first).toContain('CMOS draft P1 (decision), which your last reply put to the operator');
+    expect(first).toContain(
+      'Reasonbook draft P1 (decision), which your last reply put to the operator'
+    );
     expect(first).toContain('fromDraft="P1"');
     expect(context(await prompt('s-one', 'Now the import command, same idea'))).toContain(
       'Still pending: P1'
@@ -301,7 +303,7 @@ describe('the offer rides on the operator’s next messages', () => {
     expect(old).toMatchObject({ outcome: 'replaced', replaced_by: revised.id });
     expect(revised.outcome).toBe('pending');
     expect(context(await prompt('s-one', 'approved'))).toContain(
-      `CMOS draft P${revised.id} (decision), which your last reply put to the operator`
+      `Reasonbook draft P${revised.id} (decision), which your last reply put to the operator`
     );
   });
 
@@ -372,9 +374,9 @@ describe('the operator answers only what the reply before showed (plan critic B1
     expect(drafts()[0].outcome).toBe('pending');
     const excerpt = words('s-one');
     setExternalSessionOwner('s-one');
-    let recorded: Awaited<ReturnType<typeof cmosDecisions>>;
+    let recorded: Awaited<ReturnType<typeof rbookDecisions>>;
     try {
-      recorded = await cmosDecisions({
+      recorded = await rbookDecisions({
         action: 'record',
         projectRoot,
         fromDraft: 'P1',
@@ -413,12 +415,12 @@ describe('the operator answers only what the reply before showed (plan critic B1
     ['URL', 'Store project decisions as one JSON file per decision: draft https://example.com/P1'],
     [
       'file path',
-      'Store project decisions as one JSON file per decision: draft cmos/planning/P1.md',
+      'Store project decisions as one JSON file per decision: draft rbook/planning/P1.md',
     ],
     ['file name', 'Store project decisions as one JSON file per decision: draft P1.md'],
     [
       'link target',
-      'Store project decisions as one JSON file per decision: draft [details](cmos/planning/P1.md)',
+      'Store project decisions as one JSON file per decision: draft [details](rbook/planning/P1.md)',
     ],
   ];
   it.each(
@@ -477,14 +479,14 @@ describe('the operator answers only what the reply before showed (plan critic B1
     await hook(
       'stop',
       { session_id: 's-one', cwd: projectRoot, last_assistant_message: PROPOSAL },
-      { CMOS_AGENT_ROLE: 'review' }
+      { RBOOK_AGENT_ROLE: 'review' }
     );
     expect(drafts()).toEqual([]);
     await stop('s-one', PROPOSAL);
     const ran = await hook(
       'prompt',
       { session_id: 's-one', cwd: projectRoot, prompt: 'no', prompt_id: 'x' },
-      { CMOS_AGENT_ROLE: 'review' }
+      { RBOOK_AGENT_ROLE: 'review' }
     );
     expect(context(ran)).not.toContain('declined');
     expect(drafts()[0].outcome).toBe('pending');
@@ -532,7 +534,7 @@ describe('sessions', () => {
       await hook(
         'session-start',
         { session_id: session, cwd: projectRoot, source: 'startup' },
-        { CMOS_AGENT_ROLE: 'review' }
+        { RBOOK_AGENT_ROLE: 'review' }
       );
     }
     const runtime = openDraftRuntime(dbPath, process.env, { readonly: true })!;
@@ -728,7 +730,7 @@ describe('outside content', () => {
   });
 });
 
-describe('cmos-mcp drafts list', () => {
+describe('reasonbook drafts list', () => {
   async function drafts_(
     argv: string[]
   ): Promise<{ code: number; stdout: string; stderr: string[] }> {

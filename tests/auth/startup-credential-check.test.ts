@@ -6,7 +6,7 @@ import os from 'os';
 import path from 'path';
 import { describe, expect, it, beforeEach, afterEach } from '@jest/globals';
 import { runStartupCredentialCheck } from '../../src/auth/project-key-capture';
-import { CMOS_CONFIG_DIR_ENV, CredentialStore } from '../../src/intelligence/credential-store';
+import { RBOOK_CONFIG_DIR_ENV, CredentialStore } from '../../src/intelligence/credential-store';
 
 describe('runStartupCredentialCheck', () => {
   const originalEnv = { ...process.env };
@@ -16,7 +16,7 @@ describe('runStartupCredentialCheck', () => {
 
   beforeEach(async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'startup-cred-check-'));
-    delete process.env[CMOS_CONFIG_DIR_ENV];
+    delete process.env[RBOOK_CONFIG_DIR_ENV];
     CredentialStore.resetInstance();
     store = await CredentialStore.create({ configDir: tempDir });
     writes = [];
@@ -32,7 +32,7 @@ describe('runStartupCredentialCheck', () => {
     const result = await runStartupCredentialCheck({
       store,
       writer: (line) => writes.push(line),
-      dashboardUrl: 'https://cmos.aquex.ai',
+      dashboardUrl: 'https://reasonbook.ai',
     });
 
     expect(result.status).toBe('empty-credential-store');
@@ -42,7 +42,7 @@ describe('runStartupCredentialCheck', () => {
     expect(writes).toHaveLength(1);
     expect(writes[0]).toMatch(/\[WARN\]/);
     expect(writes[0]).toMatch(/no user-scoped credentials found/);
-    expect(writes[0]).toMatch(/cmos_auth\(action="login"\)/);
+    expect(writes[0]).toMatch(/rbook_auth\(action="login"\)/);
   });
 
   it('s78-m06: is SILENT on an empty store when NO dashboard is configured (local-forever)', async () => {

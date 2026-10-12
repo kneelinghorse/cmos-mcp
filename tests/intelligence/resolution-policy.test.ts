@@ -8,7 +8,7 @@ import os from 'os';
 import path from 'path';
 
 import {
-  CMOS_EPHEMERAL_PATHS_ENV,
+  RBOOK_EPHEMERAL_PATHS_ENV,
   defaultEphemeralRoots,
   findEnclosingStore,
   isContextlessDirectory,
@@ -26,8 +26,8 @@ function mkTmp(prefix: string): string {
 }
 
 function makeStore(root: string, withDatabase = true): void {
-  fs.mkdirSync(path.join(root, 'cmos', 'db'), { recursive: true });
-  if (withDatabase) fs.writeFileSync(path.join(root, 'cmos', 'db', 'cmos.sqlite'), '');
+  fs.mkdirSync(path.join(root, 'rbook', 'db'), { recursive: true });
+  if (withDatabase) fs.writeFileSync(path.join(root, 'rbook', 'db', 'rbook.sqlite'), '');
 }
 
 afterEach(() => {
@@ -49,7 +49,7 @@ describe('findEnclosingStore', () => {
     expect(findEnclosingStore(nested)).toEqual({ root, hasDatabase: true });
   });
 
-  it('stops at a store whose database is gone (cmos/db/ without the file)', () => {
+  it('stops at a store whose database is gone (rbook/db/ without the file)', () => {
     // Continuing past it would route a call made inside the inner project to the outer one.
     const outer = mkTmp('policy-outer-');
     makeStore(outer);
@@ -60,21 +60,21 @@ describe('findEnclosingStore', () => {
     expect(findEnclosingStore(nested)).toEqual({ root: inner, hasDatabase: false });
   });
 
-  it('walks past a folder that merely contains a directory named cmos (no cmos/db/)', () => {
-    // This repository has src/tools/cmos/; a notes tree may have cmos/ full of papers. Neither is
+  it('walks past a folder that merely contains a directory named rbook (no rbook/db/)', () => {
+    // This repository has src/tools/rbook/; a notes tree may have rbook/ full of papers. Neither is
     // a project, and stopping there would offer to init a project inside the source tree.
     const project = mkTmp('policy-source-tree-');
     makeStore(project);
     const sourceDir = path.join(project, 'src', 'tools');
-    fs.mkdirSync(path.join(sourceDir, 'cmos'), { recursive: true });
-    fs.writeFileSync(path.join(sourceDir, 'cmos', 'client.ts'), '// source, not a store\n');
+    fs.mkdirSync(path.join(sourceDir, 'rbook'), { recursive: true });
+    fs.writeFileSync(path.join(sourceDir, 'rbook', 'client.ts'), '// source, not a store\n');
     expect(findEnclosingStore(sourceDir)).toEqual({ root: project, hasDatabase: true });
     expect(storeAt(sourceDir)).toBeNull();
   });
 
-  it('ignores a FILE named cmos', () => {
+  it('ignores a FILE named rbook', () => {
     const root = mkTmp('policy-file-');
-    fs.writeFileSync(path.join(root, 'cmos'), 'not a directory');
+    fs.writeFileSync(path.join(root, 'rbook'), 'not a directory');
     expect(findEnclosingStore(root)).toBeNull();
   });
 
@@ -152,9 +152,9 @@ describe('isEphemeralStorePath', () => {
     expect(isEphemeralStorePath('/Users/someone/portfolio/project')).toBe(false);
   });
 
-  it('adds the CMOS_EPHEMERAL_PATHS list to the defaults', () => {
+  it('adds the RBOOK_EPHEMERAL_PATHS list to the defaults', () => {
     const roots = defaultEphemeralRoots({
-      [CMOS_EPHEMERAL_PATHS_ENV]: ['/scratch/agents', '/mnt/ci'].join(path.delimiter),
+      [RBOOK_EPHEMERAL_PATHS_ENV]: ['/scratch/agents', '/mnt/ci'].join(path.delimiter),
     });
     expect(isEphemeralStorePath('/scratch/agents/run-1/proj', roots)).toBe(true);
     expect(isEphemeralStorePath('/mnt/ci/job/proj', roots)).toBe(true);

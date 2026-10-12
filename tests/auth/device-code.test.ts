@@ -18,7 +18,7 @@ import type {
   DeviceCodeResponse,
   DeviceTokenSuccess,
 } from '../../src/auth/device-code';
-import { CMOS_CONFIG_DIR_ENV, CredentialStore } from '../../src/intelligence/credential-store';
+import { RBOOK_CONFIG_DIR_ENV, CredentialStore } from '../../src/intelligence/credential-store';
 import {
   describeLive,
   setUpLiveConfig,
@@ -46,14 +46,14 @@ function callsOf(fetchImpl: jest.Mock<typeof fetch>): FetchArgs[] {
 }
 
 describe('buildUserAgent', () => {
-  it('produces the agreed "cmos-mcp/<version> (<platform>; <hostname>)" format', () => {
+  it('produces the agreed "reasonbook/<version> (<platform>; <hostname>)" format', () => {
     const ua = buildUserAgent('1.0.0', 'darwin', 'alice-mbp');
-    expect(ua).toBe('cmos-mcp/1.0.0 (darwin; alice-mbp)');
+    expect(ua).toBe('reasonbook/1.0.0 (darwin; alice-mbp)');
   });
 
   it('defaults platform + hostname from the `os` module', () => {
     const ua = buildUserAgent('9.9.9');
-    expect(ua.startsWith('cmos-mcp/9.9.9 (')).toBe(true);
+    expect(ua.startsWith('reasonbook/9.9.9 (')).toBe(true);
     expect(ua).toContain(os.platform());
     expect(ua).toContain(os.hostname());
   });
@@ -72,7 +72,7 @@ describe('requestDeviceCode', () => {
     const fetchImpl = makeFetchMock();
     fetchImpl.mockImplementationOnce(async () => jsonResponse(deviceCodeBody));
 
-    const result = await requestDeviceCode(BASE_URL, 'cmos-mcp/1.0.0 (darwin; host)', {
+    const result = await requestDeviceCode(BASE_URL, 'reasonbook/1.0.0 (darwin; host)', {
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
 
@@ -82,7 +82,7 @@ describe('requestDeviceCode', () => {
     expect(String(url)).toBe('http://dashboard.test/api/auth/device/code');
     expect(init?.method).toBe('POST');
     const headers = init?.headers as Record<string, string>;
-    expect(headers['User-Agent']).toBe('cmos-mcp/1.0.0 (darwin; host)');
+    expect(headers['User-Agent']).toBe('reasonbook/1.0.0 (darwin; host)');
     expect(headers['Content-Type']).toBe('application/json');
   });
 
@@ -126,7 +126,7 @@ describe('pollForToken', () => {
     const success: DeviceTokenSuccess = {
       key: 'cmk_test',
       keyId: 'user-key-1',
-      label: 'device: cmos-mcp/1.0.0 (darwin; host) @ 2026-04-17T12:00:00Z',
+      label: 'device: reasonbook/1.0.0 (darwin; host) @ 2026-04-17T12:00:00Z',
     };
     const fetchImpl = makeFetchMock();
     fetchImpl.mockImplementationOnce(async () => jsonResponse(success));
@@ -254,7 +254,7 @@ describe('runDeviceCodeFlow', () => {
 
   beforeEach(async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'device-code-'));
-    delete process.env[CMOS_CONFIG_DIR_ENV];
+    delete process.env[RBOOK_CONFIG_DIR_ENV];
     CredentialStore.resetInstance();
   });
 
@@ -276,7 +276,7 @@ describe('runDeviceCodeFlow', () => {
     const success: DeviceTokenSuccess = {
       key: 'cmk_live_key',
       keyId: 'user-key-abc',
-      label: 'device: cmos-mcp/1.0.0 (darwin; host) @ 2026-04-17T12:00:00Z',
+      label: 'device: reasonbook/1.0.0 (darwin; host) @ 2026-04-17T12:00:00Z',
     };
 
     const fetchImpl = makeFetchMock();
@@ -305,10 +305,10 @@ describe('runDeviceCodeFlow', () => {
     expect(persisted?.issuedAt).toBeTruthy();
     expect(persisted?.lastUsedAt).toBeTruthy();
 
-    // Both calls should carry the cmos-mcp/1.0.0 (darwin; host) User-Agent.
+    // Both calls should carry the reasonbook/1.0.0 (darwin; host) User-Agent.
     for (const [, init] of callsOf(fetchImpl)) {
       const headers = init?.headers as Record<string, string>;
-      expect(headers['User-Agent']).toBe('cmos-mcp/1.0.0 (darwin; host)');
+      expect(headers['User-Agent']).toBe('reasonbook/1.0.0 (darwin; host)');
     }
   });
 
@@ -529,7 +529,7 @@ describe('pollForTokenBounded', () => {
 
 // ─── Live dashboard (Sprint 58 m03) ───────────────────────────────────────
 //
-// Set CMOS_LIVE_DASHBOARD=1 AND CMOS_DASHBOARD_URL=https://cmos.aquex.ai (or
+// Set RBOOK_LIVE_DASHBOARD=1 AND RBOOK_DASHBOARD_URL=https://reasonbook.ai (or
 // another live dashboard) to exercise the real RFC 8628 endpoint. The test
 // prints the userCode on stderr — open the verificationUri in a browser
 // and approve within ~600s or the code expires. Never run this in CI.

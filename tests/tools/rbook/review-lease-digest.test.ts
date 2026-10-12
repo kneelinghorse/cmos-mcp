@@ -1,0 +1,82 @@
+// SPDX-License-Identifier: Apache-2.0
+// ABOUTME: s91-m06 — rbook_review's next_actions names the next-steps the next close will drop,
+// ABOUTME: inside the 4 KB budget. s92-m03 retired the no-session nudge (feedback #40).
+
+import { afterEach, describe, expect, it } from '@jest/globals';
+import Database from 'better-sqlite3';
+
+import { createSeededRbookProject, type SeededRbookProject } from '../../helpers/seedRbookDb';
+import { rbookReview, formatReviewForLLM } from '../../../src/tools/rbook/rbook-review';
+import { rbookAgentOnboard } from '../../../src/tools/rbook/rbook-agent-onboard';
+
+const DAY = 24 * 60 * 60 * 1000;
+const iso = (daysAgo: number): string => new Date(Date.now() - daysAgo * DAY).toISOString();
+
+const projects: SeededRbookProject[] = [];
+afterEach(async () => {
+  while (projects.length > 0) await projects.pop()!.cleanup();
+});
+
+async function seeded(withInProgressMission: boolean): Promise<SeededRbookProject> {
+  const project = await createSeededRbookProject({}, 'rbook-s91-m06-review-');
+  projects.push(project);
+  const db = new Database(project.dbPath);
+  try {
+    const sprint = db.prepare(
+      `INSERT INTO sprints (id, title, status, start_date, end_date) VALUES (?, ?, ?, ?, ?)`
+    );
+    [50, 40, 30, 20, 10].forEach((ago, i) =>
+      sprint.run(`sprint-old-${i}`, `Old ${i}`, 'Completed', iso(ago + 9), iso(ago))
+    );
+    sprint.run('sprint-now', 'Now', 'Active', iso(5), null);
+    // Open work in the sprint, so the unrelated "all missions complete" prompt does not fire.
+    db.prepare(
+      `INSERT INTO missions (id, sprint_id, name, status, created_at) VALUES ('m-next', 'sprint-now', 'q', 'Queued', ?)`
+    ).run(iso(3));
+    if (withInProgressMission) {
+      db.prepare(
+        `INSERT INTO missions (id, sprint_id, name, status, created_at) VALUES ('m-now', 'sprint-now', 'n', 'In Progress', ?)`
+      ).run(iso(2));
+    }
+    const step = db.prepare(
+      `INSERT INTO next_steps (id, content, status, created_at) VALUES (?, ?, 'pending', ?)`
+    );
+    step.run(11, 'four closes old', iso(45));
+    step.run(12, 'three closes old', iso(35));
+    step.run(13, 'fresh', iso(1));
+  } finally {
+    db.close();
+  }
+  return project;
+}
+
+describe('s91-m06 review digest', () => {
+  it('names the lapsing and warned next-steps on the promoted next_actions', async () => {
+    const project = await seeded(false);
+    const result = await rbookReview({ projectRoot: project.projectRoot });
+
+    expect(result.success).toBe(true);
+    const lease = result.data!.next_actions.find((a) =>
+      a.action.includes('lapse at the next close')
+    );
+    expect(lease).toBeDefined();
+    expect(lease!.action).toContain('1 next-step(s) lapse at the next close unless carried: #11');
+    expect(lease!.action).toContain('1 at the warning age: #12');
+    expect(lease!.action).not.toContain('#13');
+    expect(result.data!.digestSizeBytes).toBeLessThanOrEqual(4096);
+    expect(formatReviewForLLM(result)).toContain('#11');
+  });
+
+  it('no longer flags a mission In Progress with no active session (s92-m03), within budget', async () => {
+    // Feedback #40's nudge rested on "captures made now carry no session". Since s92-m03 a capture
+    // with no session open lands in the calling process's implicit session, so it is gone.
+    const project = await seeded(true);
+    const onboard = await rbookAgentOnboard({ projectRoot: project.projectRoot });
+    expect(onboard.data!.suggestedActions.map((a) => a.action)).not.toContain(
+      'Mission m-now is In Progress with no active session'
+    );
+
+    const review = await rbookReview({ projectRoot: project.projectRoot });
+    expect(review.data!.digestSizeBytes).toBeLessThanOrEqual(4096);
+  });
+});

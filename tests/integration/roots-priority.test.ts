@@ -6,10 +6,10 @@ import { promises as fs } from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { CmosDetector } from '../../src/intelligence/cmos-detector';
+import { RbookDetector } from '../../src/intelligence/rbook-detector';
 import { ProjectGraphRegistry } from '../../src/intelligence/project-graph-registry';
 import { resolveSenderContext } from '../../src/intelligence/sender-context';
-import { createSeededCmosProject, type SeededCmosProject } from '../helpers/seedCmosDb';
+import { createSeededRbookProject, type SeededRbookProject } from '../helpers/seedRbookDb';
 
 async function makeTempDir(prefix: string): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -25,12 +25,12 @@ describe('sender-context precedence', () => {
   }
 
   beforeEach(() => {
-    CmosDetector.resetInstance();
+    RbookDetector.resetInstance();
     ProjectGraphRegistry.resetInstance();
   });
 
   afterEach(async () => {
-    CmosDetector.resetInstance();
+    RbookDetector.resetInstance();
     ProjectGraphRegistry.resetInstance();
     for (const dir of cleanupDirs.splice(0)) {
       await fs.rm(dir, { recursive: true, force: true }).catch(() => void 0);
@@ -38,25 +38,25 @@ describe('sender-context precedence', () => {
   });
 
   it('prefers advertised MCP roots over the registry singleton', async () => {
-    const rootsProject = await createSeededCmosProject(
+    const rootsProject = await createSeededRbookProject(
       {
         projectName: 'Stage1',
         projectId: 'stage1',
         slug: 'stage1',
         dashboardProjectId: 'ddb34d24-30e3-4eb3-b13c-20b106a75970',
-        cmosAddress: 'cmos://derek/stage1',
+        rbookAddress: 'rbook://derek/stage1',
       },
       'roots-priority-stage1-'
     );
-    const registryProject = await createSeededCmosProject(
+    const registryProject = await createSeededRbookProject(
       {
-        projectName: 'CMOS MCP',
+        projectName: 'Reasonbook MCP',
         projectId: 'cmos-mcp',
         slug: 'cmos-mcp',
         dashboardProjectId: 'ec2b4987-dbc1-4f16-946e-9843c4080ac1',
-        cmosAddress: 'cmos://derek/cmos-mcp',
+        rbookAddress: 'rbook://derek/cmos-mcp',
       },
-      'roots-priority-cmos-mcp-'
+      'roots-priority-rbook-'
     );
     cleanupDirs.push(rootsProject.projectRoot, registryProject.projectRoot);
 
@@ -79,23 +79,23 @@ describe('sender-context precedence', () => {
   });
 
   it('prefers explicit projectRoot over advertised MCP roots', async () => {
-    const explicitProject = await createSeededCmosProject(
+    const explicitProject = await createSeededRbookProject(
       {
         projectName: 'OODS Foundry',
         projectId: 'oods-foundry',
         slug: 'oods-foundry',
         dashboardProjectId: '11111111-2222-4333-8444-555555555555',
-        cmosAddress: 'cmos://derek/oods-foundry',
+        rbookAddress: 'rbook://derek/oods-foundry',
       },
       'roots-priority-explicit-'
     );
-    const rootsProject = await createSeededCmosProject(
+    const rootsProject = await createSeededRbookProject(
       {
         projectName: 'Stage1',
         projectId: 'stage1',
         slug: 'stage1',
         dashboardProjectId: 'ddb34d24-30e3-4eb3-b13c-20b106a75970',
-        cmosAddress: 'cmos://derek/stage1',
+        rbookAddress: 'rbook://derek/stage1',
       },
       'roots-priority-roots-'
     );

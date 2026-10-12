@@ -1,0 +1,1052 @@
+// ABOUTME: Layer 3 working retrieval. HybridRetriever (async, BM25 + sqlite-vec cosine via RRF k=60,
+// recency applied after fusion) is the Sprint 66 m04 backend covering decisions, learnings, and missions
+// per cmos/planning/adr/s66-vector-retrieval.md. (s80-m03: the dead sync FTS5Retriever was removed.)
+
+import { normalizeMissionStatus } from './terminal-status';
+import {
+  getEmbedder,
+  isEmbedderUnavailable,
+  packEmbedding,
+  type Embedder,
+} from '../../intelligence/embedding-pipeline';
+import type { RbookDatabaseClient } from './client';
+import { ensureDecisionsFts5, ensureVectorStorage } from './schema-migrations';
+import { extractKeywords } from './supersession-detection';
+import { recordStoreUpkeepNote } from './tool-call-context';
+import { storedTimeMs } from './stored-time';
+import { citationNeighbors } from './citation-neighbors';
+import { prepareSpinOutRead } from './spin-out-read';
+
+// ─── Public Interface ─────────────────────────────────────────────────────────
+
+export type RankedResultType = 'decision' | 'learning' | 'mission' | 'session';
+
+/** A single ranked retrieval result. */
+export interface RankedResult {
+  /** Unique row ID in the source table. INTEGER for decisions/learnings, TEXT for missions. */
+  id: number | string;
+
+  /** Content type */
+  type: RankedResultType;
+
+  /** The primary text of the result */
+  text: string;
+
+  /** Combined relevance + recency score (higher is better) */
+  score: number;
+
+  /** Raw BM25 score from FTS5 (positive, higher is better). 0 when only the vector arm matched. */
+  bm25Score: number;
+
+  /** Recency decay factor 0–1 (1 = fresh, approaches 0 for old items) */
+  recencyFactor: number;
+
+  /** Age in days at retrieval time */
+  ageDays: number;
+
+  /** Sprint the item belongs to (null if unknown) */
+  sprintId: string | null;
+
+  /**
+   * s83-m06: the row's genesis project_id (null on ancient/un-migrated stores).
+   * A pull-merged row carries the FOREIGN origin's project_id here; consumers
+   * compare it against the local project_id to frame foreign rows as untrusted.
+   */
+  projectId: string | null;
+
+  /** Item category (decisions only, null otherwise) */
+  category: string | null;
+
+  /**
+   * s92-m08: the row's status (decision and learning: active, archived, superseded, stale;
+   * mission: its lifecycle status), so a caller can tell what kind of row a preview stands for.
+   * Null only when the store does not record one.
+   */
+  status: string | null;
+
+  /** Evidence references (decisions only, null otherwise) */
+  evidence: string | null;
+
+  /** ISO timestamp the item was created */
+  createdAt: string | null;
+
+  /** Cosine similarity from the vector arm (vector/hybrid backends only; null for fts5-only) */
+  vectorSimilarity?: number | null;
+
+  /** Pre-recency RRF score (hybrid backend only; null otherwise) */
+  rrfScore?: number | null;
+
+  /**
+   * s82-m04: same-type 1-hop graph neighbors of this row (only populated when this row was a
+   * graph-expansion seed and `expandGraph` was on). The research's faithful context-expansion —
+   * surfaced alongside the hit so a consumer sees the related decisions/learnings/missions.
+   */
+  graphNeighbors?: Array<{ id: number | string; text: string }> | null;
+}
+
+/** Options for retrieval. */
+export interface RetrievalOptions {
+  /** Max results to return (default: 5) */
+  limit?: number;
+
+  /** Content types to include (default: ['decision']) */
+  types?: RankedResultType[];
+
+  /** Last N sprints to include (0 = all, default: 0) */
+  sprintRange?: number;
+
+  /** Weight given to recency decay: 0 = none, 1 = full decay (default: DEFAULT_RECENCY_WEIGHT, 0.5) */
+  recencyWeight?: number;
+
+  /** Minimum combined score to include in results (default: 0) */
+  minScore?: number;
+
+  /**
+   * Statuses to include for decisions and learnings. Absent: every status except `superseded`
+   * (s92-m07, R1). `[]` disables the filter. Applied inside the candidate queries, so a page is
+   * never short because the pool was cut before the filter ran.
+   */
+  statusFilter?: string[];
+
+  /** RRF k parameter for the hybrid backend (default: 60 per s66 ADR Decision 3). */
+  rrfK?: number;
+
+  /**
+   * s82-m04: expand the candidate pool with same-type 1-hop graph neighbors of the top
+   * BM25/vector seeds (depth 1, per-seed capped), injected as a smaller-weighted third RRF
+   * term + appended to each seed's payload as `graphNeighbors`. Default OFF. Enable only on
+   * recall-oriented reads (context-search, relevance-surfacing) — never on the precision,
+   * corpus-mutating paths (supersession-detection, learning-reaffirm).
+   */
+  expandGraph?: boolean;
+
+  /** s82-m04: weight of the graph-recall RRF term (default DEFAULT_GRAPH_WEIGHT). Only used
+   *  when expandGraph is on. Kept < 1 to bound over-promotion of graph-only neighbors. */
+  graphWeight?: number;
+
+  /** Same-kind textual citation recall for decisions/learnings. Default false; hybrid backend
+   *  only, like expandGraph. Precision callers and cosine-only retrieval retain their semantics. */
+  citationRecall?: boolean;
+
+  /** Learning score prior applied only when decision and learning types are both requested.
+   *  Default 1: the Sprint94 mixed-query comparison rejected a .5 penalty. */
+  learningPrior?: number;
+}
+
+/** What a retriever backend supports. */
+export interface RetrieverCapabilities {
+  /** Backend identifier */
+  backend: 'fts5' | 'vector' | 'hybrid';
+
+  /** Whether semantic (embedding-based) search is supported */
+  semanticSearch: boolean;
+
+  /** Content types this retriever can search */
+  supportedTypes: RankedResultType[];
+
+  /** Whether recency boost is applied */
+  recencyBoost: boolean;
+}
+
+/**
+ * Async retrieval interface for backends that require non-blocking I/O on the search path
+ * (e.g. query embedding via @xenova/transformers). Implemented by HybridRetriever.
+ * (s80-m03: the sync `IRetriever` + its sole implementor `FTS5Retriever` were deleted.)
+ */
+export interface IAsyncRetriever {
+  search(query: string, options?: RetrievalOptions): Promise<RankedResult[]>;
+  get(id: number | string, type: RankedResultType): RankedResult | null;
+  capabilities(): RetrieverCapabilities;
+}
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+/** Recency decay half-life in days. After this many days, score is halved. */
+const RECENCY_HALF_LIFE_DAYS = 60;
+
+/** Default recency blend. Sprint94's frozen natural-citation gate retains the research
+ *  starting weight .5: primary recall and actual mission emissions improve over the
+ *  pre-citation .2 baseline. This is measured acceptance, not a claim of global optimality. */
+export const DEFAULT_RECENCY_WEIGHT = 0.5;
+
+/** Default number of results to return. */
+const DEFAULT_LIMIT = 5;
+
+/** FTS5 candidate pool multiplier before score filtering. */
+const CANDIDATE_POOL_MULTIPLIER = 5;
+
+/** Reciprocal Rank Fusion `k` parameter — Cormack et al. 2009 used k=60 as a canonical
+ *  default; the Sprint 67 m02 sweep against the production fixtures preferred k=30 (a
+ *  smaller k inflates 1/(k+rank) for top ranks, sharpening the fused signal when both
+ *  arms agree on a candidate). See decision captured at s67-m02 close. */
+export const DEFAULT_RRF_K = 30;
+
+/**
+ * s92-m07 (retrieval R2): the keyword arm reads every distinct query keyword, up to this many. It
+ * read only the first 10, so for a long query (a citing decision, a mission objective) BM25 saw the
+ * first 15-25 words. Measured on 2,132 natural citation labels: BM25 alone 0.423 -> 0.632 R@10,
+ * fused +0.079 (cmos/research/2026-10-strategy/retrieval-natural-labels.md §4.2).
+ */
+export const FTS_MAX_KEYWORDS = 64;
+
+/**
+ * s92-m07: the vector term's weight in the fusion. On the same labels, once the keyword arm reads
+ * every keyword, keyword-only beats equal-weight hybrid (+0.045 R@10), weight 0.25 is neutral
+ * (+0.004) and 1.0 hurts. Embeddings are an optional peer dependency; when they are installed,
+ * their term counts a quarter.
+ */
+export const VECTOR_RRF_WEIGHT = 0.25;
+
+/** sqlite-vec's largest accepted `k` for a KNN query. */
+const VECTOR_MAX_K = 4096;
+
+/** s92-m07 (retrieval R1): the one status a recall surface drops when the caller names none. */
+export const DEFAULT_EXCLUDED_STATUSES: readonly string[] = ['superseded'];
+
+/**
+ * The status predicate for decisions and learnings, as SQL over `column`, or null for no filter.
+ *
+ * `statusFilter` absent: every status except superseded (R1). A row archived at a sprint close is
+ * still the record of what was decided; 46% of the rows later records cite were no longer active
+ * when they were cited. An explicit list keeps its include-list meaning, and [] means no filter.
+ */
+function statusPredicate(
+  statusFilter: readonly string[] | undefined,
+  column: string
+): { sql: string; params: string[] } | null {
+  if (statusFilter === undefined) {
+    return {
+      sql: `(${column} IS NULL OR ${column} NOT IN (${DEFAULT_EXCLUDED_STATUSES.map(() => '?').join(', ')}))`,
+      params: [...DEFAULT_EXCLUDED_STATUSES],
+    };
+  }
+  if (statusFilter.length === 0) return null;
+  return {
+    sql: `${column} IN (${statusFilter.map(() => '?').join(', ')})`,
+    params: [...statusFilter],
+  };
+}
+
+/**
+ * s82-m04 graph-neighbor arm parameters (MISSION-ONLY — see searchHybridForType).
+ *
+ * `GRAPH_WEIGHT` is < 1 to dampen the graph term relative to the direct BM25/vector arms. Because
+ * the term is added to a candidate's own direct term it can re-rank a borderline mission neighbor
+ * up or nudge one down — an accepted MISSION-internal trade-off (measured net-positive by the m02
+ * mission floor: top-3 recall 0.25→0.50). Decisions/learnings never receive the term.
+ * `GRAPH_SEED_COUNT` bounds how many top seeds expand; `GRAPH_PER_SEED_CAP` bounds each seed's
+ * neighbor fan-out (chiefly the same-sprint edge).
+ */
+export const DEFAULT_GRAPH_WEIGHT = 0.5;
+export const DEFAULT_CITATION_WEIGHT = 0.5;
+export const DEFAULT_LEARNING_PRIOR = 1;
+const GRAPH_SEED_COUNT = 5;
+const GRAPH_PER_SEED_CAP = 5;
+
+/** Mission statuses excluded from graph-neighbor injection — abandoned/parked work must not be
+ *  surfaced as "relevant context" purely by sprint adjacency (adversarial review, s82-m04). */
+const MISSION_GRAPH_EXCLUDED_STATUSES = ['Dropped', 'Deferred', 'Archived'] as const;
+
+// ─── Scoring helpers ──────────────────────────────────────────────────────────
+
+/**
+ * Compute the recency decay factor for an item created at the given ISO timestamp.
+ * Formula: exp(-ageDays / RECENCY_HALF_LIFE_DAYS)
+ * Range: 0–1 (1 = just created, approaches 0 for very old items).
+ */
+export function computeRecencyFactor(ageDays: number): number {
+  return Math.exp(-ageDays / RECENCY_HALF_LIFE_DAYS);
+}
+
+/**
+ * Compute item age in days from its created_at ISO timestamp.
+ * Returns 0 for null/invalid timestamps (treat as current).
+ */
+export function computeAgeDays(createdAt: string | null): number {
+  if (!createdAt) return 0;
+  const created = storedTimeMs(createdAt);
+  if (isNaN(created)) return 0;
+  const nowMs = Date.now();
+  return Math.max(0, (nowMs - created) / (1000 * 60 * 60 * 24));
+}
+
+// ─── HybridRetriever ──────────────────────────────────────────────────────────
+
+/** Subset of RankedResultType supported by the hybrid backend (no `session`). */
+type RetrievableType = 'decision' | 'learning' | 'mission';
+
+/** Normalized source-row shape feeding RankedResult assembly. */
+interface SourceRow {
+  id: number | string;
+  text: string;
+  sprintId: string | null;
+  category: string | null;
+  status: string | null;
+  evidence: string | null;
+  createdAt: string | null;
+  /** s83-m06: genesis project_id (null on ancient stores lacking the column). */
+  projectId: string | null;
+}
+
+/**
+ * Hybrid retriever — Sprint 66 m04.
+ *
+ * Backends:
+ * - `vector` — pure k-NN cosine similarity over the `<type>_vec` virtual tables.
+ *   Pulls `limit × CANDIDATE_POOL_MULTIPLIER` neighbours, scores `cosine × recency`,
+ *   returns top-`limit`.
+ * - `hybrid` — Reciprocal Rank Fusion of BM25 (FTS5 `<type>_fts`) and vector cosine.
+ *   RRF score: `1 / (k + bm25Rank) + VECTOR_RRF_WEIGHT / (k + vectorRank)` (k = DEFAULT_RRF_K, 30;
+ *   the vector weight is 0.25 since s92-m07). Recency is applied multiplicatively to the fused
+ *   score, keeping recency orthogonal to ranking. Without an embedder (the optional package is not
+ *   installed) only the BM25 term remains.
+ *
+ * Covers all three retrievable types (decision, learning, mission). Async because
+ * query embedding via `@xenova/transformers` is async (~10–50 ms after warmup;
+ * the embedder caches after first load).
+ *
+ * Failure posture (Decision 4 of the s66 ADR): if the embedder throws,
+ * `vector` returns []; `hybrid` degrades to BM25-only ranking.
+ *
+ * Architecture: cmos/planning/adr/s66-vector-retrieval.md (Decision 3 — RRF formula).
+ */
+export class HybridRetriever implements IAsyncRetriever {
+  constructor(
+    private readonly client: RbookDatabaseClient,
+    private readonly hybridOptions: {
+      backend?: 'vector' | 'hybrid';
+      /** Test-only embedder override. Production callers omit this and let
+       *  the singleton in embedding-pipeline.ts resolve. */
+      embedder?: Embedder;
+    } = {}
+  ) {}
+
+  capabilities(): RetrieverCapabilities {
+    return {
+      backend: this.hybridOptions.backend ?? 'hybrid',
+      semanticSearch: true,
+      supportedTypes: ['decision', 'learning', 'mission'],
+      recencyBoost: true,
+    };
+  }
+
+  async search(query: string, options: RetrievalOptions = {}): Promise<RankedResult[]> {
+    const visibility = prepareSpinOutRead(this.client);
+    const backend = this.hybridOptions.backend ?? 'hybrid';
+    const {
+      limit = DEFAULT_LIMIT,
+      types = ['decision'],
+      recencyWeight = DEFAULT_RECENCY_WEIGHT,
+      minScore = 0,
+      statusFilter,
+      rrfK = DEFAULT_RRF_K,
+      expandGraph = false,
+      graphWeight = DEFAULT_GRAPH_WEIGHT,
+      citationRecall = false,
+      learningPrior = DEFAULT_LEARNING_PRIOR,
+    } = options;
+
+    // Ensure the FTS5 + vec0 substrate exists. Idempotent at the migration layer. s93-m11: a read
+    // creates what is missing but rebuilds no index that was already there; how far one is out of
+    // step rides the answer, and the first write rebuilds it.
+    const deferred = [
+      ...(ensureDecisionsFts5(this.client).deferred ?? []),
+      ...(ensureVectorStorage(this.client).deferred ?? []),
+    ];
+    for (const note of deferred) recordStoreUpkeepNote(note);
+
+    const queryVec = await this.embedQuery(query);
+    const candidateLimit = Math.max(1, limit * CANDIDATE_POOL_MULTIPLIER);
+    const aggregated: RankedResult[] = [];
+
+    for (const t of types) {
+      if (t !== 'decision' && t !== 'learning' && t !== 'mission') continue;
+      const type = t as RetrievableType;
+
+      const perType =
+        backend === 'vector'
+          ? this.searchVectorForType(type, queryVec, candidateLimit, recencyWeight, statusFilter)
+          : this.searchHybridForType(
+              type,
+              query,
+              queryVec,
+              candidateLimit,
+              recencyWeight,
+              statusFilter,
+              rrfK,
+              expandGraph,
+              graphWeight,
+              citationRecall
+            );
+      if (type === 'learning' && types.includes('decision') && types.includes('learning')) {
+        for (const row of perType) row.score *= learningPrior;
+      }
+      aggregated.push(...perType);
+    }
+
+    return aggregated
+      .filter((r) => r.score >= minScore && !visibility.hidden(r.type as RetrievableType, r.id))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit);
+  }
+
+  get(id: number | string, type: RankedResultType): RankedResult | null {
+    if (type !== 'decision' && type !== 'learning' && type !== 'mission') return null;
+    const rt = type as RetrievableType;
+    const rows = this.fetchSourceRows(rt, [id], []);
+    if (rows.length === 0) return null;
+    const row = rows[0];
+    const ageDays = computeAgeDays(row.createdAt);
+    const recencyFactor = computeRecencyFactor(ageDays);
+    return {
+      id: row.id,
+      type: rt,
+      text: row.text,
+      score: recencyFactor,
+      bm25Score: 1.0,
+      recencyFactor,
+      ageDays,
+      sprintId: row.sprintId,
+      projectId: row.projectId,
+      status: row.status,
+      category: row.category,
+      evidence: row.evidence,
+      createdAt: row.createdAt,
+      vectorSimilarity: null,
+      rrfScore: null,
+    };
+  }
+
+  // ─── Private: embedding ────────────────────────────────────────────────────
+
+  private async embedQuery(query: string): Promise<Float32Array | null> {
+    try {
+      const embedder = this.hybridOptions.embedder ?? (await getEmbedder());
+      // s92-m07: with no embedder in this process (the optional package is absent, or its load
+      // failed and was reported once), search is keyword-only, quietly.
+      if (!this.hybridOptions.embedder && isEmbedderUnavailable()) return null;
+      return await embedder(query);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'unknown error';
+      console.error(`[WARN] HybridRetriever: query embed failed — ${message}`);
+      return null;
+    }
+  }
+
+  // ─── Private: pure vector branch ───────────────────────────────────────────
+
+  private searchVectorForType(
+    type: RetrievableType,
+    queryVec: Float32Array | null,
+    candidateLimit: number,
+    recencyWeight: number,
+    statusFilter: string[] | undefined
+  ): RankedResult[] {
+    if (queryVec === null) return [];
+    const vecCandidates = this.vectorCandidatesForType(
+      type,
+      queryVec,
+      candidateLimit,
+      statusFilter
+    );
+    if (vecCandidates.length === 0) return [];
+
+    const ids = vecCandidates.map((c) => c.id);
+    const rows = this.fetchSourceRows(type, ids, statusFilter);
+    const rowById = new Map(rows.map((r) => [String(r.id), r]));
+
+    const results: RankedResult[] = [];
+    for (const candidate of vecCandidates) {
+      const row = rowById.get(String(candidate.id));
+      if (!row) continue; // candidate filtered out by status filter (e.g. superseded decision)
+      const similarity = distanceToCosineSimilarity(candidate.distance);
+      const ageDays = computeAgeDays(row.createdAt);
+      const recencyFactor = computeRecencyFactor(ageDays);
+      const score = similarity * (1 - recencyWeight + recencyWeight * recencyFactor);
+      results.push({
+        id: row.id,
+        type,
+        text: row.text,
+        score,
+        bm25Score: 0,
+        recencyFactor,
+        ageDays,
+        sprintId: row.sprintId,
+        projectId: row.projectId,
+        status: row.status,
+        category: row.category,
+        evidence: row.evidence,
+        createdAt: row.createdAt,
+        vectorSimilarity: similarity,
+        rrfScore: null,
+      });
+    }
+    return results;
+  }
+
+  // ─── Private: hybrid branch (RRF fusion) ───────────────────────────────────
+
+  private searchHybridForType(
+    type: RetrievableType,
+    query: string,
+    queryVec: Float32Array | null,
+    candidateLimit: number,
+    recencyWeight: number,
+    statusFilter: string[] | undefined,
+    rrfK: number,
+    expandGraph: boolean,
+    graphWeight: number,
+    citationRecall: boolean
+  ): RankedResult[] {
+    // s92-m07 (R1): both arms apply the status filter while filling their pools, not after.
+    const bm25Candidates = this.fts5CandidatesForType(type, query, candidateLimit, statusFilter);
+    const vecCandidates =
+      queryVec !== null
+        ? this.vectorCandidatesForType(type, queryVec, candidateLimit, statusFilter)
+        : [];
+
+    // Build per-arm rank maps keyed by stringified id (the canonical cross-type identifier).
+    // Ranks are 1-indexed for RRF: `Σ 1 / (k + rank_i)`.
+    const bm25Rank = new Map<string, number>();
+    const bm25Raw = new Map<string, number>();
+    bm25Candidates.forEach((c, idx) => {
+      const key = String(c.id);
+      bm25Rank.set(key, idx + 1);
+      // FTS5 rank is negative — flip to positive for the telemetry-friendly bm25Score field.
+      bm25Raw.set(key, Math.abs(c.rank));
+    });
+
+    const vecRank = new Map<string, number>();
+    const vecSim = new Map<string, number>();
+    vecCandidates.forEach((c, idx) => {
+      const key = String(c.id);
+      vecRank.set(key, idx + 1);
+      vecSim.set(key, distanceToCosineSimilarity(c.distance));
+    });
+
+    // Union of candidate IDs preserving first-seen order so the post-fetch loop is deterministic.
+    const allIds: Array<number | string> = [];
+    const seen = new Set<string>();
+    for (const c of bm25Candidates) {
+      const key = String(c.id);
+      if (!seen.has(key)) {
+        seen.add(key);
+        allIds.push(c.id);
+      }
+    }
+    for (const c of vecCandidates) {
+      const key = String(c.id);
+      if (!seen.has(key)) {
+        seen.add(key);
+        allIds.push(c.id);
+      }
+    }
+
+    if (allIds.length === 0) return [];
+
+    // s82-m04: graph-neighbor expansion (depth 1, per-seed capped) — MISSION-ONLY. Expand from the
+    // top GRAPH_SEED_COUNT direct candidates (by prelim RRF) to their 1-hop mission neighbors;
+    // `graphRank` = the fused rank of the best seed that surfaced a neighbor (1-indexed);
+    // `seedNeighbors` feeds the payload context-append. Off by default; the query is soft-degrading.
+    //
+    // Why mission-only (adversarial review, s82-m04): the corpus-density problem this arm solves is
+    // specific to the dense mission graph (same-sprint clusters + dependency chains). Decisions and
+    // learnings already retrieve well, their mission_id edges are sparse, and — critically — the
+    // graph term is ADDED to a candidate's own direct term, so a same-mission sibling that is also a
+    // weak direct hit could stack a boost and EVICT a genuine top-3 decision/learning hit. Restricting
+    // to missions makes the decision/learning hard-non-regression STRUCTURAL rather than merely
+    // fixture-measured (the golden-set decision/learning fixtures happen to carry no graph edges).
+    const graphRank = new Map<string, number>();
+    const seedNeighbors = new Map<string, Array<number | string>>();
+    if (expandGraph && type === 'mission') {
+      const seeds = allIds
+        .map((id) => {
+          const key = String(id);
+          const bm = bm25Rank.get(key);
+          const vk = vecRank.get(key);
+          const prelim =
+            (bm !== undefined ? 1 / (rrfK + bm) : 0) +
+            (vk !== undefined ? VECTOR_RRF_WEIGHT / (rrfK + vk) : 0);
+          return { id, key, prelim };
+        })
+        .sort((a, b) => b.prelim - a.prelim)
+        .slice(0, GRAPH_SEED_COUNT);
+
+      const neighborsBySeed = this.missionGraphNeighbors(seeds.map((s) => s.id));
+      seeds.forEach((seed, seedIdx) => {
+        const seedGraphRank = seedIdx + 1; // 1-indexed rank of the seed among the top seeds
+        const ns = (neighborsBySeed.get(seed.key) ?? []).slice(0, GRAPH_PER_SEED_CAP);
+        if (ns.length > 0) seedNeighbors.set(seed.key, ns);
+        for (const nid of ns) {
+          const nkey = String(nid);
+          if (!seen.has(nkey)) {
+            seen.add(nkey);
+            allIds.push(nid); // a graph-only neighbor joins the pool (abandoned ones already excluded)
+          }
+          const prev = graphRank.get(nkey);
+          if (prev === undefined || seedGraphRank < prev) graphRank.set(nkey, seedGraphRank);
+        }
+      });
+    }
+
+    // Textual citations are a separate opt-in arm. Mission graph behavior above is unchanged.
+    const citationRank = new Map<string, number>();
+    if (citationRecall && (type === 'decision' || type === 'learning')) {
+      const orderedSeeds = allIds
+        .map((id) => {
+          const bm = bm25Rank.get(String(id));
+          const vk = vecRank.get(String(id));
+          return {
+            id: Number(id),
+            score:
+              (bm !== undefined ? 1 / (rrfK + bm) : 0) +
+              (vk !== undefined ? VECTOR_RRF_WEIGHT / (rrfK + vk) : 0),
+          };
+        })
+        .sort((a, b) => b.score - a.score)
+        .map((seed) => seed.id);
+      // The helper filters origins/status before taking five seeds and five neighbors per seed.
+      const expanded = citationNeighbors(this.client, type, orderedSeeds, { statusFilter });
+      for (const [seed, neighbors] of expanded.bySeed) seedNeighbors.set(String(seed), neighbors);
+      for (const [id, neighbor] of expanded.neighbors) {
+        const key = String(id);
+        citationRank.set(key, neighbor.rank);
+        if (!seen.has(key)) {
+          seen.add(key);
+          allIds.push(id);
+        }
+      }
+    }
+
+    const rows = this.fetchSourceRows(type, allIds, statusFilter);
+    const textById = new Map<string, string>();
+    for (const row of rows) textById.set(String(row.id), row.text);
+
+    const results: RankedResult[] = [];
+    for (const row of rows) {
+      const key = String(row.id);
+      const bm = bm25Rank.get(key);
+      const vk = vecRank.get(key);
+      const gr = graphRank.get(key);
+      const citation = citationRank.get(key);
+      const rrf =
+        (bm !== undefined ? 1 / (rrfK + bm) : 0) +
+        // s92-m07: the vector term is weighted (VECTOR_RRF_WEIGHT); see the constant's note.
+        (vk !== undefined ? VECTOR_RRF_WEIGHT / (rrfK + vk) : 0) +
+        // Third, smaller-weighted graph-recall term (mission-only). graphWeight < 1 dampens the
+        // graph contribution; because the term is ADDED to a candidate's own direct term it can
+        // still re-rank a borderline mission neighbor into the top-3 (the intended recall lift) or,
+        // conversely, nudge a genuine mission hit down — an accepted MISSION-internal trade-off,
+        // measured net-positive by the m02 mission floor. It never touches decisions/learnings
+        // (guarded above), so their baselines are structurally protected.
+        (gr !== undefined ? graphWeight * (1 / (rrfK + gr)) : 0) +
+        (citation !== undefined ? DEFAULT_CITATION_WEIGHT / (rrfK + citation) : 0);
+      const ageDays = computeAgeDays(row.createdAt);
+      const recencyFactor = computeRecencyFactor(ageDays);
+      const finalScore = rrf * (1 - recencyWeight + recencyWeight * recencyFactor);
+      // Payload context-append: surface this seed's fetched 1-hop neighbors (abandoned excluded).
+      const nIds = seedNeighbors.get(key);
+      const graphNeighbors = nIds
+        ? nIds
+            .map((nid) => ({ id: nid, text: textById.get(String(nid)) }))
+            .filter((n): n is { id: number | string; text: string } => n.text !== undefined)
+        : [];
+      results.push({
+        id: row.id,
+        type,
+        text: row.text,
+        score: finalScore,
+        bm25Score: bm25Raw.get(key) ?? 0,
+        recencyFactor,
+        ageDays,
+        sprintId: row.sprintId,
+        projectId: row.projectId,
+        status: row.status,
+        category: row.category,
+        evidence: row.evidence,
+        createdAt: row.createdAt,
+        vectorSimilarity: vecSim.get(key) ?? null,
+        rrfScore: rrf,
+        graphNeighbors: graphNeighbors.length > 0 ? graphNeighbors : null,
+      });
+    }
+    return results;
+  }
+
+  /**
+   * s82-m04: fetch 1-hop MISSION graph neighbors for a set of seed mission ids, grouped by seed.
+   * Edges (the real star topology, schema.ts): same `sprint_id` sibling + `mission_dependencies`
+   * (either direction). Abandoned neighbors (`Dropped`/`Deferred`/`Archived`) are excluded so the
+   * arm never surfaces parked/abandoned work as "relevant context" purely by sprint adjacency
+   * (adversarial review, s82-m04). Same-sprint fan-out is small (~3-8/sprint). Soft-degrades to no
+   * expansion on any query error (e.g. mission_dependencies absent on a pre-s10 store).
+   */
+  private missionGraphNeighbors(
+    seedIds: Array<number | string>
+  ): Map<string, Array<number | string>> {
+    const bySeed = new Map<string, Array<number | string>>();
+    const visibility = prepareSpinOutRead(this.client);
+    seedIds = seedIds.filter((id) => !visibility.hidden('mission', id));
+    if (seedIds.length === 0) return bySeed;
+    const add = (seed: string, neighbor: number | string): void => {
+      if (
+        String(neighbor) === seed ||
+        neighbor === null ||
+        neighbor === undefined ||
+        visibility.hidden('mission', neighbor)
+      )
+        return;
+      const list = bySeed.get(seed) ?? [];
+      if (!list.some((x) => String(x) === String(neighbor))) list.push(neighbor);
+      bySeed.set(seed, list);
+    };
+    try {
+      const ph = seedIds.map(() => '?').join(', ');
+      // The neighbor's status is filtered in every arm so abandoned missions are never injected.
+      const statusPh = MISSION_GRAPH_EXCLUDED_STATUSES.map(() => '?').join(', ');
+      const sprintRows = this.client.getMany<{ seed: string; neighbor: string }>(
+        `SELECT m1.id AS seed, m2.id AS neighbor
+         FROM missions m1 JOIN missions m2 ON m2.sprint_id = m1.sprint_id AND m2.id <> m1.id
+         WHERE m1.id IN (${ph}) AND m1.sprint_id IS NOT NULL
+           AND m2.status NOT IN (${statusPh})`,
+        [...seedIds, ...MISSION_GRAPH_EXCLUDED_STATUSES]
+      );
+      (sprintRows.data ?? []).forEach((r) => add(r.seed, r.neighbor));
+      const depRows = this.client.getMany<{ seed: string; neighbor: string }>(
+        `SELECT d.from_id AS seed, d.to_id AS neighbor
+         FROM mission_dependencies d JOIN missions m ON m.id = d.to_id
+         WHERE d.from_id IN (${ph}) AND m.status NOT IN (${statusPh})
+         UNION
+         SELECT d.to_id AS seed, d.from_id AS neighbor
+         FROM mission_dependencies d JOIN missions m ON m.id = d.from_id
+         WHERE d.to_id IN (${ph}) AND m.status NOT IN (${statusPh})`,
+        [
+          ...seedIds,
+          ...MISSION_GRAPH_EXCLUDED_STATUSES,
+          ...seedIds,
+          ...MISSION_GRAPH_EXCLUDED_STATUSES,
+        ]
+      );
+      (depRows.data ?? []).forEach((r) => add(r.seed, r.neighbor));
+    } catch (error) {
+      // Soft-degrade: any graph-query failure (e.g. mission_dependencies absent on an old store)
+      // falls back to no expansion — the direct BM25/vector arms are unaffected.
+      const message = error instanceof Error ? error.message : 'unknown error';
+      console.error(`[WARN] HybridRetriever: mission graph expansion failed — ${message}`);
+      return new Map();
+    }
+    return bySeed;
+  }
+
+  // ─── Private: BM25 candidates per type ─────────────────────────────────────
+
+  private fts5CandidatesForType(
+    type: RetrievableType,
+    query: string,
+    candidateLimit: number,
+    statusFilter: string[] | undefined
+  ): Array<{ id: number | string; rank: number }> {
+    const keywords = extractKeywords(query);
+    if (keywords.length === 0) return [];
+
+    const ftsTable = ftsTableForType(type);
+    const tableCheck = this.client.getOne<{ name: string }>(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+      [ftsTable]
+    );
+    if (!tableCheck.success || !tableCheck.data) return [];
+
+    const ftsQuery = keywords
+      .slice(0, FTS_MAX_KEYWORDS)
+      .map((k) => `"${k.replace(/"/g, '""')}"`)
+      .join(' OR ');
+
+    // Join every type before LIMIT: transferred source rows must not consume the pool.
+    const base = type === 'mission' ? 'missions' : baseTableForType(type);
+    const predicate =
+      type === 'mission'
+        ? { sql: '1=1', params: [] }
+        : (statusPredicate(statusFilter, 'base.status') ?? { sql: '1=1', params: [] });
+    const visible = prepareSpinOutRead(this.client).predicate(type, 'base.id');
+    let raw: Array<{ rowid: number; rank: number }>;
+    try {
+      const result = this.client.getMany<{ rowid: number; rank: number }>(
+        `SELECT ${ftsTable}.rowid AS rowid, ${ftsTable}.rank AS rank
+         FROM ${ftsTable} JOIN ${base} base ON base.rowid = ${ftsTable}.rowid
+         WHERE ${ftsTable} MATCH ? AND ${predicate.sql} AND ${visible.sql}
+         ORDER BY ${ftsTable}.rank LIMIT ?`,
+        [ftsQuery, ...predicate.params, ...visible.params, candidateLimit]
+      );
+      if (!result.success || !result.data) return [];
+      raw = result.data;
+    } catch {
+      return [];
+    }
+
+    // For decisions and learnings, rowid == id (INTEGER PRIMARY KEY AUTOINCREMENT aliases rowid).
+    // For missions, missions_fts.rowid maps to missions.rowid (auto-allocated); translate to the
+    // public TEXT id via a single batched lookup before returning.
+    if (type === 'mission') {
+      if (raw.length === 0) return [];
+      const placeholders = raw.map(() => '?').join(', ');
+      const idLookup = this.client.getMany<{ rowid: number; id: string }>(
+        `SELECT rowid, id FROM missions WHERE rowid IN (${placeholders})`,
+        raw.map((r) => r.rowid)
+      );
+      const rowidToId = new Map<number, string>();
+      (idLookup.data ?? []).forEach((r) => rowidToId.set(r.rowid, r.id));
+      const out: Array<{ id: number | string; rank: number }> = [];
+      for (const r of raw) {
+        const publicId = rowidToId.get(r.rowid);
+        if (publicId) out.push({ id: publicId, rank: r.rank });
+      }
+      return out;
+    }
+
+    return raw.map((r) => ({ id: r.rowid, rank: r.rank }));
+  }
+
+  // ─── Private: vector candidates per type ───────────────────────────────────
+
+  private vectorCandidatesForType(
+    type: RetrievableType,
+    queryVec: Float32Array,
+    candidateLimit: number,
+    statusFilter: string[] | undefined
+  ): Array<{ id: number | string; distance: number }> {
+    const vecTable = vecTableForType(type);
+    const idColumn = vecIdColumnForType(type);
+    const base = type === 'mission' ? 'missions' : baseTableForType(type);
+    const predicate =
+      type === 'mission'
+        ? { sql: '1=1', params: [] }
+        : (statusPredicate(statusFilter, 'status') ?? { sql: '1=1', params: [] });
+    const visible = prepareSpinOutRead(this.client).predicate(type, `${base}.id`);
+
+    const blob = packEmbedding(queryVec);
+    // s92-m07 (R1): vec0's KNN cannot take the status predicate, so the arm widens k until the
+    // eligible rows fill the pool or the index is exhausted, instead of cutting the pool first.
+    let k = Math.min(candidateLimit, VECTOR_MAX_K);
+    for (;;) {
+      let nearest: Array<{ id: number | string; distance: number }>;
+      try {
+        const result = this.client.getMany<{ id: number | string; distance: number }>(
+          `SELECT ${idColumn} AS id, distance FROM ${vecTable}
+           WHERE embedding MATCH ? AND k = ?
+           ORDER BY distance`,
+          [blob, k]
+        );
+        if (!result.success || !result.data) return [];
+        nearest = result.data.map((r) => ({ id: r.id, distance: r.distance }));
+      } catch {
+        return [];
+      }
+      if (nearest.length === 0) return [];
+
+      const ids = nearest.map((c) => c.id);
+      const allowed = this.client.getMany<{ id: number }>(
+        `SELECT id FROM ${base} WHERE id IN (${ids.map(() => '?').join(', ')}) AND ${predicate.sql} AND ${visible.sql}`,
+        [...ids, ...predicate.params, ...visible.params]
+      );
+      if (!allowed.success)
+        throw new Error(
+          `SPIN_OUT_READ_FAILED: ${allowed.error?.message ?? 'vector eligibility query failed'}`
+        );
+      const keep = new Set((allowed.data ?? []).map((r) => String(r.id)));
+      const eligible = nearest.filter((c) => keep.has(String(c.id)));
+      if (eligible.length >= candidateLimit || nearest.length < k || k >= VECTOR_MAX_K) {
+        return eligible.slice(0, candidateLimit);
+      }
+      k = Math.min(k * 4, VECTOR_MAX_K);
+    }
+  }
+
+  // ─── Private: source row fetch per type ────────────────────────────────────
+
+  /**
+   * s83-m06: SQL expression for a row's project_id that degrades to NULL on
+   * ancient/un-migrated stores lacking the column (mirrors decision-memory.ts's
+   * column-presence guard) — so adding project_id to the fetch SELECTs never throws
+   * on a store that predates the s69-m03 genesis columns. Column sets are cached
+   * per table (the schema does not change within a retriever's lifetime).
+   */
+  private readonly columnCache = new Map<string, Set<string>>();
+  private projectIdExpr(table: string): string {
+    let cols = this.columnCache.get(table);
+    if (!cols) {
+      const res = this.client.getMany<{ name: string }>(`PRAGMA table_info('${table}')`, []);
+      cols = new Set(res.success && res.data ? res.data.map((c) => c.name) : []);
+      this.columnCache.set(table, cols);
+    }
+    return cols.has('project_id') ? 'project_id' : 'NULL';
+  }
+
+  private fetchSourceRows(
+    type: RetrievableType,
+    ids: Array<number | string>,
+    statusFilter: string[] | undefined
+  ): SourceRow[] {
+    if (ids.length === 0) return [];
+    if (type === 'decision') return this.fetchDecisionRows(ids as number[], statusFilter);
+    if (type === 'learning') return this.fetchLearningRows(ids as number[], statusFilter);
+    return this.fetchMissionRows(ids as string[]);
+  }
+
+  private fetchDecisionRows(ids: number[], statusFilter: string[] | undefined): SourceRow[] {
+    const idPlaceholders = ids.map(() => '?').join(', ');
+    const predicate = statusPredicate(statusFilter, 'status');
+    const statusClause = predicate ? ` AND ${predicate.sql}` : '';
+    const result = this.client.getMany<{
+      id: number;
+      decision_text: string;
+      category: string | null;
+      sprint_id: string | null;
+      evidence: string | null;
+      created_at: string | null;
+      project_id: string | null;
+      status: string | null;
+    }>(
+      `SELECT id, decision_text, category, sprint_id, evidence, created_at, status,
+              ${this.projectIdExpr('strategic_decisions')} AS project_id
+       FROM strategic_decisions
+       WHERE id IN (${idPlaceholders})${statusClause}`,
+      predicate ? [...ids, ...predicate.params] : ids
+    );
+    if (!result.success || !result.data) return [];
+    return result.data.map((r) => ({
+      id: r.id,
+      text: r.decision_text,
+      sprintId: r.sprint_id,
+      category: r.category,
+      status: r.status,
+      evidence: r.evidence,
+      createdAt: r.created_at,
+      projectId: r.project_id,
+    }));
+  }
+
+  private fetchLearningRows(ids: number[], statusFilter: string[] | undefined): SourceRow[] {
+    const idPlaceholders = ids.map(() => '?').join(', ');
+    const predicate = statusPredicate(statusFilter, 'status');
+    const statusClause = predicate ? ` AND ${predicate.sql}` : '';
+    const result = this.client.getMany<{
+      id: number;
+      content: string;
+      category: string | null;
+      sprint_id: string | null;
+      created_at: string | null;
+      project_id: string | null;
+      status: string | null;
+    }>(
+      `SELECT id, content, category, sprint_id, created_at, status,
+              ${this.projectIdExpr('learnings')} AS project_id
+       FROM learnings
+       WHERE id IN (${idPlaceholders})${statusClause}`,
+      predicate ? [...ids, ...predicate.params] : ids
+    );
+    if (!result.success || !result.data) return [];
+    return result.data.map((r) => ({
+      id: r.id,
+      text: r.content,
+      sprintId: r.sprint_id,
+      category: r.category,
+      status: r.status,
+      evidence: null,
+      createdAt: r.created_at,
+      projectId: r.project_id,
+    }));
+  }
+
+  private fetchMissionRows(ids: string[]): SourceRow[] {
+    // Missions don't share the 'active' status convention; their lifecycle states
+    // (Queued, In Progress, Completed, ...) are orthogonal. No status filter applied here —
+    // callers can post-filter on RankedResult fields if needed.
+    const idPlaceholders = ids.map(() => '?').join(', ');
+    const result = this.client.getMany<{
+      id: string;
+      name: string;
+      objective: string | null;
+      notes: string | null;
+      sprint_id: string | null;
+      created_at: string | null;
+      project_id: string | null;
+      status: string | null;
+    }>(
+      `SELECT id, name, objective, notes, sprint_id, created_at, status,
+              ${this.projectIdExpr('missions')} AS project_id
+       FROM missions
+       WHERE id IN (${idPlaceholders})`,
+      ids
+    );
+    if (!result.success || !result.data) return [];
+    return result.data.map((r) => ({
+      id: r.id,
+      text: formatMissionText(r.name, r.objective, r.notes),
+      sprintId: r.sprint_id,
+      category: null,
+      status: normalizeMissionStatus(r.status),
+      evidence: null,
+      createdAt: r.created_at,
+      projectId: r.project_id,
+    }));
+  }
+}
+
+// ─── Type metadata helpers ────────────────────────────────────────────────────
+
+/** The source table of a status-bearing type. */
+function baseTableForType(type: 'decision' | 'learning'): string {
+  return type === 'decision' ? 'strategic_decisions' : 'learnings';
+}
+
+function ftsTableForType(type: RetrievableType): string {
+  switch (type) {
+    case 'decision':
+      return 'decisions_fts';
+    case 'learning':
+      return 'learnings_fts';
+    case 'mission':
+      return 'missions_fts';
+  }
+}
+
+function vecTableForType(type: RetrievableType): string {
+  switch (type) {
+    case 'decision':
+      return 'decisions_vec';
+    case 'learning':
+      return 'learnings_vec';
+    case 'mission':
+      return 'missions_vec';
+  }
+}
+
+function vecIdColumnForType(type: RetrievableType): string {
+  switch (type) {
+    case 'decision':
+      return 'decision_id';
+    case 'learning':
+      return 'learning_id';
+    case 'mission':
+      return 'mission_id';
+  }
+}
+
+function formatMissionText(name: string, objective: string | null, notes: string | null): string {
+  const parts = [name];
+  if (objective && objective.trim()) parts.push(` — ${objective.trim()}`);
+  if (notes && notes.trim()) parts.push(` | ${notes.trim()}`);
+  return parts.join('');
+}
+
+/**
+ * Convert sqlite-vec's L2 (Euclidean) distance into cosine similarity, valid because
+ * the embedding pipeline produces L2-normalized 384-dim vectors (s66 ADR Decision 2,
+ * `{ pooling: 'mean', normalize: true }`). For unit vectors:
+ *   ||a - b||² = 2 − 2(a · b)  ⇒  cosine_similarity = 1 − distance² / 2
+ * Result range is approximately [-1, 1]; numerical noise can produce values slightly > 1
+ * on self-matches, harmless for ranking.
+ */
+function distanceToCosineSimilarity(distance: number): number {
+  return 1 - (distance * distance) / 2;
+}

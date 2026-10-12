@@ -7,8 +7,8 @@ import * as os from 'os';
 import * as path from 'path';
 import { runCli } from '../../src/cli';
 import type { CliIo } from '../../src/cli/core';
-import { readTelemetry } from '../../src/tools/cmos/local-telemetry';
-import { seedCmosDb } from '../helpers/seedCmosDb';
+import { readTelemetry } from '../../src/tools/rbook/local-telemetry';
+import { seedRbookDb } from '../helpers/seedRbookDb';
 
 const verb = jest.fn();
 jest.mock('../../src/cli/session-start', () => ({ run: (...args: unknown[]) => verb(...args) }));
@@ -20,12 +20,12 @@ let root: string;
 let dbPath: string;
 let env: NodeJS.ProcessEnv;
 beforeEach(() => {
-  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-hook-dedupe-'));
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-hook-dedupe-'));
   root = path.join(tmp, 'project');
-  dbPath = seedCmosDb(root, { projectId: 'dedupe' });
+  dbPath = seedRbookDb(root, { projectId: 'dedupe' });
   env = {
     ...process.env,
-    CMOS_CONFIG_DIR: path.join(tmp, 'config'),
+    RBOOK_CONFIG_DIR: path.join(tmp, 'config'),
     CLAUDE_PROJECT_DIR: root,
     CLAUDE_PID: String(process.pid),
   };
@@ -34,7 +34,7 @@ beforeEach(() => {
 afterEach(() => fs.rmSync(tmp, { recursive: true, force: true }));
 async function hook(
   event: string,
-  source = 'cmos-plugin',
+  source = 'rbook-plugin',
   input: Record<string, string> = {},
   override: Partial<CliIo> = {}
 ) {
@@ -77,7 +77,7 @@ it('a losing source has no output, telemetry or verb effects, even after duplica
 it('all winning compact and resume calls remain eligible even with the previous prompt ID', async () => {
   for (const source of ['compact', 'compact', 'resume', 'resume']) {
     expect(
-      (await hook('session-start', 'cmos-plugin', { source, prompt_id: 'last-turn' })).stdout
+      (await hook('session-start', 'rbook-plugin', { source, prompt_id: 'last-turn' })).stdout
     ).toContain('Delivered');
   }
   expect(verb).toHaveBeenCalledTimes(4);
@@ -85,7 +85,7 @@ it('all winning compact and resume calls remain eligible even with the previous 
 it('preserves real prompt IDs and commits only after successful output', async () => {
   const failed = await hook(
     'prompt',
-    'cmos-plugin',
+    'rbook-plugin',
     { prompt_id: 'p1' },
     {
       stdout: () => {
@@ -94,8 +94,8 @@ it('preserves real prompt IDs and commits only after successful output', async (
     }
   );
   expect(failed.stderr.join('')).toContain('broken output');
-  expect((await hook('prompt', 'cmos-plugin', { prompt_id: 'p1' })).stdout).toContain('Delivered');
-  expect((await hook('prompt', 'cmos-plugin', { prompt_id: 'p1' })).stdout).toBe('');
+  expect((await hook('prompt', 'rbook-plugin', { prompt_id: 'p1' })).stdout).toContain('Delivered');
+  expect((await hook('prompt', 'rbook-plugin', { prompt_id: 'p1' })).stdout).toBe('');
   expect(verb).toHaveBeenCalledTimes(2);
   expect(verb.mock.calls[0][0].input.prompt_id).toBe('p1');
   // No invented identity from repeated prompt text when prompt_id is absent.
@@ -105,23 +105,23 @@ it('preserves real prompt IDs and commits only after successful output', async (
 });
 it('unverifiable epochs have no source election guarantee but real prompt IDs still dedupe', async () => {
   const override = { env: { ...env, CLAUDE_PID: '' } };
-  await hook('session-start', 'cmos-plugin', {}, override);
+  await hook('session-start', 'rbook-plugin', {}, override);
   await hook('session-start', 'other-adapter', {}, override);
-  await hook('prompt', 'cmos-plugin', { prompt_id: 'real-turn' }, override);
+  await hook('prompt', 'rbook-plugin', { prompt_id: 'real-turn' }, override);
   await hook('prompt', 'other-adapter', { prompt_id: 'real-turn' }, override);
   expect(verb).toHaveBeenCalledTimes(3);
 });
 
-it('keeps the elected source when CMOS is initialized during the same harness session', async () => {
-  fs.rmSync(path.join(root, 'cmos'), { recursive: true, force: true });
-  await hook('session-start', 'cmos-plugin');
-  dbPath = seedCmosDb(root, { projectId: 'dedupe' });
+it('keeps the elected source when Reasonbook is initialized during the same harness session', async () => {
+  fs.rmSync(path.join(root, 'rbook'), { recursive: true, force: true });
+  await hook('session-start', 'rbook-plugin');
+  dbPath = seedRbookDb(root, { projectId: 'dedupe' });
   expect((await hook('session-start', 'other-adapter')).stdout).toBe('');
   expect(verb).toHaveBeenCalledTimes(1);
 });
 it('Stop remains silent and calls its stage once per identified turn, independently of prompt receipt', async () => {
-  await hook('prompt', 'cmos-plugin', { prompt_id: 'turn' });
-  expect((await hook('stop', 'cmos-plugin', { prompt_id: 'turn' })).stdout).toBe('');
-  await hook('stop', 'cmos-plugin', { prompt_id: 'turn' });
+  await hook('prompt', 'rbook-plugin', { prompt_id: 'turn' });
+  expect((await hook('stop', 'rbook-plugin', { prompt_id: 'turn' })).stdout).toBe('');
+  await hook('stop', 'rbook-plugin', { prompt_id: 'turn' });
   expect(verb).toHaveBeenCalledTimes(2);
 });

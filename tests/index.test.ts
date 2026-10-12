@@ -16,40 +16,40 @@ const DEPRECATED_TOOL_NAMES = [
   'create_mission',
   'get_mission_quality_score',
   'create_mission_splits',
-  'cmos_sprint_list',
-  'cmos_sprint_show',
-  'cmos_sprint_add',
-  'cmos_sprint_update',
-  'cmos_sprint_complete',
-  'cmos_mission_list',
-  'cmos_mission_show',
-  'cmos_mission_status',
-  'cmos_mission_start',
-  'cmos_mission_complete',
-  'cmos_mission_block',
-  'cmos_mission_unblock',
-  'cmos_mission_update',
-  'cmos_mission_add',
-  'cmos_mission_depends',
-  'cmos_context_view',
-  'cmos_context_update',
-  'cmos_context_condense',
-  'cmos_context_snapshot',
-  'cmos_context_history',
-  'cmos_session_start',
-  'cmos_session_capture',
-  'cmos_session_complete',
-  'cmos_session_list',
-  'cmos_decisions_list',
-  'cmos_decisions_search',
-  'cmos_db_health',
-  'cmos_db_snapshot',
-  'cmos_db_restore',
-  'cmos_project_register',
-  'cmos_project_list',
-  'cmos_project_unregister',
-  'cmos_project_validate',
-  'cmos_project_init',
+  'rbook_sprint_list',
+  'rbook_sprint_show',
+  'rbook_sprint_add',
+  'rbook_sprint_update',
+  'rbook_sprint_complete',
+  'rbook_mission_list',
+  'rbook_mission_show',
+  'rbook_mission_status',
+  'rbook_mission_start',
+  'rbook_mission_complete',
+  'rbook_mission_block',
+  'rbook_mission_unblock',
+  'rbook_mission_update',
+  'rbook_mission_add',
+  'rbook_mission_depends',
+  'rbook_context_view',
+  'rbook_context_update',
+  'rbook_context_condense',
+  'rbook_context_snapshot',
+  'rbook_context_history',
+  'rbook_session_start',
+  'rbook_session_capture',
+  'rbook_session_complete',
+  'rbook_session_list',
+  'rbook_decisions_list',
+  'rbook_decisions_search',
+  'rbook_db_health',
+  'rbook_db_snapshot',
+  'rbook_db_restore',
+  'rbook_project_register',
+  'rbook_project_list',
+  'rbook_project_unregister',
+  'rbook_project_validate',
+  'rbook_project_init',
 ] as const;
 
 describe('Mission Protocol entry point', () => {
@@ -57,15 +57,15 @@ describe('Mission Protocol entry point', () => {
     const definitions = getToolDefinitions();
     const names = definitions.map((def) => def.name);
 
-    expect(names).toContain('cmos_mission');
-    expect(names).toContain('cmos_mission_transition');
-    expect(names).toContain('cmos_sprint');
-    expect(names).toContain('cmos_context');
-    expect(names).toContain('cmos_session');
-    expect(names).toContain('cmos_decisions');
-    expect(names).toContain('cmos_db');
-    expect(names).toContain('cmos_project');
-    expect(names).toContain('cmos_agent_onboard');
+    expect(names).toContain('rbook_mission');
+    expect(names).toContain('rbook_mission_transition');
+    expect(names).toContain('rbook_sprint');
+    expect(names).toContain('rbook_context');
+    expect(names).toContain('rbook_session');
+    expect(names).toContain('rbook_decisions');
+    expect(names).toContain('rbook_db');
+    expect(names).toContain('rbook_project');
+    expect(names).toContain('rbook_agent_onboard');
 
     for (const toolName of DEPRECATED_TOOL_NAMES) {
       expect(names).not.toContain(toolName);
@@ -118,36 +118,37 @@ describe('Mission Protocol entry point', () => {
       );
     });
 
-    test('cmos_project(action=init) passes projectRoot literally without sender-context rewrite', async () => {
-      // Regression: the dispatcher previously routed every cmos_project action
+    test('rbook_project(action=init) passes projectRoot literally without sender-context rewrite', async () => {
+      // Regression: the dispatcher previously routed every rbook_project action
       // through resolveToolSenderContext. For init, that resolver fell back to
-      // the caller's own project when the target had no CMOS DB, clobbering
+      // the caller's own project when the target had no Reasonbook DB, clobbering
       // the caller's metadata with a fresh seed.
       const fs = await import('fs');
       const os = await import('os');
-      const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-init-dispatcher-'));
+      const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-init-dispatcher-'));
       try {
         const result = await executeMissionProtocolTool(
-          'cmos_project',
+          'rbook_project',
           { action: 'init', projectRoot: tmpRoot, projectName: 'dispatcher-regression' },
           context
         );
-        const structured = (result as { structuredContent?: { data?: { cmosDirectory?: string } } })
-          .structuredContent;
-        expect(structured?.data?.cmosDirectory).toBe(path.join(tmpRoot, 'cmos'));
-        expect(fs.existsSync(path.join(tmpRoot, 'cmos', 'db', 'cmos.sqlite'))).toBe(true);
+        const structured = (
+          result as { structuredContent?: { data?: { rbookDirectory?: string } } }
+        ).structuredContent;
+        expect(structured?.data?.rbookDirectory).toBe(path.join(tmpRoot, 'rbook'));
+        expect(fs.existsSync(path.join(tmpRoot, 'rbook', 'db', 'rbook.sqlite'))).toBe(true);
       } finally {
         fs.rmSync(tmpRoot, { recursive: true, force: true });
       }
     });
 
-    test('Sprint 65 m02: project_identity.cmos_address survives planning session lifecycle + onboard', async () => {
-      // Regression: pre-fix, backfillUnknownCmosAddress (called unguarded from
-      // cmos_agent_onboard:455 and checkpoint-backfill:68) silently rewrote a
-      // user-set cmos_address back to the metadata-derived canonical form on
+    test('Sprint 65 m02: project_identity.rbook_address survives planning session lifecycle + onboard', async () => {
+      // Regression: pre-fix, backfillUnknownRbookAddress (called unguarded from
+      // rbook_agent_onboard:455 and checkpoint-backfill:68) silently rewrote a
+      // user-set rbook_address back to the metadata-derived canonical form on
       // the next observation pass. The operator attributed this to the
       // session-complete aggregation path in decision #682, but the actual
-      // trigger was the next cmos_agent_onboard call — session-complete does
+      // trigger was the next rbook_agent_onboard call — session-complete does
       // not touch project_identity. This test exercises the full lifecycle
       // (flip → session start → capture → complete → onboard) to confirm the
       // flipped address survives every step. Also asserts other identity
@@ -158,19 +159,19 @@ describe('Mission Protocol entry point', () => {
       const Database = (await import('better-sqlite3')).default;
       const originalCwd = process.cwd;
 
-      const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-identity-drift-'));
+      const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-identity-drift-'));
 
       try {
         await executeMissionProtocolTool(
-          'cmos_project',
+          'rbook_project',
           { action: 'init', projectRoot, projectName: 'identity-drift-test' },
           context
         );
 
-        // Seed metadata.owner so backfillUnknownCmosAddress has the worst-case
+        // Seed metadata.owner so backfillUnknownRbookAddress has the worst-case
         // ammo to silently re-canonicalize on the next onboard. Pre-fix, this
         // is what makes the bug bite; post-fix, the guard prevents the rewrite.
-        const db = new Database(path.join(projectRoot, 'cmos', 'db', 'cmos.sqlite'));
+        const db = new Database(path.join(projectRoot, 'rbook', 'db', 'rbook.sqlite'));
         db.exec(
           `INSERT OR REPLACE INTO metadata (key, value) VALUES ('owner', 'test-owner'), ('dashboard_slug', 'identity-drift-test')`
         );
@@ -178,18 +179,18 @@ describe('Mission Protocol entry point', () => {
 
         process.cwd = () => projectRoot;
 
-        // Flip cmos_address to a fork-style address that differs from the
+        // Flip rbook_address to a fork-style address that differs from the
         // metadata-derived canonical form. Also flip foundational_docs and
         // description so we can assert other identity fields survive too.
-        const flippedAddress = 'cmos://test-owner/identity-drift-test-fork';
+        const flippedAddress = 'rbook://test-owner/identity-drift-test-fork';
         const foundationalDocsValue = [{ title: 'Fork Spec', path: 'docs/fork.md' }];
         await executeMissionProtocolTool(
-          'cmos_context',
+          'rbook_context',
           {
             action: 'update',
             contextType: 'project_identity',
             fieldUpdates: [
-              { path: 'cmos_address', value: flippedAddress },
+              { path: 'rbook_address', value: flippedAddress },
               { path: 'foundational_docs', value: foundationalDocsValue },
               { path: 'description', value: 'Pro fork descriptor' },
             ],
@@ -200,7 +201,7 @@ describe('Mission Protocol entry point', () => {
         // Run a full planning session lifecycle. Mission says planning-close
         // is the suspected trigger.
         const startResult = (await executeMissionProtocolTool(
-          'cmos_session',
+          'rbook_session',
           { action: 'start', type: 'planning', title: 'Identity drift regression session' },
           context
         )) as { structuredContent?: { success?: boolean; data?: { sessionId?: string } } };
@@ -208,7 +209,7 @@ describe('Mission Protocol entry point', () => {
         expect(sessionId).toBeDefined();
 
         await executeMissionProtocolTool(
-          'cmos_session',
+          'rbook_session',
           {
             action: 'capture',
             sessionId,
@@ -219,7 +220,7 @@ describe('Mission Protocol entry point', () => {
         );
 
         await executeMissionProtocolTool(
-          'cmos_session',
+          'rbook_session',
           {
             action: 'complete',
             sessionId,
@@ -228,14 +229,14 @@ describe('Mission Protocol entry point', () => {
           context
         );
 
-        // The actual bug trigger: cmos_agent_onboard calls backfillUnknownCmosAddress.
-        // Pre-fix, this reverts cmos_address to 'cmos://test-owner/identity-drift-test'.
+        // The actual bug trigger: rbook_agent_onboard calls backfillUnknownRbookAddress.
+        // Pre-fix, this reverts rbook_address to 'rbook://test-owner/identity-drift-test'.
         // Post-fix, the guard preserves the flipped value.
-        await executeMissionProtocolTool('cmos_agent_onboard', {}, context);
+        await executeMissionProtocolTool('rbook_agent_onboard', {}, context);
 
         // Inspect identity after the full lifecycle. All flipped fields must persist.
         const viewResult = (await executeMissionProtocolTool(
-          'cmos_context',
+          'rbook_context',
           { action: 'view', contextType: 'project_identity' },
           context
         )) as {
@@ -243,7 +244,7 @@ describe('Mission Protocol entry point', () => {
             success?: boolean;
             data?: {
               projectIdentity?: {
-                cmos_address?: string;
+                rbook_address?: string;
                 foundational_docs?: Array<{ title: string; path: string }>;
                 description?: string;
                 project_name?: string;
@@ -256,7 +257,7 @@ describe('Mission Protocol entry point', () => {
 
         const identity = viewResult.structuredContent?.data?.projectIdentity;
         expect(identity).toBeDefined();
-        expect(identity?.cmos_address).toBe(flippedAddress);
+        expect(identity?.rbook_address).toBe(flippedAddress);
         expect(identity?.foundational_docs).toEqual(foundationalDocsValue);
         expect(identity?.description).toBe('Pro fork descriptor');
         // Sanity: other identity fields the lifecycle should not touch
@@ -268,8 +269,8 @@ describe('Mission Protocol entry point', () => {
       }
     });
 
-    test('Sprint 65 m01: cmos_mission(action=show) pins to CWD project, never fans out across registry', async () => {
-      // Regression: pre-fix, cmos_mission(show) was in READ_ACTIONS so the
+    test('Sprint 65 m01: rbook_mission(action=show) pins to CWD project, never fans out across registry', async () => {
+      // Regression: pre-fix, rbook_mission(show) was in READ_ACTIONS so the
       // dispatcher fanned out across every registered project when projectRoot
       // was omitted. Mission IDs collide across projects (sNN-mNN is not
       // globally unique), so the agent received same-ID missions from unrelated
@@ -282,18 +283,18 @@ describe('Mission Protocol entry point', () => {
       const Database = (await import('better-sqlite3')).default;
       const originalCwd = process.cwd;
 
-      const cwdRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-show-cwd-'));
-      const siblingRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-show-sibling-'));
+      const cwdRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-show-cwd-'));
+      const siblingRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-show-sibling-'));
 
       try {
-        // Initialize two real CMOS workspaces so both are registry-eligible
+        // Initialize two real Reasonbook workspaces so both are registry-eligible
         await executeMissionProtocolTool(
-          'cmos_project',
+          'rbook_project',
           { action: 'init', projectRoot: cwdRoot, projectName: 's65-m01-cwd' },
           context
         );
         await executeMissionProtocolTool(
-          'cmos_project',
+          'rbook_project',
           { action: 'init', projectRoot: siblingRoot, projectName: 's65-m01-sibling' },
           context
         );
@@ -302,7 +303,7 @@ describe('Mission Protocol entry point', () => {
         // names — the fan-out bug would have returned both rows.
         const sharedMissionId = 's65-m01-regression-fixture';
         const insertMission = (root: string, name: string): void => {
-          const db = new Database(path.join(root, 'cmos', 'db', 'cmos.sqlite'));
+          const db = new Database(path.join(root, 'rbook', 'db', 'rbook.sqlite'));
           db.prepare('INSERT INTO missions (id, name, status) VALUES (?, ?, ?)').run(
             sharedMissionId,
             name,
@@ -318,7 +319,7 @@ describe('Mission Protocol entry point', () => {
         process.cwd = () => cwdRoot;
 
         const result = (await executeMissionProtocolTool(
-          'cmos_mission',
+          'rbook_mission',
           { action: 'show', missionId: sharedMissionId },
           context
         )) as { structuredContent?: { success?: boolean; data?: unknown } };

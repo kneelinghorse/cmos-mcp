@@ -1,0 +1,51 @@
+{
+  "mcpServers": {
+    "rbook": {
+      "command": "/bin/sh",
+      "args": ["./hooks/launch.sh", "serve", "--install-root", "shared"],
+      "cwd": ".",
+      "env_vars": [
+        "RBOOK_AGENT_ROLE",
+        "CMOS_AGENT_ROLE",
+        "RBOOK_AMBIENT",
+        "CMOS_AMBIENT",
+        "RBOOK_CHECKPOINT_SYNC",
+        "CMOS_CHECKPOINT_SYNC",
+        "RBOOK_CONFIG_DIR",
+        "CMOS_CONFIG_DIR",
+        "RBOOK_CONTEXT_RETENTION_SPRINTS",
+        "CMOS_CONTEXT_RETENTION_SPRINTS",
+        "RBOOK_CONTEXT_SIZE_LIMIT_KB",
+        "CMOS_CONTEXT_SIZE_LIMIT_KB",
+        "RBOOK_CONTEXT_TARGET_SIZE_KB",
+        "CMOS_CONTEXT_TARGET_SIZE_KB",
+        "RBOOK_CONTEXT_WARNING_THRESHOLD_PERCENT",
+        "CMOS_CONTEXT_WARNING_THRESHOLD_PERCENT",
+        "RBOOK_DASHBOARD_API_KEY",
+        "CMOS_DASHBOARD_API_KEY",
+        "RBOOK_DASHBOARD_PASSWORD",
+        "CMOS_DASHBOARD_PASSWORD",
+        "RBOOK_DASHBOARD_URL",
+        "CMOS_DASHBOARD_URL",
+        "RBOOK_DASHBOARD_USER",
+        "CMOS_DASHBOARD_USER",
+        "RBOOK_DEBUG",
+        "CMOS_DEBUG",
+        "RBOOK_EPHEMERAL_PATHS",
+        "CMOS_EPHEMERAL_PATHS",
+        "RBOOK_MAX_SNAPSHOTS",
+        "CMOS_MAX_SNAPSHOTS",
+        "RBOOK_MODEL_CACHE_DIR",
+        "CMOS_MODEL_CACHE_DIR",
+        "RBOOK_OFFLINE_EMBEDDINGS",
+        "CMOS_OFFLINE_EMBEDDINGS",
+        "RBOOK_PROJECT_ID",
+        "CMOS_PROJECT_ID",
+        "RBOOK_PROJECT_ROOT",
+        "CMOS_PROJECT_ROOT",
+        "RBOOK_STALENESS_THRESHOLD_SPRINTS",
+        "CMOS_STALENESS_THRESHOLD_SPRINTS"
+      ]
+    }
+  }
+}

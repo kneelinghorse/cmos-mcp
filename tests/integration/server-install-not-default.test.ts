@@ -6,10 +6,10 @@ import { promises as fs } from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { CmosDetector } from '../../src/intelligence/cmos-detector';
+import { RbookDetector } from '../../src/intelligence/rbook-detector';
 import { ProjectGraphRegistry } from '../../src/intelligence/project-graph-registry';
 import { resolveSenderContext } from '../../src/intelligence/sender-context';
-import { createSeededCmosProject, type SeededCmosProject } from '../helpers/seedCmosDb';
+import { createSeededRbookProject, type SeededRbookProject } from '../helpers/seedRbookDb';
 
 async function makeTempDir(prefix: string): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -17,38 +17,38 @@ async function makeTempDir(prefix: string): Promise<string> {
 
 /**
  * The owner's real topology (critic B1): every MCP entry launches this repository's dist, so the
- * install root IS a CMOS store; and the registry carries a dormant default (`forge`) written long
+ * install root IS a Reasonbook store; and the registry carries a dormant default (`forge`) written long
  * before 3.2.0. A design that defaulted every "contextless" call would have woken that default for
  * calls made from this repository. These tests pin that it does not.
  */
 describe('server install root and the dormant registry default (critic B1)', () => {
   let configDir: string;
-  let installRepo: SeededCmosProject;
-  let forge: SeededCmosProject;
+  let installRepo: SeededRbookProject;
+  let forge: SeededRbookProject;
   let registry: ProjectGraphRegistry;
 
   beforeEach(async () => {
-    CmosDetector.resetInstance();
+    RbookDetector.resetInstance();
     ProjectGraphRegistry.resetInstance();
     configDir = await makeTempDir('server-install-cfg-');
     registry = await ProjectGraphRegistry.create({ configDir });
-    installRepo = await createSeededCmosProject(
+    installRepo = await createSeededRbookProject(
       {
         projectName: 'CMOS-MCP Pro',
         projectId: 'cmos-mcp-pro',
         slug: 'cmos-mcp-pro',
         dashboardProjectId: '09fb9553-6413-479a-8a5c-af6a9d949ae6',
-        cmosAddress: 'cmos://derek/cmos-mcp-pro',
+        rbookAddress: 'rbook://derek/cmos-mcp-pro',
       },
       'server-install-repo-'
     );
-    forge = await createSeededCmosProject(
+    forge = await createSeededRbookProject(
       {
         projectName: 'Forge',
         projectId: 'forge',
         slug: 'forge',
         dashboardProjectId: 'deadbeef-1234-4abc-89ef-0123456789ab',
-        cmosAddress: 'cmos://derek/forge',
+        rbookAddress: 'rbook://derek/forge',
       },
       'server-install-forge-'
     );
@@ -59,7 +59,7 @@ describe('server install root and the dormant registry default (critic B1)', () 
   });
 
   afterEach(async () => {
-    CmosDetector.resetInstance();
+    RbookDetector.resetInstance();
     ProjectGraphRegistry.resetInstance();
     await installRepo.cleanup();
     await forge.cleanup();

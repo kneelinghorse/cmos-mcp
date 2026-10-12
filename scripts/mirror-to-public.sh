@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 # ABOUTME: Append-only mirror of this PRIVATE tree's committed source (minus PRIVATE_PATHS and
-# ABOUTME: nested private-source exclusions) to github.com/kneelinghorse/cmos-mcp, with a leak-guard.
+# ABOUTME: nested private-source exclusions) to github.com/kneelinghorse/reasonbook, with a leak-guard.
 #
 # Strategy (s73 design §3, decisions #812/#819): this repo stays private and is the sole npm-publish
 # source; the public repo is a CODE mirror of everything except PRIVATE_PATHS and DOCS_EXCLUDES.
@@ -13,13 +13,13 @@
 #   scripts/mirror-to-public.sh v1.1.0                # real mirror: atomically push main + tag
 #
 # Env overrides:
-#   PUBLIC_REMOTE   default git@github.com:kneelinghorse/cmos-mcp.git (point at a local --bare repo to test)
+#   PUBLIC_REMOTE   default git@github.com:kneelinghorse/reasonbook.git (point at a local --bare repo to test)
 #   PUBLIC_BRANCH   default main
 #   DRY_RUN=1       stage, leak-check, commit locally, print the staged tree, then stop before push
 #   DRY_RUN_KEEP=1  with DRY_RUN=1 only, retain the sanitized checkout and print DRY_RUN_TREE=<path>
 set -euo pipefail
 
-PUBLIC_REMOTE="${PUBLIC_REMOTE:-git@github.com:kneelinghorse/cmos-mcp.git}"
+PUBLIC_REMOTE="${PUBLIC_REMOTE:-git@github.com:kneelinghorse/reasonbook.git}"
 PUBLIC_BRANCH="${PUBLIC_BRANCH:-main}"
 if [[ "${DRY_RUN_KEEP:-0}" == "1" && "${DRY_RUN:-0}" != "1" ]]; then
   echo "ERROR: DRY_RUN_KEEP requires DRY_RUN=1" >&2
@@ -27,7 +27,7 @@ if [[ "${DRY_RUN_KEEP:-0}" == "1" && "${DRY_RUN:-0}" != "1" ]]; then
 fi
 
 # Top-level paths that must NEVER reach the public repo. The leak-assert below is load-bearing.
-PRIVATE_PATHS=( cmos analysis artifacts tmp SESSIONS.jsonl agents.md CLAUDE.md ecosystem.config.js )
+PRIVATE_PATHS=( cmos rbook analysis artifacts tmp SESSIONS.jsonl agents.md CLAUDE.md ecosystem.config.js )
 
 # Nested private-source exclusions under otherwise-public trees: the private npm-publish workflow,
 # sprint planning, an internal strategy survey, and the private dashboard's PG-mirror schema (moat).
@@ -38,6 +38,7 @@ PRIVATE_PATHS=( cmos analysis artifacts tmp SESSIONS.jsonl agents.md CLAUDE.md e
 # authoritative per-action tool reference is the generated top-level TOOL_REFERENCE.md).
 DOCS_EXCLUDES=(
   .github/workflows/publish.yml
+  .github/workflows/finalize-reasonbook-npm.yml
   docs/specs/sprint-15-revised-missions.md
   docs/specs/phase2-pg-mirror-schema.md
   docs/survey-2026-03-29.md
@@ -52,7 +53,7 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"; cd "$REPO_ROOT"
 PKG_VERSION="$(node -p "require('./package.json').version")"
 [[ "$SEMVER" == "$PKG_VERSION" ]] || { echo "ERROR: tag $VERSION != package.json version $PKG_VERSION"; exit 1; }
 
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/cmos-mirror.XXXXXXXX")"
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/rbook-mirror.XXXXXXXX")"
 RETAINED_ROOT=""
 RETAINED_READY=0
 cleanup() {
@@ -73,7 +74,7 @@ mkdir -p "$STAGE"
 git archive --format=tar HEAD | tar -x -C "$STAGE"
 
 # Build the rsync exclude list: top-level private paths + nested private-source exclusions. Anchored ('/x')
-# so e.g. --exclude=/cmos matches only the top-level dir. /.git is excluded AND (via plain --delete,
+# so e.g. --exclude=/rbook matches only the top-level dir. /.git is excluded AND (via plain --delete,
 # which protects excludes) preserved in the destination — do NOT use --delete-excluded here (it would
 # delete the destination .git).
 RSYNC_EXCLUDES=( "--exclude=/.git" )
@@ -172,8 +173,8 @@ else
   PRIVATE_SHA="$(cd "$REPO_ROOT" && git rev-parse --short HEAD)"
   git commit --quiet -m "release $VERSION
 
-Mirrored from the private @aquex/cmos-mcp source at $PRIVATE_SHA.
-Excludes private paths (cmos/, analysis/, artifacts/, …) and nested private-source files."
+Mirrored from the private @aquex/reasonbook source at $PRIVATE_SHA.
+Excludes private paths (rbook/, analysis/, artifacts/, …) and nested private-source files."
 fi
 
 PUBLIC_COMMIT="$(git rev-parse HEAD)"
@@ -200,7 +201,7 @@ if [[ "${DRY_RUN:-0}" == "1" ]]; then
   echo "── DRY_RUN — not pushing. Re-run without DRY_RUN=1 to push main + $VERSION ──"
   if [[ "${DRY_RUN_KEEP:-0}" == "1" ]]; then
     # WORK/stage contains the private archive. Retain ONLY the already-checked public clone.
-    RETAINED_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/cmos-mirror.XXXXXXXX")"
+    RETAINED_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/rbook-mirror.XXXXXXXX")"
     mv "$PUB" "$RETAINED_ROOT/public"
     echo "DRY_RUN_TREE=$RETAINED_ROOT/public"
     RETAINED_READY=1

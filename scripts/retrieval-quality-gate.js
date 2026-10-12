@@ -146,7 +146,7 @@ function runGate(options = {}) {
     };
   const { fixture, baseline } = verifyEvidence(root, contract);
   const before = snapshotSources(root);
-  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-retrieval-gate-'));
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-retrieval-gate-'));
   try {
     const output = path.join(work, 'candidate.json');
     execFileSync(
@@ -164,7 +164,7 @@ function runGate(options = {}) {
       ],
       {
         cwd: root,
-        env: { ...process.env, CMOS_CHECKPOINT_SYNC: 'off' },
+        env: { ...process.env, RBOOK_CHECKPOINT_SYNC: 'off' },
         stdio: ['ignore', 'pipe', 'pipe'],
         maxBuffer: 16 * 1024 * 1024,
       }

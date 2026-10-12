@@ -5,7 +5,7 @@
  * register/get/unregister/list/touch/archive/unarchive API, the one-time backfill
  * from the existing ProjectRegistry + store metadata, concurrent-write safety
  * (WAL + busy_timeout), graceful first-run behavior, idempotent schema re-ensure,
- * and the cmos_project(register) + cmos_review integration touchpoints.
+ * and the rbook_project(register) + rbook_review integration touchpoints.
  *
  * @module tests/intelligence/project-graph-registry
  */
@@ -21,12 +21,12 @@ import {
   mintProjectId,
   PROJECT_GRAPH_SCHEMA_VERSION,
 } from '../../src/intelligence/project-graph-registry';
-import { CmosDetector } from '../../src/intelligence/cmos-detector';
+import { RbookDetector } from '../../src/intelligence/rbook-detector';
 import { resolveProjectRootEnhanced } from '../../src/intelligence/project-resolution';
-import { seedCmosDb } from '../helpers/seedCmosDb';
-import { cmosProjectRegister } from '../../src/tools/cmos/cmos-project-register';
-import { cmosReview } from '../../src/tools/cmos/cmos-review';
-import { captureToolCall } from '../../src/tools/cmos/tool-call-context';
+import { seedRbookDb } from '../helpers/seedRbookDb';
+import { rbookProjectRegister } from '../../src/tools/rbook/rbook-project-register';
+import { rbookReview } from '../../src/tools/rbook/rbook-review';
+import { captureToolCall } from '../../src/tools/rbook/tool-call-context';
 
 describe('ProjectGraphRegistry (Sprint 69 m05)', () => {
   let tmpDir: string;
@@ -40,24 +40,24 @@ describe('ProjectGraphRegistry (Sprint 69 m05)', () => {
     // dir so it doesn't touch the developer's real registry. (s80-m02: the JSON
     // ProjectRegistry is deleted; the graph reads the legacy JSON only via
     // readLegacyJsonRegistry, which the backfill tests seed directly on disk.)
-    prevConfigEnv = process.env.CMOS_CONFIG_DIR;
-    process.env.CMOS_CONFIG_DIR = configDir;
+    prevConfigEnv = process.env.RBOOK_CONFIG_DIR;
+    process.env.RBOOK_CONFIG_DIR = configDir;
     ProjectGraphRegistry.resetInstance();
-    CmosDetector.resetInstance();
+    RbookDetector.resetInstance();
   });
 
   afterEach(() => {
     ProjectGraphRegistry.resetInstance();
-    CmosDetector.resetInstance();
-    if (prevConfigEnv === undefined) delete process.env.CMOS_CONFIG_DIR;
-    else process.env.CMOS_CONFIG_DIR = prevConfigEnv;
+    RbookDetector.resetInstance();
+    if (prevConfigEnv === undefined) delete process.env.RBOOK_CONFIG_DIR;
+    else process.env.RBOOK_CONFIG_DIR = prevConfigEnv;
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  /** Seed a real CMOS store under tmpDir/projects/<name> with a known project_id. */
+  /** Seed a real Reasonbook store under tmpDir/projects/<name> with a known project_id. */
   function makeStore(name: string, projectId: string): string {
     const root = path.join(tmpDir, 'projects', name);
-    seedCmosDb(root, { projectId, projectName: name });
+    seedRbookDb(root, { projectId, projectName: name });
     return root;
   }
 
@@ -298,12 +298,12 @@ describe('ProjectGraphRegistry (Sprint 69 m05)', () => {
     // s93-m12: a store with no name reads as its folder's name, and says it stores none, so a
     // re-registration can keep the name the registry already has.
     const unnamed = path.join(tmpDir, 'projects', 'unnamed');
-    seedCmosDb(unnamed, { projectId: 'unnamed-id', projectName: '' });
+    seedRbookDb(unnamed, { projectId: 'unnamed-id', projectName: '' });
     expect(readStoreIdentity(unnamed)).toEqual({ project_id: 'unnamed-id', name: 'unnamed' });
 
     // A store whose metadata.project_id is empty → null (nothing to key on).
     const idless = path.join(tmpDir, 'projects', 'idless');
-    seedCmosDb(idless, { projectId: '', projectName: 'idless' });
+    seedRbookDb(idless, { projectId: '', projectName: 'idless' });
     expect(readStoreIdentity(idless)).toBeNull();
   });
 
@@ -380,10 +380,10 @@ describe('ProjectGraphRegistry (Sprint 69 m05)', () => {
     }
   });
 
-  // ── (g) integration with cmos_project(action='register') ────────────────────
-  it('cmos_project register mirrors the project into the project-graph registry', async () => {
+  // ── (g) integration with rbook_project(action='register') ────────────────────
+  it('rbook_project register mirrors the project into the project-graph registry', async () => {
     const root = makeStore('regd', 'regd-id');
-    const result = await cmosProjectRegister({ projectRoot: root });
+    const result = await rbookProjectRegister({ projectRoot: root });
     expect(result.success).toBe(true);
 
     const reg = await ProjectGraphRegistry.create();
@@ -393,11 +393,11 @@ describe('ProjectGraphRegistry (Sprint 69 m05)', () => {
     expect(entry?.name).toBe('regd');
   });
 
-  it('cmos_project register mints and reports repair for a real identity-less SQLite store', async () => {
+  it('rbook_project register mints and reports repair for a real identity-less SQLite store', async () => {
     const root = path.join(tmpDir, 'projects', 'registration-repair');
-    seedCmosDb(root, { projectId: '', projectName: 'registration-repair' });
+    seedRbookDb(root, { projectId: '', projectName: 'registration-repair' });
 
-    const result = await cmosProjectRegister({ projectRoot: root });
+    const result = await rbookProjectRegister({ projectRoot: root });
 
     expect(result.success).toBe(true);
     expect(result.data?.metadataRepaired).toBe(true);
@@ -409,13 +409,13 @@ describe('ProjectGraphRegistry (Sprint 69 m05)', () => {
     expect(reg.getByStorePath(root)).toBe(identity?.project_id);
   });
 
-  // ── (h) integration with cmos_review (existing last_seen_at touched) ─────────
-  it('cmos_review touches an existing graph row but never registers an absent one', async () => {
+  // ── (h) integration with rbook_review (existing last_seen_at touched) ─────────
+  it('rbook_review touches an existing graph row but never registers an absent one', async () => {
     const root = makeStore('reviewed', 'reviewed-id');
 
     // A read-classified opener must not create discovery state, even when the
     // project store already carries a durable identity.
-    const review1 = (await captureToolCall('read', () => cmosReview({ projectRoot: root }))).value;
+    const review1 = (await captureToolCall('read', () => rbookReview({ projectRoot: root }))).value;
     expect(review1.success).toBe(true);
     const reg = await ProjectGraphRegistry.create();
     expect(reg.get('reviewed-id')).toBeUndefined();
@@ -433,20 +433,20 @@ describe('ProjectGraphRegistry (Sprint 69 m05)', () => {
     // A second review strictly bumps last_seen_at (touch), without adding a duplicate row.
     // The deterministic old timestamp makes deletion/no-op of the touch fail this test.
     ProjectGraphRegistry.resetInstance();
-    await captureToolCall('read', () => cmosReview({ projectRoot: root }));
+    await captureToolCall('read', () => rbookReview({ projectRoot: root }));
     const reg2 = await ProjectGraphRegistry.create();
     expect(reg2.list()).toHaveLength(1);
     expect(reg2.get('reviewed-id')!.last_seen_at).toBeGreaterThan(1);
   });
 
   // ── regression: explicit configDir is honored ON THE BACKFILL PATH ──────────
-  // (workflow-found) The other tests isolate ONLY via CMOS_CONFIG_DIR. With the
+  // (workflow-found) The other tests isolate ONLY via RBOOK_CONFIG_DIR. With the
   // env var UNSET and isolation via the explicit `configDir` option, the backfill
   // must read the legacy JSON from that SAME dir — not ~/.config — or it would
   // ingest unrelated projects into a supposedly-isolated registry.
-  it('honors an explicit configDir option on the backfill path (CMOS_CONFIG_DIR unset)', async () => {
-    const savedEnv = process.env.CMOS_CONFIG_DIR;
-    delete process.env.CMOS_CONFIG_DIR;
+  it('honors an explicit configDir option on the backfill path (RBOOK_CONFIG_DIR unset)', async () => {
+    const savedEnv = process.env.RBOOK_CONFIG_DIR;
+    delete process.env.RBOOK_CONFIG_DIR;
     ProjectGraphRegistry.resetInstance();
     try {
       const isoConfig = path.join(tmpDir, 'iso-config');
@@ -469,10 +469,38 @@ describe('ProjectGraphRegistry (Sprint 69 m05)', () => {
       });
       expect(named.path).toBe(path.join(isoConfig, 'custom-graph.sqlite'));
     } finally {
-      if (savedEnv === undefined) delete process.env.CMOS_CONFIG_DIR;
-      else process.env.CMOS_CONFIG_DIR = savedEnv;
+      if (savedEnv === undefined) delete process.env.RBOOK_CONFIG_DIR;
+      else process.env.RBOOK_CONFIG_DIR = savedEnv;
       ProjectGraphRegistry.resetInstance();
     }
+  });
+
+  // ── s95-m09 (U5): the singleton follows the folder its caller asks for ──────
+  // A registry built from RBOOK_CONFIG_DIR kept that folder for the life of the process. After a
+  // test removed its folder and pointed the variable elsewhere, the next create() recreated the
+  // removed folder and kept writing the deleted file: later tests shared the first test's graph,
+  // and each npm test run left such folders behind (about 1,600 built up from 2026-10-07 to 10-11).
+  it('follows RBOOK_CONFIG_DIR to a new folder and never recreates a removed one (s95-m09)', async () => {
+    const first = await ProjectGraphRegistry.create();
+    expect(first.path).toBe(path.join(configDir, 'project-graph.sqlite'));
+    first.register({ project_id: 'p1', store_path: path.join(tmpDir, 'p1'), name: 'P1' });
+    fs.rmSync(configDir, { recursive: true, force: true });
+
+    const nextDir = path.join(tmpDir, 'next-config');
+    process.env.RBOOK_CONFIG_DIR = nextDir;
+    const second = await ProjectGraphRegistry.create();
+
+    expect(second.path).toBe(path.join(nextDir, 'project-graph.sqlite'));
+    expect(second.get('p1')).toBeUndefined();
+    expect(fs.existsSync(configDir)).toBe(false);
+  });
+
+  it('an explicit configDir pins the registry for calls that pass none; another one replaces it', async () => {
+    const pinned = await ProjectGraphRegistry.create({ configDir: path.join(tmpDir, 'pinned') });
+    expect(await ProjectGraphRegistry.create()).toBe(pinned);
+
+    const other = await ProjectGraphRegistry.create({ configDir: path.join(tmpDir, 'other') });
+    expect(other.path).toBe(path.join(tmpDir, 'other', 'project-graph.sqlite'));
   });
 
   // ── Sprint 79 m01 — authority affordances ───────────────────────────────────
@@ -483,7 +511,7 @@ describe('ProjectGraphRegistry (Sprint 69 m05)', () => {
     it('mintProjectId mints a UUID into an id-less store, and never churns an existing id', () => {
       // id-less store → a UUID is minted into metadata.project_id and returned.
       const idless = path.join(tmpDir, 'projects', 'noid');
-      seedCmosDb(idless, { projectId: '', projectName: 'noid' });
+      seedRbookDb(idless, { projectId: '', projectName: 'noid' });
       expect(readStoreIdentity(idless)).toBeNull(); // no id to key on yet
       const minted = mintProjectId(idless);
       expect(minted).toMatch(UUID_RE);
@@ -537,8 +565,8 @@ describe('ProjectGraphRegistry (Sprint 69 m05)', () => {
       const rootB = path.join(tmpDir, 'stores', 'b');
       const rootC = path.join(tmpDir, 'stores', 'c');
       // Two DIFFERENT live stores that (wrongly) both hold 'dup-id'.
-      seedCmosDb(rootA, { projectId: 'dup-id', projectName: 'A' });
-      seedCmosDb(rootB, { projectId: 'dup-id', projectName: 'B' });
+      seedRbookDb(rootA, { projectId: 'dup-id', projectName: 'A' });
+      seedRbookDb(rootB, { projectId: 'dup-id', projectName: 'B' });
 
       reg.register({ project_id: 'dup-id', store_path: rootA, name: 'A' });
       // B claims 'dup-id' while A is still a live store holding it → REFUSED.
@@ -557,7 +585,7 @@ describe('ProjectGraphRegistry (Sprint 69 m05)', () => {
       // A MOVED store: the incumbent path no longer resolves 'dup-id' (store gone),
       // so a new path legitimately takes over the id.
       fs.rmSync(rootA, { recursive: true, force: true });
-      seedCmosDb(rootC, { projectId: 'dup-id', projectName: 'C' });
+      seedRbookDb(rootC, { projectId: 'dup-id', projectName: 'C' });
       const moved = reg.register({ project_id: 'dup-id', store_path: rootC, name: 'C' });
       expect(moved.store_path).toBe(path.resolve(rootC)); // moved store wins
     });
@@ -565,7 +593,7 @@ describe('ProjectGraphRegistry (Sprint 69 m05)', () => {
     // ── identity backfill (separate marker) migrates recorded ids + the default ─
     it('identity backfill skips id-less JSON-known stores and migrates recorded identity + default', async () => {
       const idless = path.join(tmpDir, 'projects', 'legacy-noid');
-      seedCmosDb(idless, { projectId: '', projectName: 'legacy-noid' });
+      seedRbookDb(idless, { projectId: '', projectName: 'legacy-noid' });
       const withId = makeStore('has-id', 'has-id-uuid');
 
       seedLegacyJson(configDir, [{ projectRoot: idless }, { projectRoot: withId }], withId);
@@ -628,7 +656,7 @@ describe('ProjectGraphRegistry (Sprint 69 m05)', () => {
 
     it('defers an identity-less legacy default and promotes it when that path is registered', async () => {
       const idless = path.join(tmpDir, 'projects', 'legacy-default-noid');
-      seedCmosDb(idless, { projectId: '', projectName: 'legacy-default-noid' });
+      seedRbookDb(idless, { projectId: '', projectName: 'legacy-default-noid' });
       seedLegacyJson(configDir, [{ projectRoot: idless }], idless);
 
       const reg = await ProjectGraphRegistry.create();
@@ -643,11 +671,11 @@ describe('ProjectGraphRegistry (Sprint 69 m05)', () => {
 
       const originalCwd = process.cwd;
       process.cwd = () => '/'; // contextless: the only kind of call a default may serve
-      CmosDetector.resetInstance();
+      RbookDetector.resetInstance();
       try {
         await expect(
           resolveProjectRootEnhanced(undefined, { autoRegister: false })
-        ).rejects.toThrow("No CMOS project in '/'");
+        ).rejects.toThrow("No Reasonbook project in '/'");
 
         reg.registerStore(idless, { setAsDefault: true });
         expect(reg.getDefaultStatus().applied).toBe(true);
@@ -656,7 +684,7 @@ describe('ProjectGraphRegistry (Sprint 69 m05)', () => {
         expect(resolved.projectRoot).toBe(path.resolve(idless));
       } finally {
         process.cwd = originalCwd;
-        CmosDetector.resetInstance();
+        RbookDetector.resetInstance();
       }
     });
 
@@ -683,7 +711,7 @@ describe('ProjectGraphRegistry (Sprint 69 m05)', () => {
     it('registerStore mints a UUID for a readable id-less store and reuses it on re-register', async () => {
       const reg = await ProjectGraphRegistry.create();
       const idless = path.join(tmpDir, 'projects', 'store-a');
-      seedCmosDb(idless, { projectId: '', projectName: 'store-a' });
+      seedRbookDb(idless, { projectId: '', projectName: 'store-a' });
 
       const e1 = reg.registerStore(idless, { name: 'Store A' });
       expect(e1.project_id).toMatch(UUID_RE);
@@ -700,8 +728,8 @@ describe('ProjectGraphRegistry (Sprint 69 m05)', () => {
     it('registerStore falls back to a basename slug when the store DB is unreadable', async () => {
       const reg = await ProjectGraphRegistry.create();
       const root = path.join(tmpDir, 'unreadable-store');
-      fs.mkdirSync(path.join(root, 'cmos', 'db'), { recursive: true });
-      fs.writeFileSync(path.join(root, 'cmos', 'db', 'cmos.sqlite'), 'not a sqlite db');
+      fs.mkdirSync(path.join(root, 'rbook', 'db'), { recursive: true });
+      fs.writeFileSync(path.join(root, 'rbook', 'db', 'rbook.sqlite'), 'not a sqlite db');
 
       const entry = reg.registerStore(root);
       expect(entry.project_id).toBe('unreadable-store'); // slug of basename

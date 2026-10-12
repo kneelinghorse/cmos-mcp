@@ -6,16 +6,16 @@ import * as path from 'path';
 import * as ts from 'typescript';
 
 const REPO_ROOT = path.resolve(__dirname, '../..');
-export const CMOS_SOURCE_ROOT = path.join(REPO_ROOT, 'src', 'tools', 'cmos');
+export const RBOOK_SOURCE_ROOT = path.join(REPO_ROOT, 'src', 'tools', 'rbook');
 export const EXPECTED_INTERPOLATION_FILES = [
-  'cmos-mission-block.ts',
-  'cmos-mission-complete.ts',
-  'cmos-mission-defer.ts',
-  'cmos-mission-drop.ts',
-  'cmos-mission-move.ts',
-  'cmos-mission-start.ts',
-  'cmos-mission-unblock.ts',
-  'cmos-mission-update.ts',
+  'rbook-mission-block.ts',
+  'rbook-mission-complete.ts',
+  'rbook-mission-defer.ts',
+  'rbook-mission-drop.ts',
+  'rbook-mission-move.ts',
+  'rbook-mission-start.ts',
+  'rbook-mission-unblock.ts',
+  'rbook-mission-update.ts',
 ] as const;
 
 export interface SourceText {
@@ -126,9 +126,9 @@ export function emitCensusFindings(census: EmitCensus): string[] {
         `in [${census.objectLiteralFiles.join(', ')}].`
     );
   }
-  if (census.objectLiteralFiles.join('\n') !== 'cmos-session-start.ts') {
+  if (census.objectLiteralFiles.join('\n') !== 'rbook-session-start.ts') {
     findings.push(
-      `The sole direct object emit must remain in cmos-session-start.ts; found [${census.objectLiteralFiles.join(', ')}].`
+      `The sole direct object emit must remain in rbook-session-start.ts; found [${census.objectLiteralFiles.join(', ')}].`
     );
   }
   if (census.interpolationFiles.join('\n') !== EXPECTED_INTERPOLATION_FILES.join('\n')) {

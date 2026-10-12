@@ -3,7 +3,7 @@
 // ABOUTME: Never prints: Claude Code discards SessionEnd output. A close that fails is reported, not dropped.
 
 import type { HookVerbContext } from '../cli';
-import { unlinkHarness } from '../tools/cmos/harness-session';
+import { unlinkHarness } from '../tools/rbook/harness-session';
 import { hookRuntimeIdentity } from './hook-runtime';
 import { cleanupLifecycle, gitObservations } from './lifecycle-runtime';
 import { CliStoreError, hookStore } from './core';

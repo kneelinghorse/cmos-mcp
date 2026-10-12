@@ -25,9 +25,9 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-import { THIS_HOST_ID, processOwnerKey } from '../../src/tools/cmos/session-owner';
+import { THIS_HOST_ID, processOwnerKey } from '../../src/tools/rbook/session-owner';
 import { startDashboardDouble, type DashboardDouble } from '../helpers/suggestion-axes-external';
-import { reidentifyCmosTestStore, seedCmosDb } from '../helpers/seedCmosDb';
+import { reidentifyRbookTestStore, seedRbookDb } from '../helpers/seedRbookDb';
 import { connectStdioServer, dataOf, textOf, type StdioHarness } from './stdio-harness';
 import { installPackedArtifact } from './packed-artifact';
 
@@ -48,9 +48,9 @@ function mkTmp(prefix: string): string {
 }
 
 function buildProject(): { projectRoot: string; dbPath: string } {
-  const projectRoot = mkTmp('cmos-e2e-m03-');
-  const dbPath = seedCmosDb(projectRoot, { projectName: 's92-m03 e2e' });
-  reidentifyCmosTestStore(projectRoot);
+  const projectRoot = mkTmp('rbook-e2e-m03-');
+  const dbPath = seedRbookDb(projectRoot, { projectName: 's92-m03 e2e' });
+  reidentifyRbookTestStore(projectRoot);
   const db = new Database(dbPath);
   try {
     db.prepare(
@@ -65,17 +65,17 @@ function buildProject(): { projectRoot: string; dbPath: string } {
 /** A literal whitelist: never spread process.env, whose credentials would leak into the fixture. */
 function environment(projectRoot: string, dashboard?: DashboardDouble): Record<string, string> {
   const env: Record<string, string> = {
-    HOME: mkTmp('cmos-e2e-m03-home-'),
-    CMOS_CONFIG_DIR: mkTmp('cmos-e2e-m03-config-'),
-    CMOS_PROJECT_ROOT: projectRoot,
+    HOME: mkTmp('rbook-e2e-m03-home-'),
+    RBOOK_CONFIG_DIR: mkTmp('rbook-e2e-m03-config-'),
+    RBOOK_PROJECT_ROOT: projectRoot,
     PATH: process.env.PATH ?? path.dirname(process.execPath),
     NODE_ENV: 'test',
   };
   if (dashboard) {
-    env.CMOS_DASHBOARD_URL = dashboard.origin;
-    env.CMOS_DASHBOARD_API_KEY = 'cmos_e2e_m03_key';
+    env.RBOOK_DASHBOARD_URL = dashboard.origin;
+    env.RBOOK_DASHBOARD_API_KEY = 'rbook_e2e_m03_key';
     env.NODE_OPTIONS = `--require=${REDIRECT_PRELOAD}`;
-    env.CMOS_TEST_DASHBOARD_REDIRECT_ORIGIN = dashboard.origin;
+    env.RBOOK_TEST_DASHBOARD_REDIRECT_ORIGIN = dashboard.origin;
   }
   return env;
 }
@@ -128,13 +128,13 @@ describe('s92-m03 implicit sessions over stdio', () => {
       ['A', a],
       ['B', b],
     ] as const) {
-      const captured = await harness.callOk('cmos_session', {
+      const captured = await harness.callOk('rbook_session', {
         action: 'capture',
         category: 'decision',
         content: `capture by ${name}`,
         projectRoot,
       });
-      await harness.callOk('cmos_decisions', {
+      await harness.callOk('rbook_decisions', {
         action: 'record',
         content: `record by ${name}`,
         projectRoot,
@@ -166,7 +166,7 @@ describe('s92-m03 implicit sessions over stdio', () => {
       ].sort()
     );
 
-    const refused = await a.callTool('cmos_session', {
+    const refused = await a.callTool('rbook_session', {
       action: 'complete',
       sessionId: sessions.B,
       summary: 'A tries to close B',
@@ -175,7 +175,7 @@ describe('s92-m03 implicit sessions over stdio', () => {
     expect(refused.isError).toBe(true);
     expect(textOf(refused)).toContain(sessions.B);
 
-    await b.callOk('cmos_session', { action: 'complete', summary: 'B done', projectRoot });
+    await b.callOk('rbook_session', { action: 'complete', summary: 'B done', projectRoot });
     const statuses = Object.fromEntries(
       readRows<{ id: string; status: string }>(dbPath, 'SELECT id, status FROM sessions').map(
         (row) => [row.id, row.status]
@@ -187,7 +187,7 @@ describe('s92-m03 implicit sessions over stdio', () => {
   it('a server that loses its client closes its implicit session on the way out', async () => {
     const { projectRoot, dbPath } = buildProject();
     const c = await server(projectRoot, 'process-c');
-    const captured = await c.callOk('cmos_session', {
+    const captured = await c.callOk('rbook_session', {
       action: 'capture',
       category: 'next-step',
       content: 'carry this past the exit',
@@ -245,7 +245,7 @@ describe('s92-m03 implicit sessions over stdio', () => {
 
     const d = await server(projectRoot, 'process-d', dashboard);
     dashboard.clearRequests();
-    const captured = await d.callOk('cmos_session', {
+    const captured = await d.callOk('rbook_session', {
       action: 'capture',
       category: 'context',
       content: 'D arrives and reconciles',
@@ -263,7 +263,7 @@ describe('s92-m03 implicit sessions over stdio', () => {
     expect(dashboard.requests.map((r) => `${r.method} ${r.url}`)).toEqual([]);
 
     // Positive control: an explicit complete through the router, same process, same environment.
-    await d.callOk('cmos_session', { action: 'complete', summary: 'asked for', projectRoot });
+    await d.callOk('rbook_session', { action: 'complete', summary: 'asked for', projectRoot });
     const uploaded = await waitFor(() => dashboard.requests.length > 0, 10_000);
     expect(uploaded).toBe(true);
   });

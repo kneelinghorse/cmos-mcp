@@ -1,0 +1,11 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "rbook": {
+      "type": "stdio",
+      "command": "./server/launch.sh",
+      "args": ["serve", "--install-root", "shared"],
+      "cwd": "./"
+    }
+  }
+}

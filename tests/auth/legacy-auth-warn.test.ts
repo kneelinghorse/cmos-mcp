@@ -6,14 +6,14 @@ import os from 'os';
 import path from 'path';
 import { describe, expect, it, beforeEach, afterEach } from '@jest/globals';
 import {
-  CMOS_DASHBOARD_API_KEY_ENV,
-  CMOS_DASHBOARD_URL_ENV,
-  CMOS_DASHBOARD_USER_ENV,
-  CMOS_DASHBOARD_PASSWORD_ENV,
+  RBOOK_DASHBOARD_API_KEY_ENV,
+  RBOOK_DASHBOARD_URL_ENV,
+  RBOOK_DASHBOARD_USER_ENV,
+  RBOOK_DASHBOARD_PASSWORD_ENV,
   DashboardClient,
   __resetLegacyAuthWarnSeen,
-} from '../../src/tools/cmos/dashboard-client';
-import { CMOS_CONFIG_DIR_ENV, CredentialStore } from '../../src/intelligence/credential-store';
+} from '../../src/tools/rbook/dashboard-client';
+import { RBOOK_CONFIG_DIR_ENV, CredentialStore } from '../../src/intelligence/credential-store';
 
 describe('fromEnvForProject legacy-auth WARN', () => {
   const originalEnv = { ...process.env };
@@ -39,11 +39,11 @@ describe('fromEnvForProject legacy-auth WARN', () => {
   beforeEach(async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'legacy-warn-'));
     // Clear every env var we care about so arms 1-3 cannot accidentally fire.
-    delete process.env[CMOS_CONFIG_DIR_ENV];
-    delete process.env[CMOS_DASHBOARD_API_KEY_ENV];
-    delete process.env[CMOS_DASHBOARD_USER_ENV];
-    delete process.env[CMOS_DASHBOARD_PASSWORD_ENV];
-    process.env[CMOS_DASHBOARD_URL_ENV] = 'http://dashboard.test';
+    delete process.env[RBOOK_CONFIG_DIR_ENV];
+    delete process.env[RBOOK_DASHBOARD_API_KEY_ENV];
+    delete process.env[RBOOK_DASHBOARD_USER_ENV];
+    delete process.env[RBOOK_DASHBOARD_PASSWORD_ENV];
+    process.env[RBOOK_DASHBOARD_URL_ENV] = 'http://dashboard.test';
     CredentialStore.resetInstance();
     store = await CredentialStore.create({ configDir: tempDir });
     __resetLegacyAuthWarnSeen();
@@ -58,8 +58,8 @@ describe('fromEnvForProject legacy-auth WARN', () => {
     await fs.rm(tempDir, { recursive: true, force: true });
   });
 
-  it('WARNs exactly once when arm 4 (CMOS_DASHBOARD_API_KEY) fires', async () => {
-    process.env[CMOS_DASHBOARD_API_KEY_ENV] = 'cmk_legacy';
+  it('WARNs exactly once when arm 4 (RBOOK_DASHBOARD_API_KEY) fires', async () => {
+    process.env[RBOOK_DASHBOARD_API_KEY_ENV] = 'cmk_legacy';
 
     const first = await DashboardClient.fromEnvForProject(undefined, { credentialStore: store });
     const second = await DashboardClient.fromEnvForProject(undefined, { credentialStore: store });
@@ -71,12 +71,12 @@ describe('fromEnvForProject legacy-auth WARN', () => {
     const warnLines = writes.filter((w) => w.includes('[WARN]'));
     expect(warnLines).toHaveLength(1);
     expect(warnLines[0]).toMatch(/authenticating via legacy-env/);
-    expect(warnLines[0]).toMatch(/cmos_auth\(action="login"\)/);
+    expect(warnLines[0]).toMatch(/rbook_auth\(action="login"\)/);
   });
 
   it('WARNs exactly once when arm 5 (password fallback) fires', async () => {
-    process.env[CMOS_DASHBOARD_USER_ENV] = 'user@example.com';
-    process.env[CMOS_DASHBOARD_PASSWORD_ENV] = 'secret';
+    process.env[RBOOK_DASHBOARD_USER_ENV] = 'user@example.com';
+    process.env[RBOOK_DASHBOARD_PASSWORD_ENV] = 'secret';
 
     const first = await DashboardClient.fromEnvForProject(undefined, { credentialStore: store });
     const second = await DashboardClient.fromEnvForProject(undefined, { credentialStore: store });
@@ -88,17 +88,17 @@ describe('fromEnvForProject legacy-auth WARN', () => {
     const warnLines = writes.filter((w) => w.includes('[WARN]'));
     expect(warnLines).toHaveLength(1);
     expect(warnLines[0]).toMatch(/authenticating via password-fallback/);
-    expect(warnLines[0]).toMatch(/cmos_auth\(action="login"\)/);
+    expect(warnLines[0]).toMatch(/rbook_auth\(action="login"\)/);
   });
 
   it('each arm tracks its own seen-state (arm 4 and arm 5 warn independently)', async () => {
-    process.env[CMOS_DASHBOARD_API_KEY_ENV] = 'cmk_legacy';
+    process.env[RBOOK_DASHBOARD_API_KEY_ENV] = 'cmk_legacy';
     await DashboardClient.fromEnvForProject(undefined, { credentialStore: store });
     expect(writes.filter((w) => w.includes('legacy-env'))).toHaveLength(1);
 
-    delete process.env[CMOS_DASHBOARD_API_KEY_ENV];
-    process.env[CMOS_DASHBOARD_USER_ENV] = 'u';
-    process.env[CMOS_DASHBOARD_PASSWORD_ENV] = 'p';
+    delete process.env[RBOOK_DASHBOARD_API_KEY_ENV];
+    process.env[RBOOK_DASHBOARD_USER_ENV] = 'u';
+    process.env[RBOOK_DASHBOARD_PASSWORD_ENV] = 'p';
     await DashboardClient.fromEnvForProject(undefined, { credentialStore: store });
 
     expect(writes.filter((w) => w.includes('password-fallback'))).toHaveLength(1);
@@ -112,7 +112,7 @@ describe('fromEnvForProject legacy-auth WARN', () => {
       issuedAt: new Date().toISOString(),
       lastUsedAt: new Date().toISOString(),
     });
-    process.env[CMOS_DASHBOARD_API_KEY_ENV] = 'cmk_legacy';
+    process.env[RBOOK_DASHBOARD_API_KEY_ENV] = 'cmk_legacy';
 
     const result = await DashboardClient.fromEnvForProject(undefined, { credentialStore: store });
     expect(result.success).toBe(true);

@@ -2,9 +2,9 @@
 // ABOUTME: Discover active stores from an existing registry without creating, migrating or backfilling it.
 // ABOUTME: Missing registries are empty; unreadable registries fail explicitly rather than hide fleet work.
 
+import { resolveConfigDirectory } from './legacy-compat';
 import Database from 'better-sqlite3';
 import { statSync } from 'fs';
-import * as os from 'os';
 import * as path from 'path';
 import type { ProjectGraphEntry } from './project-graph-registry';
 
@@ -12,7 +12,7 @@ import type { ProjectGraphEntry } from './project-graph-registry';
 export function listRegisteredStoresReadOnly(
   env: NodeJS.ProcessEnv = process.env
 ): ProjectGraphEntry[] {
-  const configDir = env.CMOS_CONFIG_DIR ?? path.join(os.homedir(), '.config', 'cmos-mcp');
+  const configDir = resolveConfigDirectory(env);
   const file = path.join(configDir, 'project-graph.sqlite');
   try {
     statSync(file);

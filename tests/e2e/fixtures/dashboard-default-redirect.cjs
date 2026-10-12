@@ -3,11 +3,11 @@
 
 'use strict';
 
-const CANONICAL_DASHBOARD_ORIGIN = 'https://cmos.aquex.ai';
-const redirectOrigin = process.env.CMOS_TEST_DASHBOARD_REDIRECT_ORIGIN;
+const CANONICAL_DASHBOARD_ORIGIN = 'https://reasonbook.ai';
+const redirectOrigin = process.env.RBOOK_TEST_DASHBOARD_REDIRECT_ORIGIN;
 
 if (!redirectOrigin) {
-  throw new Error('CMOS_TEST_DASHBOARD_REDIRECT_ORIGIN is required by the wire-test preload');
+  throw new Error('RBOOK_TEST_DASHBOARD_REDIRECT_ORIGIN is required by the wire-test preload');
 }
 
 const originalFetch = globalThis.fetch;

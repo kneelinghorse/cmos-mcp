@@ -1,14 +1,16 @@
 {
-  "name": "cmos",
-  "owner": { "name": "CMOS" },
+  "name": "reasonbook",
+  "owner": {
+    "name": "Reasonbook"
+  },
   "metadata": {
-    "description": "CMOS project record: decisions, learnings and work that carry across sessions."
+    "description": "Reasonbook: the project record of decisions, learnings and work that carries across sessions."
   },
   "plugins": [
     {
-      "name": "cmos",
-      "source": "./plugins/cmos",
-      "description": "Bring the CMOS record into Claude Code with hooks, skills and an MCP server."
+      "name": "reasonbook",
+      "source": "./plugins/reasonbook",
+      "description": "Bring the Reasonbook record into Claude Code with hooks, skills and an MCP server."
     }
   ]
 }

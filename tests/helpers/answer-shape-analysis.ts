@@ -7,7 +7,7 @@ import * as ts from 'typescript';
 import { createSemanticTypeFingerprinter } from './semantic-type-fingerprint';
 
 const REPO_ROOT = path.resolve(__dirname, '../..');
-export const CMOS_SOURCE_ROOT = path.join(REPO_ROOT, 'src', 'tools', 'cmos');
+export const RBOOK_SOURCE_ROOT = path.join(REPO_ROOT, 'src', 'tools', 'rbook');
 
 export interface DeclarationInfo {
   readonly identity: string;
@@ -164,7 +164,7 @@ function runtimeKinds(checker: ts.TypeChecker, type: ts.Type): string[] {
   return [`UNRESOLVED:${checker.typeToString(type)}`];
 }
 
-export function analyzeAnswerShapes(sourceRoot = CMOS_SOURCE_ROOT): ShapeAnalysis {
+export function analyzeAnswerShapes(sourceRoot = RBOOK_SOURCE_ROOT): ShapeAnalysis {
   const files = walkTypeScriptFiles(sourceRoot);
   const sourceProgramRoot = path.resolve(sourceRoot, '../..');
   const program = ts.createProgram({ rootNames: files, options: readCompilerOptions() });
@@ -291,7 +291,7 @@ export function analyzeAnswerShapes(sourceRoot = CMOS_SOURCE_ROOT): ShapeAnalysi
 
 export function compositionFingerprintsForSource(
   text: string,
-  moduleId = 'src/tools/cmos/fixture.ts'
+  moduleId = 'src/tools/rbook/fixture.ts'
 ): string[] {
   const sourceFile = ts.createSourceFile(moduleId, text, ts.ScriptTarget.Latest, true);
   return sourceFile.statements

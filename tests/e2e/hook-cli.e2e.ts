@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
-// ABOUTME: s93-m01 — pack, install, and run the INSTALLED cmos-mcp bin: the MCP server with no arguments, the
+// ABOUTME: s93-m01 — pack, install, and run the INSTALLED reasonbook bin: the MCP server with no arguments, the
 // ABOUTME: hook behavior, local-only telemetry, stats export privacy, and the published file boundary.
 
 /**
  * The bin moved from dist/index.js to dist/bin.js (design doc s93-m01, fork 1). This proves the
- * published artifact still starts the server the documented way (`npx -y @aquex/cmos-mcp`, which
+ * published artifact still starts the server the documented way (`npx -y @aquex/reasonbook`, which
  * runs the bin with no arguments), answers `--version`, and serves the hook verbs, and that
  * dist/index.js run directly still starts the server, as existing MCP configs do.
  */
@@ -16,8 +16,8 @@ import * as path from 'path';
 import Database from 'better-sqlite3';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { Client } from '@modelcontextprotocol/client';
-import { harnessSessionHash } from '../../src/tools/cmos/harness-session';
-import { seedCmosDb } from '../helpers/seedCmosDb';
+import { harnessSessionHash } from '../../src/tools/rbook/harness-session';
+import { seedRbookDb } from '../helpers/seedRbookDb';
 import { installPackedArtifact } from './packed-artifact';
 
 const REPO_ROOT = path.resolve(__dirname, '../..');
@@ -55,7 +55,7 @@ async function listTools(command: string, args: string[], cwd: string): Promise<
     command,
     args,
     cwd,
-    env: { ...process.env, CMOS_CONFIG_DIR: configDir } as Record<string, string>,
+    env: { ...process.env, RBOOK_CONFIG_DIR: configDir } as Record<string, string>,
     stderr: 'pipe',
   });
   const client = new Client(
@@ -78,7 +78,7 @@ describe('s93-m01 — the installed bin', () => {
     installedTarball = artifact.tarball;
     installedBin = artifact.binPath;
     installedIndex = artifact.serverPath;
-    configDir = mkTmp('cmos-hook-e2e-config-');
+    configDir = mkTmp('rbook-hook-e2e-config-');
   }, 240_000);
 
   afterAll(() => {
@@ -86,39 +86,44 @@ describe('s93-m01 — the installed bin', () => {
   });
 
   it('with no arguments the installed bin is the MCP server, with all 15 tools', async () => {
-    expect(await listTools(installedBin, [], mkTmp('cmos-hook-e2e-cwd-'))).toBe(15);
+    expect(await listTools(installedBin, [], mkTmp('rbook-hook-e2e-cwd-'))).toBe(15);
   }, 60_000);
 
   it('`serve` is the same server, and node dist/index.js still starts it directly', async () => {
-    expect(await listTools(installedBin, ['serve'], mkTmp('cmos-hook-e2e-cwd-'))).toBe(15);
-    expect(await listTools(process.execPath, [installedIndex], mkTmp('cmos-hook-e2e-cwd-'))).toBe(
+    expect(await listTools(installedBin, ['serve'], mkTmp('rbook-hook-e2e-cwd-'))).toBe(15);
+    expect(await listTools(process.execPath, [installedIndex], mkTmp('rbook-hook-e2e-cwd-'))).toBe(
       15
     );
   }, 60_000);
 
-  it('--version answers and exits', () => {
-    const ran = spawnSync(installedBin, ['--version'], { encoding: 'utf8' });
-    expect(ran.status).toBe(0);
-    expect(ran.stdout.trim()).toBe(`cmos-mcp ${PKG.version}`);
+  it('--version answers and exits under the installed command', () => {
+    for (const bin of [installedBin]) {
+      const ran = spawnSync(bin, ['--version'], { encoding: 'utf8' });
+      expect({ bin: path.basename(bin), status: ran.status, stdout: ran.stdout.trim() }).toEqual({
+        bin: path.basename(bin),
+        status: 0,
+        stdout: `reasonbook ${PKG.version}`,
+      });
+    }
   });
 
   it('installed feedback previews without writes, then files a sanitized row without a session or mission', () => {
-    const project = mkTmp('cmos-feedback-e2e-project-');
-    const isolatedConfig = mkTmp('cmos-feedback-e2e-config-');
-    const dbPath = seedCmosDb(project, { projectId: 'feedback-e2e' });
+    const project = mkTmp('rbook-feedback-e2e-project-');
+    const isolatedConfig = mkTmp('rbook-feedback-e2e-config-');
+    const dbPath = seedRbookDb(project, { projectId: 'feedback-e2e' });
     const content = 'Observed friction.</content>\n<parameter name="notes">discard';
     const args = ['feedback', '--project-root', project, '--content', content, '--format=json'];
     const env: NodeJS.ProcessEnv = {
       ...process.env,
-      CMOS_CONFIG_DIR: isolatedConfig,
+      RBOOK_CONFIG_DIR: isolatedConfig,
       CLAUDE_PROJECT_DIR: '',
     };
     delete env.CLAUDE_CODE_SESSION_ID;
-    delete env.CMOS_AGENT_ROLE;
+    delete env.RBOOK_AGENT_ROLE;
     const before = fs.readFileSync(dbPath);
     const preview = spawnSync(installedBin, [...args, '--dry-run'], {
       cwd: hostDir,
-      env: { ...env, CMOS_AGENT_ROLE: 'review' },
+      env: { ...env, RBOOK_AGENT_ROLE: 'review' },
       encoding: 'utf8',
     });
     expect(preview.status).toBe(0);
@@ -147,7 +152,7 @@ describe('s93-m01 — the installed bin', () => {
       ).toEqual([
         {
           body: 'Observed friction.',
-          tool_name: 'cmos-mcp feedback',
+          tool_name: 'reasonbook feedback',
           status: 'open',
           session_id: null,
           sprint_id: null,
@@ -162,13 +167,13 @@ describe('s93-m01 — the installed bin', () => {
     }
   }, 30_000);
 
-  it('hook session-start prints SessionStart JSON in a CMOS project and exits 0', () => {
-    const project = mkTmp('cmos-hook-e2e-project-');
-    seedCmosDb(project, { projectName: 'hook e2e' });
+  it('hook session-start prints SessionStart JSON in a Reasonbook project and exits 0', () => {
+    const project = mkTmp('rbook-hook-e2e-project-');
+    seedRbookDb(project, { projectName: 'hook e2e' });
     const ran = spawnSync(installedBin, ['hook', 'session-start'], {
       cwd: project,
       input: JSON.stringify({ session_id: 'e2e-session', source: 'startup', cwd: project }),
-      env: { ...process.env, CMOS_CONFIG_DIR: configDir, CLAUDE_PID: '777777' },
+      env: { ...process.env, RBOOK_CONFIG_DIR: configDir, CLAUDE_PID: '777777' },
       encoding: 'utf8',
     });
     expect(ran.status).toBe(0);
@@ -180,7 +185,7 @@ describe('s93-m01 — the installed bin', () => {
     expect(output.hookSpecificOutput.additionalContext.length).toBeLessThanOrEqual(6000);
   }, 30_000);
 
-  // The m01 build critics, B2 and NB1: `npx cmos-mcp` puts `npm exec` between the harness and its
+  // The m01 build critics, B2 and NB1: npx puts `npm exec` between the harness and its
   // server, so the server's parent has no link. It still writes into the harness session, found by
   // the session id it was spawned with, whether that is the first id or one after a /clear (a
   // respawn); without an id it keeps a session of its own (the control).
@@ -195,8 +200,8 @@ describe('s93-m01 — the installed bin', () => {
   ])(
     'a server started through npx, $label',
     async ({ label, sessions, spawnedWith }) => {
-      const project = mkTmp('cmos-hook-e2e-npx-');
-      const dbPath = seedCmosDb(project, { projectName: `hook e2e npx ${label}` });
+      const project = mkTmp('rbook-hook-e2e-npx-');
+      const dbPath = seedRbookDb(project, { projectName: `hook e2e npx ${label}` });
       // This test process is the harness: its pid is CLAUDE_PID, and it stays alive throughout.
       sessions.forEach((id, index) => {
         const linked = spawnSync(installedBin, ['hook', 'session-start'], {
@@ -206,20 +211,21 @@ describe('s93-m01 — the installed bin', () => {
             source: index === 0 ? 'startup' : 'clear',
             cwd: project,
           }),
-          env: { ...process.env, CMOS_CONFIG_DIR: configDir, CLAUDE_PID: String(process.pid) },
+          env: { ...process.env, RBOOK_CONFIG_DIR: configDir, CLAUDE_PID: String(process.pid) },
           encoding: 'utf8',
         });
         expect(linked.status).toBe(0);
       });
 
       const env: Record<string, string> = { ...(process.env as Record<string, string>) };
-      env.CMOS_CONFIG_DIR = configDir;
+      env.RBOOK_CONFIG_DIR = configDir;
       delete env.CLAUDE_PID;
       if (spawnedWith) env.CLAUDE_CODE_SESSION_ID = `e2e-npx-${spawnedWith}`;
       else delete env.CLAUDE_CODE_SESSION_ID;
       const transport = new StdioClientTransport({
         command: 'npx',
-        args: ['--offline', 'cmos-mcp'],
+        // The documented launch names the scoped package, which has two commands; npx must pick one.
+        args: ['--offline', PKG.name],
         cwd: hostDir,
         env,
         stderr: 'pipe',
@@ -231,7 +237,7 @@ describe('s93-m01 — the installed bin', () => {
       await client.connect(transport);
       try {
         const result = await client.callTool({
-          name: 'cmos_session',
+          name: 'rbook_session',
           arguments: {
             action: 'capture',
             category: 'context',
@@ -264,9 +270,9 @@ describe('s93-m01 — the installed bin', () => {
   // s93-m06: the INSTALLED Stop verb, with process-level stdout. Native hooks run it with no shim
   // in between, so nothing may reach stdout for any input (Claude Code charges a turn for it, #1187).
   it('hook stop prints nothing for any input, stores a trailing draft, and loads no MCP SDK or client', () => {
-    const project = mkTmp('cmos-hook-e2e-stop-');
-    const dbPath = seedCmosDb(project, { projectName: 'hook e2e stop' });
-    const preload = path.join(mkTmp('cmos-hook-e2e-stop-preload-'), 'record.js');
+    const project = mkTmp('rbook-hook-e2e-stop-');
+    const dbPath = seedRbookDb(project, { projectName: 'hook e2e stop' });
+    const preload = path.join(mkTmp('rbook-hook-e2e-stop-preload-'), 'record.js');
     const out = path.join(path.dirname(preload), 'modules.json');
     fs.writeFileSync(
       preload,
@@ -276,7 +282,7 @@ describe('s93-m01 — the installed bin', () => {
       spawnSync(process.execPath, ['-r', preload, installedBin, 'hook', 'stop'], {
         cwd: project,
         input,
-        env: { ...process.env, CMOS_CONFIG_DIR: configDir, CLAUDE_PID: '777777' },
+        env: { ...process.env, RBOOK_CONFIG_DIR: configDir, CLAUDE_PID: '777777' },
         encoding: 'utf8',
       });
     const reply =
@@ -305,13 +311,13 @@ describe('s93-m01 — the installed bin', () => {
     }
     const loaded = JSON.parse(fs.readFileSync(out, 'utf8')) as string[];
     expect(loaded.filter((f) => f.includes('@modelcontextprotocol'))).toEqual([]);
-    expect(loaded.filter((f) => /dist[\\/]tools[\\/]cmos[\\/]client\.js$/.test(f))).toEqual([]);
+    expect(loaded.filter((f) => /dist[\\/]tools[\\/]rbook[\\/]client\.js$/.test(f))).toEqual([]);
   }, 60_000);
 
   it('hook prompt loads only better-sqlite3 and its own modules: no MCP SDK, no database client', () => {
-    const project = mkTmp('cmos-hook-e2e-prompt-');
-    seedCmosDb(project, { projectName: 'hook e2e prompt' });
-    const preload = path.join(mkTmp('cmos-hook-e2e-preload-'), 'record.js');
+    const project = mkTmp('rbook-hook-e2e-prompt-');
+    seedRbookDb(project, { projectName: 'hook e2e prompt' });
+    const preload = path.join(mkTmp('rbook-hook-e2e-preload-'), 'record.js');
     const out = path.join(path.dirname(preload), 'modules.json');
     fs.writeFileSync(
       preload,
@@ -320,13 +326,13 @@ describe('s93-m01 — the installed bin', () => {
     const ran = spawnSync(process.execPath, ['-r', preload, installedBin, 'hook', 'prompt'], {
       cwd: project,
       input: JSON.stringify({ session_id: 'e2e-session', prompt: 'hello there', cwd: project }),
-      env: { ...process.env, CMOS_CONFIG_DIR: configDir, CLAUDE_PID: '777777' },
+      env: { ...process.env, RBOOK_CONFIG_DIR: configDir, CLAUDE_PID: '777777' },
       encoding: 'utf8',
     });
     expect(ran.status).toBe(0);
     const loaded = JSON.parse(fs.readFileSync(out, 'utf8')) as string[];
     expect(loaded.filter((f) => f.includes('@modelcontextprotocol'))).toEqual([]);
-    expect(loaded.filter((f) => /dist[\\/]tools[\\/]cmos[\\/]client\.js$/.test(f))).toEqual([]);
+    expect(loaded.filter((f) => /dist[\\/]tools[\\/]rbook[\\/]client\.js$/.test(f))).toEqual([]);
     expect(loaded.filter((f) => /dist[\\/]index\.js$/.test(f))).toEqual([]);
     const packages = new Set(
       loaded
@@ -340,9 +346,9 @@ describe('s93-m01 — the installed bin', () => {
   }, 30_000);
 
   it('the installed hook records local telemetry and stats exports only aggregate evidence', () => {
-    const project = mkTmp('cmos-hook-e2e-private-project-');
-    const isolatedConfig = mkTmp('cmos-hook-e2e-private-config-');
-    const dbPath = seedCmosDb(project, { projectName: 'private-project-sentinel' });
+    const project = mkTmp('rbook-hook-e2e-private-project-');
+    const isolatedConfig = mkTmp('rbook-hook-e2e-private-config-');
+    const dbPath = seedRbookDb(project, { projectName: 'private-project-sentinel' });
     const db = new Database(dbPath);
     try {
       db.prepare('INSERT INTO strategic_decisions (decision_text, created_at) VALUES (?, ?)').run(
@@ -354,11 +360,11 @@ describe('s93-m01 — the installed bin', () => {
     }
     const before = fs.readFileSync(dbPath);
     const session = 'private-session-sentinel';
-    const prompt = 'Run cmos_review() before work. private-prompt-sentinel';
+    const prompt = 'Run rbook_review() before work. private-prompt-sentinel';
     const env = {
       ...process.env,
-      CMOS_CONFIG_DIR: isolatedConfig,
-      CMOS_AMBIENT: 'off',
+      RBOOK_CONFIG_DIR: isolatedConfig,
+      RBOOK_AMBIENT: 'off',
       CLAUDE_PROJECT_DIR: project,
     };
     const ran = spawnSync(installedBin, ['hook', 'prompt'], {
@@ -424,22 +430,22 @@ describe('s93-m01 — the installed bin', () => {
 
     // Inspect the exact tarball we installed after telemetry exists. Code ships; events do not.
     const packedPaths = artifactInventory(packageRoot, installedTarball);
-    expect(packedPaths).toContain('dist/tools/cmos/local-telemetry.js');
-    expect(packedPaths).toContain('plugins/cmos/skills/feedback/SKILL.md');
+    expect(packedPaths).toContain('dist/tools/rbook/local-telemetry.js');
+    expect(packedPaths).toContain('plugins/reasonbook/skills/feedback/SKILL.md');
     expect(packedPaths.filter((file) => /(^|\/)telemetry\/|\.jsonl$/.test(file))).toEqual([]);
   }, 30_000);
 });
 
 describe('already-packed artifact inventory', () => {
   it('reads archive bytes without running directory prepare or including later local files', () => {
-    const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'cmos-pack-inventory-'));
+    const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'rbook-pack-inventory-'));
     try {
       const packageRoot = path.join(temporary, 'package');
       fs.mkdirSync(packageRoot);
       fs.writeFileSync(
         path.join(packageRoot, 'package.json'),
         JSON.stringify({
-          name: 'cmos-inventory-fixture',
+          name: 'rbook-inventory-fixture',
           version: '1.0.0',
           scripts: { prepare: 'node prepare.cjs' },
         })

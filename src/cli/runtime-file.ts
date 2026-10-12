@@ -4,7 +4,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { safeDestination, type TelemetryTarget } from '../tools/cmos/local-telemetry';
+import { safeDestination, type TelemetryTarget } from '../tools/rbook/local-telemetry';
 
 export function requireSafeRuntime(file: string, target?: TelemetryTarget): void {
   for (const name of [file, `${file}-journal`, `${file}-wal`, `${file}-shm`]) {

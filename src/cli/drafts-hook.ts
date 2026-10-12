@@ -14,7 +14,7 @@ import {
   SINGLE_REVISION_FLOOR,
   type DraftLine,
   type ReplyClass,
-} from '../tools/cmos/draft-grammar';
+} from '../tools/rbook/draft-grammar';
 import {
   bindWindow,
   bumpOffers,
@@ -33,8 +33,8 @@ import {
   takeShown,
   type DraftRuntime,
   type ScanState,
-} from '../tools/cmos/draft-runtime';
-import { harnessSessionHash } from '../tools/cmos/harness-session';
+} from '../tools/rbook/draft-runtime';
+import { harnessSessionHash } from '../tools/rbook/harness-session';
 import {
   draftLabel,
   ensureProposalsTable,
@@ -47,10 +47,10 @@ import {
   proposalsTableExists,
   rawRunner,
   type DraftRow,
-} from '../tools/cmos/proposals';
-import { isReadOnlyAgentSession } from '../tools/cmos/read-only-agent-guard';
-import { processBusyTimeout } from '../tools/cmos/sqlite-busy';
-import { storedTimeMs } from '../tools/cmos/stored-time';
+} from '../tools/rbook/proposals';
+import { isReadOnlyAgentSession } from '../tools/rbook/read-only-agent-guard';
+import { processBusyTimeout } from '../tools/rbook/sqlite-busy';
+import { storedTimeMs } from '../tools/rbook/stored-time';
 import {
   lastAssistantText,
   scanFile,
@@ -72,7 +72,7 @@ import {
  *     messages in the session that drafted them, and on the first message of a later session.
  *   Session start: counted toward the 3-start expiry; every store's stale words are pruned.
  *   Session end: the session's words, offers, windows, shown set and scans are deleted.
- * Under the review role (CMOS_AGENT_ROLE=review) the hooks store, bind and decline nothing.
+ * Under the review role (RBOOK_AGENT_ROLE=review) the hooks store, bind and decline nothing.
  */
 
 export const OFFERS_PER_START = 3;
@@ -149,7 +149,7 @@ export function onSessionStart(
     if (source === 'compact') return true;
     // Only a start after a draft exists counts toward its expiry, and a session that started
     // before every pending draft is concurrent with them: with none pending, nothing is written
-    // (the session-start hook stays a read; tests/tools/cmos/reads-never-write.test.ts).
+    // (the session-start hook stays a read; tests/tools/rbook/reads-never-write.test.ts).
     if (!hasPending(dbPath)) return true;
     return withRuntime(dbPath, env, false, (runtime) => {
       recordSessionStart(runtime, harnessSessionHash(rawSessionId), now);
@@ -439,7 +439,7 @@ const KIND_NOTE: Readonly<Record<string, string>> = {
 
 function fullOffer(draft: DraftRow): string {
   const label = draftLabel(draft.id);
-  let text = `CMOS draft ${label} (${draft.kind}), which your last reply put to the operator: "${cut(draft.text, FULL_TEXT_MAX)}".`;
+  let text = `Reasonbook draft ${label} (${draft.kind}), which your last reply put to the operator: "${cut(draft.text, FULL_TEXT_MAX)}".`;
   text += KIND_NOTE[draft.kind] ?? '';
   if (draft.evidence.length) text += ` It names ${draft.evidence.slice(0, 3).join(', ')}.`;
   if (draft.outsideContent === 1)
@@ -453,7 +453,7 @@ function instruction(reply: ReplyClass, bound: readonly DraftRow[]): string {
   const one = labels.length === 1;
   const standing = bound.some((draft) => draft.kind !== 'decision');
   const call = (label: string) =>
-    `cmos_decisions(action="record", content=<${label}'s text as drafted>, fromDraft="${label}")`;
+    `rbook_decisions(action="record", content=<${label}'s text as drafted>, fromDraft="${label}")`;
   switch (reply) {
     case 'approval':
       return one
