@@ -12,7 +12,7 @@
  * `decisions=` before its closing parenthesis, or a `rbook_session(action="complete" …)` call with
  * `summary=` and `decisions=`.
  * UNIVERSE: every git-tracked `.md` file, derived at run time.
- * NOT LOOKED AT: `cmos/planning/**` and `CHANGELOG.md` (historical records that quote old shapes);
+ * NOT LOOKED AT: `rbook/planning/**` and `CHANGELOG.md` (historical records that quote old shapes);
  * prose that describes the pair without writing a call; non-Markdown files; and
  * `rbook_session(action="complete", summary, nextSteps)` — six tracked sites at s91-m03
  * (session-management-guide.md, tiers/general.md, build-session-prompt.md x3, release.md). Those
@@ -43,7 +43,7 @@ function trackedMarkdown(): string[] {
   return execFileSync('git', ['ls-files', '*.md'], { cwd: REPO_ROOT, encoding: 'utf8' })
     .split('\n')
     .filter(Boolean)
-    .filter((file) => !file.startsWith('cmos/planning/') && file !== 'CHANGELOG.md');
+    .filter((file) => !file.startsWith('rbook/planning/') && file !== 'CHANGELOG.md');
 }
 
 describe('s91-m03 notes-only completion in shipped prose', () => {

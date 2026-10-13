@@ -209,7 +209,7 @@ it('applies to two historical stores, preserves all three active sprints and rem
 const PRIVATE = requiresPrivateEvidence({
   reason:
     'The actual store is private; full spin-out runs on a consistent temporary SQLite backup only.',
-  paths: { source: 'cmos/db/cmos.sqlite' },
+  paths: { source: 'rbook/db/rbook.sqlite' },
 });
 PRIVATE.describe('private public-entry positive fire', () => {
   it('copies a real completed mission and its linked records, preserving original source text and historical access', async () => {

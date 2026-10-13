@@ -52,9 +52,9 @@ const PRIVATE = requiresPrivateEvidence({
     "The close is fired on a copy of the private live store's real decisions, learnings, missions " +
     'and sessions, and two of the documents it checks are private.',
   paths: {
-    liveDb: 'cmos/db/cmos.sqlite',
-    prompt: 'cmos/docs/build-session-prompt.md',
-    architecture: 'cmos/docs/architecture.md',
+    liveDb: 'rbook/db/rbook.sqlite',
+    prompt: 'rbook/docs/build-session-prompt.md',
+    architecture: 'rbook/docs/architecture.md',
   },
 });
 

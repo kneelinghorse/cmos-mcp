@@ -8,7 +8,7 @@ import { createHash } from 'crypto';
 import { execFileSync } from 'child_process';
 const { runGate } = require('../../scripts/retrieval-quality-gate');
 const { summarize } = require('../../scripts/retrieval-quality-metrics');
-const fixturePath = 'cmos/research/2026-10-s94-m06';
+const fixturePath = 'rbook/research/2026-10-s94-m06';
 const contractPath = 'tests/fixtures/retrieval-quality-contract.json';
 const sha = (bytes: string | Buffer) => createHash('sha256').update(bytes).digest('hex');
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value));

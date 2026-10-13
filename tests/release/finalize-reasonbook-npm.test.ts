@@ -30,6 +30,22 @@ afterEach(() => {
 const ok = (data: unknown) => ({ status: 0, stdout: JSON.stringify(data), stderr: '' });
 const absent = { status: 1, stdout: JSON.stringify({ error: { code: 'E404' } }), stderr: '' };
 const release = { name: '@aquex/reasonbook', version: '4.0.0', mcpName: 'ai.aquex/reasonbook' };
+const legacyVersion = { name: '@aquex/cmos-mcp', version: '3.5.0' };
+const deprecation =
+  'CMOS is now Reasonbook. Use @aquex/reasonbook. Migration: https://github.com/kneelinghorse/reasonbook/blob/main/docs/migrating-from-cmos.md';
+// npm view package@* returns latest metadata with a version list, not one object per version.
+function legacyRead(
+  args: string[],
+  records: Array<{ name: string; version: string; deprecated?: string }> = [legacyVersion]
+) {
+  if (args[1] === legacyVersion.name || args[1] === `${legacyVersion.name}@*`)
+    return ok({
+      ...legacyVersion,
+      deprecated: records.find((entry) => entry.version === legacyVersion.version)?.deprecated,
+      versions: records.map((entry) => entry.version),
+    });
+  return ok(records.find((entry) => args[1] === `${legacyVersion.name}@${entry.version}`));
+}
 function localRoot(version = '4.0.0'): string {
   const dir = path.join(scratch, 'repo');
   fs.mkdirSync(dir);
@@ -187,9 +203,12 @@ test('an existing exact placeholder verifies without publishing again', () => {
 });
 test('new publication requires the prepared exact bytes and uses only fixed targets', () => {
   const dir = localRoot();
-  const runNpm = jest.fn((args: string[]) =>
-    args[0] === 'view' ? (args[1] === '@aquex/reasonbook@4.0.0' ? ok(release) : absent) : ok({})
-  );
+  const runNpm = jest.fn((args: string[]) => {
+    if (args[0] !== 'view') return ok({});
+    if (args[1] === '@aquex/reasonbook@4.0.0') return ok(release);
+    if (args[1] === 'cmos-mcp') return absent;
+    return legacyRead(args);
+  });
   runPhase('prepare', { root: dir, scratch, runNpm });
   runPhase('deprecate', { root: dir, scratch, runNpm });
   runPhase('publish', { root: dir, scratch, runNpm });
@@ -207,9 +226,80 @@ test('new publication requires the prepared exact bytes and uses only fixed targ
     '--tag',
     'latest',
     '--provenance=false',
+    '--json',
   ]);
+  expect(writes[0][writes[0].length - 1]).toBe('--json');
   fs.appendFileSync(path.join(scratch, 'placeholder', 'bin.js'), '\nfetch("https://evil.invalid")');
   expect(() => runPhase('publish', { root: dir, scratch, runNpm })).toThrow(/contents/);
+});
+test.each([
+  {
+    name: 'registry refusal',
+    result: {
+      status: 1,
+      stdout: JSON.stringify({
+        error: { code: 'E403', summary: 'SECRET_SUMMARY', detail: 'SECRET_DETAIL' },
+        config: 'SECRET_CONFIG',
+      }),
+      stderr: 'SECRET_STDERR',
+    },
+    expected: { npmCode: 'E403', status: 1, signal: null, spawnCode: null },
+  },
+  {
+    name: 'timeout with non-JSON output',
+    result: {
+      status: null,
+      stdout: 'SECRET_STDOUT',
+      stderr: 'SECRET_STDERR',
+      signal: 'SIGTERM',
+      error: { code: 'ETIMEDOUT', message: 'SECRET_ERROR_MESSAGE' },
+    },
+    expected: { npmCode: null, status: null, signal: 'SIGTERM', spawnCode: 'ETIMEDOUT' },
+  },
+  {
+    name: 'unrecognized but code-shaped strings',
+    result: {
+      status: 1,
+      stdout: JSON.stringify({ error: { code: 'ESECRET' } }),
+      stderr: 'SECRET_STDERR',
+      signal: 'SIGSECRET',
+      error: { code: 'ESECRET', message: 'SECRET_ERROR_MESSAGE' },
+    },
+    expected: { npmCode: null, status: 1, signal: null, spawnCode: null },
+  },
+  {
+    name: 'malformed diagnostic fields',
+    result: {
+      status: 'SECRET_STATUS',
+      stdout: JSON.stringify({ error: { code: ['E403', 'SECRET_CODE'] } }),
+      stderr: 'SECRET_STDERR',
+      signal: 'SIGTERM\nSECRET_SIGNAL',
+      error: { code: 'ENOENT\nSECRET_CODE' },
+    },
+    expected: { npmCode: null, status: null, signal: null, spawnCode: null },
+  },
+])('mutation diagnostics retain only safe fields: $name', ({ result, expected }) => {
+  const dir = localRoot();
+  const runNpm = jest.fn((args: string[]) => {
+    if (args[0] !== 'view') return result;
+    if (args[1] === '@aquex/reasonbook@4.0.0') return ok(release);
+    if (args[1] === 'cmos-mcp') return absent;
+    return legacyRead(args);
+  });
+  runPhase('prepare', { root: dir, scratch, runNpm });
+  for (const phase of ['publish', 'deprecate']) {
+    let failure: unknown;
+    try {
+      runPhase(phase, { root: dir, scratch, runNpm });
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toBe(
+      `npm ${phase} failed (${JSON.stringify(expected)}); no success claimed. Retry verifies the registry again.`
+    );
+    expect(runNpm.mock.calls[runNpm.mock.calls.length - 1][0]).toContain('--json');
+  }
 });
 test('final readback refuses an undeclared legacy version instead of claiming all versions deprecated', () => {
   const dir = localRoot();
@@ -232,14 +322,16 @@ test('final readback refuses an undeclared legacy version instead of claiming al
         versions: ['1.0.0'],
         maintainers: [{ name: 'kneelinghorse' }],
       });
-    return ok([{ name: '@aquex/cmos-mcp', version: '3.5.0', deprecated }]);
+    return legacyRead(args, [
+      { ...legacyVersion, version: '3.3.0-rc.1', deprecated },
+      { ...legacyVersion, deprecated: deprecation },
+    ]);
   });
   expect(() => runPhase('verify', { root: dir, scratch, runNpm })).toThrow(/missing deprecation/);
-  deprecated =
-    'CMOS is now Reasonbook. Use @aquex/reasonbook. Migration: https://github.com/kneelinghorse/reasonbook/blob/main/docs/migrating-from-cmos.md';
+  deprecated = deprecation;
   expect(runPhase('verify', { root: dir, scratch, runNpm })).toMatchObject({
     placeholder: 'verified-existing',
-    deprecatedVersions: 1,
+    deprecatedVersions: 2,
   });
 });
 PRIVATE.describe('private follow-up workflow', () => {

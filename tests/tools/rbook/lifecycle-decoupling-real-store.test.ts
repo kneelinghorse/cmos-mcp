@@ -15,7 +15,7 @@ import { rbookNextSteps } from '../../../src/tools/rbook/rbook-next-steps';
 import { RbookDetector } from '../../../src/intelligence/rbook-detector';
 const PRIVATE = requiresPrivateEvidence({
   reason: 'B1.1 and historical context/lease positive fires require a private source backup.',
-  paths: { liveDb: 'cmos/db/cmos.sqlite' },
+  paths: { liveDb: 'rbook/db/rbook.sqlite' },
 });
 const live = PRIVATE.paths.liveDb;
 function sourceHashes(file = live): Record<string, string | null> {

@@ -18,7 +18,7 @@ import { reidentifyRbookTestStore } from '../../helpers/seedRbookDb';
 const PRIVATE = requiresPrivateEvidence({
   reason:
     'The proposal positive-fire test needs a temporary SQLite backup of the live project store.',
-  paths: { liveDb: 'cmos/db/cmos.sqlite' },
+  paths: { liveDb: 'rbook/db/rbook.sqlite' },
 });
 
 PRIVATE.describe('draft approval on a copy of the live store', () => {

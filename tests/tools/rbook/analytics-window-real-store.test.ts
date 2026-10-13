@@ -17,7 +17,7 @@
  * FKs on strategic_decisions where the live store carries three, and it writes contexts
  * source_path values the live store's rows do not carry. A fixture proves the ordering logic; it
  * cannot prove the view exists with these columns in a store that has been migrated across 86
- * sprints. So the window assertion runs against a COPY of cmos/db/cmos.sqlite.
+ * sprints. So the window assertion runs against a COPY of rbook/db/rbook.sqlite.
  *
  * THE LIVE STORE'S MEASURED SHAPE (2026-08-12, this machine):
  *   sprint_summary holds 78 rows, 77 matching `status IN ('Completed','Active')`,
@@ -54,7 +54,7 @@ import { reidentifyRbookTestStore, seedRbookDb } from '../../helpers/seedRbookDb
 const PRIVATE = requiresPrivateEvidence({
   reason:
     'The analytics positive fire derives a suite-private copy from the private live Reasonbook store; the ordering fixtures below are portable.',
-  paths: { liveDb: 'cmos/db/cmos.sqlite' },
+  paths: { liveDb: 'rbook/db/rbook.sqlite' },
 });
 
 const tmpDirs: string[] = [];

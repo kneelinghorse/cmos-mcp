@@ -9,7 +9,7 @@
  * A SEEDED FIXTURE IS NOT A REAL STORE, and stdio-against-dist proves TRANSPORT, not SCHEMA.
  * The divergence is measured, not hypothetical: `src/tools/rbook/schema.ts` declares SIX foreign
  * keys on `strategic_decisions` while the live store carries THREE — `PRAGMA
- * foreign_key_list(strategic_decisions)` on cmos/db/cmos.sqlite returns exactly
+ * foreign_key_list(strategic_decisions)` on rbook/db/rbook.sqlite returns exactly
  * snapshot_id -> context_snapshots, sprint_id -> sprints, and context_id -> contexts
  * (ON DELETE CASCADE). So a fixture ENFORCES a mission_id FK the live store does not, and a test
  * that only ever ran against a fixture could be green about the wrong schema.
@@ -42,7 +42,7 @@ import { reidentifyRbookTestStore, seedRbookDb } from '../../helpers/seedRbookDb
 const PRIVATE = requiresPrivateEvidence({
   reason:
     'The schema-divergence positive and negative fires derive suite-private copies from the private live Reasonbook store; the seeded-fixture agreement control remains portable.',
-  paths: { liveDb: 'cmos/db/cmos.sqlite' },
+  paths: { liveDb: 'rbook/db/rbook.sqlite' },
 });
 const PRIVATE_SUITE_TITLE =
   's86-m02b real-store fire: a failed decision INSERT is named, not called "skipped"';

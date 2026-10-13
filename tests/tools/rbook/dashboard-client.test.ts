@@ -1101,8 +1101,8 @@ describe('getSyncStatus', () => {
   it('should call GET /api/sync/status and return typed result', async () => {
     const syncData = {
       tables: [
-        { table: 'rbook_sprints', count: 10 },
-        { table: 'rbook_missions', count: 25 },
+        { table: 'cmos_sprints', count: 10 },
+        { table: 'cmos_missions', count: 25 },
       ],
       totalMirrorRows: 35,
       totalSyncLogEntries: 100,

@@ -6,7 +6,7 @@
 
 /**
  * Outbound mutable-surface push (Sprint 71 m04, UC2 — see
- * cmos/docs/multiuser-collab-client.md §5). The "you're behind, pull first" model:
+ * rbook/docs/multiuser-collab-client.md §5). The "you're behind, pull first" model:
  *
  *   1. PULL-BEFORE-PUSH — run the m02 pull first so a stale local value can't be the
  *      basis of the edit. The append-only bulk is NOT gated by this — only the

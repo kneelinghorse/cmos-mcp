@@ -26,9 +26,9 @@ const TOOL_REFERENCE_PATH = path.join(REPO_ROOT, 'TOOL_REFERENCE.md');
 const PRIVATE = requiresPrivateEvidence({
   reason: 'private dependency documentation, CLI, and historical edge store',
   paths: {
-    liveDb: 'cmos/db/cmos.sqlite',
-    buildSessionPrompt: 'cmos/docs/build-session-prompt.md',
-    cli: 'cmos/cli.py',
+    liveDb: 'rbook/db/rbook.sqlite',
+    buildSessionPrompt: 'rbook/docs/build-session-prompt.md',
+    cli: 'rbook/cli.py',
   },
 });
 

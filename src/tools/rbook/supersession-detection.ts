@@ -11,7 +11,7 @@
  *
  * s92-m04: NO WRITE PATH CALLS THE DETECTOR ANY MORE. Replayed over every historical capture, 69 of
  * 9,035 offers were true, and 28-61% of real supersessions crossed sprints where it could not see
- * them (cmos/research/2026-10-strategy/retrieval-natural-labels.md §5), so capture and record stopped
+ * them (rbook/research/2026-10-strategy/retrieval-natural-labels.md §5), so capture and record stopped
  * offering candidates; a correction names its target with supersedes=[...]. The module stays for
  * the historical `extractKeywords` re-export and for that replay.
  *

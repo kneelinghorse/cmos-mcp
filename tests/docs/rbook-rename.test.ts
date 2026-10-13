@@ -162,7 +162,7 @@ test('a declared migration-page path remains searchable by its former name', () 
   expect(planRename(input, manifest(rules)).issues).toEqual([]);
 });
 
-test('the real policy distinguishes own-checkout references from seeded project paths', () => {
+test('the real policy moves current own-checkout references along with seeded project paths', () => {
   const policy = require('../../scripts/rbook-rename-protected.json');
   const input = [
     file('agents.md', 'Read cmos/tiers/build.md and cmos/docs/build-session-prompt.md.'),
@@ -174,7 +174,9 @@ test('the real policy distinguishes own-checkout references from seeded project 
   ];
   const plan = planRename(input, captureCounts(input, policy));
   expect(plan.issues).toEqual([]);
-  expect(plan.files[0].text).toBe(input[0].text);
+  expect(plan.files[0].text).toBe(
+    'Read rbook/tiers/build.md and rbook/docs/build-session-prompt.md.'
+  );
   expect(plan.files[1].text).toBe('Read rbook/tiers/build.md and rbook/README.md.');
   expect(plan.files[2].text).toContain("'rbook/tiers/managed.md'");
 });
@@ -195,16 +197,16 @@ test('the real policy reaches multiline current-output assertions', () => {
   expect(plan.issues.join('\n')).toMatch(/current-address-output-fixture/);
 });
 
-test('private source paths stay usable while copies and seed paths follow the new layout', () => {
+test('private sources follow the moved record while migration fixtures retain legacy inputs', () => {
   const policy = require('../../scripts/rbook-rename-protected.json');
   const input = [
     file(
       'tests/tools/cmos/draft-real-store.test.ts',
       "paths: { liveDb: 'cmos/db/cmos.sqlite' },\nconst copy = path.join(root, 'cmos/db/cmos.sqlite');"
     ),
-    file('cmos/cli.py', 'db_path = root / "db" / "cmos.sqlite"\nreturn current / "cmos"\n'),
+    file('rbook/cli.py', 'db_path = root / "db" / "cmos.sqlite"\nreturn current / "cmos"\n'),
     file(
-      'cmos/tests/test_cli_research_export.py',
+      'rbook/tests/test_cli_research_export.py',
       'shutil.copy2(CMOS_ROOT / "db" / "cmos.sqlite", self.db_path)\nself.db_path = temp / "cmos.sqlite"\n'
     ),
     file(
@@ -214,10 +216,12 @@ test('private source paths stay usable while copies and seed paths follow the ne
   ];
   const plan = planRename(input, captureCounts(input, policy));
   expect(plan.issues).toEqual([]);
-  expect(plan.files[0].text).toContain("liveDb: 'cmos/db/cmos.sqlite'");
+  expect(plan.files[0].text).toContain("liveDb: 'rbook/db/rbook.sqlite'");
   expect(plan.files[0].text).toContain("path.join(root, 'rbook/db/rbook.sqlite')");
-  expect(plan.files[1].text).toBe(input[1].text);
-  expect(plan.files[2].text).toContain('RBOOK_ROOT / "db" / "cmos.sqlite"');
+  expect(plan.files[1].text).toBe(
+    'db_path = root / "db" / "rbook.sqlite"\nreturn current / "rbook"\n'
+  );
+  expect(plan.files[2].text).toContain('RBOOK_ROOT / "db" / "rbook.sqlite"');
   expect(plan.files[2].text).toContain('temp / "rbook.sqlite"');
   expect(plan.files[3].text).toContain("'../../rbook-seed'");
   expect(plan.files[3].text).toContain("'cmos/db/cmos.sqlite'");
@@ -246,8 +250,8 @@ test('the private lint exclusion does not mask a current test module path', () =
   const plan = planRename(input, captureCounts(input, policy));
   expect(plan.issues).toEqual([]);
   expect(plan.files[0].text).toContain('tests/tools/rbook/e2e-lifecycle.test.ts');
-  expect(plan.files[0].text).toContain('!(cmos)/**');
-  const guard = file('cmos/docs/release.md', '^package/(cmos|rbook|analysis|artifacts|tmp)(/|$)');
+  expect(plan.files[0].text).toContain('!(rbook)/**');
+  const guard = file('rbook/docs/release.md', '^package/(cmos|rbook|analysis|artifacts|tmp)(/|$)');
   expect(planRename([guard], captureCounts([guard], policy)).files[0].text).toBe(guard.text);
 });
 

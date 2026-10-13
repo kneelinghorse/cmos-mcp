@@ -50,7 +50,7 @@ describe('dependency security overrides', () => {
     }
   });
 
-  // s99-m01: the development tree was cleared of four advisories (cmos/research/2026-10-s99-m01).
+  // s99-m01: the development tree was cleared of four advisories (rbook/research/2026-10-s99-m01).
   // Two have no fixed release (braces, sprintf-js), so the guard is that no path reaches them at
   // all; the other two must resolve at or above their fixed versions. A regenerated lockfile or a
   // dependency bump that brings one back fails here instead of in the next audit.

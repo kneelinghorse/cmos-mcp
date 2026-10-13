@@ -3,7 +3,7 @@
 // ABOUTME: CLAUDE.md that imports it), the levels, the hook-less block, and the operator profile's guards.
 
 /**
- * The criteria (design doc cmos/planning/s93-the-loop-runs-itself-build.md, m12):
+ * The criteria (design doc rbook/planning/s93-the-loop-runs-itself-build.md, m12):
  * - init in a temp folder writes an AGENTS.md of at most 150 lines with the practices block and one
  *   Reasonbook line, and a CLAUDE.md that imports it (the internal-reference gate scans both templates,
  *   tests/docs/internal-references.test.ts);

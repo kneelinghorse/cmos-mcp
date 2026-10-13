@@ -48,7 +48,7 @@ import { requiresPrivateEvidence } from '../../helpers/public-mirror';
 const PRIVATE = requiresPrivateEvidence({
   reason:
     'The existing-store upgrade, sprint-binding, and route-integrity fires derive suite-private copies from the private live Reasonbook store; synthetic migration shapes remain portable.',
-  paths: { liveDb: 'cmos/db/cmos.sqlite' },
+  paths: { liveDb: 'rbook/db/rbook.sqlite' },
 });
 const EXISTING_STORE_SUITE =
   'real-store fire: an EXISTING store upgrades and stays consistent (s86-m08)';

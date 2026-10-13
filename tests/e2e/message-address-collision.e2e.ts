@@ -42,7 +42,7 @@ const DIST_ENTRY = path.join(REPO_ROOT, 'dist', 'index.js');
 const PRIVATE = requiresPrivateEvidence({
   reason:
     'This built-server messaging E2E derives its scratch project from the private live Reasonbook store.',
-  paths: { liveDb: 'cmos/db/cmos.sqlite' },
+  paths: { liveDb: 'rbook/db/rbook.sqlite' },
 });
 
 const PRO_ID = 'c02ea1cb-3db7-40b0-a263-7d17ef2a656f';

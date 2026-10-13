@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "capturedAgainst": "5f5da1762f7af2364d659066665b33bfa14f659c",
-  "scope": "Tracked UTF-8 regular files; old record path stays until m09. Full-tree counts bind apply; public-only residual counts exclude the exact public-mirror private surfaces.",
+  "capturedAgainst": "2dd87c694ee99cff91f1c84ac7d48c51e260af2e",
+  "scope": "Tracked UTF-8 regular files after the own-record migration. Current record paths use rbook; historical evidence and legacy compatibility/privacy boundaries remain protected. Full-tree counts bind apply; public-only residual counts exclude the exact public-mirror private surfaces.",
   "falseNegativeProfile": [
     "Excluded encodings and binary content, untracked/ignored files, SQLite/config values and other repositories are outside the source gate; exclusions are reported.",
     "The lexical rename cannot judge all prose or computed identifiers. Ambiguous command/host tokens and declared manual triggers block apply. Dry-run reviews still require human/agent inspection.",
@@ -10,8 +10,23 @@
   ],
   "protections": [
     {
+      "id": "dashboard-sync-status-wire",
+      "paths": [
+        "src/tools/rbook/rbook-db-backfill.ts",
+        "src/tools/rbook/rbook-agent-onboard.ts",
+        "tests/tools/rbook/rbook-db-backfill.test.ts",
+        "tests/tools/rbook/rbook-agent-onboard.test.ts",
+        "tests/tools/rbook/sync-status-wire.test.ts",
+        "tests/tools/rbook/dashboard-client.test.ts"
+      ],
+      "pattern": "\\bcmos_(?:projects|sprints|missions|sessions|decisions|project_metadata|contexts|learnings|mission_dependencies|sync_log)\\b",
+      "reason": "The live dashboard sync-status API owns these table labels; six entity labels are compared and four non-entity/out-of-scope labels are fixture exclusions. Their spelling is independent of the client product rename.",
+      "expectedCount": 54,
+      "expectedPublicCount": 54
+    },
+    {
       "id": "release-private-tree-guard",
-      "paths": ["cmos/docs/release.md"],
+      "paths": ["rbook/docs/release.md"],
       "pattern": "(?<=package/\\()cmos(?=\\|rbook\\|analysis\\|artifacts\\|tmp\\))",
       "reason": "The tarball privacy predicate must refuse both historical and current private record folders.",
       "expectedCount": 1,
@@ -20,67 +35,16 @@
     {
       "id": "retrieval-contract-history",
       "paths": ["tests/fixtures/retrieval-quality-contract.json"],
-      "pattern": "(?:\"src/tools/cmos/record-link-extractor\\.ts\"|\"src/tools/cmos/decision-citations\\.ts\"|\"src/tools/cmos/stored-time\\.ts\"|\"src/tools/cmos/errors\\.ts\"|\"src/tools/cmos/terminal-status\\.ts\")(?=\\s*:)|(?<=\"from\":\\s*)(?:\"Cmos\"|\"CMOS_\"|\"CMOS\"|\"tools/cmos/\"|\"cmos/db/cmos\\.sqlite\"|\"cmos_\"|\"cmosNotDetected\"|\"cmos-mission-\"|\"cmos-sprint-\"|\"cmos\\.aquex\\.ai\"|\"cmos-retrieval-slice-\")",
+      "pattern": "(?:\"src/tools/cmos/record-link-extractor\\.ts\"|\"src/tools/cmos/decision-citations\\.ts\"|\"src/tools/cmos/stored-time\\.ts\"|\"src/tools/cmos/errors\\.ts\"|\"src/tools/cmos/terminal-status\\.ts\")(?=\\s*:)|(?<=\"from\":\\s*)(?:\"Cmos\"|\"CMOS_\"|\"CMOS\"|\"tools/cmos/\"|\"cmos/db/cmos\\.sqlite\"|\"cmos_\"|\"cmosNotDetected\"|\"cmos-mission-\"|\"cmos-sprint-\"|\"cmos\\.aquex\\.ai\"|\"cmos-retrieval-slice-\")|(?<=\"from\":\\s*)\"(?:cmos/docs/archive/session-management-guide\\.md|cmos/research/2026-10-s94-m06)\"",
       "reason": "Exact historical parser path keys and finite replacement from-values bind pre-rename source hashes. Current path and to-values remain checked.",
-      "expectedCount": 32,
-      "expectedPublicCount": 32
+      "expectedCount": 34,
+      "expectedPublicCount": 34
     },
     {
       "id": "sweep-legacy-block-start",
       "paths": ["tests/sweeps/s94-m11.json"],
       "pattern": "'<!-- CMOS hook-less block: written by `cmos-mcp init --no-hooks` for a harness without hooks\\. Delete it if the harness gains them\\. -->',|'<!\\\\-\\\\-\\\\ CMOS\\\\ hook\\\\-less\\\\ block:\\\\ written\\\\ by\\\\ `cmos\\\\-mcp\\\\ init\\\\ \\\\-\\\\-no\\\\-hooks`\\\\ for\\\\ a\\\\ harness\\\\ without\\\\ hooks\\\\\\.\\\\ Delete\\\\ it\\\\ if\\\\ the\\\\ harness\\\\ gains\\\\ them\\\\\\.\\\\ \\\\-\\\\->',|'<!\\\\\\\\-\\\\\\\\-\\\\\\\\ CMOS\\\\\\\\ hook\\\\\\\\-less\\\\\\\\ block:\\\\\\\\ written\\\\\\\\ by\\\\\\\\ `cmos\\\\\\\\-mcp\\\\\\\\ init\\\\\\\\ \\\\\\\\-\\\\\\\\-no\\\\\\\\-hooks`\\\\\\\\ for\\\\\\\\ a\\\\\\\\ harness\\\\\\\\ without\\\\\\\\ hooks\\\\\\\\\\.\\\\\\\\ Delete\\\\\\\\ it\\\\\\\\ if\\\\\\\\ the\\\\\\\\ harness\\\\\\\\ gains\\\\\\\\ them\\\\\\\\\\.\\\\\\\\ \\\\\\\\-\\\\\\\\->',",
       "reason": "Exact current compatibility recognizer witness and exact residual exclusion must match LEGACY.blockStart bytes; all other current ledger paths/text still transform.",
-      "expectedCount": 2,
-      "expectedPublicCount": 2
-    },
-    {
-      "id": "private-lint-exclusion",
-      "paths": ["package.json"],
-      "pattern": "(?<=!\\()cmos(?=\\))",
-      "reason": "Only the exact private lint exclusion names this record directory; package command module paths must follow source moves.",
-      "expectedCount": 1,
-      "expectedPublicCount": 1
-    },
-    {
-      "id": "private-evidence-db-source",
-      "paths": [
-        "tests/cli/later-prompt-recall.test.ts",
-        "tests/e2e/analytics-window.e2e.ts",
-        "tests/e2e/auth-reissue.e2e.ts",
-        "tests/e2e/message-address-collision.e2e.ts",
-        "tests/e2e/mission-move.e2e.ts",
-        "tests/tools/cmos/analytics-window-real-store.test.ts",
-        "tests/tools/cmos/decision-shape-migration-boundary.test.ts",
-        "tests/tools/cmos/dependency-ordering-contract.test.ts",
-        "tests/tools/cmos/draft-real-store.test.ts",
-        "tests/tools/cmos/lifecycle-decoupling-real-store.test.ts",
-        "tests/tools/cmos/onboarding-by-level-real-store.test.ts",
-        "tests/tools/cmos/cmos-review-drift-selfperturbation.test.ts",
-        "tests/tools/cmos/record-links-boundary.test.ts",
-        "tests/tools/cmos/record-links-writer-boundaries.test.ts",
-        "tests/tools/cmos/remedy-reachability.test.ts",
-        "tests/tools/cmos/router-param-reachability-real-store.test.ts",
-        "tests/tools/cmos/spin-out-legacy.test.ts",
-        "tests/tools/cmos/spin-out-mapping-store.test.ts",
-        "tests/tools/cmos/spin-out-read-boundaries.test.ts",
-        "tests/tools/cmos/sprint-close-keeps-record.test.ts",
-        "tests/tools/cmos/sprint-end-date-repair.test.ts",
-        "tests/tools/cmos/sprint-summary-denominator.test.ts",
-        "tests/tools/cmos/staleness-repair-real-store.test.ts",
-        "tests/tools/cmos/suggestion-oracle.test.ts",
-        "tests/tools/cmos/supersession-replay.test.ts",
-        "tests/tools/cmos/write-disclosure-real-store.test.ts"
-      ],
-      "pattern": "(?<=(?:liveDb|source|store):\\s*['\"])cmos/db/cmos\\.sqlite",
-      "reason": "These exact private-evidence declarations read this checkout until m09; destination copies in the same files must rename.",
-      "expectedCount": 26,
-      "expectedPublicCount": 26
-    },
-    {
-      "id": "private-evidence-adr",
-      "paths": ["tests/docs/adr-verification-gate.test.ts"],
-      "pattern": "cmos/planning/adr",
-      "reason": "The actual own ADR corpus stays in place until m09.",
       "expectedCount": 2,
       "expectedPublicCount": 2
     },
@@ -93,98 +57,16 @@
       "expectedPublicCount": 1
     },
     {
-      "id": "private-store-comments",
-      "paths": [
-        "scripts/measure-hook-budgets.ts",
-        "scripts/measure-retrieval-production.ts",
-        "tests/tools/cmos/analytics-window-real-store.test.ts",
-        "tests/tools/cmos/write-disclosure-learning-reaffirm.test.ts",
-        "tests/tools/cmos/write-disclosure-migrations.test.ts",
-        "tests/tools/cmos/write-disclosure-next-steps.test.ts",
-        "tests/tools/cmos/write-disclosure-persist-context.test.ts",
-        "tests/tools/cmos/write-disclosure-real-store.test.ts",
-        "tests/tools/cmos/unknown-project-disclosure.test.ts"
-      ],
-      "pattern": "cmos/db/cmos\\.sqlite",
-      "reason": "Own source-store commentary and recorded fleet discovery path; copies in these files use decomposed temporary paths.",
-      "expectedCount": 11,
-      "expectedPublicCount": 11
-    },
-    {
       "id": "private-db-basename",
-      "paths": [".gitignore", "scripts/mirror-to-public.sh"],
+      "paths": [".gitignore"],
       "pattern": "cmos/db/cmos\\.(?:sqlite|db)",
-      "reason": "Own store ignore/leak-report paths must retain both directory and filename until m09.",
-      "expectedCount": 3,
-      "expectedPublicCount": 3
-    },
-    {
-      "id": "own-record-readme",
-      "paths": ["cmos/README.md"],
-      "pattern": "(?<![A-Za-z0-9_./-])cmos/[A-Za-z0-9_./<>-]*|cmos root",
-      "reason": "This private record README describes its own operational files; product names still transform.",
-      "expectedCount": 40,
-      "expectedPublicCount": 0
-    },
-    {
-      "id": "own-record-positions",
-      "paths": ["agents.md", "cmos/docs/build-session-prompt.md"],
-      "pattern": "cmos/db/cmos\\.sqlite|(?<=`|Reasonbook location: )cmos/(?=` - Local|\\n)",
-      "reason": "Own dogfood workspace and concrete own database location remain until m09.",
-      "expectedCount": 4,
-      "expectedPublicCount": 0
-    },
-    {
-      "id": "own-record-release-planning",
-      "paths": ["cmos/docs/release.md"],
-      "pattern": "cmos/db/cmos\\.sqlite|cmos/planning/(?:<forward-looking-id-list>|phase-3-master-plan\\.md)",
-      "reason": "Own pre-close git add targets cannot move before the record migration.",
-      "expectedCount": 3,
-      "expectedPublicCount": 0
-    },
-    {
-      "id": "own-record-build-authority",
-      "paths": ["cmos/docs/build-session-prompt.md"],
-      "pattern": "cmos/planning/s91-what-the-field-said\\.md",
-      "reason": "Existing private authority document.",
+      "reason": "The legacy database remains ignored alongside the migrated canonical database.",
       "expectedCount": 1,
-      "expectedPublicCount": 0
-    },
-    {
-      "id": "own-record-snippets-directory",
-      "paths": ["cmos/tiers/build.md"],
-      "pattern": "cmos/snippets/",
-      "reason": "The private tier points at its existing snippets directory.",
-      "expectedCount": 3,
-      "expectedPublicCount": 0
-    },
-    {
-      "id": "own-python-layout",
-      "paths": ["cmos/cli.py", "cmos/scripts/*.py", "cmos/scripts/*.sh"],
-      "pattern": "(?<=['\"])cmos(?=['\"])|cmos/[A-Za-z0-9_./<>-]*|cmos(?:-old)?\\.sqlite|cmos root",
-      "reason": "Private helper discovery, help paths and database basenames stay on the actual own record; local identifiers and product prose still transform.",
-      "expectedCount": 98,
-      "expectedPublicCount": 0
-    },
-    {
-      "id": "own-python-copy-source",
-      "paths": ["cmos/tests/*.py"],
-      "pattern": "(?<=(?:CMOS_ROOT|RBOOK_ROOT|self\\.repo_root) / \"db\" / \")cmos\\.sqlite",
-      "reason": "Private Python test copy sources stay old while temporary destination filenames follow the new spelling.",
-      "expectedCount": 5,
-      "expectedPublicCount": 0
-    },
-    {
-      "id": "own-record-inner-ignore",
-      "paths": ["cmos/.gitignore"],
-      "pattern": "^cmos/",
-      "reason": "Own nested workbench exclusion remains current.",
-      "expectedCount": 0,
-      "expectedPublicCount": 0
+      "expectedPublicCount": 1
     },
     {
       "id": "legacy-python-migration-version",
-      "paths": ["cmos/scripts/migrate_cmos_memory.py"],
+      "paths": ["rbook/scripts/migrate_legacy_memory.py"],
       "pattern": "cmos-v1|CMOS v[12]",
       "reason": "Stored legacy source-version markers and versioned historical migration labels are compatibility data.",
       "expectedCount": 8,
@@ -200,7 +82,7 @@
     },
     {
       "id": "archived-private-script",
-      "paths": ["cmos/scripts/validate_parity.py.archived"],
+      "paths": ["rbook/scripts/validate_parity.py.archived"],
       "reason": "This explicitly archived script is a historical artifact.",
       "expectedCount": 1,
       "expectedPublicCount": 0,
@@ -210,35 +92,35 @@
     {
       "id": "private-release-exclusion-paths",
       "paths": ["tests/release/publish-pipeline.test.ts"],
-      "pattern": "cmos/(?:db/|docs/archive/|research/)",
-      "reason": "Release tests inspect actual own private path exclusions until m09.",
-      "expectedCount": 4,
-      "expectedPublicCount": 4
+      "pattern": "cmos/(?:db/|planning/|docs/archive/|research/)",
+      "reason": "Release privacy checks continue to reject historical as well as current private record paths.",
+      "expectedCount": 5,
+      "expectedPublicCount": 5
     },
     {
       "id": "historical-records",
       "paths": [
-        "cmos/research/**",
-        "cmos/reports/**",
-        "cmos/planning/**",
-        "cmos/missions/**",
-        "cmos/context/**",
-        "cmos/telemetry/**",
-        "cmos/PROJECT_CONTEXT.json",
+        "rbook/research/**",
+        "rbook/reports/**",
+        "rbook/planning/**",
+        "rbook/missions/**",
+        "rbook/context/*.json",
+        "rbook/telemetry/**",
+        "rbook/PROJECT_CONTEXT.json",
         "analysis/**",
         "artifacts/**",
         "tmp/**",
         "SESSIONS.jsonl"
       ],
       "reason": "Historical evidence is never rewritten.",
-      "expectedCount": 1017,
+      "expectedCount": 1033,
       "allowOldPath": true,
       "mode": "file",
       "expectedPublicCount": 0
     },
     {
       "id": "archived-private-docs",
-      "paths": ["cmos/docs/archive/**", "cmos/docs/archived/**"],
+      "paths": ["rbook/docs/archive/**", "rbook/docs/archived/**"],
       "reason": "Archived documentation is history.",
       "expectedCount": 11,
       "allowOldPath": true,
@@ -248,24 +130,27 @@
     {
       "id": "dated-private-receipts",
       "paths": [
-        "cmos/docs/attribution-first-contact-heal-analysis.md",
-        "cmos/docs/attribution-rebuild-verification.md",
-        "cmos/docs/mcp-audit-oods-foundry.md",
-        "cmos/docs/mcp-audit-stage1.md",
-        "cmos/docs/mcp-audit-tracelab.md",
-        "cmos/docs/s91-dependency-audit.md",
-        "cmos/docs/s92-m01-resolution-fleet-regression.md",
-        "cmos/docs/s92-m02-end-date-repair-fire.md",
-        "cmos/docs/s92-m05-close-differential.md",
-        "cmos/docs/s92-m06-docs-truth.md",
-        "cmos/docs/s92-m07-retrieval-evaluation.md",
-        "cmos/docs/s92-m09-snapshot-diet.md",
-        "cmos/docs/migration-attribution-rebuild.md",
-        "docs/survey-2026-03-29.md"
+        "rbook/docs/attribution-first-contact-heal-analysis.md",
+        "rbook/docs/attribution-rebuild-verification.md",
+        "rbook/docs/mcp-audit-oods-foundry.md",
+        "rbook/docs/mcp-audit-stage1.md",
+        "rbook/docs/mcp-audit-tracelab.md",
+        "rbook/docs/s91-dependency-audit.md",
+        "rbook/docs/s92-m01-resolution-fleet-regression.md",
+        "rbook/docs/s92-m02-end-date-repair-fire.md",
+        "rbook/docs/s92-m05-close-differential.md",
+        "rbook/docs/s92-m06-docs-truth.md",
+        "rbook/docs/s92-m07-retrieval-evaluation.md",
+        "rbook/docs/s92-m09-snapshot-diet.md",
+        "rbook/docs/migration-attribution-rebuild.md",
+        "docs/survey-2026-03-29.md",
+        "rbook/docs/s92-m01-resolution-fleet-regression.cjs",
+        "rbook/docs/s92-m02-tracelab-repair-fire.cjs",
+        "rbook/docs/s92-m05-close-differential.cjs"
       ],
       "mode": "file",
       "allowOldPath": true,
-      "expectedCount": 14,
+      "expectedCount": 17,
       "reason": "Explicitly dated audit, pre-edit universe, and before/after live-measurement receipts preserve the historical observations they certify; active runbooks remain outside this list.",
       "expectedPublicCount": 0
     },
@@ -354,7 +239,7 @@
     },
     {
       "id": "old-package-exit",
-      "paths": ["README.md", "docs/**", "plugins/**", "tests/**", "cmos/docs/release.md"],
+      "paths": ["README.md", "docs/**", "plugins/**", "tests/**", "rbook/docs/release.md"],
       "reason": "The uninstall/deprecation target must remain the former package.",
       "expectedCount": 8,
       "pattern": "(?:npm uninstall -g|npm deprecate) @aquex/cmos-mcp",
@@ -362,7 +247,7 @@
     },
     {
       "id": "old-plugin-ids",
-      "paths": ["README.md", "docs/**", "plugins/**", "tests/**", "cmos/docs/**", "CHANGELOG.md"],
+      "paths": ["README.md", "docs/**", "plugins/**", "tests/**", "rbook/docs/**", "CHANGELOG.md"],
       "reason": "Every remaining old install id deliberately names a 3.x installation.",
       "expectedCount": 18,
       "pattern": "cmos(?:-chat)?@cmos",
@@ -372,23 +257,17 @@
       "id": "operator-project-names",
       "paths": ["**", "*"],
       "reason": "Operator project names/path segments are not product names.",
-      "expectedCount": 9818,
+      "expectedCount": 9971,
       "pattern": "cmos-mcp-pro(?![A-Za-z0-9_-])|(?<![A-Za-z0-9_-])cmos-dashboard(?![A-Za-z0-9_-])",
       "expectedPublicCount": 147
     },
     {
       "id": "private-record-ignore",
-      "paths": [
-        ".gitignore",
-        ".prettierignore",
-        ".npmignore",
-        ".eslintrc.cjs",
-        ".github/workflows/quality-tooling.yml"
-      ],
-      "reason": "Own record-folder exclusions remain until m09.",
-      "expectedCount": 13,
+      "paths": [".gitignore", ".npmignore"],
+      "reason": "Retain legacy-folder privacy exclusions alongside the current record exclusions.",
+      "expectedCount": 8,
       "pattern": "cmos(?=/|\\))",
-      "expectedPublicCount": 13
+      "expectedPublicCount": 8
     },
     {
       "id": "private-mirror-guard",
@@ -415,110 +294,11 @@
       "expectedPublicCount": 20
     },
     {
-      "id": "own-record-docs",
-      "paths": [
-        "agents.md",
-        "CLAUDE.md",
-        "cmos/**",
-        "scripts/repair-unknown-project.ts",
-        "src/tools/cmos/cmos-message.ts",
-        "src/tools/cmos/errors.ts",
-        "src/tools/cmos/sync-bootstrap.ts",
-        "src/tools/cmos/sync-locks.ts",
-        "src/tools/cmos/sync-mutable-push.ts",
-        "src/tools/cmos/sync-mutable.ts",
-        "src/tools/cmos/sync-pull.ts",
-        "tests/docs/adr-verification-gate.test.ts",
-        "tests/docs/rules-file-size.test.ts",
-        "tests/docs/shipped-prose-truth.test.ts",
-        "tests/docs/sprint-close-caller-protocol.test.ts",
-        "tests/integration/whoami.test.ts",
-        "tests/release/publish-pipeline.test.ts",
-        "tests/tools/cmos/dependency-ordering-contract.test.ts",
-        "tests/tools/cmos/docs-truth.test.ts",
-        "tests/tools/cmos/sprint-close-keeps-record.test.ts",
-        "tests/tools/cmos/tool-definition-inventory.test.ts"
-      ],
-      "reason": "Exact existing own-checkout reference stays until m09; invented/fixture paths are not covered.",
-      "expectedCount": 1745,
-      "pattern": "(?:cmos/docs/attribution\\-first\\-contact\\-heal\\-analysis\\.md|cmos/docs/s92\\-m01\\-resolution\\-fleet\\-regression\\.cjs|cmos/docs/s92\\-m01\\-resolution\\-fleet\\-regression\\.md|cmos/docs/archive/mission_runtime_migration\\.md|cmos/docs/archive/session\\-management\\-guide\\.md|cmos/docs/attribution\\-rebuild\\-verification\\.md|cmos/docs/archive/sqlite\\-schema\\-reference\\.md|cmos/docs/archive/legacy\\-migration\\-guide\\.md|cmos/docs/migration\\-attribution\\-rebuild\\.md|cmos/docs/s92\\-m02\\-tracelab\\-repair\\-fire\\.cjs|cmos/docs/s92\\-m02\\-end\\-date\\-repair\\-fire\\.md|cmos/docs/s92\\-m07\\-retrieval\\-evaluation\\.md|cmos/docs/s92\\-m05\\-close\\-differential\\.cjs|cmos/docs/s92\\-m05\\-close\\-differential\\.md|cmos/docs/archive/workflow\\-examples\\.md|cmos/docs/archive/operations\\-guide\\.md|cmos/docs/archive/agents\\-md\\-guide\\.md|cmos/docs/archive/getting\\-started\\.md|cmos/docs/multiuser\\-collab\\-client\\.md|cmos/docs/mcp\\-audit\\-oods\\-foundry\\.md|cmos/docs/archive/mcp\\-reference\\.md|cmos/docs/s92\\-m09\\-snapshot\\-diet\\.md|cmos/docs/build\\-session\\-prompt\\.md|cmos/docs/directory\\-submission\\.md|cmos/docs/s91\\-dependency\\-audit\\.md|cmos/docs/archive/user\\-manual\\.md|cmos/docs/mcp\\-audit\\-tracelab\\.md|cmos/docs/onboarding\\-runbook\\.md|cmos/docs/s92\\-m06\\-docs\\-truth\\.md|cmos/docs/mcp\\-audit\\-stage1\\.md|cmos/docs/tracelab\\-bridge\\.md|cmos/docs/archive/README\\.md|cmos/docs/architecture\\.md|cmos/docs/live\\-testing\\.md|cmos/docs/release\\.md|cmos/docs/README\\.md)",
-      "expectedPublicCount": 30
-    },
-    {
-      "id": "own-record-tiers",
-      "paths": ["agents.md", "CLAUDE.md", "cmos/**"],
-      "reason": "Exact existing own-checkout reference stays until m09; invented/fixture paths are not covered.",
-      "expectedCount": 87,
-      "pattern": "(?:cmos/tiers/general\\.md|cmos/tiers/managed\\.md|cmos/tiers/build\\.md)",
-      "expectedPublicCount": 0
-    },
-    {
-      "id": "own-record-templates",
-      "paths": ["agents.md", "CLAUDE.md", "cmos/**"],
-      "reason": "Exact existing own-checkout reference stays until m09; invented/fixture paths are not covered.",
-      "expectedCount": 12,
-      "pattern": "(?:cmos/templates/session\\-onboarding\\-template\\.md|cmos/templates/PROJECT\\-README\\-template\\.md)",
-      "expectedPublicCount": 0
-    },
-    {
-      "id": "own-record-tests",
-      "paths": ["agents.md", "CLAUDE.md", "cmos/**"],
-      "reason": "Exact existing own-checkout reference stays until m09; invented/fixture paths are not covered.",
-      "expectedCount": 88,
-      "pattern": "(?:cmos/tests/test_session_runtime_context_updates\\.py|cmos/tests/backward_compatibility/scenarios\\.yaml|cmos/tests/backward_compatibility/checklist\\.md|cmos/tests/test_session_runtime_validation\\.py|cmos/tests/integration/test_manifest\\.json|cmos/tests/test_context_view_helpers\\.py|cmos/tests/performance/benchmarks\\.json|cmos/tests/security/context\\-risky\\.yaml|cmos/tests/test_cli_research_export\\.py|cmos/tests/test_mission_runtime_api\\.py|cmos/tests/security/context\\-safe\\.yaml|cmos/tests/quality/sample\\-risky\\.js|cmos/tests/quality/sample\\-safe\\.js)",
-      "expectedPublicCount": 0
-    },
-    {
-      "id": "own-record-scripts",
-      "paths": ["agents.md", "CLAUDE.md", "cmos/**"],
-      "reason": "Exact existing own-checkout reference stays until m09; invented/fixture paths are not covered.",
-      "expectedCount": 244,
-      "pattern": "(?:cmos/scripts/validate_foundational_refs\\.py|cmos/scripts/migrate_sprint_yaml_to_db\\.py|cmos/scripts/validate_parity\\.py\\.archived|cmos/scripts/migrate_historical_data\\.py|cmos/scripts/migrate_cmos_memory\\.py|cmos/scripts/mission_runtime\\.py|cmos/scripts/package_starter\\.sh|cmos/scripts/query_helpers\\.sql|cmos/scripts/reset_starter\\.sh|cmos/scripts/seed_sqlite\\.py|cmos/scripts/db_tools\\.py)",
-      "expectedPublicCount": 0
-    },
-    {
-      "id": "own-record-snippets",
-      "paths": ["agents.md", "CLAUDE.md", "cmos/**"],
-      "reason": "Exact existing own-checkout reference stays until m09; invented/fixture paths are not covered.",
-      "expectedCount": 76,
-      "pattern": "(?:cmos/snippets/attribution\\-diagnostic\\.md|cmos/snippets/sprint\\-zero\\-managed\\.md|cmos/snippets/check\\-in\\-general\\.md|cmos/snippets/sprint\\-planning\\.md|cmos/snippets/mission\\-start\\.md|cmos/snippets/sprint\\-review\\.md|cmos/snippets/check\\-in\\.md|cmos/snippets/README\\.md)",
-      "expectedPublicCount": 0
-    },
-    {
-      "id": "own-record-foundational-docs",
-      "paths": ["agents.md", "CLAUDE.md", "cmos/**"],
-      "reason": "Exact existing own-checkout reference stays until m09; invented/fixture paths are not covered.",
-      "expectedCount": 253,
-      "pattern": "(?:cmos/foundational\\-docs/20241113_mp_json_output_implementation_plan\\.md|cmos/foundational\\-docs/sprint\\-4\\-\\-review\\-plan\\-6d325d37\\.plan\\.md|cmos/foundational\\-docs/m02\\-project\\-identity\\-schema\\.md|cmos/foundational\\-docs/context\\-v2\\-implementation\\.md|cmos/foundational\\-docs/m04\\-meridian\\-integration\\.md|cmos/foundational\\-docs/context\\-v2\\-architecture\\.md|cmos/foundational\\-docs/m01\\-retrieval\\-research\\.md|cmos/foundational\\-docs/m03\\-session\\-continuity\\.md|cmos/foundational\\-docs/tech_arch_template\\.md|cmos/foundational\\-docs/roadmap\\-sprint\\-08\\.md|cmos/foundational\\-docs/roadmap_template\\.md|cmos/foundational\\-docs/platform\\-vision\\.md|cmos/foundational\\-docs/roadmap\\.md)",
-      "expectedPublicCount": 0
-    },
-    {
-      "id": "own-record-workers",
-      "paths": ["agents.md", "CLAUDE.md", "cmos/**"],
-      "reason": "Exact existing own-checkout reference stays until m09; invented/fixture paths are not covered.",
-      "expectedCount": 7,
-      "pattern": "(?:cmos/workers/implementation\\.frontend\\.yaml|cmos/workers/implementation\\.backend\\.yaml|cmos/workers/research\\.code\\-analysis\\.yaml|cmos/workers/research\\.web\\-search\\.yaml|cmos/workers/manifest\\.yaml)",
-      "expectedPublicCount": 0
-    },
-    {
-      "id": "own-record-root-docs",
-      "paths": [
-        "agents.md",
-        "CLAUDE.md",
-        "cmos/**",
-        "tests/tools/cmos/dependency-ordering-contract.test.ts"
-      ],
-      "reason": "Exact own record root files remain until m09.",
-      "expectedCount": 578,
-      "pattern": "cmos/(?:README\\.md|PROJECT_CONTEXT\\.json|cli\\.py)",
-      "expectedPublicCount": 1
-    },
-    {
       "id": "operator-display-name",
       "paths": ["**", "*"],
       "pattern": "CMOS-MCP Pro",
       "reason": "The registered project display name stays with its operator-owned project identity.",
-      "expectedCount": 211,
+      "expectedCount": 220,
       "expectedPublicCount": 32
     },
     {
@@ -526,7 +306,7 @@
       "paths": ["**", "*"],
       "pattern": "(?<=://[A-Za-z0-9_.-]+/|\\$\\{LEGACY\\.addressScheme\\}[A-Za-z0-9_.-]+/)cmos-mcp\\b(?!-)",
       "reason": "Address scheme changes, but the operator-owned project slug does not.",
-      "expectedCount": 207,
+      "expectedCount": 209,
       "expectedPublicCount": 63
     },
     {
@@ -561,14 +341,6 @@
       "expectedPublicCount": 108
     },
     {
-      "id": "private-history-references",
-      "paths": ["**", "*"],
-      "pattern": "cmos/(?:research|reports)/[A-Za-z0-9_./-]+|cmos/planning/(?:phase-2-master-plan\\.md|adr/[a-z0-9-]+\\.md|s86-say-only-what-you-know\\.md|s93-the-loop-runs-itself-build\\.md|dormant-code-cleanup-manifest\\.md)|cmos/planning/(?=['\"`*])",
-      "reason": "References into this checkout historical record stay until m09; no project is initialized with these historical filenames.",
-      "expectedCount": 16883,
-      "expectedPublicCount": 54
-    },
-    {
       "id": "removed-http-bin",
       "paths": ["SECURITY.md", "tests/release/publish-pipeline.test.ts"],
       "pattern": "cmos-mcp-http",
@@ -595,7 +367,7 @@
         "README.md",
         "docs/getting-started.md",
         "docs/harnesses.md",
-        "cmos/docs/release.md"
+        "rbook/docs/release.md"
       ],
       "pattern": "@aquex/cmos-mcp(?=`, the former package)",
       "reason": "The explanatory transition noun names the former package; current alias claims still require manual rewrite.",
@@ -650,7 +422,7 @@
     {
       "id": "operator-legacy-identity-prose",
       "paths": [
-        "cmos/foundational-docs/**",
+        "rbook/foundational-docs/**",
         "behaviors/cmos-sweep.feature",
         "tests/bdd/cmos-sweep.steps.test.ts",
         "src/tools/cmos/cmos-message.ts",
@@ -734,8 +506,8 @@
       "paths": ["**", "*"],
       "pattern": "migrating-from-cmos\\.md",
       "reason": "The intentionally old-named migration guide remains the target of all public links.",
-      "expectedCount": 31,
-      "expectedPublicCount": 15
+      "expectedCount": 40,
+      "expectedPublicCount": 16
     },
     {
       "id": "old-package-launch-detector",
@@ -750,12 +522,45 @@
       "paths": [
         "scripts/finalize-reasonbook-npm.js",
         "tests/release/finalize-reasonbook-npm.test.ts",
-        "cmos/docs/release.md"
+        "tests/release/legacy-npm-deprecation.test.ts",
+        "rbook/docs/release.md"
       ],
       "pattern": "(?<![A-Za-z0-9_-])(?:@aquex/)?cmos-mcp(?:@\\*|@1\\.0\\.0|-1\\.0\\.0\\.tgz)?(?![A-Za-z0-9_-])|CMOS is now Reasonbook",
       "reason": "Approved draft P6 (decision 1340): exact former scoped package, inert legacy-name placeholder and transition notice are intentional compatibility destinations; no file-wide exemption.",
-      "expectedCount": 32,
-      "expectedPublicCount": 29
+      "expectedCount": 40,
+      "expectedPublicCount": 37
+    },
+    {
+      "id": "legacy-python-import-source",
+      "paths": ["rbook/scripts/migrate_legacy_memory.py"],
+      "pattern": "(?<=source = repo_root / \")cmos(?=\")|(?<=sibling \\x27)cmos(?=\\x27)",
+      "reason": "The legacy importer still reads a sibling CMOS v1 workspace; only its destination follows this record.",
+      "expectedCount": 2,
+      "expectedPublicCount": 0
+    },
+    {
+      "id": "legacy-python-input-database",
+      "paths": ["rbook/scripts/migrate_historical_data.py"],
+      "pattern": "cmos-old\\.sqlite",
+      "reason": "The importer input retains its old database filename; its destination is the current database.",
+      "expectedCount": 1,
+      "expectedPublicCount": 0
+    },
+    {
+      "id": "legacy-archived-db-label",
+      "paths": ["scripts/mirror-to-public.sh"],
+      "pattern": "rbook/db/cmos\\.db",
+      "reason": "The privacy failure names the actual retained historical database alongside the canonical current store.",
+      "expectedCount": 1,
+      "expectedPublicCount": 1
+    },
+    {
+      "id": "historical-fleet-inspection-command",
+      "paths": ["tests/tools/rbook/unknown-project-disclosure.test.ts"],
+      "pattern": "(?<=&#47;)cmos/db/cmos\\.sqlite",
+      "reason": "This dated discovery command certifies a historical fleet count; changing it would misrepresent the measurement.",
+      "expectedCount": 1,
+      "expectedPublicCount": 1
     }
   ],
   "replacements": [
@@ -773,7 +578,7 @@
       "paths": ["**", "*"],
       "pattern": "(?<=\\.config/)cmos-mcp\\b",
       "replacement": "rbook",
-      "expectedCount": 1039,
+      "expectedCount": 1049,
       "reason": "Current public prose names the new config directory; legacy compatibility files remain protected.",
       "expectedPublicCount": 11
     },
@@ -786,8 +591,8 @@
         "src/**",
         "scripts/**",
         "tests/**",
-        "cmos/docs/architecture.md",
-        "cmos/README.md"
+        "rbook/docs/architecture.md",
+        "rbook/README.md"
       ],
       "pattern": "cmos-mcp(?= (?:ambient|init|profile|hook|drafts|feedback|stats|--whoami|--version)\\b)",
       "replacement": "reasonbook",
@@ -797,7 +602,7 @@
     },
     {
       "id": "manual-mcp-entry-example",
-      "paths": ["README.md", "docs/getting-started.md", "cmos/docs/onboarding-runbook.md"],
+      "paths": ["README.md", "docs/getting-started.md", "rbook/docs/onboarding-runbook.md"],
       "pattern": "(?<=mcp add-json )cmos-mcp\\b|cmos-mcp(?=\": \\{)",
       "replacement": "rbook",
       "reason": "Manual MCP entry keys use the short identifier, rather than the installed command name.",
@@ -810,7 +615,7 @@
         "src/auth/device-code.ts",
         "tests/auth/device-code.test.ts",
         "src/intelligence/credential-store.ts",
-        "cmos/docs/architecture.md"
+        "rbook/docs/architecture.md"
       ],
       "pattern": "cmos-mcp(?=/)",
       "replacement": "reasonbook",
@@ -851,12 +656,12 @@
       "pattern": "cmos\\.aquex\\.ai",
       "replacement": "reasonbook.ai",
       "reason": "Authenticated API probe at reasonbook.ai succeeded during m07; active default/links/examples use that verified host. Frozen history and compatibility modes retain old input fixtures.",
-      "expectedCount": 714,
+      "expectedCount": 716,
       "expectedPublicCount": 7
     },
     {
       "id": "template-project-folder",
-      "paths": [".env.template", "cmos/docs/onboarding-runbook.md"],
+      "paths": [".env.template", "rbook/docs/onboarding-runbook.md"],
       "pattern": "cmos-mcp",
       "reason": "Example checkout paths use the current short product identifier.",
       "replacement": "rbook",
@@ -881,7 +686,7 @@
         "src/tools/cmos/project-id.ts",
         "tests/index.runtime.test.ts",
         "tests/e2e/first-run.e2e.ts",
-        "cmos/docs/architecture.md"
+        "rbook/docs/architecture.md"
       ],
       "pattern": "(?<=\\[WARN\\] )cmos-mcp(?=:)|(?<=\\[)cmos-mcp(?=\\])|(?<=\\[)cmos-mcp(?=\\\\\\])|cmos-mcp(?= MCP server running)",
       "reason": "Human-facing startup and warning prefixes name the installed Reasonbook program.",

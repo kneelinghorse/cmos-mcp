@@ -22,7 +22,7 @@ module.exports = {
     'node_modules/',
     'templates/',
     'artifacts/',
-    '/cmos/',
+    '/rbook/',
     '*.config.js',
   ],
   rules: {

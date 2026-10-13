@@ -37,7 +37,7 @@
  *
  * FAULT INJECTION IS AT THE DATABASE, NEVER A MOCK CLIENT (agents.md Process Hardening #4). A
  * mock cannot catch a wrong-column or wrong-table SQL bug. Each store is a real `seedRbookDb`
- * SQLite file in an `fs.mkdtempSync` dir; the live `cmos/db/cmos.sqlite` is never opened.
+ * SQLite file in an `fs.mkdtempSync` dir; the live `rbook/db/rbook.sqlite` is never opened.
  *   - the existence SELECT is broken by renaming `learnings` out from under it;
  *   - the reaffirm UPDATE is broken by a `BEFORE UPDATE` RAISE(ABORT) trigger, which leaves
  *     every read working so the two failure modes stay distinguishable.

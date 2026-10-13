@@ -1,6 +1,6 @@
 {
   "name": "@aquex/reasonbook",
-  "version": "4.0.0",
+  "version": "4.0.1",
   "description": "Reasonbook: decisions that survive the session, in a local record AI agents keep.",
   "mcpName": "ai.aquex/reasonbook",
   "repository": {
@@ -147,7 +147,7 @@
     "uuid": "^11.1.1"
   },
   "lint-staged": {
-    "{!(*.config),!(cmos)/**/!(*.config)}.{js,ts,mjs}": [
+    "{!(*.config),!(rbook)/**/!(*.config)}.{js,ts,mjs}": [
       "eslint --cache --fix --max-warnings=0",
       "prettier --cache --write"
     ],

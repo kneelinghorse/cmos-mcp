@@ -229,7 +229,7 @@ it('two independent processes serialize the same migration and only one commits 
 const PRIVATE = requiresPrivateEvidence({
   reason:
     'The real decision corpus is private; migration positive fire runs only on its temporary SQLite backup.',
-  paths: { source: 'cmos/db/cmos.sqlite' },
+  paths: { source: 'rbook/db/rbook.sqlite' },
 });
 PRIVATE.describe('private real-store decision shape positive fire', () => {
   it('upgrades a legacy copy, preserves its actual rows, and searches a new context-only token', async () => {

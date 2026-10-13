@@ -132,7 +132,7 @@ it('two independent processes serialize the same migration and only one commits 
 
 const PRIVATE = requiresPrivateEvidence({
   reason: 'The citation corpus is private; positive fire mutates only its temporary SQLite backup.',
-  paths: { source: 'cmos/db/cmos.sqlite' },
+  paths: { source: 'rbook/db/rbook.sqlite' },
 });
 PRIVATE.describe('private real-store citation positive fire', () => {
   it('backfills the actual local corpus without changing its record bytes', async () => {

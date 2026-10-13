@@ -33,8 +33,8 @@ const PRIVATE = requiresPrivateEvidence({
   paths: {
     agents: 'agents.md',
     // s93-m12: agents.md's architecture reference moved here; the gate follows its text.
-    architecture: 'cmos/docs/architecture.md',
-    inventory: 'cmos/reports/tool-definition-inventory.json',
+    architecture: 'rbook/docs/architecture.md',
+    inventory: 'rbook/reports/tool-definition-inventory.json',
   },
 });
 

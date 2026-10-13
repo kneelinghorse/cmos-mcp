@@ -1,6 +1,6 @@
 // ABOUTME: Embedding pipeline (Sprint 66 m03). Singleton @xenova/transformers feature-extractor for Xenova/all-MiniLM-L6-v2,
 // per-type embedding-input composition, and recordEmbedding() — the write-path hook that hash-compares against
-// last_embedded_hash, embeds on change, and upserts into <type>_vec. Architecture per cmos/planning/adr/s66-vector-retrieval.md.
+// last_embedded_hash, embeds on change, and upserts into <type>_vec. Architecture per rbook/planning/adr/s66-vector-retrieval.md.
 
 import { composeDecisionText, type DecisionTextRow } from '../tools/rbook/decision-fields';
 import * as crypto from 'crypto';
@@ -284,7 +284,7 @@ export function learningEmbeddingInput(content: string): string {
 /**
  * Flatten the four indexable mission fields into one semantic passage that
  * the embedder sees as a coherent piece of text. The format matches the
- * canonical layout in cmos/planning/adr/s66-vector-retrieval.md Decision 5.
+ * canonical layout in rbook/planning/adr/s66-vector-retrieval.md Decision 5.
  */
 export function missionEmbeddingInput(fields: MissionEmbeddingFields): string {
   const parts: string[] = [fields.name.trim()];

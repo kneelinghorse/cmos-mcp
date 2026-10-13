@@ -470,7 +470,7 @@ function ensureCloneIdentity(
   // LWW) instead of the solo whole-DB file-sync. Default 'editor' — a clone, by
   // definition, received a shared project; author_user_id is dashboard-authoritative
   // so the value never misattributes authorship, and the gate only needs presence.
-  // See cmos/docs/multiuser-collab-client.md §4 (Fork A). 'collab_role' = COLLAB_ROLE_KEY.
+  // See rbook/docs/multiuser-collab-client.md §4 (Fork A). 'collab_role' = COLLAB_ROLE_KEY.
   setIfEmpty(db, 'collab_role', 'editor', warnings);
   return projectId;
 }

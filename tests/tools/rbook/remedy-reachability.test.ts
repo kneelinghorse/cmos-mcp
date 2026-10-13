@@ -158,7 +158,7 @@ const SRC_ROOT = path.join(REPO_ROOT, 'src');
 const PRIVATE = requiresPrivateEvidence({
   reason:
     'The remedy matrix and its write-route proof derive suite-private copies from the private live Reasonbook store; the static prescription arms remain portable.',
-  paths: { liveDb: 'cmos/db/cmos.sqlite' },
+  paths: { liveDb: 'rbook/db/rbook.sqlite' },
 });
 
 /** The mission row every cell drives. Its status is SET per cell; nothing about it is inherited. */

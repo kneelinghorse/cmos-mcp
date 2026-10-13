@@ -7,8 +7,8 @@ import { requiresPrivateEvidence } from '../helpers/public-mirror';
 
 /**
  * The canonical section heading — defined ONCE here and referenced verbatim by the
- * ADRs (cmos/planning/adr/*.md) and by the "Process Hardening" convention in
- * cmos/docs/build-session-prompt.md. The drift guard below asserts the convention
+ * ADRs (rbook/planning/adr/*.md) and by the "Process Hardening" convention in
+ * rbook/docs/build-session-prompt.md. The drift guard below asserts the convention
  * names this exact string, so the three places cannot silently diverge.
  */
 const LIVE_SCHEMA_VERIFICATION_HEADING = 'Live-schema verification';
@@ -16,8 +16,8 @@ const LIVE_SCHEMA_VERIFICATION_HEADING = 'Live-schema verification';
 const PRIVATE = requiresPrivateEvidence({
   reason: 'private ADR corpus and build-session process convention',
   paths: {
-    adrDir: 'cmos/planning/adr',
-    buildSessionPrompt: 'cmos/docs/build-session-prompt.md',
+    adrDir: 'rbook/planning/adr',
+    buildSessionPrompt: 'rbook/docs/build-session-prompt.md',
   },
 });
 

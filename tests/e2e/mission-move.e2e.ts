@@ -34,7 +34,7 @@ const DIST_ENTRY = path.join(REPO_ROOT, 'dist', 'index.js');
 const PRIVATE = requiresPrivateEvidence({
   reason:
     'This built-server mission-move E2E derives its scratch project from the private live Reasonbook store.',
-  paths: { liveDb: 'cmos/db/cmos.sqlite' },
+  paths: { liveDb: 'rbook/db/rbook.sqlite' },
 });
 
 const tmpDirs: string[] = [];

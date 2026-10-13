@@ -123,6 +123,7 @@ import { rbookMessage } from '../../../src/tools/rbook/rbook-message';
 import { rbookAgentOnboard } from '../../../src/tools/rbook/rbook-agent-onboard';
 import { rbookStatus } from '../../../src/tools/rbook/rbook-status';
 import { rbookReview } from '../../../src/tools/rbook/rbook-review';
+import { RbookErrors } from '../../../src/tools/rbook/errors';
 import { processOwnerKey } from '../../../src/tools/rbook/session-owner';
 import { PROPOSALS_TABLE_SQL } from '../../../src/tools/rbook/proposals';
 
@@ -156,7 +157,7 @@ const SRC_ROOT = path.join(REPO_ROOT, 'src');
 const PRIVATE = requiresPrivateEvidence({
   reason:
     'The suggestion axis matrix and the wrong-typed-parameter sweep both drive a suite-private copy of the live Reasonbook store; the census, extractor and mirror-integrity arms need only src/ and always run.',
-  paths: { liveDb: 'cmos/db/cmos.sqlite' },
+  paths: { liveDb: 'rbook/db/rbook.sqlite' },
 });
 
 // ───────────────────────────────────────────────────────────────────────────────────────────────
@@ -308,6 +309,12 @@ const SITES_BY_MISSION = {
     'src/cli/migrate-config.ts:156',
     'src/cli/migrate-config.ts:166',
   ],
+  // s99-m10: scoped and global reconciliation refuse an unrecognized table-count payload.
+  // Both inherit DASHBOARD_ERROR, are driven by the portable HTTP arm, and prescribe no tool call.
+  's99-m10': [
+    'src/tools/rbook/rbook-db-backfill.ts:1253',
+    'src/tools/rbook/rbook-db-backfill.ts:1335',
+  ],
 } as const satisfies Readonly<Record<string, readonly string[]>>;
 const RATIFIED_SITE_ADDS = Object.values(SITES_BY_MISSION).flat();
 
@@ -371,6 +378,9 @@ const CONSUMER_RESOLVED_CODES: Readonly<Record<string, string>> = {
   'src/tools/rbook/rbook-context-update.ts:799': 'INVALID_PARAMETER',
   'src/tools/rbook/rbook-context-update.ts:818': 'INVALID_PARAMETER',
   'src/tools/rbook/errors.ts:386': '<expr>',
+  // These objects spread dashboardError before overriding its suggestion; proven below.
+  'src/tools/rbook/rbook-db-backfill.ts:1253': 'DASHBOARD_ERROR',
+  'src/tools/rbook/rbook-db-backfill.ts:1335': 'DASHBOARD_ERROR',
 };
 
 type TriggerClass = 'VALIDATION' | 'STATE' | 'FAULT' | 'EXTERNAL' | 'UNTYPED';
@@ -2083,6 +2093,8 @@ const EXTERNAL_RESIDUAL_REASONS: Readonly<Record<string, string>> = {
 };
 
 const HTTP_EXTERNAL_SITES = new Set([
+  'src/tools/rbook/rbook-db-backfill.ts:1253',
+  'src/tools/rbook/rbook-db-backfill.ts:1335',
   'src/tools/rbook/rbook-auth.ts:610',
   'src/tools/rbook/rbook-auth.ts:1183',
   'src/tools/rbook/rbook-auth.ts:1192',
@@ -2212,6 +2224,50 @@ describe('s89-m08 CENSUS — the universe re-derives at build time, never from a
     expect(fs.readFileSync(path.join(SRC_ROOT, 'tools', 'rbook', 'errors.ts'), 'utf8')).toContain(
       'code: string = RBOOK_ERROR_CODES.SENDER_UNRESOLVABLE'
     );
+  });
+
+  it('proves the s99-m10 additions inherit DASHBOARD_ERROR rather than parking them as untyped', () => {
+    const file = 'src/tools/rbook/rbook-db-backfill.ts';
+    const source = ts.createSourceFile(
+      file,
+      fs.readFileSync(path.join(REPO_ROOT, file), 'utf8'),
+      ts.ScriptTarget.ES2020,
+      true
+    );
+    const sites: string[] = [];
+    const visit = (node: ts.Node): void => {
+      if (
+        ts.isPropertyAssignment(node) &&
+        node.name.getText(source) === 'suggestion' &&
+        ts.isObjectLiteralExpression(node.parent)
+      ) {
+        const spread = node.parent.properties[0];
+        if (
+          spread &&
+          ts.isSpreadAssignment(spread) &&
+          ts.isCallExpression(spread.expression) &&
+          spread.expression.expression.getText(source) === 'RbookErrors.dashboardError'
+        ) {
+          // No later property may replace the inherited error code.
+          expect(node.parent.properties).toHaveLength(2);
+          expect(node.parent.properties[1]).toBe(node);
+          sites.push(
+            `${file}:${source.getLineAndCharacterOfPosition(node.initializer.getStart(source)).line + 1}`
+          );
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+    expect(sites).toEqual(SITES_BY_MISSION['s99-m10']);
+    expect(RbookErrors.dashboardError('oracle classification proof').code).toBe('DASHBOARD_ERROR');
+    for (const site of sites) {
+      expect(CENSUS.find((row) => row.site === site)).toMatchObject({
+        code: 'DASHBOARD_ERROR',
+        triggerClass: 'EXTERNAL',
+        callBearing: false,
+      });
+    }
   });
 
   it('re-adjudicates D-5 by measuring the prose share under a STATED predicate', () => {
@@ -3059,6 +3115,68 @@ describe('s90-m07 PORTABLE EXTERNAL + FIRST-RUN LEDGER — loopback, never live 
     const unknownResponse = await fetch(`${externalDouble.origin}/never-stubbed`);
     unknownRouteProbe = { status: unknownResponse.status, body: await unknownResponse.text() };
     externalDouble.clearRequests();
+
+    // The double matches paths without queries. Select its response before each real HTTP
+    // request so the fallback receives a scoped failure followed by an empty global payload.
+    for (const globalFallback of [false, true]) {
+      const scenario: DashboardScenario = {
+        kind: 'http',
+        expected: { method: 'GET', path: '/api/sync/status', authorization: USER_AUTH },
+        status: 200,
+        body: {
+          type: 'json',
+          value: {
+            success: true,
+            data: {
+              tables: [],
+              totalMirrorRows: 0,
+              totalSyncLogEntries: 0,
+              unprocessedSyncLogEntries: 0,
+              failedSyncLogEntries: 0,
+              lastSyncAt: null,
+              oldestUnprocessedAt: null,
+              projectCount: 1,
+            },
+          },
+        },
+      };
+      const fencedFetch = globalThis.fetch;
+      globalThis.fetch = (async (...args: Parameters<typeof fetch>) => {
+        const input = args[0];
+        const raw =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const url = new URL(raw);
+        if (url.origin === externalDouble.origin && url.pathname === '/api/sync/status') {
+          externalDouble.setScenario({
+            ...scenario,
+            status: globalFallback && url.searchParams.has('projectSlug') ? 503 : 200,
+          });
+        }
+        return fencedFetch(...args);
+      }) as typeof fetch;
+      try {
+        await runPortableCase({
+          name: `reconciliation refuses no comparisons (${globalFallback ? 'global fallback' : 'scoped'})`,
+          family: 'external-http',
+          expectedCode: 'DASHBOARD_ERROR',
+          expectsHttp: true,
+          scenario,
+          seed: { credentials: 'user' },
+          tool: 'rbook_db',
+          params: ({ projectRoot }) => ({ action: 'reconcile', projectRoot }),
+        });
+        const evidence = portableEvidence[portableEvidence.length - 1];
+        expect(evidence.fired).toContain(SITES_BY_MISSION['s99-m10'][globalFallback ? 1 : 0]);
+        expect(evidence.suggestion).toMatch(/sync.status.*retry/i);
+        expect(evidence.requests.map((request) => request.url)).toEqual(
+          globalFallback
+            ? ['/api/sync/status?projectSlug=external-fixture', '/api/sync/status']
+            : ['/api/sync/status?projectSlug=external-fixture']
+        );
+      } finally {
+        globalThis.fetch = fencedFetch;
+      }
+    }
 
     await runPortableCase({
       name: 'rotate has no local project key',

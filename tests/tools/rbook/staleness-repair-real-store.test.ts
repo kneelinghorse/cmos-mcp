@@ -37,7 +37,7 @@ import { reidentifyRbookTestStore } from '../../helpers/seedRbookDb';
 const PRIVATE = requiresPrivateEvidence({
   reason:
     "The repair's real-store fire reads this repository's own store from its git history; the public mirror carries neither.",
-  paths: { liveDb: 'cmos/db/cmos.sqlite' },
+  paths: { liveDb: 'rbook/db/rbook.sqlite' },
   revisions: { planTime: '82b2c9d' },
 });
 

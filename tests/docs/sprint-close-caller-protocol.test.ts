@@ -18,7 +18,7 @@ const PRE_M02_PARENT = '7843dfcc9aaebe7eeb482b5dbf9566eab425e4e8';
 const PRIVATE = requiresPrivateEvidence({
   reason: 'private closeout instructions and private source-history boundary',
   paths: {
-    buildSessionPrompt: 'cmos/docs/build-session-prompt.md',
+    buildSessionPrompt: 'rbook/docs/build-session-prompt.md',
   },
   revisions: {
     preM02Parent: '188d9e3^',

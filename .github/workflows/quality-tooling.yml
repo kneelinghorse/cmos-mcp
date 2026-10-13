@@ -11,7 +11,7 @@ on:
       - 'src/**'
       - 'tests/**'
       - 'scripts/**'
-      - 'cmos/research/2026-10-s94-m06/**'
+      - 'rbook/research/2026-10-s94-m06/**'
       - '.github/workflows/quality-tooling.yml'
       - 'package.json'
       - 'package-lock.json'

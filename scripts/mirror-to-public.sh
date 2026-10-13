@@ -99,7 +99,7 @@ find "$PUB" -path "$PUB/.git" -prune -o -name '.env' -print -o \( -name '.env.*'
 LEAK=0
 for p in "${PRIVATE_PATHS[@]}"; do [[ -e "$PUB/$p" ]] && { echo "LEAK: private path $p"; LEAK=1; }; done
 for d in "${DOCS_EXCLUDES[@]}";  do [[ -e "$PUB/$d" ]] && { echo "LEAK: nested exclusion $d"; LEAK=1; }; done
-if find "$PUB" -path "$PUB/.git" -prune -o \( -name '*.sqlite*' -o -name '*.db*' \) -print | grep -q .; then echo "LEAK: a database file (*.sqlite/*.db — the tree carries cmos/db/cmos.sqlite AND cmos/db/cmos.db)"; LEAK=1; fi
+if find "$PUB" -path "$PUB/.git" -prune -o \( -name '*.sqlite*' -o -name '*.db*' \) -print | grep -q .; then echo "LEAK: a database file (*.sqlite/*.db — the tree carries rbook/db/rbook.sqlite AND rbook/db/cmos.db)"; LEAK=1; fi
 if find "$PUB" -path "$PUB/.git" -prune -o \( -name '.env' -o \( -name '.env.*' ! -name '.env.template' \) \) -print | grep -q .; then echo "LEAK: a real .env file"; LEAK=1; fi
 [[ "$LEAK" -eq 0 ]] || { echo "ABORT: private content present in the staged public tree — refusing to mirror"; exit 1; }
 echo "✓ leak-guard passed: no PRIVATE_PATHS, nested exclusions, *.sqlite, or .env in the staged tree"

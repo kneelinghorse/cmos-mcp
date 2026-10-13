@@ -1,5 +1,5 @@
 // ABOUTME: Tests for ensureVectorStorage (Sprint 66 m02) — vec0 tables, last_embedded_hash columns, learnings_fts + missions_fts parity, idempotency, and trigger correctness.
-// Verifies the migration matches the schema sketch in cmos/planning/adr/s66-vector-retrieval.md.
+// Verifies the migration matches the schema sketch in rbook/planning/adr/s66-vector-retrieval.md.
 
 import Database from 'better-sqlite3';
 import * as fs from 'fs';

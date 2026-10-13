@@ -41,7 +41,7 @@ type Tier = 'general' | 'managed' | 'build';
 const SPRINT_WORDS = /(?<![A-Za-z_])(sprints?|missions?)(?![A-Za-z_])/gi;
 
 /**
- * The Builder documents (cmos/research/2026-10-s99-probes/s95-m06-universe.md): the seed's quick
+ * The Builder documents (rbook/research/2026-10-s99-probes/s95-m06-universe.md): the seed's quick
  * starts, guides and templates teach sprints and missions (#1219), and the Builder guide is one of them.
  */
 const BUILDER_ONLY = (rel: string): boolean =>

@@ -46,7 +46,7 @@ import { reidentifyRbookTestStore } from '../../helpers/seedRbookDb';
 const PRIVATE = requiresPrivateEvidence({
   reason:
     'Every router-parameter positive fire derives a suite-private copy from the private live Reasonbook store.',
-  paths: { liveDb: 'cmos/db/cmos.sqlite' },
+  paths: { liveDb: 'rbook/db/rbook.sqlite' },
 });
 const PRIVATE_SUITE_TITLE =
   's86-m03 real-store fires: the four params reach the database (tmpdir copy)';

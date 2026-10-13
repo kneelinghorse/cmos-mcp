@@ -32,7 +32,7 @@ const evaluatorHashes = () =>
   );
 const INITIAL_EVALUATOR_HASHES = evaluatorHashes();
 
-const DEFAULT_FIXTURE = 'cmos/research/2026-10-s94-m06';
+const DEFAULT_FIXTURE = 'rbook/research/2026-10-s94-m06';
 const typedIds = (rows) => rows.map((row) => `${row.type === 'learning' ? 'l' : 'd'}:${row.id}`);
 
 async function emittedHookIds(source, slice, query, sequence) {

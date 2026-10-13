@@ -52,7 +52,7 @@ import { requiresPrivateEvidence } from '../../helpers/public-mirror';
 const PRIVATE = requiresPrivateEvidence({
   reason:
     'The drift self-perturbation fires derive aged suite-private copies from the private live Reasonbook store; the mutation-path oracle remains portable.',
-  paths: { liveDb: 'cmos/db/cmos.sqlite' },
+  paths: { liveDb: 'rbook/db/rbook.sqlite' },
 });
 const MS_PER_DAY = 1000 * 60 * 60 * 24;
 

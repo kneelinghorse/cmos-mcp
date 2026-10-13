@@ -3,7 +3,7 @@
 // ABOUTME: a decision or learning beyond the named sites, and every stored-timestamp compare/sort is a time.
 
 /**
- * The predicates are the design doc's (cmos/planning/s93-the-loop-runs-itself-build.md, m11 class
+ * The predicates are the design doc's (rbook/planning/s93-the-loop-runs-itself-build.md, m11 class
  * sweeps 1 and 5), run over src/ with JavaScript's regex engine, which reads them as ripgrep's PCRE2
  * does. Each match is keyed by what it writes or compares, not by line number, so an edit elsewhere in
  * a file never moves the ledger; a new site fails until it is classified here.

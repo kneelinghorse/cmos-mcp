@@ -3,7 +3,7 @@
 // ABOUTME: a general-tier review with no mission talk, and the shipped claims the audit refuted.
 
 /**
- * The universe is published in cmos/docs/s92-m06-docs-truth.md (practice 8). These tests pin the
+ * The universe is published in rbook/docs/s92-m06-docs-truth.md (practice 8). These tests pin the
  * items that changed behaviour or a tool definition, and the cross-document claims a reader could
  * act on: Node 20, the snapshot sentence, the full-file upload, and what `DASHBOARD_NOT_CONFIGURED`
  * means. Prose tokens are kept honest by tests/docs/shipped-prose-truth.test.ts and internal

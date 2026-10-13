@@ -18,7 +18,7 @@
  * enum, and require that token set to EQUAL the set of actions ACTION_PARAMS assigns the
  * parameter to. Equality, not subset, in both directions: naming an action the parameter does not
  * apply to is a false claim, and omitting one it does apply to is the `learningId` defect — the
- * exact string cmos/planning/s86-say-only-what-you-know.md cites as this arc's motivating example.
+ * exact string rbook/planning/s86-say-only-what-you-know.md cites as this arc's motivating example.
  *
  * MEASURED RED BASELINE (2026-08-12, this tree): 107 clauses across 10 tools, 13 of them
  * disagreeing — rbook_mission.status/.limit/.fromId/.toId, rbook_sprint.sprintId/.limit,

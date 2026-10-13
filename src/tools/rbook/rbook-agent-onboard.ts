@@ -1602,14 +1602,14 @@ async function fetchMessagingContext(
   }
 }
 
-/** PG table → SQLite table name mapping for reconciliation (global fallback) */
+/** Actual dashboard PG wire names → SQLite entities for the sync-status fallback. */
 const PG_TO_SQLITE_TABLE: Record<string, string> = {
-  rbook_sprints: 'sprints',
-  rbook_missions: 'missions',
-  rbook_sessions: 'sessions',
-  rbook_decisions: 'strategic_decisions',
-  rbook_learnings: 'learnings',
-  rbook_mission_dependencies: 'mission_dependencies',
+  cmos_sprints: 'sprints',
+  cmos_missions: 'missions',
+  cmos_sessions: 'sessions',
+  cmos_decisions: 'strategic_decisions',
+  cmos_learnings: 'learnings',
+  cmos_mission_dependencies: 'mission_dependencies',
 };
 
 /** Project state entity field → SQLite table name mapping (project-scoped) */
@@ -1758,10 +1758,12 @@ async function buildSyncHealthFromGlobalStatus(
 
   const pgStatus = statusResult.data;
   const mismatches: SyncHealthMismatch[] = [];
+  let comparedTables = 0;
 
   for (const pgTable of pgStatus.tables) {
+    if (!Object.prototype.hasOwnProperty.call(PG_TO_SQLITE_TABLE, pgTable.table)) continue;
     const sqliteTable = PG_TO_SQLITE_TABLE[pgTable.table];
-    if (!sqliteTable) continue;
+    comparedTables++;
 
     const countResult = db.getOne<{ cnt: number }>(`SELECT COUNT(*) AS cnt FROM ${sqliteTable}`);
     const sqliteCount = countResult.success && countResult.data ? countResult.data.cnt : 0;
@@ -1774,6 +1776,14 @@ async function buildSyncHealthFromGlobalStatus(
         delta: sqliteCount - pgTable.count,
       });
     }
+  }
+
+  if (comparedTables === 0) {
+    warnings.push(
+      'Sync health unavailable: dashboard returned no recognized entity table counts. ' +
+        'Check the dashboard sync-status response and retry.'
+    );
+    return null;
   }
 
   return {

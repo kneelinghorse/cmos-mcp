@@ -12,7 +12,7 @@ import { recallLaterPrompt, skipLaterPrompt } from '../../src/cli/later-prompt-r
 import { requiresPrivateEvidence } from '../helpers/public-mirror';
 const evidence = requiresPrivateEvidence({
   reason: 'Later recall positive-fire uses the private store schema and real decision population.',
-  paths: { store: 'cmos/db/cmos.sqlite' },
+  paths: { store: 'rbook/db/rbook.sqlite' },
 });
 let tmp: string;
 let file: string;

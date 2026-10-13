@@ -12,7 +12,7 @@
  * point for each PATTERN family below that matches it, and is flagged at {@link DECISION_SHAPE_THRESHOLD}
  * or more. Families: recommending one option; settling on one; preferring one over another; and
  * proposing to record. Precision and recall on the sample are published in
- * cmos/research/2026-10-s93-probes/m06-measurements.md with the sample's counting rule.
+ * rbook/research/2026-10-s93-probes/m06-measurements.md with the sample's counting rule.
  */
 
 export interface ShapePattern {

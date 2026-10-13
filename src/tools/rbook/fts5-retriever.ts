@@ -1,6 +1,6 @@
 // ABOUTME: Layer 3 working retrieval. HybridRetriever (async, BM25 + sqlite-vec cosine via RRF k=60,
 // recency applied after fusion) is the Sprint 66 m04 backend covering decisions, learnings, and missions
-// per cmos/planning/adr/s66-vector-retrieval.md. (s80-m03: the dead sync FTS5Retriever was removed.)
+// per rbook/planning/adr/s66-vector-retrieval.md. (s80-m03: the dead sync FTS5Retriever was removed.)
 
 import { normalizeMissionStatus } from './terminal-status';
 import {
@@ -185,7 +185,7 @@ export const DEFAULT_RRF_K = 30;
  * s92-m07 (retrieval R2): the keyword arm reads every distinct query keyword, up to this many. It
  * read only the first 10, so for a long query (a citing decision, a mission objective) BM25 saw the
  * first 15-25 words. Measured on 2,132 natural citation labels: BM25 alone 0.423 -> 0.632 R@10,
- * fused +0.079 (cmos/research/2026-10-strategy/retrieval-natural-labels.md §4.2).
+ * fused +0.079 (rbook/research/2026-10-strategy/retrieval-natural-labels.md §4.2).
  */
 export const FTS_MAX_KEYWORDS = 64;
 
@@ -308,7 +308,7 @@ interface SourceRow {
  * Failure posture (Decision 4 of the s66 ADR): if the embedder throws,
  * `vector` returns []; `hybrid` degrades to BM25-only ranking.
  *
- * Architecture: cmos/planning/adr/s66-vector-retrieval.md (Decision 3 — RRF formula).
+ * Architecture: rbook/planning/adr/s66-vector-retrieval.md (Decision 3 — RRF formula).
  */
 export class HybridRetriever implements IAsyncRetriever {
   constructor(

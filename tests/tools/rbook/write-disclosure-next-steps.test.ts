@@ -38,7 +38,7 @@
  * where it matters, exactly the row) under test. A mock client cannot catch a wrong-column or
  * wrong-table SQL bug (agents.md Process Hardening #4), and it cannot tell a rejected statement
  * apart from a statement that matched no rows — which is the exact distinction under test.
- * The live store at cmos/db/cmos.sqlite is never opened.
+ * The live store at rbook/db/rbook.sqlite is never opened.
  */
 
 import { afterAll, describe, expect, it } from '@jest/globals';

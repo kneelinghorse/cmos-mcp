@@ -24,7 +24,7 @@ import { requiresPrivateEvidence } from '../../helpers/public-mirror';
 const PRIVATE = requiresPrivateEvidence({
   reason:
     'The real spin-out shape and citation corpus are private; mutations run only on temporary SQLite backups.',
-  paths: { source: 'cmos/db/cmos.sqlite' },
+  paths: { source: 'rbook/db/rbook.sqlite' },
 });
 function must<T>(result: RbookToolResult<T>): NonNullable<T> {
   if (!result.success || result.data == null)

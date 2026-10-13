@@ -7,7 +7,7 @@ const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 
 const CONTRACT = 'tests/fixtures/retrieval-quality-contract.json';
-const FIXTURE = 'cmos/research/2026-10-s94-m06';
+const FIXTURE = 'rbook/research/2026-10-s94-m06';
 const EVIDENCE = [
   'acceptance-fixture/corpus.json',
   'acceptance-fixture/manifest.json',

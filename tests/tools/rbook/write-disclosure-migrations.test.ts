@@ -31,7 +31,7 @@
  * NO MOCK CLIENT ANYWHERE (agents.md Process Hardening #4). A mock that returns
  * `{success:false}` proves the plumbing and nothing about the SQL. Every failure here is forced
  * at the DATABASE, on a real `seedRbookDb` store in an `fs.mkdtempSync` directory. The live
- * `cmos/db/cmos.sqlite` is never opened.
+ * `rbook/db/rbook.sqlite` is never opened.
  *
  * THE FORCING MECHANISM, stated so a later reader can re-derive it:
  *   `ensureAuthorNamespaceColumns` step 2 runs

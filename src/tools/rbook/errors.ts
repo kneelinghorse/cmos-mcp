@@ -147,7 +147,7 @@ export function transitionsFrom(currentStatus: string): MissionStatus[] | undefi
 }
 
 /**
- * Valid session types matching cmos/docs/archive/session-management-guide.md.
+ * Valid session types matching rbook/docs/archive/session-management-guide.md.
  */
 export const VALID_SESSION_TYPES = [
   'onboarding',

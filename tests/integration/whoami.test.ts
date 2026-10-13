@@ -148,7 +148,7 @@ describe('whoami diagnostics', () => {
    * `if (!strictContext)`. On the SUCCESS path it is `undefined`, so the guard
    * `(!mcpRoots || mcpRoots.length === 0) && !relaxedContext?.projectRoot` fired even though
    * `resolvedContext` held the resolution. Nine rows of this repo's own signed-off artifact,
-   * `cmos/docs/attribution-rebuild-verification.md`, record the warning beside a resolved root, a
+   * `rbook/docs/attribution-rebuild-verification.md`, record the warning beside a resolved root, a
    * dashboard project id and an address.
    *
    * THE TRAP THIS SUITE WAS ALREADY IN, and it is why the arm below omits `mcpRoots` entirely:

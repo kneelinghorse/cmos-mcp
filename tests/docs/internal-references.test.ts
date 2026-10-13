@@ -5,7 +5,7 @@
 /**
  * A stranger reading "(Sprint 56 m03)", "(#487 mission -> row trail)" or "s84-m05: on reaffirm" in
  * a tool's parameter table learns nothing, and a model reading it in tools/list spends tokens on a
- * reference it cannot follow. The audit (cmos/research/2026-10-strategy/first-run-and-plugin.md
+ * reference it cannot follow. The audit (rbook/research/2026-10-strategy/first-run-and-plugin.md
  * §4.3) counted 6 such references in TOOL_REFERENCE.md, 5 in SECURITY.md and 22 in the seed schema
  * every project receives.
  *

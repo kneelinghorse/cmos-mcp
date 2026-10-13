@@ -27,7 +27,7 @@ import { renderDigestV2 } from '../../../src/tools/rbook/digest-v2';
 
 const PRIVATE = requiresPrivateEvidence({
   reason: "The fire runs the level-gated paths on a copy of this project's real store.",
-  paths: { liveDb: 'cmos/db/cmos.sqlite' },
+  paths: { liveDb: 'rbook/db/rbook.sqlite' },
 });
 
 const SPRINT_WORDS = /(?<![A-Za-z])(sprints?|missions?)(?![A-Za-z])/gi;
@@ -45,6 +45,19 @@ PRIVATE.describe('s95-m06 level-gated behavior on a real-store copy', () => {
       await source.backup(dbPath);
     } finally {
       source.close();
+    }
+    // This fixture exercises tier wording, not the operator's active workflow. An inherited
+    // keyless explicit session blocks every caller, regardless of agent name. Close sessions
+    // only in the temporary copy so each wording probe can establish its own session.
+    const copy = new Database(dbPath);
+    try {
+      copy
+        .prepare(
+          "UPDATE sessions SET status = 'completed', completed_at = ? WHERE status = 'active'"
+        )
+        .run(new Date().toISOString());
+    } finally {
+      copy.close();
     }
     // Establish, rather than inherit, an open sprint, so the sprint label has something to name. The
     // shipped sprint add stamps the real store's genesis columns (project_id and the rest).
@@ -84,13 +97,17 @@ PRIVATE.describe('s95-m06 level-gated behavior on a real-store copy', () => {
       title: 's95-m06 fire',
       type: 'custom',
     });
-    expect(started.success).toBe(true);
+    if (!started.success) {
+      throw new Error(`Real-store session start failed: ${JSON.stringify(started.error)}`);
+    }
     const closed = await rbookSessionComplete({
       projectRoot: root,
       sessionId: started.data!.sessionId,
       summary: 's95-m06 fire',
     });
-    expect(closed.success).toBe(true);
+    if (!closed.success) {
+      throw new Error(`Real-store session completion failed: ${JSON.stringify(closed.error)}`);
+    }
     return formatSessionStartForLLM(started);
   };
 

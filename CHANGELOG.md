@@ -4,6 +4,14 @@ All notable changes to Reasonbook (published as `@aquex/cmos-mcp` before 4.0.0) 
 
 ## Unreleased
 
+## 4.0.1 — 2026-10-12
+
+- Restore dashboard sync-status table recognition after the rename. Reconciliation and the
+  onboarding status fallback compare the dashboard's existing entity labels again; an empty
+  or unrecognized status response can no longer report a verified match.
+- Update this repository's current record references after its offline folder migration.
+  Historical evidence and the dashboard's stored names remain unchanged.
+
 ## 4.0.0 — 2026-10-12
 
 - **Breaking: CMOS is now Reasonbook.** The npm package is `@aquex/reasonbook`, the CLI is

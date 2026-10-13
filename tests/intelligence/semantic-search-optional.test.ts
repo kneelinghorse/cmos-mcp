@@ -4,7 +4,7 @@
 
 /**
  * The branch, measured on 2,132 natural citation labels in four stores
- * (cmos/research/2026-10-strategy/retrieval-natural-labels.md §4.9): once the keyword arm reads
+ * (rbook/research/2026-10-strategy/retrieval-natural-labels.md §4.9): once the keyword arm reads
  * every query keyword, keyword-only recall@10 is 0.637 against hybrid's 0.592. The stack it would
  * pull in is about 81% of a 306 MB install. So a missing package is a supported configuration, not a
  * failure, and must not print a warning per write or per search.

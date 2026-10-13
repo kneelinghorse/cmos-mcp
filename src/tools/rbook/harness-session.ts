@@ -12,7 +12,7 @@ import { performance } from 'perf_hooks';
 import { findEnclosingStore } from '../../intelligence/resolution-policy';
 
 /**
- * WHY A FILE, NOT THE ENVIRONMENT (decision #1189; cmos/research/2026-10-s93-probes/, the /clear
+ * WHY A FILE, NOT THE ENVIRONMENT (decision #1189; rbook/research/2026-10-s93-probes/, the /clear
  * probe). Claude Code starts its MCP servers once per harness process and keeps them across
  * `/clear`, and the CLAUDE_CODE_SESSION_ID in a server's environment is the session id that was
  * current when the server was spawned, so it goes stale at the next `/clear`. Hooks see the current

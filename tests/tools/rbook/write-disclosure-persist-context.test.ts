@@ -90,7 +90,7 @@ afterAll(() => {
 });
 
 /**
- * A seeded fixture under os.tmpdir(). NEVER cmos/db/cmos.sqlite — the real-store guard
+ * A seeded fixture under os.tmpdir(). NEVER rbook/db/rbook.sqlite — the real-store guard
  * (src/tools/rbook/real-store-guard.ts) throws on a write-capable open outside tmpdir under Jest,
  * and this suite deliberately schema-mutates its store.
  */

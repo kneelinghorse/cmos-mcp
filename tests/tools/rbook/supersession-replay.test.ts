@@ -41,7 +41,7 @@ import {
 const PRIVATE = requiresPrivateEvidence({
   reason:
     'The replay reads the named decision rows (text and sprint tag) from the private live store.',
-  paths: { liveDb: 'cmos/db/cmos.sqlite' },
+  paths: { liveDb: 'rbook/db/rbook.sqlite' },
 });
 
 const REPLAY: ReadonlyArray<{ capture: number; mustNotOffer: readonly number[] }> = [

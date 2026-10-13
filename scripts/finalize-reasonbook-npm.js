@@ -3,6 +3,7 @@
 // ABOUTME: Completes the fixed legacy npm deprecation and inert name placeholder after Reasonbook ships.
 // ABOUTME: Verifies public registry evidence without credentials before each independently retryable write.
 const fs = require('node:fs');
+const { constants } = require('node:os');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const { spawnSync, execFileSync } = require('node:child_process');
@@ -11,6 +12,9 @@ const REGISTRY = 'https://registry.npmjs.org';
 const MIGRATION =
   'https://github.com/kneelinghorse/reasonbook/blob/main/docs/migrating-from-cmos.md';
 const DEPRECATION = `CMOS is now Reasonbook. Use @aquex/reasonbook. Migration: ${MIGRATION}`;
+// Exact SemVer only: registry data may supply a version, never an npm tag, range or package spec.
+const EXACT_VERSION =
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 
 function placeholderFiles(root) {
   return {
@@ -69,6 +73,49 @@ function readResult(result, allowAbsent = false) {
   return data;
 }
 
+function failureDiagnostics(result) {
+  // Treat npm output as untrusted: emit only recognized codes, never summaries or raw text.
+  const npmCodes = new Set([
+    'EOTP',
+    'EAUTH',
+    'ENEEDAUTH',
+    'EPRIVATE',
+    'EPUBLISHCONFLICT',
+    'EUNSCOPED',
+    'EUSAGE',
+    'EINVALIDTAGNAME',
+    'EBADSEMVER',
+    'EINTEGRITY',
+    'ENOTFOUND',
+    'EAI_AGAIN',
+  ]);
+  let code;
+  try {
+    code = JSON.parse(result.stdout)?.error?.code;
+  } catch {
+    // Non-JSON output remains private; status and spawn diagnostics can still identify failure.
+  }
+  return {
+    npmCode:
+      typeof code === 'string' &&
+      (/^E[45]\d{2}$/.test(code) || npmCodes.has(code) || Object.hasOwn(constants.errno, code))
+        ? code
+        : null,
+    status:
+      Number.isInteger(result.status) && result.status >= 0 && result.status <= 255
+        ? result.status
+        : null,
+    signal:
+      typeof result.signal === 'string' && Object.hasOwn(constants.signals, result.signal)
+        ? result.signal
+        : null,
+    spawnCode:
+      typeof result.error?.code === 'string' && Object.hasOwn(constants.errno, result.error.code)
+        ? result.error.code
+        : null,
+  };
+}
+
 function verifyTarball(file, files) {
   const entries = execFileSync('tar', ['-tzf', file], { encoding: 'utf8', maxBuffer: 1024 * 1024 })
     .trim()
@@ -122,6 +169,29 @@ function runPhase(phase, { root, scratch, runNpm: npm = runNpm }) {
   }
   const read = (spec, allowAbsent = false) =>
     readResult(npm(['view', spec, '--json'], { mutation: false, cwd: scratch }), allowAbsent);
+  const readLegacyVersions = () => {
+    const name = '@aquex/cmos-mcp';
+    const legacy = read(name);
+    assert.ok(legacy.name === name, 'unexpected legacy package');
+    const versions = legacy.versions;
+    assert.ok(
+      Array.isArray(versions) &&
+        versions.length > 0 &&
+        versions.every((version) => typeof version === 'string' && EXACT_VERSION.test(version)) &&
+        new Set(versions).size === versions.length,
+      'legacy version list must contain unique exact versions'
+    );
+    return versions.map((version) => {
+      const entry = read(`${name}@${version}`);
+      assert.ok(
+        entry.name === name && entry.version === version,
+        'legacy version metadata does not match requested package and version'
+      );
+      return entry;
+    });
+  };
+  const legacyCountingRule =
+    'each unique version listed in @aquex/cmos-mcp metadata, read and verified by exact version (including prereleases)';
   const published = read(`@aquex/reasonbook@${pkg.version}`);
   assert.equal(published.name, pkg.name, 'published target name differs');
   assert.equal(published.version, pkg.version, 'published target version differs');
@@ -159,10 +229,10 @@ function runPhase(phase, { root, scratch, runNpm: npm = runNpm }) {
   }
   const dir = path.join(scratch, 'placeholder');
   const mutate = (args) => {
-    const result = npm(args, { mutation: true, cwd: scratch });
+    const result = npm([...args, '--json'], { mutation: true, cwd: scratch });
     if (result.status !== 0)
       throw new Error(
-        `npm ${args[0]} failed; no success claimed. Retry verifies the registry again.`
+        `npm ${args[0]} failed (${JSON.stringify(failureDiagnostics(result))}); no success claimed. Retry verifies the registry again.`
       );
   };
   if (phase === 'prepare') {
@@ -177,6 +247,13 @@ function runPhase(phase, { root, scratch, runNpm: npm = runNpm }) {
     return { placeholder: existing ? 'verified-existing' : 'prepared' };
   }
   if (phase === 'deprecate') {
+    const versions = readLegacyVersions();
+    if (versions.every((version) => version.deprecated === DEPRECATION))
+      return {
+        deprecation: 'verified-existing',
+        deprecatedVersions: versions.length,
+        countingRule: legacyCountingRule,
+      };
     mutate(['deprecate', '@aquex/cmos-mcp@*', DEPRECATION]);
     return { deprecation: 'submitted' };
   }
@@ -196,17 +273,14 @@ function runPhase(phase, { root, scratch, runNpm: npm = runNpm }) {
     return { placeholder: 'submitted' };
   }
   assert.ok(existing, 'placeholder is not published');
-  const legacy = read('@aquex/cmos-mcp@*');
-  const versions = Array.isArray(legacy) ? legacy : [legacy];
-  assert.ok(versions.length > 0, 'no legacy versions returned');
+  const versions = readLegacyVersions();
   for (const version of versions) {
-    assert.equal(version.name, '@aquex/cmos-mcp', 'unexpected legacy package');
     assert.equal(version.deprecated, DEPRECATION, `missing deprecation on ${version.version}`);
   }
   return {
     placeholder: 'verified-existing',
     deprecatedVersions: versions.length,
-    countingRule: 'each version object returned by npm view @aquex/cmos-mcp@*',
+    countingRule: legacyCountingRule,
   };
 }
 

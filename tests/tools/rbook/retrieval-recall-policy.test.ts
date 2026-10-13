@@ -3,7 +3,7 @@
 // ABOUTME: query so a page is never short, and the keyword arm reads every query keyword up to 64.
 
 /**
- * Grounding (cmos/research/2026-10-strategy/retrieval-natural-labels.md): 46% of the rows later
+ * Grounding (rbook/research/2026-10-strategy/retrieval-natural-labels.md): 46% of the rows later
  * records cite were no longer active when cited, and the active-only filter ran AFTER both arms had
  * filled their candidate pools, so 26-33% of searches came back short. The keyword arm read only
  * the first 10 distinct query words. Each test below fails on the pre-m07 retriever.

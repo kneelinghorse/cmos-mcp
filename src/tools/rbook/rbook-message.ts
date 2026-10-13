@@ -582,7 +582,7 @@ function resolvedFromContext(context: SenderContext | undefined): MessageWhoamiR
  *
  *   FALSE POSITIVE — the "No MCP roots were advertised and no local Reasonbook database was resolved"
  *   warning fired alongside a fully resolved payload. Pre-proven nine times over in this repo's
- *   own signed-off artifact: cmos/docs/attribution-rebuild-verification.md carries it beside a
+ *   own signed-off artifact: rbook/docs/attribution-rebuild-verification.md carries it beside a
  *   resolved root, dashboard project id and address on nine rows.
  *
  *   TRUE NEGATIVE — the "Healed stale rbook_address" notice reads `.healed` off the same

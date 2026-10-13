@@ -3,7 +3,7 @@
 // ABOUTME: line naming the level and any opt-out) and a CLAUDE.md that imports it. Both init paths use this.
 
 /**
- * ONE INIT, ONE OUTPUT (design doc cmos/planning/s93-the-loop-runs-itself-build.md, m12 fork 1).
+ * ONE INIT, ONE OUTPUT (design doc rbook/planning/s93-the-loop-runs-itself-build.md, m12 fork 1).
  * `rbook_project(action="init")` and `reasonbook init` write the same AGENTS.md from
  * rbook-seed/templates/AGENTS.md. Reasonbook procedure stays out of it: the method arrives through the
  * server instructions, the hooks and the tier guides, and the file carries exactly one Reasonbook line,

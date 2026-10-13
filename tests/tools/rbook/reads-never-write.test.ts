@@ -6,7 +6,7 @@
  * WHY SEEDED COPIES. On an unmodified store almost no read can show a write: every row the old
  * staleness flagger could flag is already stale, and an address that is already canonical cannot be
  * healed. So each fixture holds the precondition of a write a read used to make (design doc
- * cmos/planning/s93-the-loop-runs-itself-build.md, m11 class 2):
+ * rbook/planning/s93-the-loop-runs-itself-build.md, m11 class 2):
  *  - every fixture holds an active decision and learning 29 sprints old, unreviewed and without
  *    evidence, which the old flagger set to 'stale';
  *  - `unknown-address`: project_identity says rbook://unknown/..., and metadata.owner knows the

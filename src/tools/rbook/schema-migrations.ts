@@ -1556,7 +1556,7 @@ const VECTOR_STORAGE_MARKER_KEY = 'vector_storage_columns';
  * fleet stores read 2.4 with zero vec0/FTS objects). NO CODE MAY BRANCH ON IT. Every migration
  * that needs a completion signal owns its OWN marker key in `metadata`.
  *
- * Layout decisions and rationale: cmos/planning/adr/s66-vector-retrieval.md.
+ * Layout decisions and rationale: rbook/planning/adr/s66-vector-retrieval.md.
  *
  * Idempotent. Safe to call multiple times — existence checks early-return for
  * already-provisioned virtual tables and columns. Requires the sqlite-vec

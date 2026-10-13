@@ -6,7 +6,7 @@
 // ABOUTME: sync-mutable-push.ts (kept separate to avoid a sync-pull import cycle).
 
 /**
- * Mutable-surface engine (Sprint 71 m04, UC2 — see cmos/docs/multiuser-collab-client.md).
+ * Mutable-surface engine (Sprint 71 m04, UC2 — see rbook/docs/multiuser-collab-client.md).
  *
  * The mutable surface (project_identity, mission active status, sprint status) is
  * the small slice of Reasonbook state that two editors can race on. This module holds

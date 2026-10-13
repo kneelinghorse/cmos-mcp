@@ -22,7 +22,7 @@
  *     no inbound mutable edits to reconcile.
  *   - The remaining transition events (sprint_completed, session_completed) stay
  *     DEFERRED: sprint_status/session status are not broker-wired conflict surfaces
- *     yet (mission-active scope; see cmos/docs/multiuser-collab-client.md §7).
+ *     yet (mission-active scope; see rbook/docs/multiuser-collab-client.md §7).
  *
  * MERGE — the per-entity insert-union lives in sync-merge.ts and is SHARED with the
  * m03 clone-from-/state bootstrap (no duplicate insert logic). This consumer maps

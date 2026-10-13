@@ -15,7 +15,7 @@ TOOL_REFERENCE.md
 # regex fragments. Prettier's markdown emphasis normalization reads those as inline
 # formatting and rewrites the characters: `__snapshots__` becomes `**snapshots**`,
 # `console.*` becomes `console._`, `mutable_status:*` becomes `mutable_status:_`.
-# Running `prettier --write` on cmos/planning/s86-say-only-what-you-know.md damaged
+# Running `prettier --write` on rbook/planning/s86-say-only-what-you-know.md damaged
 # 73 lines that way — including the path to the tool-definitions snapshot that four
 # separate missions are ordered around. It is also NOT IDEMPOTENT here: --write
 # followed by --check still fails, oscillating between two differently-corrupted
@@ -24,10 +24,10 @@ TOOL_REFERENCE.md
 # A formatter that rewrites the content of a contract while reporting a style fix is
 # precisely this sprint's defect class. Plans are read by humans and agents, never
 # imported or rendered by the build, so nothing is lost by exempting them.
-cmos/planning/
+rbook/planning/
 
 # s92: research evidence packs are the exact scripts and reports that produced the numbers the
 # plans cite. They are read, re-run and quoted — never imported or built — so reformatting them
 # only changes bytes a reader verifies against. The 2026-10 pack's .cjs scripts were committed
 # unformatted and failed `prettier --check` in CI at 275ce6f.
-cmos/research/
+rbook/research/

@@ -91,9 +91,9 @@ const PRIVATE = requiresPrivateEvidence({
     'release authority documents and private version stamps are absent from the public mirror',
   paths: {
     workflow: '.github/workflows/publish.yml',
-    releaseRunbook: 'cmos/docs/release.md',
+    releaseRunbook: 'rbook/docs/release.md',
     agents: 'agents.md',
-    buildSessionPrompt: 'cmos/docs/build-session-prompt.md',
+    buildSessionPrompt: 'rbook/docs/build-session-prompt.md',
   },
 });
 
@@ -105,6 +105,7 @@ const RECORD_TREE_PREFIXES = [
   'cmos/db/',
   'rbook/db/',
   'cmos/planning/',
+  'rbook/planning/',
   'cmos/docs/archive/',
   'rbook/docs/archive/',
   'cmos/research/',

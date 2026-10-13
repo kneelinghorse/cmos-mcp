@@ -30,7 +30,7 @@ names. Current module references and declared symbol identifiers inside compatib
 follow renamed exports, while strings, setting keys and stored property keys retain their
 old fixture values. Ledger current witnesses, residuals and universe fields follow renamed
 paths; predicates and historical fields remain unchanged. Active private procedure text changes,
-while the repository's own `cmos/` record paths stay until the record-folder migration.
+and this repository's current record paths use `rbook/` after its offline migration.
 
 After the preview has no blocking issues and its review list has been inspected:
 

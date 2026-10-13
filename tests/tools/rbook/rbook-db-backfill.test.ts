@@ -1702,12 +1702,12 @@ describe('rbookDbReconcile', () => {
         return new Response(
           JSON.stringify(
             syncStatusResponse({
-              rbook_sprints: counts.sprints ?? 0,
-              rbook_missions: counts.missions ?? 0,
-              rbook_sessions: counts.sessions ?? 0,
-              rbook_decisions: counts.decisions ?? 0,
-              rbook_learnings: counts.learnings ?? 0,
-              rbook_mission_dependencies: counts.dependencies ?? 0,
+              cmos_sprints: counts.sprints ?? 0,
+              cmos_missions: counts.missions ?? 0,
+              cmos_sessions: counts.sessions ?? 0,
+              cmos_decisions: counts.decisions ?? 0,
+              cmos_learnings: counts.learnings ?? 0,
+              cmos_mission_dependencies: counts.dependencies ?? 0,
             })
           ),
           { status: 200, headers: { 'Content-Type': 'application/json' } }
@@ -1718,12 +1718,12 @@ describe('rbookDbReconcile', () => {
         return new Response(
           JSON.stringify(
             syncStatusResponse({
-              rbook_sprints: 0,
-              rbook_missions: 0,
-              rbook_sessions: 0,
-              rbook_decisions: 0,
-              rbook_learnings: 0,
-              rbook_mission_dependencies: 0,
+              cmos_sprints: 0,
+              cmos_missions: 0,
+              cmos_sessions: 0,
+              cmos_decisions: 0,
+              cmos_learnings: 0,
+              cmos_mission_dependencies: 0,
             })
           ),
           { status: 200, headers: { 'Content-Type': 'application/json' } }
@@ -1915,12 +1915,12 @@ describe('rbookDbReconcile', () => {
       INSERT INTO sprints (id, title, status) VALUES ('s1', 'Sprint 1', 'Active');
     `);
     setupFetchForGlobalReconcile({
-      rbook_sprints: 1,
-      rbook_missions: 0,
-      rbook_sessions: 0,
-      rbook_decisions: 0,
-      rbook_learnings: 0,
-      rbook_mission_dependencies: 0,
+      cmos_sprints: 1,
+      cmos_missions: 0,
+      cmos_sessions: 0,
+      cmos_decisions: 0,
+      cmos_learnings: 0,
+      cmos_mission_dependencies: 0,
     });
 
     const result = await rbookDbReconcile({ projectRoot: tempDir });

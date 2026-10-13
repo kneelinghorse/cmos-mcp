@@ -62,7 +62,7 @@ it('sees only committed source pointers while another process owns the write tra
 
 const PRIVATE = requiresPrivateEvidence({
   reason: 'Spin-out read positive fire uses a consistent disposable backup of the private store.',
-  paths: { source: 'cmos/db/cmos.sqlite' },
+  paths: { source: 'rbook/db/rbook.sqlite' },
 });
 PRIVATE.describe('real-store spin-out read positive fire', () => {
   it('hides only marked rows and leaves the copied main and WAL bytes unchanged during reads', async () => {

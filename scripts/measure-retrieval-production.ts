@@ -1,7 +1,7 @@
 // ABOUTME: Sprint 67 m01 / Sprint 82 m02 — production-corpus paraphrase measurement + gate.
 // Runs the hand-authored fixtures at tests/fixtures/paraphrase-fixtures-production.json
 // through both BM25-only and HybridRetriever (real Xenova embedder) against the live
-// cmos/db/cmos.sqlite. As a REPORTER (no flag) it emits a JSON report. As a GATE
+// rbook/db/rbook.sqlite. As a REPORTER (no flag) it emits a JSON report. As a GATE
 // (--gate) it additionally enforces per-type floors + a decisions/learnings baseline-delta
 // regression assert + an embedder-loaded assert, and process.exit(1) on any miss.
 //

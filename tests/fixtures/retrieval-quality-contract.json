@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "mission": "s94-m06",
-  "fixtureRoot": "cmos/research/2026-10-s94-m06",
+  "fixtureRoot": "rbook/research/2026-10-s94-m06",
   "baseline": {
     "file": "frozen-baseline.json",
     "sha256": "23c04d92b417af11c753c4c51c408a7553c4a92ca91a653acb4ad1e8b5232b58",
@@ -226,6 +226,11 @@
           "from": "cmos.aquex.ai",
           "to": "reasonbook.ai",
           "count": 4
+        },
+        {
+          "from": "cmos/docs/archive/session-management-guide.md",
+          "to": "rbook/docs/archive/session-management-guide.md",
+          "count": 1
         }
       ]
     },
@@ -255,6 +260,11 @@
         {
           "from": "tools/cmos/",
           "to": "tools/rbook/",
+          "count": 1
+        },
+        {
+          "from": "cmos/research/2026-10-s94-m06",
+          "to": "rbook/research/2026-10-s94-m06",
           "count": 1
         }
       ]

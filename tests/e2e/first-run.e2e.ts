@@ -281,7 +281,7 @@ describe('first-run E2E: pack -> install -> drive quickstart over stdio (s77-m10
 
   /**
    * s92-m10 — the clean-room scenarios, promoted from the 2026-10-06 scripted client
-   * (cmos/research/2026-10-strategy/cleanroom-client/, which the public mirror excludes) and run
+   * (rbook/research/2026-10-strategy/cleanroom-client/, which the public mirror excludes) and run
    * against the INSTALLED package with a literal environment. Two more clean-room assertions live
    * in this lane: two stderr lines (the s92-m07 test above) and no checkpoint upload on an
    * implicit close (implicit-sessions.e2e.ts drives the upload path with a positive control,

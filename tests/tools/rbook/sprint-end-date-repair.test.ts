@@ -36,7 +36,7 @@ import {
 const PRIVATE = requiresPrivateEvidence({
   reason:
     "The repair is fired against a copy of the private live store's real sprint and close history.",
-  paths: { liveDb: 'cmos/db/cmos.sqlite' },
+  paths: { liveDb: 'rbook/db/rbook.sqlite' },
 });
 
 interface Anchored {

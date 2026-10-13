@@ -1190,12 +1190,12 @@ export interface ReconciliationResult {
 
 /** PG table → SQLite table name mapping (used by global reconciliation fallback) */
 const PG_TO_SQLITE_TABLE: Record<string, string> = {
-  rbook_sprints: 'sprints',
-  rbook_missions: 'missions',
-  rbook_sessions: 'sessions',
-  rbook_decisions: 'strategic_decisions',
-  rbook_learnings: 'learnings',
-  rbook_mission_dependencies: 'mission_dependencies',
+  cmos_sprints: 'sprints',
+  cmos_missions: 'missions',
+  cmos_sessions: 'sessions',
+  cmos_decisions: 'strategic_decisions',
+  cmos_learnings: 'learnings',
+  cmos_mission_dependencies: 'mission_dependencies',
 };
 
 interface CountRow {
@@ -1229,8 +1229,8 @@ export async function rbookDbReconcile(params: {
       const tables: ReconciliationTableResult[] = [];
 
       for (const pgTable of pgStatus.tables) {
+        if (!Object.prototype.hasOwnProperty.call(PG_TO_SQLITE_TABLE, pgTable.table)) continue;
         const sqliteTable = PG_TO_SQLITE_TABLE[pgTable.table];
-        if (!sqliteTable) continue;
 
         const countResult = db.getOne<CountRow>(`SELECT COUNT(*) AS cnt FROM ${sqliteTable}`);
         const sqliteCount = countResult.success && countResult.data ? countResult.data.cnt : 0;
@@ -1241,6 +1241,16 @@ export async function rbookDbReconcile(params: {
           pgCount: pgTable.count,
           match: sqliteCount === pgTable.count,
           delta: sqliteCount - pgTable.count,
+        });
+      }
+
+      if (tables.length === 0) {
+        return createError({
+          ...RbookErrors.dashboardError(
+            'Reconciliation unavailable: no recognized entity table counts were returned.'
+          ),
+          suggestion:
+            'Check the dashboard sync-status response includes supported entity table counts, then retry reconciliation.',
         });
       }
 
@@ -1301,8 +1311,8 @@ async function reconcileWithGlobalEndpoint(
   const tables: ReconciliationTableResult[] = [];
 
   for (const pgTable of pgStatus.tables) {
+    if (!Object.prototype.hasOwnProperty.call(PG_TO_SQLITE_TABLE, pgTable.table)) continue;
     const sqliteTable = PG_TO_SQLITE_TABLE[pgTable.table];
-    if (!sqliteTable) continue;
 
     const countResult = db.getOne<CountRow>(`SELECT COUNT(*) AS cnt FROM ${sqliteTable}`);
     const sqliteCount = countResult.success && countResult.data ? countResult.data.cnt : 0;
@@ -1313,6 +1323,16 @@ async function reconcileWithGlobalEndpoint(
       pgCount: pgTable.count,
       match: sqliteCount === pgTable.count,
       delta: sqliteCount - pgTable.count,
+    });
+  }
+
+  if (tables.length === 0) {
+    return createError({
+      ...RbookErrors.dashboardError(
+        'Reconciliation unavailable: no recognized entity table counts were returned.'
+      ),
+      suggestion:
+        'Check the dashboard sync-status response includes supported entity table counts, then retry reconciliation.',
     });
   }
 

@@ -3,7 +3,7 @@
 // ABOUTME: for "a shipped example call the server refuses", with placeholders filled from a published table.
 
 /**
- * WHY (design doc cmos/planning/s93-the-loop-runs-itself-build.md, m12). The tier guides taught calls
+ * WHY (design doc rbook/planning/s93-the-loop-runs-itself-build.md, m12). The tier guides taught calls
  * the server refuses: managed.md's task example left out missionId and sprintId (next-step #605,
  * byte-identical in twelve projects), build.md's sprint close left out sprintId, and the seed
  * README's session start left out title. An agent that copies a shipped example should never meet

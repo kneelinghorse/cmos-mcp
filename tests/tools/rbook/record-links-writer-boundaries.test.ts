@@ -270,7 +270,7 @@ describe('actual MCP citation writer boundary', () => {
 
 const PRIVATE = requiresPrivateEvidence({
   reason: 'Citation positive fire uses a temporary backup of the private Reasonbook store.',
-  paths: { source: 'cmos/db/cmos.sqlite' },
+  paths: { source: 'rbook/db/rbook.sqlite' },
 });
 PRIVATE.describe('private real-store citation writer positive fire', () => {
   it('migrates and captures a local citation on a consistent disposable backup', async () => {

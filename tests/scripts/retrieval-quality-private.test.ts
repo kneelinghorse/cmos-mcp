@@ -11,12 +11,12 @@ const PRIVATE = requiresPrivateEvidence({
   reason:
     'The retrieval acceptance baseline and natural labels contain private project records; CI executes the actual candidate benchmark separately.',
   paths: {
-    baseline: 'cmos/research/2026-10-s94-m06/frozen-baseline.json',
-    corpus: 'cmos/research/2026-10-s94-m06/acceptance-fixture/corpus.json',
-    labels: 'cmos/research/2026-10-s94-m06/frozen-labels/labels.json',
-    manifest: 'cmos/research/2026-10-s94-m06/frozen-labels/manifest.json',
-    parserReview: 'cmos/research/2026-10-s94-m06/labels-v5-review/manifest.json',
-    reviewLabels: 'cmos/research/2026-10-s94-m06/labels-v5-review/labels.json',
+    baseline: 'rbook/research/2026-10-s94-m06/frozen-baseline.json',
+    corpus: 'rbook/research/2026-10-s94-m06/acceptance-fixture/corpus.json',
+    labels: 'rbook/research/2026-10-s94-m06/frozen-labels/labels.json',
+    manifest: 'rbook/research/2026-10-s94-m06/frozen-labels/manifest.json',
+    parserReview: 'rbook/research/2026-10-s94-m06/labels-v5-review/manifest.json',
+    reviewLabels: 'rbook/research/2026-10-s94-m06/labels-v5-review/labels.json',
   },
 });
 const root = path.resolve(__dirname, '../..');

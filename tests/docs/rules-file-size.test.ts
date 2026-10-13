@@ -3,9 +3,9 @@
 // ABOUTME: Codex's 32 KiB read limit with a margin, CLAUDE.md imports it, and the moved reference is linked.
 
 /**
- * WHY (decision #1183; design doc cmos/planning/s93-the-loop-runs-itself-build.md, m12 fork 6).
+ * WHY (decision #1183; design doc rbook/planning/s93-the-loop-runs-itself-build.md, m12 fork 6).
  * agents.md was 98,095 bytes, two-thirds of it architecture reference, and Codex reads the first
- * 32 KiB of a rules file. The reference moved to cmos/docs/architecture.md, linked from agents.md,
+ * 32 KiB of a rules file. The reference moved to rbook/docs/architecture.md, linked from agents.md,
  * and CLAUDE.md imports agents.md so Claude Code loads every rule rather than a pointer to them.
  *
  * Private evidence: agents.md, CLAUDE.md and rbook/ are not mirrored, so the public repository skips
@@ -25,7 +25,7 @@ const PRIVATE = requiresPrivateEvidence({
   paths: {
     agents: 'agents.md',
     claude: 'CLAUDE.md',
-    architecture: 'cmos/docs/architecture.md',
+    architecture: 'rbook/docs/architecture.md',
   },
 });
 
@@ -42,7 +42,7 @@ describe('s93-m12 — one readable rules file for this repository', () => {
 
     it('agents.md links the moved reference, and the reference links back', () => {
       expect(fs.readFileSync(PRIVATE.paths.agents, 'utf8')).toContain(
-        '(cmos/docs/architecture.md)'
+        '(rbook/docs/architecture.md)'
       );
       expect(fs.readFileSync(PRIVATE.paths.architecture, 'utf8')).toContain('(../../agents.md)');
     });

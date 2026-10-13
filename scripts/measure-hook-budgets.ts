@@ -5,7 +5,7 @@
 /**
  * Usage: npm run build && npx ts-node scripts/measure-hook-budgets.ts [runs]
  *
- * Never touches the live store: it copies cmos/db/cmos.sqlite into a temp project first, and runs
+ * Never touches the live store: it copies rbook/db/rbook.sqlite into a temp project first, and runs
  * every verb with a temp RBOOK_CONFIG_DIR. Each run is a fresh `node` process, so module loading
  * is measured the way a hook pays for it.
  */

@@ -149,10 +149,10 @@ const PRIVATE = requiresPrivateEvidence({
   reason: 'private authority documents and private source-history provenance',
   paths: {
     agents: 'agents.md',
-    buildSessionPrompt: 'cmos/docs/build-session-prompt.md',
+    buildSessionPrompt: 'rbook/docs/build-session-prompt.md',
     // s93-m12: agents.md's architecture reference, environment lists included, moved here.
-    architecture: 'cmos/docs/architecture.md',
-    rulesPreservation: 'cmos/research/2026-10-s93-probes/m10-repo-rules-preservation.json',
+    architecture: 'rbook/docs/architecture.md',
+    rulesPreservation: 'rbook/research/2026-10-s93-probes/m10-repo-rules-preservation.json',
   },
 });
 const PRIVATE_TARGETS: readonly string[] = [
@@ -215,7 +215,7 @@ const TARGETS = [
 /** Excluded from the target set, each with the RULE that excludes it. Printed, never silent. */
 const EXCLUSIONS: Array<{ pathGlob: string; reason: string }> = [
   {
-    pathGlob: 'cmos/planning/**',
+    pathGlob: 'rbook/planning/**',
     reason:
       'Sprint planning records. Naming a retired tool or a superseded figure there is CORRECT — ' +
       'they are a historical record, not a description of the current surface.',
@@ -699,7 +699,7 @@ const ROLE_COMPLEMENT: ReadonlyArray<{ role: string; reason: string }> = [
  * 271 shared claims + 0 agents.md + 46 architecture.md + 63 private build-session claims = 380 in
  * this checkout, while the staged public mirror derives 271 because the private targets are absent.
  * s99-m08 replaces eight demo call recipes with sealed receipt excerpts, without callable examples.
- * s93-m12 moved agents.md's architecture reference (and its claims) to cmos/docs/architecture.md,
+ * s93-m12 moved agents.md's architecture reference (and its claims) to rbook/docs/architecture.md,
  * and the seed's AGENTS.md now names no Reasonbook call (its hook-less block, a separate template, does).
  * s93-m10 removes generic call recipes from agents.md and replaces the private close recipe with
  * the release checklist and runtime carrier. Its zero/63 floors follow those actual scoped texts.
@@ -751,8 +751,8 @@ const TOOL_ACTION_CLAIM_FLOORS: Readonly<Record<string, number>> = {
   'plugins/reasonbook/skills/record-decision/SKILL.md': 3,
   'plugins/reasonbook/skills/start/SKILL.md': 1,
   'agents.md': 0,
-  'cmos/docs/build-session-prompt.md': 63,
-  'cmos/docs/architecture.md': 46,
+  'rbook/docs/build-session-prompt.md': 63,
+  'rbook/docs/architecture.md': 46,
 };
 
 function targetDocuments(): TargetDocument[] {
@@ -942,7 +942,7 @@ describe('shipped-prose truth (s86-m05 Instrument 3)', () => {
     // The exclusions are scope statements, never individual findings. Seed docs are targets for
     // identifier claims here and their eight date stamps are gated by the always-running arm.
     expect(TARGETS.some((t) => t.startsWith('rbook-seed/docs/'))).toBe(true);
-    expect(TARGETS.some((t) => t.startsWith('cmos/planning/'))).toBe(false);
+    expect(TARGETS.some((t) => t.startsWith('rbook/planning/'))).toBe(false);
   });
 
   it('accounts for every shipped Markdown file under the seed and plugin', () => {
@@ -1247,7 +1247,7 @@ function deriveEnvReads(root: string): Set<string> {
 
 /**
  * The RBOOK_* names the environment lists hold, split by which subsection they appear under. They
- * moved with agents.md's architecture reference to cmos/docs/architecture.md in s93-m12.
+ * moved with agents.md's architecture reference to rbook/docs/architecture.md in s93-m12.
  */
 function agentsMdEnvSections(): { server: string[]; scripts: string[] } {
   const content = fs.readFileSync(PRIVATE.paths.architecture, 'utf8');
@@ -1272,7 +1272,7 @@ function agentsMdEnvSections(): { server: string[]; scripts: string[] } {
 }
 
 /**
- * PRIVATE-REPO ONLY. These blocks read agents.md and cmos/docs/build-session-prompt.md, both of
+ * PRIVATE-REPO ONLY. These blocks read agents.md and rbook/docs/build-session-prompt.md, both of
  * which scripts/mirror-to-public.sh deletes while still mirroring tests/. The shared wrapper's
  * mirror skip is a SCOPE statement, not a silent pass: partial/private absence fails loudly, and
  * a genuine structural mirror prints exactly what it skipped without evaluating this callback.
@@ -1545,8 +1545,8 @@ describePrivate(
             }
           : entry
       );
-    // s99-m07 translates names while retaining every obligation and the original sealed ledger.
-    // Private record paths and operator-owned repository names still identify their real homes.
+    // s99-m07 translates names and m09 follows the moved record while retaining every obligation
+    // and the original sealed ledger. Operator-owned repository names retain their identity.
     const currentRuleNames = (text: string): string => {
       const kept: string[] = [];
       const preserve = (value: string) => {
@@ -1558,19 +1558,11 @@ describePrivate(
         .join('Reasonbook')
         .split(`~/.config/${LEGACY.configDirectory}/`)
         .join('~/.config/rbook/')
-        .replace(
-          new RegExp(
-            `${LEGACY.recordDirectory}/db/${LEGACY.databaseFile.replace('.', '\\.')}`,
-            'g'
-          ),
-          preserve
-        )
         .replace(/(Detector[^\n]*via `)[^`]+(?=` directory)/, '$1rbook/')
         .replace(
           new RegExp(`${LEGACY.command}-pro|${LEGACY.recordDirectory}-dashboard`, 'g'),
           preserve
         )
-        .replace(new RegExp(`(?<![A-Za-z0-9_/-])${LEGACY.recordDirectory}/`, 'g'), preserve)
         .split(`plugins/${LEGACY.recordDirectory}`)
         .join('plugins/reasonbook')
         .split(LEGACY.command)
@@ -1591,7 +1583,14 @@ describePrivate(
       return current;
     };
     const currentPreservationLines = (entries: ProtectedLine[]): ProtectedLine[] =>
-      practice8Lines(entries).map((entry) => ({ ...entry, text: currentRuleNames(entry.text) }));
+      practice8Lines(entries).map((entry) => ({
+        ...entry,
+        home:
+          entry.home === `${LEGACY.recordDirectory}/docs/build-session-prompt.md`
+            ? PRIVATE.relativePaths.buildSessionPrompt
+            : entry.home,
+        text: currentRuleNames(entry.text),
+      }));
     const normalize = (value: string) => value.replace(/\s+/g, ' ').trim();
     const missingLines = (entries: ProtectedLine[], homes: Map<string, string>) =>
       entries.filter(
@@ -1620,7 +1619,7 @@ describePrivate(
       );
       expect(missingLines(currentPreservationLines(ledger.protected), homes())).toEqual([]);
       const architecture = ledger.sources.find(
-        (source) => source.path === PRIVATE.relativePaths.architecture
+        (source) => source.path === `${LEGACY.recordDirectory}/docs/architecture.md`
       )!;
       // The already-moved architecture text was unchanged at this migration boundary. Keep
       // that receipt without freezing the entire architecture document against future edits.
@@ -1657,7 +1656,7 @@ describePrivate(
 
     it('detects deletion of the shared-host safeguard from an isolated carrier copy', () => {
       const ledger = readLedger();
-      const safeguard = ledger.protected.find((entry) =>
+      const safeguard = currentPreservationLines(ledger.protected).find((entry) =>
         entry.text.includes('Never restart the shared app host')
       )!;
       expect(safeguard).toBeDefined();
@@ -1803,7 +1802,7 @@ describePrivate('build-session-prompt ↔ agents.md process-hardening parity (s8
   /**
    * SCOPE + FALSE-NEGATIVE PROFILE (#1063): these assertions check only the presence,
    * numbering, parity, and clause wording of practices 8 and 9 in agents.md and
-   * cmos/docs/build-session-prompt.md.
+   * rbook/docs/build-session-prompt.md.
    *
    * This file does not verify practice-8 sweep execution. The separate class-sweeps gate checks
    * only s92-m03, s92-m09 and both s94-m11 arms over tracked UTF-8 src files, across extensions:
@@ -1813,7 +1812,7 @@ describePrivate('build-session-prompt ↔ agents.md process-hardening parity (s8
    * Neither gate reads the shared mutable Reasonbook store as evidence of historical compliance.
    * They cannot see COMPLIANCE with practice 9 either: next-step #555 passes the strongest
    * home-of-record text predicate by citing rbook-context-view.ts while never naming its actual
-   * home, cmos/planning/phase-2-master-plan.md. A predicate that green-lights its motivating
+   * home, rbook/planning/phase-2-master-plan.md. A predicate that green-lights its motivating
    * counterexample is a fake gate. These checks also key on wording, so a rewrite that retains
    * every keyword while inverting the rule can pass; sentence correctness is reviewer-judgment.
    *

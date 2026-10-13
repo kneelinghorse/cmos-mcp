@@ -5,7 +5,7 @@
 // ABOUTME: a collab store (thin mission_active wrapper keeps the mission path frozen).
 
 /**
- * Soft-lock orchestration (Sprint 71 m05, UC2 — see cmos/docs/multiuser-collab-client.md §6).
+ * Soft-lock orchestration (Sprint 71 m05, UC2 — see rbook/docs/multiuser-collab-client.md §6).
  *
  * m04 built the data plane (pull-before-push + per-field push + inbound LWW). m05 is
  * the control plane that wraps it:

@@ -7,6 +7,9 @@ dist
 !cmos/runtime/
 cmos/runtime/*
 !cmos/runtime/.gitignore
+!rbook/runtime/
+rbook/runtime/*
+!rbook/runtime/.gitignore
 runtime/
 artifacts/quality-metrics/
 .eslintcache
@@ -15,6 +18,10 @@ cmos/db/*.sqlite-shm
 cmos/db/*.sqlite-wal
 cmos/db/cmos.sqlite
 cmos/db/snapshots/
+rbook/db/*.sqlite-shm
+rbook/db/*.sqlite-wal
+rbook/db/rbook.sqlite
+rbook/db/snapshots/
 rbook-seed/db/rbook.sqlite
 rbook-seed/db/*.sqlite-shm
 rbook-seed/db/*.sqlite-wal

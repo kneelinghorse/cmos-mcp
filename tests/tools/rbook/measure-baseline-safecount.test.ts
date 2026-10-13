@@ -11,7 +11,7 @@
  * append-only domain tables. Those counts are the DENOMINATOR of the mutable-write share, and
  * that share is the number the s68 App-View / CRDT trigger is read against — the number
  * s86's arc recommendation ("21.04% vs the 25% CRDT trigger") rests on. The script does not
- * merely print it: `main()` rewrites `cmos/planning/phase-2-master-plan.md` IN PLACE, splicing
+ * merely print it: `main()` rewrites `rbook/planning/phase-2-master-plan.md` IN PLACE, splicing
  * the rendered block between `<!-- BASELINE-MEASUREMENT-S69M01 -->` markers. Whatever this
  * instrument believes becomes the roadmap's stated fact.
  *
@@ -462,7 +462,7 @@ describe('the run: an unreliable store is excluded and NAMED in the block writte
 
     const block = renderMarkdownSummary(report);
 
-    // This string IS what `main()` splices into cmos/planning/phase-2-master-plan.md between the
+    // This string IS what `main()` splices into rbook/planning/phase-2-master-plan.md between the
     // markers. Asserting the markers bracket it is what makes "in the block written between the
     // file markers" a claim about the file and not just about a helper's return value.
     expect(block.startsWith(MARK_START)).toBe(true);
@@ -640,7 +640,7 @@ describe('the run OUTPUT half of the criterion', () => {
    * `main()`, which is not exported and is guarded by `require.main === module`; its report and
    * roadmap paths are `path.resolve(__dirname, '..')`-anchored to THIS repository, so executing
    * it would enumerate the operator's live project-graph registry and rewrite
-   * cmos/planning/phase-2-master-plan.md. That is forbidden here, and no seam exists to redirect
+   * rbook/planning/phase-2-master-plan.md. That is forbidden here, and no seam exists to redirect
    * it. So this is a WIRING guard over the source, not a behavioural proof — it fails if the
    * disclosure loops are deleted or decoupled from the report fields the tests above verify, and
    * it is reported as the weaker assertion it is.
@@ -663,7 +663,7 @@ describe('the run OUTPUT half of the criterion', () => {
   it('the marker constants this test asserts against are the ones the script splices with', () => {
     expect(source).toContain(`const MARK_START = '${MARK_START}'`);
     expect(source).toContain(`const MARK_END = '${MARK_END}'`);
-    expect(source).toContain("'cmos/planning/phase-2-master-plan.md'");
+    expect(source).toContain("'rbook/planning/phase-2-master-plan.md'");
   });
 
   /**
