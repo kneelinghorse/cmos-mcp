@@ -150,7 +150,7 @@ export async function rbookDecisionsUpdate(
       const ready = prepareRecordLinkWrite(client, warnings);
       if (!ready.success) return createError<RbookDecisionsUpdateResult>(ready.error!);
       const reviewOnly = newStatus === previousStatus && params.supersededBy === undefined;
-      const committed = client.transaction(() => {
+      const committed = client.writeTransaction(() => {
         if (sets.length > 0) {
           updateParams.push(params.decisionId);
           const updated = client.execute(

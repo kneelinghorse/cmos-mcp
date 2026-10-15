@@ -55,6 +55,23 @@ afterEach(() => {
 function key() {
   return hookRuntimeIdentity({ session_id: 'lifecycle-session', cwd: root }, env)!;
 }
+/**
+ * s96-m10 (#645): real Git answers the hook's repository probes, but under a 10 s timeout, so a loaded
+ * machine cannot turn "not a Git repository" into "baseline timeout". The production timeout of each
+ * probe is returned for the caller to check, as tests/cli/lifecycle-runtime.test.ts does.
+ */
+function unhurriedGit(): Array<number | undefined> {
+  const timeouts: Array<number | undefined> = [];
+  const childProcess = require('child_process') as typeof import('child_process');
+  const realExecFileSync = childProcess.execFileSync;
+  jest.spyOn(childProcess, 'execFileSync').mockImplementation((file, args, options) => {
+    if (file !== 'git' || !Array.isArray(args) || args[0] !== '--no-optional-locks')
+      return realExecFileSync(file, args, options);
+    timeouts.push(options?.timeout);
+    return realExecFileSync('git', args, { ...options, timeout: 10_000 });
+  });
+  return timeouts;
+}
 async function hook(
   event: string,
   input: Record<string, string> = {},
@@ -100,6 +117,7 @@ it('consumes PreCompact only after successful compact digest output and records 
   expect((await hook('session-start', { source: 'compact' })).stdout).toContain('d:7');
 });
 it('closes only existing owned sessions with honest observations, preserving recall after duplicate end', async () => {
+  const gitTimeouts = unhurriedGit();
   await hook('session-start', { source: 'startup' });
   const owned = await ensureHarnessSession(root, 'lifecycle-session');
   expect(owned).not.toBeNull();
@@ -120,6 +138,12 @@ it('closes only existing owned sessions with honest observations, preserving rec
   expect(after.prepare('SELECT count(*) AS n FROM sessions').get()).toEqual(count);
   after.close();
   expect(fs.readFileSync(recallStatePath('lifecycle-session', env))).toEqual(recallBefore);
+  // The probe ran, and production still bounds every Git call at 100 ms.
+  expect(gitTimeouts.length).toBeGreaterThan(0);
+  for (const timeout of gitTimeouts) {
+    expect(timeout).toBeGreaterThan(0);
+    expect(timeout).toBeLessThanOrEqual(100);
+  }
 });
 it('never creates an empty Reasonbook session solely for exit observations', async () => {
   await hook('session-start', { source: 'startup' });

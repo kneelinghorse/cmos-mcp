@@ -6,6 +6,7 @@ import { composeDecisionText, type DecisionTextRow } from '../tools/rbook/decisi
 import * as crypto from 'crypto';
 import { debugLog } from '../debug-log';
 import type { RbookDatabaseClient } from '../tools/rbook/client';
+import { ensureVectorStorageForWrite } from '../tools/rbook/schema-migrations';
 import { checkWrite } from '../tools/rbook/write-guard';
 import { applyOfflineTransformersEnv, type TransformersEnv } from './transformers-offline-env';
 
@@ -44,9 +45,9 @@ export interface RecordEmbeddingResult {
   error?: string;
   /**
    * Sprint 86 m02b — DB errors from the vec0 upsert and the `last_embedded_hash`
-   * write, which used to be discarded. Present only when a write actually failed;
-   * callers splice these into their own warnings sink so the answer discloses that
-   * the row will not be findable by vector search.
+   * write, which used to be discarded. Callers splice these into their own warnings
+   * sink so the answer discloses that the row will not be findable by vector search.
+   * s96-m11: also the vector storage setup's warnings; empty when nothing failed.
    */
   warnings?: string[];
 }
@@ -333,6 +334,7 @@ export async function recordEmbedding(
   client: RbookDatabaseClient,
   target: RecordEmbeddingTarget
 ): Promise<RecordEmbeddingResult> {
+  const warnings: string[] = [];
   try {
     const hash = crypto.createHash('sha256').update(target.inputText).digest('hex');
 
@@ -347,15 +349,18 @@ export async function recordEmbedding(
     const vec = await embed(target.inputText);
     const blob = packEmbedding(vec);
 
+    // s96-m11 (#642): a store made its vector tables at its first search, after its first write.
+    const storage = ensureVectorStorageForWrite(client, tableMeta(target.type).vecTable);
+    warnings.push(...(storage.warnings ?? []));
+
     const upsertError = upsertVector(client, target.type, target.id, blob);
     const hashError = writeLastEmbeddedHash(client, target.type, target.id, hash);
-
-    const warnings = [upsertError, hashError].filter((w): w is string => w !== null);
-    return warnings.length > 0 ? { action: 'embedded', warnings } : { action: 'embedded' };
+    for (const error of [upsertError, hashError]) if (error !== null) warnings.push(error);
+    return { action: 'embedded', warnings };
   } catch (error) {
     const message = error instanceof Error ? error.message : 'unknown error';
     console.error(`[WARN] embedding-pipeline: ${target.type}#${target.id} failed — ${message}`);
-    return { action: 'failed', error: message };
+    return { action: 'failed', error: message, warnings };
   }
 }
 

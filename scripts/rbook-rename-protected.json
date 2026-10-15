@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "capturedAgainst": "2dd87c694ee99cff91f1c84ac7d48c51e260af2e",
+  "capturedAgainst": "6a297140b874ba36f414d507c0fa3cd4999df6d3",
   "scope": "Tracked UTF-8 regular files after the own-record migration. Current record paths use rbook; historical evidence and legacy compatibility/privacy boundaries remain protected. Full-tree counts bind apply; public-only residual counts exclude the exact public-mirror private surfaces.",
   "falseNegativeProfile": [
     "Excluded encodings and binary content, untracked/ignored files, SQLite/config values and other repositories are outside the source gate; exclusions are reported.",
@@ -113,7 +113,7 @@
         "SESSIONS.jsonl"
       ],
       "reason": "Historical evidence is never rewritten.",
-      "expectedCount": 1033,
+      "expectedCount": 1071,
       "allowOldPath": true,
       "mode": "file",
       "expectedPublicCount": 0
@@ -257,7 +257,7 @@
       "id": "operator-project-names",
       "paths": ["**", "*"],
       "reason": "Operator project names/path segments are not product names.",
-      "expectedCount": 9971,
+      "expectedCount": 10135,
       "pattern": "cmos-mcp-pro(?![A-Za-z0-9_-])|(?<![A-Za-z0-9_-])cmos-dashboard(?![A-Za-z0-9_-])",
       "expectedPublicCount": 147
     },
@@ -298,7 +298,7 @@
       "paths": ["**", "*"],
       "pattern": "CMOS-MCP Pro",
       "reason": "The registered project display name stays with its operator-owned project identity.",
-      "expectedCount": 220,
+      "expectedCount": 229,
       "expectedPublicCount": 32
     },
     {
@@ -506,7 +506,7 @@
       "paths": ["**", "*"],
       "pattern": "migrating-from-cmos\\.md",
       "reason": "The intentionally old-named migration guide remains the target of all public links.",
-      "expectedCount": 40,
+      "expectedCount": 41,
       "expectedPublicCount": 16
     },
     {
@@ -578,7 +578,7 @@
       "paths": ["**", "*"],
       "pattern": "(?<=\\.config/)cmos-mcp\\b",
       "replacement": "rbook",
-      "expectedCount": 1049,
+      "expectedCount": 1068,
       "reason": "Current public prose names the new config directory; legacy compatibility files remain protected.",
       "expectedPublicCount": 11
     },
@@ -656,7 +656,7 @@
       "pattern": "cmos\\.aquex\\.ai",
       "replacement": "reasonbook.ai",
       "reason": "Authenticated API probe at reasonbook.ai succeeded during m07; active default/links/examples use that verified host. Frozen history and compatibility modes retain old input fixtures.",
-      "expectedCount": 716,
+      "expectedCount": 719,
       "expectedPublicCount": 7
     },
     {

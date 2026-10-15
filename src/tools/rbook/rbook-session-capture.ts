@@ -895,7 +895,7 @@ export async function rbookSessionCapture(
         return resultData;
       };
       const captured = linkedCategory
-        ? client.transaction(captureUnit)
+        ? client.writeTransaction(captureUnit)
         : createSuccess(captureUnit());
       if (!captured.success || !captured.data)
         return recordLinkFailure(captured.error?.message ?? 'Capture rolled back');

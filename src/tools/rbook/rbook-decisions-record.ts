@@ -316,7 +316,7 @@ export async function rbookDecisionsRecord(
       }
       const now = new Date().toISOString();
       let draftRaced = false;
-      const committed = client.transaction(() => {
+      const committed = client.writeTransaction(() => {
         let decisionId = existingId;
         if (decisionId === undefined) {
           const written = insertDecisionRow(

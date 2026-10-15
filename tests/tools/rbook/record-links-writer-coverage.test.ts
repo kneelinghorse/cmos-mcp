@@ -82,7 +82,8 @@ function violations(files: Map<string, string>): string[] {
     'rbook-mission-complete',
   ]) {
     const source = files.get(`tools/rbook/${entry}.ts`) ?? '';
-    if (!source.includes('prepareRecordLinkWrite(') || !source.includes('.transaction('))
+    // s96-m11: these writers own a write transaction, which takes the write lock at BEGIN.
+    if (!source.includes('prepareRecordLinkWrite(') || !source.includes('.writeTransaction('))
       failures.push(`${entry}: missing required unit`);
   }
   for (const entry of ['sync-pull', 'sync-bootstrap']) {

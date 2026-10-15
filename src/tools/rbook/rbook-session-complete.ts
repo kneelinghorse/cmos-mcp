@@ -498,7 +498,7 @@ export async function rbookSessionComplete(
         const ready = prepareRecordLinkWrite(client, warnings);
         if (!ready.success) return createError<RbookSessionCompleteResult>(ready.error!);
       }
-      const decisionBatch = client.transaction(() => {
+      const decisionBatch = client.writeTransaction(() => {
         let decisionsExtracted = 0;
         if (decisionSources.length > 0) {
           const domainResult = client.getOne<{ value: string }>(

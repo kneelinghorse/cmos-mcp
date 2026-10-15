@@ -434,7 +434,10 @@ describe('actual process and initialization boundaries', () => {
       const results = await Promise.all(children.map((c) => c.done));
       for (const result of results) {
         expect(result.code).toBe(0);
-        expect(JSON.parse(result.output.trim().split('\n').slice(-1)[0]).success).toBe(true);
+        // s96-m10: match the whole answer, so a failure prints the child's error code and message.
+        expect(JSON.parse(result.output.trim().split('\n').slice(-1)[0])).toMatchObject({
+          success: true,
+        });
       }
       expect(
         (

@@ -35,6 +35,9 @@ test('cold SessionStart detaches one worker, then the next session uses its full
       CLAUDE_PLUGIN_DATA: data,
       RBOOK_CONFIG_DIR: path.join(root, 'config'),
     };
+    // s96-m10 (#647): a hang guard, not a speed budget. The first call is the first run of the
+    // binary copied above, which macOS scans first: it measured 2.0-2.9 s at load 19-25, and ran
+    // past 5 s in 3 of 89 runs under two concurrent full suites. A hung hook still fails, by signal.
     const invoke = () =>
       spawnSync(
         localNode,
@@ -45,10 +48,10 @@ test('cold SessionStart detaches one worker, then the next session uses its full
           '--hook-source',
           'rbook-plugin',
         ],
-        { env, input: '{}', encoding: 'utf8', timeout: 5000 }
+        { env, input: '{}', encoding: 'utf8', timeout: 30_000 }
       );
     const first = invoke();
-    expect(first.status).toBe(0);
+    expect({ status: first.status, signal: first.signal }).toEqual({ status: 0, signal: null });
     expect(first.stdout).toContain('Reasonbook is installing');
     const deadline = Date.now() + 10000;
     while (
@@ -59,7 +62,7 @@ test('cold SessionStart detaches one worker, then the next session uses its full
       await new Promise((resolve) => setTimeout(resolve, 20));
     expect(fs.existsSync(path.join(installRoot, '.rbook-ready.json'))).toBe(true);
     const second = invoke();
-    expect(second.status).toBe(0);
+    expect({ status: second.status, signal: second.signal }).toEqual({ status: 0, signal: null });
     expect(JSON.parse(second.stdout).args).toEqual([
       'hook',
       'session-start',
@@ -79,7 +82,7 @@ test('cold SessionStart detaches one worker, then the next session uses its full
     }
     fs.rmSync(root, { recursive: true, force: true });
   }
-});
+}, 120_000);
 
 test('shared hook and MCP starters install once even after the MCP process group ends', async () => {
   const root = fixture();

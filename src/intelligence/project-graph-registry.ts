@@ -40,7 +40,7 @@ import {
   resolveRecordPaths,
 } from './legacy-compat';
 import Database from 'better-sqlite3';
-import { processBusyTimeout } from '../tools/rbook/sqlite-busy';
+import { enableWal, processBusyTimeout } from '../tools/rbook/sqlite-busy';
 import { randomUUID } from 'crypto';
 import { existsSync, readFileSync, realpathSync } from 'fs';
 import path from 'path';
@@ -293,15 +293,15 @@ export class ProjectGraphRegistry {
     // Pinned instances and retained closed objects must not reopen a migrated legacy path.
     assertConfigDirectoryAvailable(this.configDir);
     if (this.db) return this.db;
-    // Arm the busy handler via the CONSTRUCTOR option, not a later pragma: the
-    // `journal_mode = WAL` flip below briefly takes an exclusive lock (and creates
-    // the -wal/-shm sidecars on first open), which is the most likely point to
-    // contend with a sibling MCP-server process opening the same file at session
-    // start. If the timeout were armed only by a pragma AFTER the flip, that flip
-    // would throw SQLITE_BUSY immediately instead of waiting. Mirrors the
-    // convention in client.ts (constructor timeout, then WAL).
+    // Arm the busy handler via the CONSTRUCTOR option, not a later pragma, as client.ts does. The
+    // `journal_mode = WAL` flip below takes an exclusive lock (and creates the -wal/-shm sidecars
+    // on first open), the likeliest point to contend with a sibling MCP-server process opening the
+    // same file at session start. s96-m10 CORRECTION: the busy handler does not cover the flip.
+    // While another connection holds a write reservation, SQLite refuses it at once, whatever the
+    // timeout; two servers opening a new registry together failed sprint-99's Node 22 CI run that
+    // way. enableWal re-reads the mode and retries within the same budget.
     const db = new Database(this.registryPath, { timeout: busyTimeoutMs() });
-    db.pragma('journal_mode = WAL');
+    enableWal(db, busyTimeoutMs());
     db.pragma(`busy_timeout = ${busyTimeoutMs()}`); // redundant w/ constructor; kept explicit
     this.db = db;
     return db;

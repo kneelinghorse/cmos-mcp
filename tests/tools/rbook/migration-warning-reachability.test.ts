@@ -81,6 +81,8 @@ const EXPECTED_PRODUCERS = [
   'ensureSprintSummaryView',
   'ensureStrategicDecisionsSchema',
   'ensureVectorStorage',
+  // s96-m11: makes vector storage, under the write lock, before an embedding write needs it.
+  'ensureVectorStorageForWrite',
   'migrateContentHash',
   'migrateStrategicDecisionsV21',
 ] as const;
@@ -142,6 +144,11 @@ const FORWARDING_CARRIERS: readonly ForwardingCarrier[] = [
     key: 'tools/rbook/agent-feedback.ts:recordAgentFeedback:ensureAgentFeedbackTable',
     reason:
       'RecordAgentFeedbackResult.warnings is spliced by all four answer callers, including the standalone CLI',
+  },
+  {
+    key: 'intelligence/embedding-pipeline.ts:recordEmbedding:ensureVectorStorageForWrite',
+    reason:
+      'RecordEmbeddingResult.warnings is spliced by all six callers: decision write, mission add, update and complete, session capture and complete',
   },
   {
     key: 'tools/rbook/learning-reaffirm.ts:reaffirmLearningsByIds:ensureReviewTimestamps',
@@ -709,6 +716,34 @@ function verifyAgentFeedbackCarrier(
   );
 }
 
+/** s96-m11: the embedding write's storage warnings ride RecordEmbeddingResult to six answers. */
+function verifyRecordEmbeddingCarrier(
+  site: MigrationCallSite,
+  program: ts.Program,
+  checker: ts.TypeChecker
+): boolean {
+  const localSink = warningSinkForCall(site.call, checker);
+  if (!localSink || !helperReturnCarrierIsComplete(site, localSink, checker)) return false;
+  const helper = sourceFunctionByName(
+    program,
+    'intelligence/embedding-pipeline.ts',
+    'recordEmbedding'
+  );
+  const calls = callsToFunction(program, helper, checker);
+  return (
+    calls.length === 6 &&
+    calls.every((call) => {
+      const callerSink = warningSinkForCall(call, checker);
+      return Boolean(
+        callerSink &&
+        (reachesAttachBoundary(call, callerSink, checker) ||
+          callbackReturnsSuccessWithSink(call, callerSink, checker) ||
+          mutableSinkReachesAnswers(call, callerSink, program, checker))
+      );
+    })
+  );
+}
+
 function verifyLearningReaffirmCarrier(
   site: MigrationCallSite,
   program: ts.Program,
@@ -1030,6 +1065,8 @@ function forwardingCarrierIsVerified(
       return verifyRecordLinkCarrier(site, program, checker);
     case 'tools/rbook/agent-feedback.ts:recordAgentFeedback:ensureAgentFeedbackTable':
       return verifyAgentFeedbackCarrier(site, program, checker);
+    case 'intelligence/embedding-pipeline.ts:recordEmbedding:ensureVectorStorageForWrite':
+      return verifyRecordEmbeddingCarrier(site, program, checker);
     case 'tools/rbook/learning-reaffirm.ts:reaffirmLearningsByIds:ensureReviewTimestamps':
       return verifyLearningReaffirmCarrier(site, program, checker);
     case 'tools/rbook/rbook-mission-complete.ts:ensureMissionIdColumn:ensureStrategicDecisionsSchema':
@@ -1091,7 +1128,8 @@ describe('s88-m09 MigrationResult warning reachability census', () => {
     // calls); the scoped producer universe now also covers ensureRecordLinks (+3 callers).
     // s94-m08: four directly named preparation producers join the forwarding paths.
     // Six array-dispatched preparations are the declared dynamic-dispatch complement below.
-    expect(census.sites.length).toBe(73);
+    // s96-m11: 73 -> 74 — recordEmbedding makes vector storage before its write, forwarded.
+    expect(census.sites.length).toBe(74);
   });
 
   it('carries every reachable producer through its exact answer boundary', () => {
@@ -1227,7 +1265,8 @@ describe('s88-m09 MigrationResult warning reachability census', () => {
     // s94-m04: all six shape callers carry warnings through their final answer (+5 net).
     // s94-m06: 53 direct + 12 structurally verified forwarded warning reads.
     // s94-m08: 53 direct + 16 verified forwarded reads; four residuals remain unchanged.
-    expect(consumed).toHaveLength(69);
+    // s96-m11: 53 direct + 17 verified forwarded reads (recordEmbedding's storage warnings).
+    expect(consumed).toHaveLength(70);
     expect(unconsumed).toHaveLength(STRUCTURAL_RESIDUALS.length);
   });
 });

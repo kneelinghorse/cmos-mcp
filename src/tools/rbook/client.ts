@@ -29,7 +29,7 @@ import { loadVecExtension } from './vec-loader';
 import { assertJestDbPathIsolated, RealStoreGuardError } from './real-store-guard';
 import { isReadOnlyAgentSession } from './read-only-agent-guard';
 import { currentToolCallActionMode, recordStoreWrite } from './tool-call-context';
-import { processBusyTimeout } from './sqlite-busy';
+import { enableWal, processBusyTimeout } from './sqlite-busy';
 
 // Re-export the resolver for convenience. s80-m01 trimmed the dead JSON
 // `ProjectRegistry` / `RegisteredProject` / `ProjectValidation` /
@@ -401,11 +401,11 @@ export class RbookDatabaseClient {
       // read-classified/readonly client resolution out of project-identity registration; the
       // pragma rule remains independently necessary for a connection that declares it will not
       // write.
-      const currentJournalMode = String(
-        (this.db.pragma('journal_mode', { simple: true }) as string | undefined) ?? ''
-      ).toLowerCase();
-      if (!this.options.readonly && currentJournalMode !== 'wal') {
-        this.db.pragma('journal_mode = WAL');
+      // s96-m10: enableWal reads the mode first, as above, and retries the switch within this
+      // client's busy timeout: while another connection holds a write reservation, SQLite refuses
+      // the switch at once, without consulting the busy handler.
+      if (!this.options.readonly) {
+        enableWal(this.db, this.options.timeout);
       }
 
       // Load sqlite-vec extension so vec0 virtual tables created by
@@ -796,6 +796,25 @@ export class RbookDatabaseClient {
         return createSuccess(undefined);
       }
       return this.handleQueryError(error, 'validateProjectId');
+    }
+  }
+
+  /**
+   * s96-m11: run a write in a transaction that takes the store's write lock at BEGIN (BEGIN
+   * IMMEDIATE), waiting within the busy timeout. A deferred transaction that reads before it writes
+   * is refused at once, "database is locked", when another process commits in between, and no wait
+   * helps it; two processes recording the first decisions of one store hit that on CI. Reads keep
+   * `transaction`, so a hook's digest never queues behind a writer.
+   */
+  writeTransaction<T>(fn: () => T): RbookToolResult<T> {
+    const connectionResult = this.ensureConnection();
+    if (!connectionResult.success) {
+      return connectionResult as RbookToolResult<T>;
+    }
+    try {
+      return createSuccess(this.db!.transaction(fn).immediate());
+    } catch (error) {
+      return this.handleQueryError(error, 'TRANSACTION');
     }
   }
 }

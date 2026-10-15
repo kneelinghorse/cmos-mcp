@@ -4,6 +4,34 @@ All notable changes to Reasonbook (published as `@aquex/cmos-mcp` before 4.0.0) 
 
 ## Unreleased
 
+## 4.0.2 — 2026-10-15
+
+- **Two processes can open one store at once.** When a new store, a new project registry or a
+  store kept in rollback-journal mode (a copy from a zip, say) was opened by two processes at the
+  same moment, one could fail at once with "database is locked", whatever the busy timeout: SQLite
+  refuses a concurrent switch into WAL mode without waiting. The switch now waits within the busy
+  timeout.
+- **First writes from two processes no longer crash.** On a new store, the schema migrations a first
+  write runs could race, and the second process threw on a schema the first had already changed.
+  They now run under the store's write lock and check again once they hold it.
+- **Two processes recording at once both succeed.** Recording a decision, updating one, capturing,
+  and completing a mission or session read before they write, and a commit by another process in
+  between made SQLite refuse the write at once with "database is locked". Those writes now take the
+  store's write lock when they begin, and wait for it within the busy timeout.
+- **No vector-table warning on a new store's first record.** A new store's first decision, learning
+  or mission warned that `decisions_vec` did not exist when the optional embedding package was
+  installed, because its vector tables were made only at its first search. They are now made before
+  the first embedding write.
+- **`reasonbook migrate` renames only the old names that still mean the old tooling.** It keeps hosts
+  such as `cmos-mcp.com`, file names such as `cmos_context.py`, project slugs, the old name after
+  "formerly", and an old form on a line that names its new form on purpose (`cmos://` beside
+  `rbook://`, the old package beside `@aquex/reasonbook`, the `cmos/` folder beside `rbook/`). It
+  renames the command only where it runs: after `npx`, or before one of its verbs or a flag. In
+  `.mcp.json` it renames values, never a server name outside `mcpServers`. In a checkout of the old
+  `@aquex/cmos-mcp` package itself, it leaves the root documents unchanged, because they describe
+  that code, and reports how many lines name the record folder. It still renames the tool glob
+  `cmos_*`.
+
 ## 4.0.1 — 2026-10-12
 
 - Restore dashboard sync-status table recognition after the rename. Reconciliation and the

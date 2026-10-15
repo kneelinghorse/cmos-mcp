@@ -218,8 +218,10 @@ const EXPECTED_SCHEMA_VERSION_LITERALS: readonly SourceSite[] = sortSourceSites(
   { file: MIGRATIONS_FILE, line: 145, role: 'raiseSchemaVersionLabel' },
   { file: MIGRATIONS_FILE, line: 148, role: 'raiseSchemaVersionLabel' },
   { file: MIGRATIONS_FILE, line: 164, role: 'raiseSchemaVersionLabel' },
-  { file: MIGRATIONS_FILE, line: 1576, role: 'ensureVectorStorage' },
-  { file: MIGRATIONS_FILE, line: 2426, role: 'migrateFirehoseTable' },
+  // s96-m11 moved these sites down 22 and 75 lines (ensureVectorStorageForWrite, then
+  // underMigrationLock and markerIs); nothing was added or re-roled.
+  { file: MIGRATIONS_FILE, line: 1598, role: 'ensureVectorStorage' },
+  { file: MIGRATIONS_FILE, line: 2501, role: 'migrateFirehoseTable' },
   { file: SCHEMA_FILE, line: 128, role: '<module>' },
   { file: SCHEMA_FILE, line: 146, role: '<module>' },
   { file: SCHEMA_FILE, line: 183, role: '<module>' },
@@ -578,11 +580,14 @@ const EXPECTED_LOGICAL_SETTERS: readonly SourceSite[] = [
     role: "migration:migrateStrategicDecisionsV21:'2.1'",
   },
   { file: MIGRATIONS_FILE, line: 596, role: "migration:migrateContentHash:'2.2'" },
-  { file: MIGRATIONS_FILE, line: 1815, role: 'migration:ensureVectorStorage:labelVersion' },
+  // s96-m11 moved this setter down 22 lines (ensureVectorStorageForWrite above it).
+  { file: MIGRATIONS_FILE, line: 1837, role: 'migration:ensureVectorStorage:labelVersion' },
+  // s96-m11: the same setter, moved into applyFirehoseEventColumns, which
+  // ensureFirehoseEventColumns now runs under the store's write lock.
   {
     file: MIGRATIONS_FILE,
-    line: 2553,
-    role: 'migration:ensureFirehoseEventColumns:FIREHOSE_SCHEMA_VERSION',
+    line: 2629,
+    role: 'migration:applyFirehoseEventColumns:FIREHOSE_SCHEMA_VERSION',
   },
   { file: SCHEMA_FILE, line: 128, role: 'seed:ignore' },
 ].sort((a, b) => `${a.file}:${a.line}`.localeCompare(`${b.file}:${b.line}`));

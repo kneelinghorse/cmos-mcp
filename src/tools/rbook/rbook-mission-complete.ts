@@ -565,7 +565,7 @@ async function captureDecisions(
 
     for (const decision of decisions) {
       const trimmed = decision.trim();
-      const committed = client.transaction(() => {
+      const committed = client.writeTransaction(() => {
         const g = genesisColumns(client, 'strategic_decisions', getProjectId(client));
         const insertResult = client.execute(
           // s69-m04: session_id renamed → author_session_id. genesisColumns above

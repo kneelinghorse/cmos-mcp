@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
-// ABOUTME: s91-m05 replay — the supersession detector, run on a byte copy of the live store, must stop
-// ABOUTME: offering the false positives eight field reports named, and must still offer a real one.
+// ABOUTME: s91-m05 replay — the supersession detector, run on the store as committed at 87dc56a,
+// ABOUTME: must stop offering the false positives eight field reports named, and still offer a real one.
 
 /**
  * THE CORPUS. Each capturing row below is re-run through `detectSupersessionCandidates` with its
- * own text and sprint tag on a copy of the live store, after every named row is set `active` on
- * the copy (several are archived at HEAD). The "must not offer" ids are exactly the candidates
- * the ledger reported as false positives: feedback #32/#33 for #1084-#1086, and the planning
- * session's own five captures #1150-#1154 (fifteen candidates, fifteen false positives).
+ * own text and sprint tag on a copy of the store as committed at 87dc56a, after every named row is
+ * set `active` on the copy (several are archived there). The "must not offer" ids are exactly the
+ * candidates the ledger reported as false positives: feedback #32/#33 for #1084-#1086, and the
+ * planning session's own five captures #1150-#1154 (fifteen candidates, fifteen false positives).
+ *
+ * FROZEN (s96-m10, #641). On a copy of the live store, the ranking pool and its word weights moved
+ * with every decision written after the test, so the same code could pass one day and fail the next.
  *
  * ONE REPORTED PAIR IS A MEASURED RESIDUAL, NOT A PASS: #1086 -> #1085. Both are sprint-88, so
  * same-sprint scoping keeps it; #1086 never cites #1085 by id; and its similarity (0.116) sits
@@ -19,17 +22,18 @@
  *
  * FEEDBACK #43 (capture #1140) named no candidate ids. Re-run at HEAD on this copy, the detector
  * offered #866, #959 and #938 (sprint-76/84/81 release decisions for a sprint-90 capture), so
- * those three joined the replay. The live store is only ever READ; its hash is asserted unchanged.
+ * those three joined the replay. The store comes from git history; the live store is not opened.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from '@jest/globals';
 import Database from 'better-sqlite3';
-import { createHash } from 'crypto';
+import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
 import { requiresPrivateEvidence } from '../../helpers/public-mirror';
+import { reidentifyRbookTestStore } from '../../helpers/seedRbookDb';
 import { withClientAsync } from '../../../src/tools/rbook/client';
 import { RbookDetector } from '../../../src/intelligence/rbook-detector';
 import { createSuccess } from '../../../src/tools/rbook/errors';
@@ -38,11 +42,14 @@ import {
   type SupersessionSuggestion,
 } from '../../../src/tools/rbook/supersession-detection';
 
+// 87dc56a holds every named decision (any commit from 0216b63 on does). At s96-m10 these
+// assertions held on the store at all 30 commits that changed it from 0216b63 to 2e769d4.
 const PRIVATE = requiresPrivateEvidence({
   reason:
-    'The replay reads the named decision rows (text and sprint tag) from the private live store.',
-  paths: { liveDb: 'rbook/db/rbook.sqlite' },
+    "The replay reads the named decision rows (text and sprint tag) from this repository's store in its git history; the public mirror carries neither.",
+  revisions: { frozen: '87dc56a' },
 });
+const REPO = path.resolve(__dirname, '..', '..', '..');
 
 const REPLAY: ReadonlyArray<{ capture: number; mustNotOffer: readonly number[] }> = [
   { capture: 1084, mustNotOffer: [1015, 972, 1061] },
@@ -61,27 +68,23 @@ const REPLAY: ReadonlyArray<{ capture: number; mustNotOffer: readonly number[] }
 
 const POSITIVE = { capture: 1135, mustOffer: 1134 } as const;
 
-function sha256(file: string): string {
-  return createHash('sha256').update(fs.readFileSync(file)).digest('hex');
-}
-
-PRIVATE.describe('s91-m05 supersession replay on a live-store copy', () => {
+PRIVATE.describe('s91-m05 supersession replay on the store as committed at 87dc56a', () => {
   let tempRoot: string;
-  let hashBefore: string;
   const rows = new Map<number, { text: string; sprintId: string | null }>();
 
   beforeAll(async () => {
-    hashBefore = sha256(PRIVATE.paths.liveDb);
     tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 's91-m05-replay-'));
     const dbDir = path.join(tempRoot, 'rbook', 'db');
     fs.mkdirSync(dbDir, { recursive: true });
     const copyPath = path.join(dbDir, 'rbook.sqlite');
-    const source = new Database(PRIVATE.paths.liveDb, { readonly: true, fileMustExist: true });
-    try {
-      await source.backup(copyPath);
-    } finally {
-      source.close();
-    }
+    fs.writeFileSync(
+      copyPath,
+      execFileSync('git', ['show', `${PRIVATE.revisions.frozen}:rbook/db/rbook.sqlite`], {
+        cwd: REPO,
+        maxBuffer: 512 * 1024 * 1024,
+      })
+    );
+    reidentifyRbookTestStore(tempRoot);
 
     const named = new Set<number>([
       POSITIVE.capture,
@@ -96,7 +99,7 @@ PRIVATE.describe('s91-m05 supersession replay on a live-store copy', () => {
             'SELECT decision_text AS text, sprint_id AS sprintId FROM strategic_decisions WHERE id = ?'
           )
           .get(id) as { text: string; sprintId: string | null } | undefined;
-        if (!row) throw new Error(`precondition: decision #${id} is absent from the live store`);
+        if (!row) throw new Error(`precondition: decision #${id} is absent from the frozen store`);
         rows.set(id, row);
         db.prepare(
           `UPDATE strategic_decisions SET status = 'active', superseded_by = NULL WHERE id = ?`
@@ -110,7 +113,6 @@ PRIVATE.describe('s91-m05 supersession replay on a live-store copy', () => {
 
   afterAll(() => {
     fs.rmSync(tempRoot, { recursive: true, force: true });
-    expect(sha256(PRIVATE.paths.liveDb)).toBe(hashBefore);
   });
 
   async function detect(captureId: number): Promise<SupersessionSuggestion> {
@@ -140,8 +142,9 @@ PRIVATE.describe('s91-m05 supersession replay on a live-store copy', () => {
   });
 
   // The residual is REPORTED, not asserted: whether #1085 clears the floor depends on IDF weights
-  // over a live corpus that moves with every decision written (measured offered at s91-m05 build,
-  // not offered after three more captures). Asserting either outcome would make the gate flaky.
+  // over the corpus (measured offered at s91-m05 build, not offered after three more captures on
+  // the live store). The corpus is frozen now, but neither outcome is the target: asserting the
+  // offer would pin a false positive, and asserting its absence would pin one corpus's weights.
   it('reports whether the measured #1086 -> #1085 residual is currently offered', async () => {
     const ids = await offered(1086);
     // eslint-disable-next-line no-console

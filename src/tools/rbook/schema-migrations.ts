@@ -1541,6 +1541,28 @@ export const VECTOR_STORAGE_SCHEMA_VERSION = '2.3';
 const VECTOR_STORAGE_MARKER_KEY = 'vector_storage_columns';
 
 /**
+ * s96-m11 (#642): make a store's vector storage before an embedding write that needs it. A store
+ * made its vector tables at its first search, which on a new store comes after its first write, so
+ * that write warned that decisions_vec did not exist. Under the store's write lock, two processes
+ * making their first embedding writes at once make the tables once, and only a real failure warns.
+ */
+export function ensureVectorStorageForWrite(
+  client: RbookDatabaseClient,
+  vectorTable: string
+): MigrationResult {
+  const present = (): boolean => {
+    const row = client.getOne<{ present: number }>(
+      "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = ?",
+      [vectorTable]
+    );
+    return row.success && Boolean(row.data);
+  };
+  return underMigrationLock(client, VECTOR_STORAGE_MARKER_KEY, present, () =>
+    ensureVectorStorage(client)
+  );
+}
+
+/**
  * Ensure the vector retrieval substrate exists (Sprint 66 m02).
  *
  * Provisions three vec0 virtual tables (one per retrievable type), adds the
@@ -1843,6 +1865,59 @@ export class SchemaMigrationError extends Error {
     super(message);
     this.name = 'SchemaMigrationError';
   }
+}
+
+/**
+ * s96-m11: run a marker-gated first-write migration under the store's write lock, and read its
+ * marker again once the lock is held. Without the lock, two processes making the first writes of
+ * one new store both saw no marker and both migrated, and the second threw on a schema the first
+ * had already changed ("expected exactly one bare project_id TEXT column ... found 0"). This is
+ * migrateDecisionShapeColumns's pattern. Foreign keys go off before the lock, because the table
+ * rebuild needs them off and a transaction keeps the setting it began with. A caller already
+ * inside a transaction keeps the path it had before.
+ */
+function underMigrationLock(
+  client: RbookDatabaseClient,
+  label: string,
+  isCurrent: () => boolean,
+  apply: () => MigrationResult
+): MigrationResult {
+  const current = { columnsAdded: [], indexesCreated: [], rowsUpdated: 0, alreadyCurrent: true };
+  if (isCurrent()) return current;
+  client.pragma('foreign_keys = OFF');
+  const begin = client.raw('BEGIN IMMEDIATE');
+  if (!begin.success) {
+    client.pragma('foreign_keys = ON');
+    if (/within a transaction/i.test(begin.error?.message ?? '')) return apply();
+    throw new SchemaMigrationError(
+      `${label} migration could not take the store's write lock: ${begin.error?.message ?? 'unknown'}`
+    );
+  }
+  try {
+    // A different process may have completed the migration while this connection waited.
+    const result = isCurrent() ? current : apply();
+    const commit = client.raw('COMMIT');
+    if (!commit.success)
+      throw new SchemaMigrationError(
+        `${label} migration commit failed: ${commit.error?.message ?? 'unknown'}`
+      );
+    return result;
+  } catch (error) {
+    client.raw('ROLLBACK');
+    throw error;
+  } finally {
+    client.pragma('foreign_keys = ON');
+  }
+}
+
+/** True once a migration's metadata marker holds its version. */
+function markerIs(client: RbookDatabaseClient, key: string, version: string): () => boolean {
+  return () => {
+    const marker = client.getOne<{ value: string }>('SELECT value FROM metadata WHERE key = ?', [
+      key,
+    ]);
+    return marker.success && marker.data?.value === version;
+  };
 }
 
 /**
@@ -2525,14 +2600,15 @@ function migrateFirehoseTable(client: RbookDatabaseClient, table: FirehoseTable)
  * which Reasonbook does not use).
  */
 export function ensureFirehoseEventColumns(client: RbookDatabaseClient): MigrationResult {
-  const marker = client.getOne<{ value: string }>(
-    `SELECT value FROM metadata WHERE key='${FIREHOSE_MARKER_KEY}'`,
-    []
+  return underMigrationLock(
+    client,
+    FIREHOSE_MARKER_KEY,
+    markerIs(client, FIREHOSE_MARKER_KEY, FIREHOSE_SCHEMA_VERSION),
+    () => applyFirehoseEventColumns(client)
   );
-  if (marker.success && marker.data?.value === FIREHOSE_SCHEMA_VERSION) {
-    return { columnsAdded: [], indexesCreated: [], rowsUpdated: 0, alreadyCurrent: true };
-  }
+}
 
+function applyFirehoseEventColumns(client: RbookDatabaseClient): MigrationResult {
   const columnsAdded: string[] = [];
   const indexesCreated: string[] = [];
   const warnings: string[] = [];
@@ -2625,14 +2701,15 @@ const AUTHOR_SESSION_RENAME_TABLES = ['strategic_decisions', 'learnings'] as con
  * store. Returns `alreadyCurrent: true` only when nothing changed.
  */
 export function ensureAuthorNamespaceColumns(client: RbookDatabaseClient): MigrationResult {
-  const marker = client.getOne<{ value: string }>(
-    `SELECT value FROM metadata WHERE key='${AUTHOR_NAMESPACE_MARKER_KEY}'`,
-    []
+  return underMigrationLock(
+    client,
+    AUTHOR_NAMESPACE_MARKER_KEY,
+    markerIs(client, AUTHOR_NAMESPACE_MARKER_KEY, AUTHOR_NAMESPACE_SCHEMA_VERSION),
+    () => applyAuthorNamespaceColumns(client)
   );
-  if (marker.success && marker.data?.value === AUTHOR_NAMESPACE_SCHEMA_VERSION) {
-    return { columnsAdded: [], indexesCreated: [], rowsUpdated: 0, alreadyCurrent: true };
-  }
+}
 
+function applyAuthorNamespaceColumns(client: RbookDatabaseClient): MigrationResult {
   const columnsAdded: string[] = [];
   const indexesCreated: string[] = [];
   const warnings: string[] = [];
@@ -2746,14 +2823,15 @@ const IMPLICIT_SESSION_MARKER_KEY = 'implicit_session_columns';
  * once applied; a store with no `sessions` table is left alone and unmarked.
  */
 export function ensureImplicitSessionColumns(client: RbookDatabaseClient): MigrationResult {
-  const marker = client.getOne<{ value: string }>(
-    `SELECT value FROM metadata WHERE key='${IMPLICIT_SESSION_MARKER_KEY}'`,
-    []
+  return underMigrationLock(
+    client,
+    IMPLICIT_SESSION_MARKER_KEY,
+    markerIs(client, IMPLICIT_SESSION_MARKER_KEY, IMPLICIT_SESSION_SCHEMA_VERSION),
+    () => applyImplicitSessionColumns(client)
   );
-  if (marker.success && marker.data?.value === IMPLICIT_SESSION_SCHEMA_VERSION) {
-    return { columnsAdded: [], indexesCreated: [], rowsUpdated: 0, alreadyCurrent: true };
-  }
+}
 
+function applyImplicitSessionColumns(client: RbookDatabaseClient): MigrationResult {
   const columns = getTableColumns(client, 'sessions');
   if (columns.size === 0) {
     return { columnsAdded: [], indexesCreated: [], rowsUpdated: 0, alreadyCurrent: true };
